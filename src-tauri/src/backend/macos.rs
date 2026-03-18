@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use objc2::{rc::Retained, ClassType};
+use objc2::{rc::Retained, AnyThread};
 use objc2_app_kit::NSRunningApplication;
 use objc2_core_audio::{
     AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart,
@@ -22,10 +22,11 @@ use objc2_core_audio::{
     kAudioProcessPropertyPID, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
 };
 use objc2_core_audio_types::{
-    AudioBuffer, AudioBufferList, AudioStreamBasicDescription, kAudioFormatFlagIsFloat,
+    AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, kAudioFormatFlagIsFloat,
     kAudioFormatFlagIsSignedInteger, kAudioFormatLinearPCM,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSMutableDictionary, NSNumber, NSObject, NSString};
+use objc2_core_foundation::CFDictionary;
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
 
 use crate::models::{AppAudioSession, MixerSnapshot, PlatformSupport, SessionSupport};
 
@@ -83,6 +84,47 @@ impl Drop for MacosTapSession {
             let _ = AudioDeviceDestroyIOProcID(self.aggregate_device_id, self.io_proc_id);
             let _ = AudioHardwareDestroyAggregateDevice(self.aggregate_device_id);
             let _ = AudioHardwareDestroyProcessTap(self.tap_id);
+        }
+    }
+}
+
+impl MacosMixerBackend {
+    fn ensure_tap_session(&mut self, app_id: &str, gain: f32) -> Result<(), String> {
+        if self.tap_sessions.contains_key(app_id) {
+            return Ok(());
+        }
+
+        let process_object = *self
+            .process_objects
+            .get(app_id)
+            .ok_or_else(|| format!("The macOS audio session for {app_id} is no longer available."))?;
+        let session = create_tap_session(app_id, process_object, gain)?;
+        self.tap_sessions.insert(app_id.to_string(), session);
+        Ok(())
+    }
+
+    fn apply_tap_overrides(&mut self) {
+        for app in &mut self.snapshot.apps {
+            if let Some(session) = self.tap_sessions.get(&app.id) {
+                let gain = session.io_state.gain();
+                app.support.controllable = true;
+                app.support.reason = None;
+                app.volume = (gain * 100.0).round().clamp(0.0, 100.0) as u8;
+                app.muted = app.volume == 0;
+                app.peak_level = if app.muted {
+                    0.04
+                } else {
+                    (gain * 0.72).clamp(0.06, 1.0)
+                };
+                continue;
+            }
+
+            app.support.controllable = app.active;
+            app.support.reason = if app.active {
+                None
+            } else {
+                Some("This macOS session is idle right now, so Waves cannot attach a live tap yet.".to_string())
+            };
         }
     }
 }
@@ -299,6 +341,219 @@ fn infer_category(display_name: &str, bundle_id: Option<&str>) -> String {
     }
 
     "Productivity".to_string()
+}
+
+fn create_tap_session(app_id: &str, process_object: AudioObjectID, gain: f32) -> Result<MacosTapSession, String> {
+    let process_number = NSNumber::new_u32(process_object);
+    let processes = NSArray::from_slice(&[&*process_number]);
+    let tap_description = unsafe {
+        CATapDescription::initStereoMixdownOfProcesses(CATapDescription::alloc(), &processes)
+    };
+    let tap_name = NSString::from_str(&format!("Waves {}", app_id.replace(':', "-")));
+
+    unsafe {
+        tap_description.setName(&tap_name);
+        tap_description.setPrivate(true);
+        tap_description.setExclusive(false);
+        tap_description.setMuteBehavior(CATapMuteBehavior::MutedWhenTapped);
+    }
+
+    let mut tap_id = 0;
+    let tap_status = unsafe { AudioHardwareCreateProcessTap(Some(&tap_description), &mut tap_id) };
+    if tap_status != 0 {
+        return Err(format!("AudioHardwareCreateProcessTap failed for {app_id}: {tap_status}"));
+    }
+
+    let tap_uid = unsafe { tap_description.UUID().UUIDString() };
+    let tap_dictionary = dictionary_from_pairs(
+        vec![
+            key_string(kAudioSubTapUIDKey),
+            key_string(kAudioSubTapDriftCompensationKey),
+        ],
+        vec![
+            tap_uid.clone().into_super(),
+            NSNumber::new_bool(true).into_super().into_super(),
+        ],
+    );
+    let taps = NSArray::from_retained_slice(&[tap_dictionary]);
+    let aggregate_name = NSString::from_str(&format!("Waves Aggregate {}", app_id.replace(':', "-")));
+    let aggregate_uid = NSString::from_str(&format!("com.jonathanreed.waves.{}", app_id.replace(':', "-")));
+    let aggregate_dictionary = dictionary_from_pairs(
+        vec![
+            key_string(kAudioAggregateDeviceNameKey),
+            key_string(kAudioAggregateDeviceUIDKey),
+            key_string(kAudioAggregateDeviceTapListKey),
+            key_string(kAudioAggregateDeviceTapAutoStartKey),
+            key_string(kAudioAggregateDeviceIsPrivateKey),
+        ],
+        vec![
+            aggregate_name.into_super(),
+            aggregate_uid.into_super(),
+            taps.into_super(),
+            NSNumber::new_bool(false).into_super().into_super(),
+            NSNumber::new_bool(true).into_super().into_super(),
+        ],
+    );
+
+    let mut aggregate_device_id = 0;
+    let aggregate_status = unsafe {
+        let dictionary = aggregate_dictionary.as_ref() as &CFDictionary<NSString, NSObject>;
+        let dictionary = &*(dictionary as *const CFDictionary<NSString, NSObject> as *const CFDictionary);
+        AudioHardwareCreateAggregateDevice(dictionary, NonNull::from(&mut aggregate_device_id))
+    };
+    if aggregate_status != 0 {
+        unsafe {
+            let _ = AudioHardwareDestroyProcessTap(tap_id);
+        }
+        return Err(format!(
+            "AudioHardwareCreateAggregateDevice failed for {app_id}: {aggregate_status}"
+        ));
+    }
+
+    let format = read_value::<AudioStreamBasicDescription>(tap_id, kAudioTapPropertyFormat)?;
+    let mut io_state = Box::new(TapIoState::new(format, gain));
+    let client_data = io_state.as_mut() as *mut TapIoState as *mut c_void;
+    let mut io_proc_id: AudioDeviceIOProcID = None;
+    let io_proc_status = unsafe {
+        AudioDeviceCreateIOProcID(
+            aggregate_device_id,
+            Some(tap_io_proc),
+            client_data,
+            NonNull::from(&mut io_proc_id),
+        )
+    };
+    if io_proc_status != 0 {
+        unsafe {
+            let _ = AudioHardwareDestroyAggregateDevice(aggregate_device_id);
+            let _ = AudioHardwareDestroyProcessTap(tap_id);
+        }
+        return Err(format!("AudioDeviceCreateIOProcID failed for {app_id}: {io_proc_status}"));
+    }
+
+    let start_status = unsafe { AudioDeviceStart(aggregate_device_id, io_proc_id) };
+    if start_status != 0 {
+        unsafe {
+            let _ = AudioDeviceDestroyIOProcID(aggregate_device_id, io_proc_id);
+            let _ = AudioHardwareDestroyAggregateDevice(aggregate_device_id);
+            let _ = AudioHardwareDestroyProcessTap(tap_id);
+        }
+        return Err(format!("AudioDeviceStart failed for {app_id}: {start_status}"));
+    }
+
+    Ok(MacosTapSession {
+        tap_id,
+        aggregate_device_id,
+        io_proc_id,
+        io_state,
+    })
+}
+
+fn dictionary_from_pairs(
+    keys: Vec<Retained<NSString>>,
+    values: Vec<Retained<NSObject>>,
+) -> Retained<NSDictionary<NSString, NSObject>> {
+    let key_refs = keys.iter().map(|key| &**key).collect::<Vec<_>>();
+    let value_refs = values.iter().map(|value| &**value).collect::<Vec<_>>();
+    NSDictionary::from_slices(&key_refs, &value_refs)
+}
+
+fn key_string(value: &std::ffi::CStr) -> Retained<NSString> {
+    NSString::from_str(value.to_str().unwrap_or_default())
+}
+
+unsafe extern "C-unwind" fn tap_io_proc(
+    _device: AudioObjectID,
+    _now: NonNull<AudioTimeStamp>,
+    input_data: NonNull<AudioBufferList>,
+    _input_time: NonNull<AudioTimeStamp>,
+    output_data: NonNull<AudioBufferList>,
+    _output_time: NonNull<AudioTimeStamp>,
+    client_data: *mut c_void,
+) -> i32 {
+    let Some(io_state) = (client_data as *mut TapIoState).as_ref() else {
+        return 0;
+    };
+
+    let input_buffers = unsafe { buffer_list_slice(input_data) };
+    let output_buffers = unsafe { buffer_list_slice_mut(output_data) };
+    let buffer_count = input_buffers.len().min(output_buffers.len());
+
+    for index in 0..buffer_count {
+        unsafe {
+            process_audio_buffer(&input_buffers[index], &mut output_buffers[index], io_state);
+        }
+    }
+
+    0
+}
+
+unsafe fn process_audio_buffer(input: &AudioBuffer, output: &mut AudioBuffer, io_state: &TapIoState) {
+    if input.mData.is_null() || output.mData.is_null() {
+        output.mDataByteSize = 0;
+        return;
+    }
+
+    let byte_len = input.mDataByteSize.min(output.mDataByteSize) as usize;
+    output.mDataByteSize = byte_len as u32;
+    let gain = io_state.gain();
+
+    if io_state.format.mFormatID == kAudioFormatLinearPCM
+        && io_state.format.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        && io_state.format.mBitsPerChannel == 32
+    {
+        let input_samples = std::slice::from_raw_parts(input.mData.cast::<f32>(), byte_len / std::mem::size_of::<f32>());
+        let output_samples = std::slice::from_raw_parts_mut(output.mData.cast::<f32>(), byte_len / std::mem::size_of::<f32>());
+        for (source, target) in input_samples.iter().zip(output_samples.iter_mut()) {
+            *target = *source * gain;
+        }
+        return;
+    }
+
+    if io_state.format.mFormatID == kAudioFormatLinearPCM
+        && io_state.format.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0
+        && io_state.format.mBitsPerChannel == 16
+    {
+        let input_samples = std::slice::from_raw_parts(input.mData.cast::<i16>(), byte_len / std::mem::size_of::<i16>());
+        let output_samples = std::slice::from_raw_parts_mut(output.mData.cast::<i16>(), byte_len / std::mem::size_of::<i16>());
+        for (source, target) in input_samples.iter().zip(output_samples.iter_mut()) {
+            *target = ((*source as f32) * gain).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        }
+        return;
+    }
+
+    if io_state.format.mFormatID == kAudioFormatLinearPCM
+        && io_state.format.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0
+        && io_state.format.mBitsPerChannel == 32
+    {
+        let input_samples = std::slice::from_raw_parts(input.mData.cast::<i32>(), byte_len / std::mem::size_of::<i32>());
+        let output_samples = std::slice::from_raw_parts_mut(output.mData.cast::<i32>(), byte_len / std::mem::size_of::<i32>());
+        for (source, target) in input_samples.iter().zip(output_samples.iter_mut()) {
+            *target = ((*source as f64) * gain as f64)
+                .round()
+                .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        }
+        return;
+    }
+
+    if (gain - 1.0).abs() < f32::EPSILON {
+        ptr::copy_nonoverlapping(input.mData.cast::<u8>(), output.mData.cast::<u8>(), byte_len);
+    } else {
+        ptr::write_bytes(output.mData.cast::<u8>(), 0, byte_len);
+    }
+}
+
+unsafe fn buffer_list_slice(list: NonNull<AudioBufferList>) -> &'static [AudioBuffer] {
+    let pointer = list.as_ptr();
+    let count = (*pointer).mNumberBuffers as usize;
+    let data = (*pointer).mBuffers.as_ptr();
+    std::slice::from_raw_parts(data, count)
+}
+
+unsafe fn buffer_list_slice_mut(list: NonNull<AudioBufferList>) -> &'static mut [AudioBuffer] {
+    let pointer = list.as_ptr();
+    let count = (*pointer).mNumberBuffers as usize;
+    let data = std::ptr::addr_of_mut!((*pointer).mBuffers) as *mut AudioBuffer;
+    std::slice::from_raw_parts_mut(data, count)
 }
 
 fn state_from_error(reason: String) -> (MixerSnapshot, HashMap<String, AudioObjectID>) {
