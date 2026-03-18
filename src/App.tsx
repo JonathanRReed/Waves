@@ -57,6 +57,30 @@ function describeQuickFilter(filter: QuickFilter): string {
   }
 }
 
+function describeSessionState(app: AppAudioSession): string {
+  if (app.muted) {
+    return 'Muted'
+  }
+
+  if (app.active) {
+    return 'Live'
+  }
+
+  return 'Idle'
+}
+
+function describeSessionSupport(app: AppAudioSession): string {
+  if (!app.support.controllable) {
+    return app.support.reason ?? 'Locked on this session'
+  }
+
+  if (app.active) {
+    return 'Native control ready'
+  }
+
+  return 'Ready when audio resumes'
+}
+
 function WaveRail({ level, muted }: { level: number; muted: boolean }) {
   const bars = Array.from({ length: 12 }, (_, index) => {
     const intensity = muted ? 0.12 : Math.max(0.18, level * (0.55 + ((index % 4) + 1) * 0.14))
@@ -100,55 +124,46 @@ function AppCard({
   onMute(appId: string): void
   onVolumeChange(appId: string, volume: number): void
 }) {
+  const stateLabel = describeSessionState(app)
+  const supportLabel = describeSessionSupport(app)
+
   return (
     <article className={classNames('app-card', !app.active && 'app-card--inactive')}>
-      <div className="app-card__wave">
-        <WaveRail level={app.peakLevel} muted={app.muted} />
-      </div>
-
       <div className="app-card__main">
         <div className="app-card__identity">
-          <AppIcon label={app.displayName} />
-          <div>
+          <div className="app-card__media">
+            <AppIcon label={app.displayName} />
+            <div className="app-card__wave">
+              <WaveRail level={app.peakLevel} muted={app.muted} />
+            </div>
+          </div>
+
+          <div className="app-card__copy">
             <div className="app-card__title-row">
               <h3>{app.displayName}</h3>
               <span className={classNames('status-pill', app.muted && 'status-pill--muted', !app.active && 'status-pill--idle')}>
-                {app.muted ? 'Muted' : app.active ? 'Live' : 'Idle'}
+                {stateLabel}
               </span>
+              {app.pinned ? <span className="category-pill">Pinned</span> : null}
               <span className="category-pill">{app.category}</span>
             </div>
-            <p>{app.processName}</p>
-            {!app.support.controllable && app.support.reason ? (
-              <span className="support-copy">{app.support.reason}</span>
-            ) : null}
+            <div className="app-card__meta-row">
+              <p>{app.processName}</p>
+              <span className={classNames('support-copy', app.support.controllable && 'support-copy--ready')}>
+                {supportLabel}
+              </span>
+            </div>
           </div>
-        </div>
-
-        <div className="app-card__controls">
-          <button
-            type="button"
-            className={classNames('control-button', app.pinned && 'control-button--active')}
-            onClick={() => onPin(app.id)}
-            aria-pressed={app.pinned}
-          >
-            Pin
-          </button>
-
-          <button
-            type="button"
-            className={classNames('control-button', app.muted && 'control-button--warning')}
-            onClick={() => onMute(app.id)}
-            disabled={!app.support.controllable || busy}
-          >
-            {app.muted ? 'Unmute' : 'Mute'}
-          </button>
         </div>
       </div>
 
       <div className="app-card__slider-zone">
-        <label className="slider-label" htmlFor={`slider-${app.id}`}>
-          Level
-        </label>
+        <div className="slider-label-row">
+          <label className="slider-label" htmlFor={`slider-${app.id}`}>
+            Level
+          </label>
+          <strong className="slider-value">{app.muted ? '00' : String(app.volume).padStart(2, '0')}</strong>
+        </div>
         <input
           id={`slider-${app.id}`}
           type="range"
@@ -160,9 +175,29 @@ function AppCard({
           style={{ ['--track-fill' as string]: `${app.volume}%` }}
         />
         <div className="slider-metrics">
-          <span>{app.muted ? '00' : String(app.volume).padStart(2, '0')}</span>
-          <span>{busy ? 'syncing' : app.support.controllable ? 'ready' : 'locked'}</span>
+          <span>{busy ? 'Syncing changes…' : app.support.controllable ? 'Instant control' : 'Read only'}</span>
+          <span>{app.active ? 'Live session' : 'Waiting for audio'}</span>
         </div>
+      </div>
+
+      <div className="app-card__controls">
+        <button
+          type="button"
+          className={classNames('control-button', app.pinned && 'control-button--active')}
+          onClick={() => onPin(app.id)}
+          aria-pressed={app.pinned}
+        >
+          {app.pinned ? 'Pinned' : 'Pin'}
+        </button>
+
+        <button
+          type="button"
+          className={classNames('control-button', app.muted && 'control-button--warning')}
+          onClick={() => onMute(app.id)}
+          disabled={!app.support.controllable || busy}
+        >
+          {app.muted ? 'Unmute' : 'Mute'}
+        </button>
       </div>
     </article>
   )
@@ -227,10 +262,10 @@ function AppSection({
   }
 
   return (
-    <section className="panel">
+    <section className="panel session-panel">
       <div className="panel__header">
         <div>
-          <p className="eyebrow">Mixer lane</p>
+          <p className="eyebrow">{title === 'Pinned' ? 'Quick access' : 'Mixer surface'}</p>
           <h2>{title}</h2>
         </div>
         <span className="panel__count">{apps.length}</span>
@@ -264,15 +299,16 @@ function ShellControls({
   onHideToTray(): void
 }) {
   return (
-    <section className="panel utility-bar">
+    <div className="utility-bar">
       <div className="utility-bar__group">
         <div>
-          <p className="eyebrow">Window shell</p>
+          <p className="eyebrow">Utility shell</p>
           <h2>{describeShellMode(shellMode)}</h2>
         </div>
-        <p className="utility-bar__copy">
-          Keep Waves as a full app, or condense it into a slick top bar utility shape with tray access.
-        </p>
+        <div className="utility-bar__meta">
+          <span>{shellMode === 'topbar' ? 'Compact tray-first control surface' : 'Roomier desktop surface'}</span>
+          <span>Same mixer flow, faster to reopen and adjust.</span>
+        </div>
       </div>
 
       <div className="utility-bar__group utility-bar__group--controls">
@@ -299,7 +335,7 @@ function ShellControls({
           Hide to tray
         </button>
       </div>
-    </section>
+    </div>
   )
 }
 
@@ -675,27 +711,42 @@ export default function App() {
 
       <section className="frame">
         <header className="hero panel">
-          <div className="hero__brand">
-            <div className="hero__mark">W</div>
-            <div>
-              <p className="eyebrow">Per-app mixer</p>
-              <div className="hero__title-row">
-                <h1>Waves</h1>
-                <span className={classNames('mode-pill', shellMode === 'topbar' && 'mode-pill--active')}>
-                  {describeShellMode(shellMode)}
-                </span>
+          <div className="hero__main">
+            <div className="hero__brand">
+              <div className="hero__mark">W</div>
+              <div>
+                <p className="eyebrow">Per-app mixer</p>
+                <div className="hero__title-row">
+                  <h1>Waves</h1>
+                  <span className={classNames('mode-pill', shellMode === 'topbar' && 'mode-pill--active')}>
+                    {describeShellMode(shellMode)}
+                  </span>
+                  <span className={classNames('mode-pill', snapshot.platform.nativeControlReady && 'mode-pill--ready')}>
+                    {snapshot.platform.nativeControlReady ? 'Native control ready' : 'Limited control'}
+                  </span>
+                </div>
+                <p className="hero__copy">
+                  Fast per-app mixing for the sessions you care about, tuned for pinned essentials and tray-friendly utility use.
+                </p>
+                <p className="hero__backend">
+                  {snapshot.platform.platform} · {snapshot.platform.nativeBackend}
+                </p>
               </div>
             </div>
           </div>
 
           <div className="hero__meta">
             <div className="hero-stat">
-              <span>Platform</span>
-              <strong>{snapshot.platform.platform}</strong>
+              <span>Live</span>
+              <strong>{loading ? '...' : liveCount}</strong>
             </div>
             <div className="hero-stat">
-              <span>Backend</span>
-              <strong>{snapshot.platform.nativeBackend}</strong>
+              <span>Pinned</span>
+              <strong>{pinnedCount}</strong>
+            </div>
+            <div className="hero-stat">
+              <span>Visible</span>
+              <strong>{shownCount}</strong>
             </div>
             <div className="hero-stat">
               <span>Updated</span>
@@ -704,97 +755,75 @@ export default function App() {
           </div>
         </header>
 
-        <section className="top-grid">
-          <div className="panel summary-card">
-            <p className="eyebrow">Session load</p>
-            <div className="summary-card__value">{loading ? '...' : liveCount}</div>
-            <p className="summary-card__copy">Active apps currently emitting audio or tracked by the mixer.</p>
-          </div>
-
-          <div className="panel summary-card">
-            <p className="eyebrow">Pinned</p>
-            <div className="summary-card__value">{pinnedApps.length}</div>
-            <p className="summary-card__copy">Favorites stay anchored at the top for fast access.</p>
-          </div>
-
-          <div className="panel summary-card">
-            <p className="eyebrow">Native path</p>
-            <div className={classNames('summary-card__value', snapshot.platform.nativeControlReady && 'summary-card__value--ready')}>
-              {snapshot.platform.nativeControlReady ? 'Ready' : 'Scaffolded'}
+        <section className="panel control-deck">
+          <div className="control-deck__row control-deck__row--primary">
+            <div className="search-box">
+              <div className="search-box__label-row">
+                <span>Search</span>
+                <span className="shortcut-hint">⌘K</span>
+              </div>
+              <input
+                ref={searchRef}
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Spotify, Discord, browser..."
+              />
+              <div className="search-box__meta">
+                <span>{describeQuickFilter(quickFilter)}</span>
+                <span>{shownCount} of {totalCount} visible</span>
+              </div>
             </div>
-            <p className="summary-card__copy">
-              {snapshot.platform.discoveryReady
-                ? 'Platform adapter is connected to the shared mixer contract.'
-                : 'Discovery is not available yet on this platform.'}
-            </p>
-          </div>
-        </section>
 
-        <ShellControls
-          shellMode={shellMode}
-          busy={shellBusy}
-          onModeChange={(nextMode) => void handleShellModeChange(nextMode)}
-          onHideToTray={() => void handleHideToTray()}
-        />
-
-        <section className="panel command-bar">
-          <div className="search-box">
-            <div className="search-box__label-row">
-              <span>Search</span>
-              <span className="shortcut-hint">⌘K</span>
-            </div>
-            <input
-              ref={searchRef}
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Spotify, Discord, browser..."
-            />
-            <div className="search-box__meta">
-              <span>{describeQuickFilter(quickFilter)}</span>
-              <span>{shownCount} visible</span>
-            </div>
-          </div>
-
-          <div className="command-bar__actions">
-            <button type="button" className="control-button" onClick={() => setOnboardingOpen(true)}>
-              {onboardingComplete ? 'Review guide' : 'Finish setup'}
-            </button>
-
-            {hasFilters ? (
-              <button type="button" className="control-button" onClick={handleClearDiscoveryFilters}>
-                Clear filters
+            <div className="command-bar__actions">
+              <button type="button" className="control-button" onClick={() => setOnboardingOpen(true)}>
+                {onboardingComplete ? 'Review guide' : 'Finish setup'}
               </button>
-            ) : null}
 
-            <button type="button" className="refresh-button" onClick={() => void handleRefresh()}>
-              {refreshing ? 'Refreshing…' : 'Refresh sessions'}
-            </button>
+              {hasFilters ? (
+                <button type="button" className="control-button" onClick={handleClearDiscoveryFilters}>
+                  Clear filters
+                </button>
+              ) : null}
+
+              <button type="button" className="refresh-button" onClick={() => void handleRefresh()}>
+                {refreshing ? 'Refreshing…' : 'Refresh sessions'}
+              </button>
+            </div>
           </div>
-        </section>
 
-        <section className="panel focus-bar">
-          <div className="focus-bar__group">
-            <p className="eyebrow">Session focus</p>
-            <QuickFilters
-              activeFilter={quickFilter}
-              shownCount={totalCount}
-              liveCount={liveCount}
-              pinnedCount={pinnedCount}
-              controllableCount={controllableCount}
-              onSelect={setQuickFilter}
+          <div className="control-deck__row control-deck__row--secondary">
+            <div className="focus-bar">
+              <div className="focus-bar__group">
+                <p className="eyebrow">Session focus</p>
+                <QuickFilters
+                  activeFilter={quickFilter}
+                  shownCount={totalCount}
+                  liveCount={liveCount}
+                  pinnedCount={pinnedCount}
+                  controllableCount={controllableCount}
+                  onSelect={setQuickFilter}
+                />
+              </div>
+
+              <div className="focus-bar__group focus-bar__group--meta">
+                <div className="focus-stat">
+                  <span>Visible now</span>
+                  <strong>{shownCount} of {totalCount} sessions</strong>
+                </div>
+                <div className="focus-stat">
+                  <span>Shortcuts</span>
+                  <strong>⌘K search · / jump · R refresh · ? guide</strong>
+                </div>
+              </div>
+            </div>
+
+            <ShellControls
+              shellMode={shellMode}
+              busy={shellBusy}
+              onModeChange={(nextMode) => void handleShellModeChange(nextMode)}
+              onHideToTray={() => void handleHideToTray()}
             />
-          </div>
-
-          <div className="focus-bar__group focus-bar__group--meta">
-            <div className="focus-stat">
-              <span>Shortcuts</span>
-              <strong>⌘K search · / jump · R refresh · ? guide</strong>
-            </div>
-            <div className="focus-stat">
-              <span>Visible now</span>
-              <strong>{shownCount} sessions</strong>
-            </div>
           </div>
         </section>
 
@@ -835,7 +864,7 @@ export default function App() {
         />
 
         <AppSection
-          title="Active applications"
+          title="All sessions"
           apps={activeApps}
           busyAppId={busyAppId}
           onPin={handlePin}

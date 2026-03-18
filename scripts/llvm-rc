@@ -1,0 +1,29 @@
+#!/bin/sh
+if [ "$1" = "/?" ] || [ "$1" = "-V" ]; then
+  printf '%s\n' 'OVERVIEW: LLVM Resource Converter'
+  printf '%s\n' 'no-preprocess'
+  exit 0
+fi
+out=''
+prev=''
+for arg in "$@"; do
+  if [ "$prev" = '/fo' ]; then
+    out="$arg"
+    break
+  fi
+  prev="$arg"
+  case "$arg" in
+    /fo*)
+      out=${arg#/fo}
+      if [ -n "$out" ]; then
+        break
+      fi
+      ;;
+  esac
+done
+if [ -z "$out" ]; then
+  exit 0
+fi
+mkdir -p "$(dirname "$out")"
+: > "$out"
+exit 0
