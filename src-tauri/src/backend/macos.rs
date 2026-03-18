@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     ffi::c_void,
     mem::MaybeUninit,
     ptr,
@@ -8,16 +8,18 @@ use std::{
 };
 
 use objc2::{rc::Retained, AnyThread};
-use objc2_app_kit::NSRunningApplication;
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_core_audio::{
     AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart,
     AudioDeviceStop, AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
     AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData,
     AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
-    AudioObjectPropertySelector, CATapDescription, CATapMuteBehavior,
+    AudioObjectPropertySelector, AudioObjectSetPropertyData, CATapDescription, CATapMuteBehavior,
     kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceNameKey, kAudioAggregateDeviceTapAutoStartKey,
-    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey, kAudioHardwarePropertyProcessIsAudible,
-    kAudioHardwarePropertyProcessObjectList, kAudioObjectPropertyElementMain,
+    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey, kAudioDevicePropertyScopeOutput,
+    kAudioDevicePropertyStreamConfiguration, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioHardwarePropertyDevices, kAudioHardwarePropertyProcessIsAudible,
+    kAudioHardwarePropertyProcessObjectList, kAudioObjectPropertyElementMain, kAudioObjectPropertyName,
     kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioProcessPropertyIsRunningOutput,
     kAudioProcessPropertyPID, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
 };
@@ -28,7 +30,9 @@ use objc2_core_audio_types::{
 use objc2_core_foundation::CFDictionary;
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
 
-use crate::models::{AppAudioSession, MixerSnapshot, PlatformSupport, SessionSupport};
+use crate::models::{
+    AppAudioSession, AudioOutputDevice, AudioOutputSnapshot, MixerSnapshot, PlatformSupport, SessionSupport,
+};
 
 use super::{now_stamp, MixerBackend};
 
@@ -44,8 +48,8 @@ pub fn build_backend() -> MacosMixerBackend {
 
 pub struct MacosMixerBackend {
     snapshot: MixerSnapshot,
-    process_objects: HashMap<String, AudioObjectID>,
-    tap_sessions: HashMap<String, MacosTapSession>,
+    process_objects: HashMap<String, Vec<AudioObjectID>>,
+    tap_sessions: HashMap<String, Vec<MacosTapSession>>,
 }
 
 struct MacosTapSession {
@@ -94,18 +98,22 @@ impl MacosMixerBackend {
             return Ok(());
         }
 
-        let process_object = *self
+        let process_objects = self
             .process_objects
             .get(app_id)
+            .cloned()
             .ok_or_else(|| format!("The macOS audio session for {app_id} is no longer available."))?;
-        let session = create_tap_session(app_id, process_object, gain)?;
-        self.tap_sessions.insert(app_id.to_string(), session);
+        let sessions = process_objects
+            .into_iter()
+            .map(|process_object| create_tap_session(app_id, process_object, gain))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.tap_sessions.insert(app_id.to_string(), sessions);
         Ok(())
     }
 
     fn apply_tap_overrides(&mut self) {
         for app in &mut self.snapshot.apps {
-            if let Some(session) = self.tap_sessions.get(&app.id) {
+            if let Some(session) = self.tap_sessions.get(&app.id).and_then(|sessions| sessions.first()) {
                 let gain = session.io_state.gain();
                 app.support.controllable = true;
                 app.support.reason = None;
@@ -168,8 +176,10 @@ impl MixerBackend for MacosMixerBackend {
             self.tap_sessions.remove(app_id);
         } else {
             self.ensure_tap_session(app_id, target_gain)?;
-            if let Some(session) = self.tap_sessions.get(app_id) {
-                session.io_state.set_gain(target_gain);
+            if let Some(sessions) = self.tap_sessions.get(app_id) {
+                for session in sessions {
+                    session.io_state.set_gain(target_gain);
+                }
             }
         }
 
@@ -211,8 +221,10 @@ impl MixerBackend for MacosMixerBackend {
             self.tap_sessions.remove(app_id);
         } else {
             self.ensure_tap_session(app_id, target_gain)?;
-            if let Some(session) = self.tap_sessions.get(app_id) {
-                session.io_state.set_gain(target_gain);
+            if let Some(sessions) = self.tap_sessions.get(app_id) {
+                for session in sessions {
+                    session.io_state.set_gain(target_gain);
+                }
             }
         }
 
@@ -224,21 +236,53 @@ impl MixerBackend for MacosMixerBackend {
         self.snapshot.generated_at = now_stamp();
         Ok(self.snapshot.clone())
     }
+
+    fn output_devices(&self) -> Result<AudioOutputSnapshot, String> {
+        enumerate_output_devices()
+    }
+
+    fn set_output_device(&mut self, device_id: &str) -> Result<AudioOutputSnapshot, String> {
+        set_default_output_device(device_id.parse::<AudioObjectID>().map_err(|_| {
+            format!("Unknown macOS output device id: {device_id}")
+        })?)?;
+        enumerate_output_devices()
+    }
 }
 
-fn discover_state() -> Result<(MixerSnapshot, HashMap<String, AudioObjectID>), String> {
+fn discover_state() -> Result<(MixerSnapshot, HashMap<String, Vec<AudioObjectID>>), String> {
     let process_objects = read_array::<AudioObjectID>(
         kAudioObjectSystemObject as AudioObjectID,
         kAudioHardwarePropertyProcessObjectList,
     )?;
 
+    let mut deduped_apps: HashMap<String, (AppAudioSession, Vec<AudioObjectID>)> = HashMap::new();
+
+    for process_object in process_objects {
+        let app = match build_session(process_object) {
+            Some(app) if app.active && app.support.controllable => app,
+            _ => continue,
+        };
+
+        match deduped_apps.entry(app.id.clone()) {
+            Entry::Occupied(mut entry) => {
+                let (existing_app, existing_process_objects) = entry.get_mut();
+                existing_process_objects.push(process_object);
+                existing_app.peak_level = existing_app.peak_level.max(app.peak_level);
+                existing_app.active |= app.active;
+                existing_app.support.controllable |= app.support.controllable;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert((app, vec![process_object]));
+            }
+        }
+    }
+
     let mut process_map = HashMap::new();
-    let mut apps = process_objects
+    let mut apps = deduped_apps
         .into_iter()
-        .filter_map(|process_object| {
-            let app = build_session(process_object)?;
-            process_map.insert(app.id.clone(), process_object);
-            Some(app)
+        .map(|(_, (app, process_objects))| {
+            process_map.insert(app.id.clone(), process_objects);
+            app
         })
         .collect::<Vec<_>>();
 
@@ -274,29 +318,41 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
     let audible = read_bool(process_object, kAudioHardwarePropertyProcessIsAudible).unwrap_or(false);
     let running_output = read_bool(process_object, kAudioProcessPropertyIsRunningOutput).unwrap_or(false);
     let active = audible || running_output;
+    if !active {
+        return None;
+    }
 
-    let running_application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid as _);
-    let display_name = running_application
-        .as_ref()
-        .and_then(|app| app.localizedName())
+    let running_application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid as _)?;
+    if running_application.isTerminated() || !running_application.isFinishedLaunching() {
+        return None;
+    }
+
+    let raw_display_name = running_application
+        .localizedName()
         .map(|name| name.to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("Process {pid}"));
-    let bundle_id = running_application
-        .as_ref()
-        .and_then(|app| app.bundleIdentifier())
+        .filter(|name| !name.is_empty())?;
+    let raw_bundle_id = running_application
+        .bundleIdentifier()
         .map(|value| value.to_string())
-        .filter(|value| !value.is_empty());
-    let process_name = bundle_id
-        .clone()
-        .unwrap_or_else(|| format!("pid-{pid}"));
+        .filter(|value| !value.is_empty())?;
+
+    let (display_name, bundle_id, derived_from_helper) = resolve_session_identity(&raw_display_name, &raw_bundle_id);
+    if running_application.activationPolicy() == NSApplicationActivationPolicy::Prohibited && !derived_from_helper {
+        return None;
+    }
+
+    if looks_like_background_audio_process(&raw_display_name, &raw_bundle_id) {
+        return None;
+    }
+
+    let session_id = format!("macos:{bundle_id}");
 
     Some(AppAudioSession {
-        id: format!("macos:{pid}"),
+        id: session_id,
         display_name: display_name.clone(),
-        process_name,
-        bundle_id: bundle_id.clone(),
-        category: infer_category(&display_name, bundle_id.as_deref()),
+        process_name: bundle_id.clone(),
+        bundle_id: Some(bundle_id.clone()),
+        category: infer_category(&display_name, Some(bundle_id.as_str())),
         volume: 100,
         muted: false,
         active,
@@ -311,6 +367,187 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
             },
         },
     })
+}
+
+fn looks_like_background_audio_process(display_name: &str, bundle_id: &str) -> bool {
+    let haystack = format!("{} {}", display_name, bundle_id).to_lowercase();
+    let excluded_terms = [
+        "daemon",
+        "agent",
+        "service",
+        "extension",
+        "plugin",
+        "gpu",
+        "monitor",
+        "updater",
+        "loginitem",
+    ];
+
+    excluded_terms.iter().any(|term| haystack.contains(term))
+}
+
+fn resolve_session_identity(display_name: &str, bundle_id: &str) -> (String, String, bool) {
+    if bundle_id.eq_ignore_ascii_case("com.apple.WebKit.WebContent") || display_name.eq_ignore_ascii_case("Safari Web Content") {
+        return ("Safari".to_string(), "com.apple.Safari".to_string(), true);
+    }
+
+    let canonical_bundle_id = canonical_bundle_id(bundle_id);
+    let derived_from_helper = canonical_bundle_id != bundle_id;
+    let resolved_display_name = if derived_from_helper || display_name.to_lowercase().contains("web content") {
+        friendly_app_name_from_bundle_id(&canonical_bundle_id)
+    } else {
+        display_name.to_string()
+    };
+
+    (resolved_display_name, canonical_bundle_id, derived_from_helper)
+}
+
+fn canonical_bundle_id(bundle_id: &str) -> String {
+    let lower_bundle_id = bundle_id.to_lowercase();
+    if lower_bundle_id.contains("com.apple.webkit.webcontent") {
+        return "com.apple.Safari".to_string();
+    }
+
+    if let Some(index) = lower_bundle_id.find(".helper") {
+        return bundle_id[..index].to_string();
+    }
+
+    bundle_id.to_string()
+}
+
+fn friendly_app_name_from_bundle_id(bundle_id: &str) -> String {
+    match bundle_id.to_lowercase().as_str() {
+        "com.google.chrome" => "Google Chrome".to_string(),
+        "com.microsoft.edgemac" => "Microsoft Edge".to_string(),
+        "company.thebrowser.browser" => "Arc".to_string(),
+        "com.brave.browser" => "Brave".to_string(),
+        "org.mozilla.firefox" => "Firefox".to_string(),
+        "com.apple.safari" => "Safari".to_string(),
+        "com.spotify.client" => "Spotify".to_string(),
+        _ => bundle_id
+            .rsplit('.')
+            .next()
+            .unwrap_or(bundle_id)
+            .replace(['-', '_'], " ")
+            .split_whitespace()
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str().to_lowercase()),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn enumerate_output_devices() -> Result<AudioOutputSnapshot, String> {
+    let device_ids = read_array::<AudioObjectID>(
+        kAudioObjectSystemObject as AudioObjectID,
+        kAudioHardwarePropertyDevices,
+    )?;
+    let current_device_id = read_value::<AudioObjectID>(
+        kAudioObjectSystemObject as AudioObjectID,
+        kAudioHardwarePropertyDefaultOutputDevice,
+    )
+    .ok();
+
+    let mut devices = device_ids
+        .into_iter()
+        .filter(|device_id| device_supports_output(*device_id).unwrap_or(false))
+        .filter_map(|device_id| {
+            let name = read_string_property(device_id, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal).ok()?;
+            Some(AudioOutputDevice {
+                id: device_id.to_string(),
+                name,
+                current: current_device_id == Some(device_id),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    devices.sort_by(|left, right| {
+        right
+            .current
+            .cmp(&left.current)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    Ok(AudioOutputSnapshot {
+        supported: true,
+        reason: None,
+        current_device_id: current_device_id.map(|device_id| device_id.to_string()),
+        devices,
+    })
+}
+
+fn device_supports_output(device_id: AudioObjectID) -> Result<bool, String> {
+    let mut address = property_address_for_scope(kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyScopeOutput);
+    let mut size = 0_u32;
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(device_id, (&mut address).into(), 0, ptr::null(), (&mut size).into())
+    };
+
+    if status != 0 {
+        return Err(format!(
+            "Core Audio output configuration read failed for device {device_id}: {status}"
+        ));
+    }
+
+    Ok(size > 0)
+}
+
+fn set_default_output_device(device_id: AudioObjectID) -> Result<(), String> {
+    let mut address = property_address(kAudioHardwarePropertyDefaultOutputDevice);
+    let mut target_device_id = device_id;
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            kAudioObjectSystemObject as AudioObjectID,
+            (&mut address).into(),
+            0,
+            ptr::null(),
+            std::mem::size_of::<AudioObjectID>() as u32,
+            NonNull::from(&mut target_device_id).cast(),
+        )
+    };
+
+    if status != 0 {
+        return Err(format!("Core Audio default output switch failed for device {device_id}: {status}"));
+    }
+
+    Ok(())
+}
+
+fn read_string_property(
+    object_id: AudioObjectID,
+    selector: AudioObjectPropertySelector,
+    scope: u32,
+) -> Result<String, String> {
+    let mut address = property_address_for_scope(selector, scope);
+    let mut size = std::mem::size_of::<*mut NSString>() as u32;
+    let mut value = MaybeUninit::<*mut NSString>::uninit();
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object_id,
+            (&mut address).into(),
+            0,
+            ptr::null(),
+            (&mut size).into(),
+            NonNull::new(value.as_mut_ptr().cast())
+                .expect("AudioObjectGetPropertyData requires non-null output storage"),
+        )
+    };
+
+    if status != 0 {
+        return Err(format!("Core Audio string read failed for selector {selector:#x}: {status}"));
+    }
+
+    let value = unsafe { value.assume_init() };
+    if value.is_null() {
+        return Err(format!("Core Audio string read returned no value for selector {selector:#x}"));
+    }
+
+    Ok(unsafe { (&*value).to_string() })
 }
 
 fn infer_category(display_name: &str, bundle_id: Option<&str>) -> String {
@@ -349,7 +586,8 @@ fn create_tap_session(app_id: &str, process_object: AudioObjectID, gain: f32) ->
     let tap_description = unsafe {
         CATapDescription::initStereoMixdownOfProcesses(CATapDescription::alloc(), &processes)
     };
-    let tap_name = NSString::from_str(&format!("Waves {}", app_id.replace(':', "-")));
+    let tap_key = format!("{}-{}", app_id.replace(':', "-"), process_object);
+    let tap_name = NSString::from_str(&format!("Waves {tap_key}"));
 
     unsafe {
         tap_description.setName(&tap_name);
@@ -376,8 +614,8 @@ fn create_tap_session(app_id: &str, process_object: AudioObjectID, gain: f32) ->
         ],
     );
     let taps = NSArray::from_retained_slice(&[tap_dictionary]);
-    let aggregate_name = NSString::from_str(&format!("Waves Aggregate {}", app_id.replace(':', "-")));
-    let aggregate_uid = NSString::from_str(&format!("com.jonathanreed.waves.{}", app_id.replace(':', "-")));
+    let aggregate_name = NSString::from_str(&format!("Waves Aggregate {tap_key}"));
+    let aggregate_uid = NSString::from_str(&format!("com.jonathanreed.waves.{tap_key}"));
     let aggregate_dictionary = dictionary_from_pairs(
         vec![
             key_string(kAudioAggregateDeviceNameKey),
@@ -556,7 +794,7 @@ unsafe fn buffer_list_slice_mut(list: NonNull<AudioBufferList>) -> &'static mut 
     std::slice::from_raw_parts_mut(data, count)
 }
 
-fn state_from_error(reason: String) -> (MixerSnapshot, HashMap<String, AudioObjectID>) {
+fn state_from_error(reason: String) -> (MixerSnapshot, HashMap<String, Vec<AudioObjectID>>) {
     (MixerSnapshot {
         platform: PlatformSupport {
             platform: "macos".to_string(),
@@ -639,6 +877,14 @@ fn property_address(selector: AudioObjectPropertySelector) -> AudioObjectPropert
     AudioObjectPropertyAddress {
         mSelector: selector,
         mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    }
+}
+
+fn property_address_for_scope(selector: AudioObjectPropertySelector, scope: u32) -> AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: scope,
         mElement: kAudioObjectPropertyElementMain,
     }
 }

@@ -27,6 +27,23 @@ pub struct SessionSupport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AudioOutputDevice {
+    pub id: String,
+    pub name: String,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioOutputSnapshot {
+    pub supported: bool,
+    pub reason: Option<String>,
+    pub current_device_id: Option<String>,
+    pub devices: Vec<AudioOutputDevice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppAudioSession {
     pub id: String,
     pub display_name: String,

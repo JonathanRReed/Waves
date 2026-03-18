@@ -7,13 +7,26 @@ pub mod windows;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::models::{AppAudioSession, MixerSnapshot};
+use crate::models::{AppAudioSession, AudioOutputSnapshot, MixerSnapshot};
 
 pub trait MixerBackend: Send {
     fn snapshot(&self) -> MixerSnapshot;
     fn refresh(&mut self) -> MixerSnapshot;
     fn set_volume(&mut self, app_id: &str, volume: u8) -> Result<MixerSnapshot, String>;
     fn toggle_mute(&mut self, app_id: &str) -> Result<MixerSnapshot, String>;
+
+    fn output_devices(&self) -> Result<AudioOutputSnapshot, String> {
+        Ok(AudioOutputSnapshot {
+            supported: false,
+            reason: Some("Output device control is unavailable on this platform.".to_string()),
+            current_device_id: None,
+            devices: Vec::new(),
+        })
+    }
+
+    fn set_output_device(&mut self, _device_id: &str) -> Result<AudioOutputSnapshot, String> {
+        Err("Output device switching is unavailable on this platform.".to_string())
+    }
 }
 
 pub struct SnapshotMixerBackend {
