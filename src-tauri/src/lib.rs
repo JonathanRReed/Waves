@@ -4,16 +4,20 @@ mod models;
 use std::sync::Mutex;
 
 use backend::{create_backend, MixerBackend};
-use models::MixerSnapshot;
+use models::{AudioOutputSnapshot, MixerSnapshot};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, LogicalSize, Manager, Size, State, WebviewWindow,
+    AppHandle, LogicalSize, Manager, RunEvent, Size, State, WebviewWindow,
 };
 
 struct WavesState {
     backend: Mutex<Box<dyn MixerBackend>>,
     shell_mode: Mutex<String>,
+}
+
+struct TrayState {
+    _tray: Mutex<Option<TrayIcon>>,
 }
 
 fn normalize_shell_mode(mode: String) -> String {
@@ -39,7 +43,7 @@ fn apply_shell_mode_to_window(window: &WebviewWindow, mode: &str) -> Result<(), 
     match mode {
         "topbar" => {
             window
-                .set_size(Size::Logical(LogicalSize::new(920.0, 720.0)))
+                .set_size(Size::Logical(LogicalSize::new(640.0, 620.0)))
                 .map_err(|cause| cause.to_string())?;
             window
                 .set_always_on_top(true)
@@ -84,7 +88,14 @@ fn hide_main_window_internal(app: &AppHandle) -> Result<(), String> {
 
 fn show_main_window_internal(app: &AppHandle) -> Result<(), String> {
     let window = main_window(app)?;
-    focus_window(&window)
+    let state = app.state::<WavesState>();
+    let shell_mode = state
+        .shell_mode
+        .lock()
+        .map_err(|_| "Shell mode state is unavailable".to_string())?
+        .clone();
+
+    apply_shell_mode_to_window(&window, &shell_mode)
 }
 
 fn toggle_main_window(app: &AppHandle) -> Result<(), String> {
@@ -92,7 +103,7 @@ fn toggle_main_window(app: &AppHandle) -> Result<(), String> {
     if window.is_visible().map_err(|cause| cause.to_string())? {
         window.hide().map_err(|cause| cause.to_string())
     } else {
-        focus_window(&window)
+        show_main_window_internal(app)
     }
 }
 
@@ -114,7 +125,7 @@ fn handle_tray_menu_event(app: &AppHandle, item_id: &str) {
     }
 }
 
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
     let show = MenuItemBuilder::with_id("show", "Show Waves").build(app)?;
     let hide = MenuItemBuilder::with_id("hide", "Hide to Tray").build(app)?;
     let desktop = MenuItemBuilder::with_id("desktop", "Desktop Mode").build(app)?;
@@ -125,7 +136,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .items(&[&show, &hide, &desktop, &topbar, &quit])
         .build()?;
 
-    TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::new()
         .tooltip("Waves")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -144,10 +155,18 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     eprintln!("{cause}");
                 }
             }
-        })
-        .build(app)?;
+        });
 
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.title("Waves").icon_as_template(true);
+    }
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+
+    builder.build(app)
 }
 
 #[tauri::command]
@@ -195,6 +214,29 @@ fn toggle_app_mute(app_id: String, state: State<'_, WavesState>) -> Result<Mixer
 }
 
 #[tauri::command]
+fn get_output_devices(state: State<'_, WavesState>) -> Result<AudioOutputSnapshot, String> {
+    let backend = state
+        .backend
+        .lock()
+        .map_err(|_| "Mixer backend is unavailable".to_string())?;
+
+    backend.output_devices()
+}
+
+#[tauri::command]
+fn set_output_device(
+    device_id: String,
+    state: State<'_, WavesState>,
+) -> Result<AudioOutputSnapshot, String> {
+    let mut backend = state
+        .backend
+        .lock()
+        .map_err(|_| "Mixer backend is unavailable".to_string())?;
+
+    backend.set_output_device(&device_id)
+}
+
+#[tauri::command]
 fn set_shell_mode(
     mode: String,
     app: AppHandle,
@@ -213,10 +255,13 @@ fn show_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             let app_handle = app.handle().clone();
-            build_tray(&app_handle).map_err(|cause| -> Box<dyn std::error::Error> { Box::new(cause) })?;
+            let tray = build_tray(&app_handle).map_err(|cause| -> Box<dyn std::error::Error> { Box::new(cause) })?;
+            app.manage(TrayState {
+                _tray: Mutex::new(Some(tray)),
+            });
             Ok(())
         })
         .manage(WavesState {
@@ -228,10 +273,20 @@ pub fn run() {
             refresh_sessions,
             set_app_volume,
             toggle_app_mute,
+            get_output_devices,
+            set_output_device,
             set_shell_mode,
             hide_main_window,
             show_main_window
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Waves");
+        .build(tauri::generate_context!())
+        .expect("failed to build Waves");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::Reopen { .. } = event {
+            if let Err(cause) = show_main_window_internal(app_handle) {
+                eprintln!("{cause}");
+            }
+        }
+    });
 }

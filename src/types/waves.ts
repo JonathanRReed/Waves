@@ -13,6 +13,19 @@ export type SessionSupport = {
   reason: string | null
 }
 
+export type AudioOutputDevice = {
+  id: string
+  name: string
+  current: boolean
+}
+
+export type AudioOutputSnapshot = {
+  supported: boolean
+  reason: string | null
+  currentDeviceId: string | null
+  devices: AudioOutputDevice[]
+}
+
 export type AppAudioSession = {
   id: string
   displayName: string

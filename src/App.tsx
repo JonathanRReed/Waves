@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { getMixerSnapshot, refreshSessions, setAppVolume, toggleAppMute } from './lib/mixer'
+import { getMixerSnapshot, getOutputDevices, refreshSessions, setAppVolume, setOutputDevice, toggleAppMute } from './lib/mixer'
 import { applyShellMode, hideMainWindow } from './lib/shell'
 import {
   loadOnboardingComplete,
@@ -9,52 +9,20 @@ import {
   savePinnedApps,
   saveShellMode,
 } from './lib/storage'
-import type { AppAudioSession, MixerSnapshot, ShellMode } from './types/waves'
+import type { AppAudioSession, AudioOutputSnapshot, MixerSnapshot, ShellMode } from './types/waves'
 
 type ViewApp = AppAudioSession & {
   pinned: boolean
 }
 
-type QuickFilter = 'all' | 'live' | 'pinned' | 'controllable'
+type QuickFilter = 'all' | 'pinned'
 
 function classNames(...names: Array<string | false | null | undefined>): string {
   return names.filter(Boolean).join(' ')
 }
 
-function formatRelativeTimestamp(value: string): string {
-  const parsed = Number(value)
-  if (Number.isNaN(parsed)) {
-    return 'just now'
-  }
-
-  const diff = Math.max(0, Math.floor(Date.now() / 1000) - parsed)
-  if (diff < 5) {
-    return 'just now'
-  }
-
-  if (diff < 60) {
-    return `${diff}s ago`
-  }
-
-  const minutes = Math.floor(diff / 60)
-  return `${minutes}m ago`
-}
-
 function describeShellMode(mode: ShellMode): string {
   return mode === 'topbar' ? 'Top bar mode' : 'Desktop app'
-}
-
-function describeQuickFilter(filter: QuickFilter): string {
-  switch (filter) {
-    case 'live':
-      return 'Live only'
-    case 'pinned':
-      return 'Pinned only'
-    case 'controllable':
-      return 'Ready only'
-    default:
-      return 'All apps'
-  }
 }
 
 function describeSessionState(app: AppAudioSession): string {
@@ -69,16 +37,23 @@ function describeSessionState(app: AppAudioSession): string {
   return 'Idle'
 }
 
-function describeSessionSupport(app: AppAudioSession): string {
-  if (!app.support.controllable) {
-    return app.support.reason ?? 'Locked on this session'
+function isDisplayableApp(app: AppAudioSession): boolean {
+  if (!app.active || !app.support.controllable) {
+    return false
   }
 
-  if (app.active) {
-    return 'Native control ready'
+  const displayName = app.displayName.trim()
+  const processName = app.processName.trim()
+
+  if (!displayName || /^process\s+\d+$/i.test(displayName)) {
+    return false
   }
 
-  return 'Ready when audio resumes'
+  if (!processName || /^pid-\d+$/i.test(processName)) {
+    return false
+  }
+
+  return true
 }
 
 function WaveRail({ level, muted }: { level: number; muted: boolean }) {
@@ -125,7 +100,6 @@ function AppCard({
   onVolumeChange(appId: string, volume: number): void
 }) {
   const stateLabel = describeSessionState(app)
-  const supportLabel = describeSessionSupport(app)
 
   return (
     <article className={classNames('app-card', !app.active && 'app-card--inactive')}>
@@ -146,12 +120,6 @@ function AppCard({
               </span>
               {app.pinned ? <span className="category-pill">Pinned</span> : null}
               <span className="category-pill">{app.category}</span>
-            </div>
-            <div className="app-card__meta-row">
-              <p>{app.processName}</p>
-              <span className={classNames('support-copy', app.support.controllable && 'support-copy--ready')}>
-                {supportLabel}
-              </span>
             </div>
           </div>
         </div>
@@ -206,23 +174,17 @@ function AppCard({
 function QuickFilters({
   activeFilter,
   shownCount,
-  liveCount,
   pinnedCount,
-  controllableCount,
   onSelect,
 }: {
   activeFilter: QuickFilter
   shownCount: number
-  liveCount: number
   pinnedCount: number
-  controllableCount: number
   onSelect(filter: QuickFilter): void
 }) {
   const options: Array<{ filter: QuickFilter; label: string; count: number }> = [
     { filter: 'all', label: 'All', count: shownCount },
-    { filter: 'live', label: 'Live', count: liveCount },
     { filter: 'pinned', label: 'Pinned', count: pinnedCount },
-    { filter: 'controllable', label: 'Ready', count: controllableCount },
   ]
 
   return (
@@ -239,6 +201,37 @@ function QuickFilters({
         </button>
       ))}
     </div>
+  )
+}
+
+function OutputControls({
+  outputSnapshot,
+  busy,
+  onSelect,
+}: {
+  outputSnapshot: AudioOutputSnapshot
+  busy: boolean
+  onSelect(deviceId: string): void
+}) {
+  if (!outputSnapshot.supported) {
+    return null
+  }
+
+  return (
+    <label className="output-select" aria-label="Audio output device">
+      <span>Output</span>
+      <select
+        value={outputSnapshot.currentDeviceId ?? ''}
+        onChange={(event) => onSelect(event.target.value)}
+        disabled={busy || outputSnapshot.devices.length === 0}
+      >
+        {outputSnapshot.devices.map((device) => (
+          <option key={device.id} value={device.id}>
+            {device.name}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }
 
@@ -289,52 +282,47 @@ function AppSection({
 
 function ShellControls({
   shellMode,
+  outputSnapshot,
   busy,
+  outputBusy,
   onModeChange,
+  onOutputChange,
   onHideToTray,
 }: {
   shellMode: ShellMode
+  outputSnapshot: AudioOutputSnapshot
   busy: boolean
+  outputBusy: boolean
   onModeChange(mode: ShellMode): void
+  onOutputChange(deviceId: string): void
   onHideToTray(): void
 }) {
   return (
     <div className="utility-bar">
-      <div className="utility-bar__group">
-        <div>
-          <p className="eyebrow">Utility shell</p>
-          <h2>{describeShellMode(shellMode)}</h2>
-        </div>
-        <div className="utility-bar__meta">
-          <span>{shellMode === 'topbar' ? 'Compact tray-first control surface' : 'Roomier desktop surface'}</span>
-          <span>Same mixer flow, faster to reopen and adjust.</span>
-        </div>
-      </div>
+      <OutputControls outputSnapshot={outputSnapshot} busy={outputBusy} onSelect={onOutputChange} />
 
-      <div className="utility-bar__group utility-bar__group--controls">
-        <div className="mode-switch" role="tablist" aria-label="Shell mode">
-          <button
-            type="button"
-            className={classNames('mode-switch__button', shellMode === 'desktop' && 'mode-switch__button--active')}
-            onClick={() => onModeChange('desktop')}
-            disabled={busy}
-          >
-            App mode
-          </button>
-          <button
-            type="button"
-            className={classNames('mode-switch__button', shellMode === 'topbar' && 'mode-switch__button--active')}
-            onClick={() => onModeChange('topbar')}
-            disabled={busy}
-          >
-            Top bar mode
-          </button>
-        </div>
-
-        <button type="button" className="refresh-button" onClick={onHideToTray} disabled={busy}>
-          Hide to tray
+      <div className="mode-switch" role="tablist" aria-label="Shell mode">
+        <button
+          type="button"
+          className={classNames('mode-switch__button', shellMode === 'desktop' && 'mode-switch__button--active')}
+          onClick={() => onModeChange('desktop')}
+          disabled={busy}
+        >
+          App mode
+        </button>
+        <button
+          type="button"
+          className={classNames('mode-switch__button', shellMode === 'topbar' && 'mode-switch__button--active')}
+          onClick={() => onModeChange('topbar')}
+          disabled={busy}
+        >
+          Top bar mode
         </button>
       </div>
+
+      <button type="button" className="refresh-button" onClick={onHideToTray} disabled={busy}>
+        Hide to tray
+      </button>
     </div>
   )
 }
@@ -459,15 +447,25 @@ const emptySnapshot: MixerSnapshot = {
   generatedAt: '0',
 }
 
+const emptyOutputSnapshot: AudioOutputSnapshot = {
+  supported: false,
+  reason: null,
+  currentDeviceId: null,
+  devices: [],
+}
+
 export default function App() {
   const [snapshot, setSnapshot] = useState<MixerSnapshot>(emptySnapshot)
+  const [outputSnapshot, setOutputSnapshot] = useState<AudioOutputSnapshot>(emptyOutputSnapshot)
   const [query, setQuery] = useState('')
   const [quickFilter, setQuickFilter] = useState<QuickFilter>('all')
   const [busyAppId, setBusyAppId] = useState<string | null>(null)
   const [onboardingComplete, setOnboardingComplete] = useState<boolean>(() => loadOnboardingComplete())
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => !loadOnboardingComplete())
   const [shellMode, setShellModeState] = useState<ShellMode>(() => loadShellMode())
+  const [onboardingShellMode, setOnboardingShellMode] = useState<ShellMode>(() => loadShellMode())
   const [shellBusy, setShellBusy] = useState(false)
+  const [outputBusy, setOutputBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -481,6 +479,18 @@ export default function App() {
         setSnapshot(nextSnapshot)
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : 'Unable to load mixer state')
+      }
+
+      try {
+        const nextOutputSnapshot = await getOutputDevices()
+        setOutputSnapshot(nextOutputSnapshot)
+      } catch (cause) {
+        setOutputSnapshot({
+          supported: false,
+          reason: cause instanceof Error ? cause.message : 'Unable to load output devices',
+          currentDeviceId: null,
+          devices: [],
+        })
       } finally {
         setLoading(false)
       }
@@ -498,6 +508,14 @@ export default function App() {
   useEffect(() => {
     saveOnboardingComplete(onboardingComplete)
   }, [onboardingComplete])
+
+  useEffect(() => {
+    if (!onboardingOpen) {
+      return
+    }
+
+    setOnboardingShellMode(shellMode)
+  }, [onboardingOpen, shellMode])
 
   useEffect(() => {
     void (async () => {
@@ -550,6 +568,7 @@ export default function App() {
 
   const baseApps = useMemo<ViewApp[]>(() => {
     return snapshot.apps
+      .filter(isDisplayableApp)
       .map((app) => ({
         ...app,
         pinned: pinnedIds.includes(app.id) || app.pinnedHint,
@@ -584,12 +603,8 @@ export default function App() {
         }
 
         switch (quickFilter) {
-          case 'live':
-            return app.active
           case 'pinned':
             return app.pinned
-          case 'controllable':
-            return app.support.controllable
           default:
             return true
         }
@@ -598,13 +613,16 @@ export default function App() {
 
   const pinnedApps = apps.filter((app) => app.pinned)
   const activeApps = apps.filter((app) => !app.pinned)
-  const liveCount = baseApps.filter((app) => app.active).length
+  const liveCount = baseApps.length
   const pinnedCount = baseApps.filter((app) => app.pinned).length
-  const controllableCount = baseApps.filter((app) => app.support.controllable).length
   const shownCount = apps.length
   const totalCount = baseApps.length
   const hasQuery = query.trim().length > 0
   const hasFilters = hasQuery || quickFilter !== 'all'
+  const diagnostics = [
+    ...snapshot.platform.notes,
+    ...(outputSnapshot.reason ? [`Output devices: ${outputSnapshot.reason}`] : []),
+  ]
 
   async function updateSnapshot(task: Promise<MixerSnapshot>, appId?: string) {
     if (appId) {
@@ -642,7 +660,38 @@ export default function App() {
   async function handleRefresh() {
     setRefreshing(true)
     await updateSnapshot(refreshSessions())
+
+    try {
+      const nextOutputSnapshot = await getOutputDevices()
+      setOutputSnapshot(nextOutputSnapshot)
+    } catch (cause) {
+      setOutputSnapshot({
+        supported: false,
+        reason: cause instanceof Error ? cause.message : 'Unable to refresh output devices',
+        currentDeviceId: null,
+        devices: [],
+      })
+    }
+
     setRefreshing(false)
+  }
+
+  async function handleOutputChange(deviceId: string) {
+    if (!deviceId || deviceId === outputSnapshot.currentDeviceId) {
+      return
+    }
+
+    setOutputBusy(true)
+    setError(null)
+
+    try {
+      const nextOutputSnapshot = await setOutputDevice(deviceId)
+      setOutputSnapshot(nextOutputSnapshot)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to change output device')
+    } finally {
+      setOutputBusy(false)
+    }
   }
 
   async function handleShellModeChange(nextMode: ShellMode) {
@@ -676,12 +725,32 @@ export default function App() {
     }
   }
 
-  function handleCompleteOnboarding() {
-    setOnboardingComplete(true)
-    setOnboardingOpen(false)
+  function handleOnboardingShellModeChange(nextMode: ShellMode) {
+    setOnboardingShellMode(nextMode)
+  }
+
+  async function handleCompleteOnboarding() {
+    setShellBusy(true)
+    setError(null)
+
+    try {
+      if (onboardingShellMode !== shellMode) {
+        const applied = await applyShellMode(onboardingShellMode)
+        setShellModeState(applied)
+        setOnboardingShellMode(applied)
+      }
+
+      setOnboardingComplete(true)
+      setOnboardingOpen(false)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to finish setup')
+    } finally {
+      setShellBusy(false)
+    }
   }
 
   function handleCloseOnboarding() {
+    setOnboardingShellMode(shellMode)
     setOnboardingOpen(false)
   }
 
@@ -697,88 +766,60 @@ export default function App() {
 
       {onboardingOpen ? (
         <OnboardingOverlay
-          shellMode={shellMode}
+          shellMode={onboardingShellMode}
           busy={shellBusy || refreshing}
           loading={loading}
           liveCount={liveCount}
-          onModeChange={(nextMode) => void handleShellModeChange(nextMode)}
+          onModeChange={handleOnboardingShellModeChange}
           onRefresh={() => void handleRefresh()}
-          onComplete={handleCompleteOnboarding}
+          onComplete={() => void handleCompleteOnboarding()}
           onClose={handleCloseOnboarding}
           completed={onboardingComplete}
         />
       ) : null}
 
       <section className="frame">
-        <header className="hero panel">
-          <div className="hero__main">
-            <div className="hero__brand">
-              <div className="hero__mark">W</div>
-              <div>
-                <p className="eyebrow">Per-app mixer</p>
-                <div className="hero__title-row">
-                  <h1>Waves</h1>
-                  <span className={classNames('mode-pill', shellMode === 'topbar' && 'mode-pill--active')}>
-                    {describeShellMode(shellMode)}
-                  </span>
-                  <span className={classNames('mode-pill', snapshot.platform.nativeControlReady && 'mode-pill--ready')}>
-                    {snapshot.platform.nativeControlReady ? 'Native control ready' : 'Limited control'}
-                  </span>
-                </div>
-                <p className="hero__copy">
-                  Fast per-app mixing for the sessions you care about, tuned for pinned essentials and tray-friendly utility use.
-                </p>
-                <p className="hero__backend">
-                  {snapshot.platform.platform} · {snapshot.platform.nativeBackend}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="hero__meta">
-            <div className="hero-stat">
-              <span>Live</span>
-              <strong>{loading ? '...' : liveCount}</strong>
-            </div>
-            <div className="hero-stat">
-              <span>Pinned</span>
-              <strong>{pinnedCount}</strong>
-            </div>
-            <div className="hero-stat">
-              <span>Visible</span>
-              <strong>{shownCount}</strong>
-            </div>
-            <div className="hero-stat">
-              <span>Updated</span>
-              <strong>{formatRelativeTimestamp(snapshot.generatedAt)}</strong>
-            </div>
-          </div>
-        </header>
-
         <section className="panel control-deck">
           <div className="control-deck__row control-deck__row--primary">
-            <div className="search-box">
-              <div className="search-box__label-row">
-                <span>Search</span>
-                <span className="shortcut-hint">⌘K</span>
+            <div className="command-bar__brand">
+              <div className="hero__mark">W</div>
+              <div>
+                <h1>Waves</h1>
+                <p>
+                  {loading ? 'Checking live apps…' : `${shownCount} live app${shownCount === 1 ? '' : 's'}`}
+                  {quickFilter === 'pinned' ? ' · pinned only' : ''}
+                </p>
               </div>
+            </div>
+
+            <ShellControls
+              shellMode={shellMode}
+              outputSnapshot={outputSnapshot}
+              busy={shellBusy}
+              outputBusy={outputBusy}
+              onModeChange={(nextMode) => void handleShellModeChange(nextMode)}
+              onOutputChange={(deviceId) => void handleOutputChange(deviceId)}
+              onHideToTray={() => void handleHideToTray()}
+            />
+          </div>
+
+          <div className="control-deck__row control-deck__row--primary">
+            <div className="search-box">
               <input
                 ref={searchRef}
                 type="search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Spotify, Discord, browser..."
+                placeholder="Search live apps"
               />
-              <div className="search-box__meta">
-                <span>{describeQuickFilter(quickFilter)}</span>
-                <span>{shownCount} of {totalCount} visible</span>
-              </div>
             </div>
 
             <div className="command-bar__actions">
-              <button type="button" className="control-button" onClick={() => setOnboardingOpen(true)}>
-                {onboardingComplete ? 'Review guide' : 'Finish setup'}
-              </button>
+              {!onboardingComplete ? (
+                <button type="button" className="control-button" onClick={() => setOnboardingOpen(true)}>
+                  Finish setup
+                </button>
+              ) : null}
 
               {hasFilters ? (
                 <button type="button" className="control-button" onClick={handleClearDiscoveryFilters}>
@@ -793,43 +834,18 @@ export default function App() {
           </div>
 
           <div className="control-deck__row control-deck__row--secondary">
-            <div className="focus-bar">
-              <div className="focus-bar__group">
-                <p className="eyebrow">Session focus</p>
-                <QuickFilters
-                  activeFilter={quickFilter}
-                  shownCount={totalCount}
-                  liveCount={liveCount}
-                  pinnedCount={pinnedCount}
-                  controllableCount={controllableCount}
-                  onSelect={setQuickFilter}
-                />
-              </div>
-
-              <div className="focus-bar__group focus-bar__group--meta">
-                <div className="focus-stat">
-                  <span>Visible now</span>
-                  <strong>{shownCount} of {totalCount} sessions</strong>
-                </div>
-                <div className="focus-stat">
-                  <span>Shortcuts</span>
-                  <strong>⌘K search · / jump · R refresh · ? guide</strong>
-                </div>
-              </div>
-            </div>
-
-            <ShellControls
-              shellMode={shellMode}
-              busy={shellBusy}
-              onModeChange={(nextMode) => void handleShellModeChange(nextMode)}
-              onHideToTray={() => void handleHideToTray()}
+            <QuickFilters
+              activeFilter={quickFilter}
+              shownCount={totalCount}
+              pinnedCount={pinnedCount}
+              onSelect={setQuickFilter}
             />
           </div>
         </section>
 
-        {snapshot.platform.notes.length > 0 ? (
+        {diagnostics.length > 0 ? (
           <section className="panel notes-panel">
-            {snapshot.platform.notes.map((note) => (
+            {diagnostics.map((note) => (
               <p key={note}>{note}</p>
             ))}
           </section>
@@ -839,12 +855,20 @@ export default function App() {
 
         {!loading && apps.length === 0 ? (
           <section className="panel empty-panel">
-            <p className="eyebrow">{hasFilters ? 'No matches' : 'No sessions found'}</p>
-            <h2>{hasFilters ? 'Nothing matches your current focus.' : 'Nothing is playing right now.'}</h2>
+            <p className="eyebrow">{hasFilters ? 'No matches' : snapshot.platform.discoveryReady ? 'No sessions found' : 'Discovery unavailable'}</p>
+            <h2>
+              {hasFilters
+                ? 'Nothing matches your current focus.'
+                : snapshot.platform.discoveryReady
+                  ? 'Nothing is playing right now.'
+                  : 'Waves could not read live macOS sessions.'}
+            </h2>
             <p>
               {hasFilters
                 ? 'Clear the search or switch filters to widen the mixer view again.'
-                : 'Launch audio apps and refresh. Pinned apps will stay visible here once native discovery is connected.'}
+                : snapshot.platform.discoveryReady
+                  ? 'Launch audio apps and refresh. If something is already playing, check the diagnostics above.'
+                  : 'Check the diagnostics above, then refresh after reopening the apps that should be audible.'}
             </p>
             {hasFilters ? (
               <button type="button" className="refresh-button empty-panel__action" onClick={handleClearDiscoveryFilters}>

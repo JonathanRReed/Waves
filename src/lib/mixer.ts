@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { AppAudioSession, MixerSnapshot } from '../types/waves'
+import type { AppAudioSession, AudioOutputSnapshot, MixerSnapshot } from '../types/waves'
 
 type TauriWindow = Window & {
   __TAURI__?: unknown
@@ -87,7 +87,33 @@ function createBrowserSnapshot(): MixerSnapshot {
   }
 }
 
+function createBrowserOutputs(): AudioOutputSnapshot {
+  return {
+    supported: true,
+    reason: null,
+    currentDeviceId: 'default-speakers',
+    devices: [
+      {
+        id: 'default-speakers',
+        name: 'MacBook Speakers',
+        current: true,
+      },
+      {
+        id: 'default-headphones',
+        name: 'Headphones',
+        current: false,
+      },
+      {
+        id: 'default-display',
+        name: 'Studio Display',
+        current: false,
+      },
+    ],
+  }
+}
+
 let browserSnapshot = createBrowserSnapshot()
+let browserOutputs = createBrowserOutputs()
 
 function cloneSnapshot(snapshot: MixerSnapshot): MixerSnapshot {
   return JSON.parse(JSON.stringify(snapshot)) as MixerSnapshot
@@ -160,6 +186,20 @@ async function fallbackInvoke<T>(command: string, args: Record<string, unknown> 
       )
       return updateBrowserSnapshot(nextApps) as T
     }
+    case 'get_output_devices':
+      return JSON.parse(JSON.stringify(browserOutputs)) as T
+    case 'set_output_device': {
+      const deviceId = String(args.deviceId)
+      browserOutputs = {
+        ...browserOutputs,
+        currentDeviceId: deviceId,
+        devices: browserOutputs.devices.map((device) => ({
+          ...device,
+          current: device.id === deviceId,
+        })),
+      }
+      return JSON.parse(JSON.stringify(browserOutputs)) as T
+    }
     default:
       throw new Error(`Unsupported fallback command: ${command}`)
   }
@@ -191,5 +231,15 @@ export function setAppVolume(appId: string, volume: number): Promise<MixerSnapsh
 export function toggleAppMute(appId: string): Promise<MixerSnapshot> {
   return invokeMixer<MixerSnapshot>('toggle_app_mute', {
     appId,
+  })
+}
+
+export function getOutputDevices(): Promise<AudioOutputSnapshot> {
+  return invokeMixer<AudioOutputSnapshot>('get_output_devices')
+}
+
+export function setOutputDevice(deviceId: string): Promise<AudioOutputSnapshot> {
+  return invokeMixer<AudioOutputSnapshot>('set_output_device', {
+    deviceId,
   })
 }
