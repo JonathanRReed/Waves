@@ -31,6 +31,13 @@ export type AppAudioSession = {
   displayName: string
   processName: string
   bundleId: string | null
+  detected: boolean
+  audible: boolean
+  runningOutput: boolean
+  recentSignal: boolean
+  recentRender: boolean
+  lastSeenAt: string
+  lastSignalAt: string | null
   category: string
   volume: number
   muted: boolean

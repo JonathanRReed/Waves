@@ -1,3 +1,7 @@
+mod bridge;
+mod driver_rpc;
+mod virtual_device;
+
 use std::{
     collections::{hash_map::Entry, HashMap},
     ffi::c_void,
@@ -9,7 +13,7 @@ use std::{
 };
 
 use objc2::{rc::Retained, AnyThread};
-use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
 use objc2_core_audio::{
     AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart,
     AudioDeviceStop, AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
@@ -19,6 +23,7 @@ use objc2_core_audio::{
     kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceNameKey, kAudioAggregateDeviceTapAutoStartKey,
     kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey, kAudioDevicePropertyScopeOutput,
     kAudioDevicePropertyStreamConfiguration, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioHardwarePropertyDefaultSystemOutputDevice,
     kAudioHardwarePropertyDevices, kAudioHardwarePropertyProcessIsAudible,
     kAudioHardwarePropertyProcessObjectList, kAudioObjectPropertyElementMain, kAudioObjectPropertyName,
     kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioProcessPropertyIsRunningOutput,
@@ -42,15 +47,42 @@ const SIGNAL_HOLD_MS: u64 = 1_800;
 const PEAK_DECAY_MS: u64 = 900;
 const IDLE_PEAK_FLOOR: f32 = 0.04;
 const LIVE_PEAK_FLOOR: f32 = 0.08;
+const MACOS_READ_ONLY_REASON: &str =
+    "Live metering is enabled, but per-app attenuation is temporarily disabled on macOS to avoid interrupting system audio output.";
+const MACOS_PENDING_SESSION_REASON: &str =
+    "This app is open in Waves. Start playback to let the macOS audio engine attach live controls.";
+const MACOS_SYSTEM_SOUNDS_REASON: &str =
+    "System Sounds stay visible here so short macOS alerts and UI sounds are easier to verify.";
+
+pub fn create_backend() -> Box<dyn MixerBackend> {
+    match virtual_device::build_virtual_backend() {
+        Ok(backend) => Box::new(backend),
+        Err(reason) => {
+            let mut backend = build_backend();
+            backend.snapshot.platform.notes.push(
+                format!("Waves virtual-device engine is unavailable, so macOS is using safe meter-only fallback: {reason}"),
+            );
+            Box::new(backend)
+        }
+    }
+}
 
 pub fn build_backend() -> MacosMixerBackend {
     let (snapshot, process_objects) = discover_state().unwrap_or_else(state_from_error);
 
-    MacosMixerBackend {
+    let mut backend = MacosMixerBackend {
         snapshot,
         process_objects,
         tap_sessions: HashMap::new(),
-    }
+    };
+    let tap_sync_notes = backend.sync_live_taps();
+    backend.apply_tap_overrides();
+    backend
+        .snapshot
+        .platform
+        .notes
+        .extend(tap_sync_notes.into_iter().take(3));
+    backend
 }
 
 pub struct MacosMixerBackend {
@@ -98,10 +130,6 @@ impl TapIoState {
         self.gain_bits.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed)
     }
 
-    fn is_passthrough(&self) -> bool {
-        (self.gain() - 1.0).abs() < 0.005
-    }
-
     fn note_render(&self, peak: f32) {
         self.render_count.fetch_add(1, Ordering::Relaxed);
 
@@ -129,10 +157,10 @@ impl TapIoState {
 
 struct TapMeterState {
     gain: f32,
-    passthrough: bool,
     peak: f32,
     recent_signal: bool,
-    saw_render: bool,
+    recent_render: bool,
+    last_signal_at_ms: u64,
 }
 
 impl Drop for MacosTapSession {
@@ -175,10 +203,10 @@ impl MacosTapSession {
 
         TapMeterState {
             gain: self.io_state.gain(),
-            passthrough: self.io_state.is_passthrough(),
             peak,
             recent_signal: self.last_signal_at_ms > 0 && now_ms.saturating_sub(self.last_signal_at_ms) <= SIGNAL_HOLD_MS,
-            saw_render: self.observed_render_count > 0,
+            recent_render: self.last_render_at_ms > 0 && now_ms.saturating_sub(self.last_render_at_ms) <= SIGNAL_HOLD_MS,
+            last_signal_at_ms: self.last_signal_at_ms,
         }
     }
 }
@@ -208,27 +236,38 @@ impl MacosMixerBackend {
         for app in &mut self.snapshot.apps {
             if let Some(sessions) = self.tap_sessions.get_mut(&app.id) {
                 let mut gain = 1.0;
-                let mut saw_render = false;
+                let mut has_recent_render = false;
                 let mut has_recent_signal = false;
                 let mut measured_peak = 0.0_f32;
+                let mut latest_signal_at_ms = 0_u64;
 
                 for (index, session) in sessions.iter_mut().enumerate() {
                     let meter = session.sync_meter_state(now_ms);
                     if index == 0 {
                         gain = meter.gain;
                     }
-                    saw_render |= meter.saw_render;
+                    has_recent_render |= meter.recent_render;
                     has_recent_signal |= meter.recent_signal;
                     measured_peak = measured_peak.max(meter.peak);
+                    latest_signal_at_ms = latest_signal_at_ms.max(meter.last_signal_at_ms);
                 }
 
-                app.support.controllable = true;
-                app.support.reason = None;
+                app.support.controllable = false;
+                app.support.reason = Some(MACOS_READ_ONLY_REASON.to_string());
+                app.detected = true;
+                app.audible |= has_recent_signal;
+                app.running_output |= has_recent_render;
+                app.recent_signal = has_recent_signal;
+                app.recent_render = has_recent_render;
+                app.last_seen_at = now_ms.to_string();
+                app.last_signal_at = if latest_signal_at_ms > 0 {
+                    Some(latest_signal_at_ms.to_string())
+                } else {
+                    app.last_signal_at.clone()
+                };
                 app.volume = (gain * 100.0).round().clamp(0.0, 100.0) as u8;
                 app.muted = gain <= 0.001;
-                if saw_render {
-                    app.active = has_recent_signal || measured_peak >= SIGNAL_THRESHOLD;
-                }
+                app.active = has_recent_signal || has_recent_render || measured_peak >= SIGNAL_THRESHOLD;
                 app.peak_level = if app.muted {
                     IDLE_PEAK_FLOOR
                 } else if app.active {
@@ -239,48 +278,31 @@ impl MacosMixerBackend {
                 continue;
             }
 
-            app.support.controllable = app.active;
-            app.support.reason = if app.active {
-                None
-            } else {
-                Some("This macOS session is idle right now, so Waves cannot attach a live tap yet.".to_string())
-            };
+            app.detected = true;
+            app.recent_signal = app.audible;
+            app.recent_render = app.running_output;
+            app.last_seen_at = now_ms.to_string();
+            if app.last_signal_at.is_none() && app.audible {
+                app.last_signal_at = Some(now_ms.to_string());
+            }
+            app.active = app.audible || app.running_output;
+            app.support.controllable = false;
+            app.support.reason = Some(MACOS_READ_ONLY_REASON.to_string());
         }
     }
 
     fn sync_live_taps(&mut self) -> Vec<String> {
-        let now_ms = current_time_millis();
         let mut notes = Vec::new();
 
         self.tap_sessions.retain(|app_id, sessions| {
-            if !self.process_objects.contains_key(app_id) {
-                return false;
-            }
-
-            let is_discovery_active = self
-                .snapshot
-                .apps
-                .iter()
-                .find(|app| app.id == app_id.as_str())
-                .map(|app| app.active)
-                .unwrap_or(false);
-            let should_keep = sessions.iter_mut().any(|session| {
-                let meter = session.sync_meter_state(now_ms);
-                !meter.passthrough || meter.recent_signal || (is_discovery_active && !meter.saw_render)
-            });
-
-            should_keep
+            self.process_objects.contains_key(app_id) && !sessions.is_empty()
         });
 
-        let active_apps = self
+        let discoverable_apps = self
             .snapshot
             .apps
             .iter()
-            .filter(|app| {
-                self.process_objects.contains_key(&app.id)
-                    && app.active
-                    && is_browser_like_app(&app.display_name, app.bundle_id.as_deref())
-            })
+            .filter(|app| self.process_objects.contains_key(&app.id))
             .map(|app| {
                 let gain = if app.muted {
                     0.0
@@ -291,7 +313,7 @@ impl MacosMixerBackend {
             })
             .collect::<Vec<_>>();
 
-        for (app_id, display_name, gain) in active_apps {
+        for (app_id, display_name, gain) in discoverable_apps {
             if let Err(reason) = self.ensure_tap_session(&app_id, gain) {
                 notes.push(format!("Waves could not attach live metering for {display_name}: {reason}"));
             }
@@ -421,24 +443,11 @@ fn discover_state() -> Result<(MixerSnapshot, HashMap<String, Vec<AudioObjectID>
             Some(app) => app,
             _ => continue,
         };
+        merge_discovered_app(&mut deduped_apps, app, Some(process_object));
+    }
 
-        match deduped_apps.entry(app.id.clone()) {
-            Entry::Occupied(mut entry) => {
-                let (existing_app, existing_process_objects) = entry.get_mut();
-                existing_process_objects.push(process_object);
-                existing_app.peak_level = existing_app.peak_level.max(app.peak_level);
-                existing_app.active |= app.active;
-                existing_app.support.controllable |= app.support.controllable;
-                existing_app.support.reason = if existing_app.support.controllable {
-                    None
-                } else {
-                    app.support.reason.clone().or_else(|| existing_app.support.reason.clone())
-                };
-            }
-            Entry::Vacant(entry) => {
-                entry.insert((app, vec![process_object]));
-            }
-        }
+    for app in running_application_sessions() {
+        merge_discovered_app(&mut deduped_apps, app, None);
     }
 
     let mut process_map = HashMap::new();
@@ -461,16 +470,69 @@ fn discover_state() -> Result<(MixerSnapshot, HashMap<String, Vec<AudioObjectID>
         platform: PlatformSupport {
             platform: "macos".to_string(),
             native_backend: "macos-process-discovery".to_string(),
-            native_control_ready: true,
+            native_control_ready: false,
             discovery_ready: true,
             notes: vec![
                 "Waves is reading real macOS Core Audio process objects for live session discovery.".to_string(),
-                "Per-app control uses the direct Rust Core Audio tap prototype for live sessions.".to_string(),
+                "Per-app control is currently disabled on macOS while Waves uses Core Audio taps only for safe live metering.".to_string(),
             ],
         },
         generated_at: now_stamp(),
         apps,
     }, process_map))
+}
+
+fn merge_discovered_app(
+    deduped_apps: &mut HashMap<String, (AppAudioSession, Vec<AudioObjectID>)>,
+    app: AppAudioSession,
+    process_object: Option<AudioObjectID>,
+) {
+    match deduped_apps.entry(app.id.clone()) {
+        Entry::Occupied(mut entry) => {
+            let (existing_app, existing_process_objects) = entry.get_mut();
+            if let Some(process_object) = process_object {
+                existing_process_objects.push(process_object);
+            }
+
+            if existing_app.display_name.starts_with("Process ") && !app.display_name.starts_with("Process ") {
+                existing_app.display_name = app.display_name.clone();
+            }
+            if existing_app.process_name.starts_with("pid-") && !app.process_name.starts_with("pid-") {
+                existing_app.process_name = app.process_name.clone();
+            }
+            if existing_app.bundle_id.is_none() && app.bundle_id.is_some() {
+                existing_app.bundle_id = app.bundle_id.clone();
+            }
+
+            existing_app.detected |= app.detected;
+            existing_app.audible |= app.audible;
+            existing_app.running_output |= app.running_output;
+            existing_app.recent_signal |= app.recent_signal;
+            existing_app.recent_render |= app.recent_render;
+            existing_app.active |= app.active;
+            existing_app.pinned_hint |= app.pinned_hint;
+            existing_app.peak_level = existing_app.peak_level.max(app.peak_level);
+            if existing_app.last_signal_at.is_none() {
+                existing_app.last_signal_at = app.last_signal_at.clone();
+            }
+            if existing_app.category.trim().is_empty() {
+                existing_app.category = app.category.clone();
+            }
+            existing_app.support.controllable |= app.support.controllable;
+            existing_app.support.reason = if existing_app.support.controllable {
+                None
+            } else {
+                existing_app
+                    .support
+                    .reason
+                    .clone()
+                    .or_else(|| app.support.reason.clone())
+            };
+        }
+        Entry::Vacant(entry) => {
+            entry.insert((app, process_object.into_iter().collect()));
+        }
+    }
 }
 
 fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
@@ -510,22 +572,31 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
     let active = audible || running_output;
     let allow_prohibited_process =
         derived_from_helper || raw_display_name.to_lowercase().contains("web content")
-            || browser_like;
+            || browser_like
+            || is_special_audio_process(&display_name, &bundle_id);
     if running_application.activationPolicy() == NSApplicationActivationPolicy::Prohibited && !allow_prohibited_process {
         return None;
     }
 
-    if looks_like_background_audio_process(&display_name, &bundle_id) {
+    if looks_like_background_audio_process(&display_name, &bundle_id) && !is_special_audio_process(&display_name, &bundle_id) {
         return None;
     }
 
     let session_id = format!("macos:{bundle_id}");
+    let now = now_stamp();
 
     Some(AppAudioSession {
         id: session_id,
         display_name: display_name.clone(),
         process_name: bundle_id.clone(),
         bundle_id: Some(bundle_id.clone()),
+        detected: true,
+        audible,
+        running_output,
+        recent_signal: audible,
+        recent_render: running_output,
+        last_seen_at: now.clone(),
+        last_signal_at: active.then_some(now.clone()),
         category: infer_category(&display_name, Some(bundle_id.as_str())),
         volume: 100,
         muted: false,
@@ -533,14 +604,117 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
         pinned_hint: false,
         peak_level: if active { 0.62 } else { 0.04 },
         support: SessionSupport {
-            controllable: active,
-            reason: if active {
-                None
-            } else {
-                Some("This macOS session is idle right now, so Waves cannot attach a live tap yet.".to_string())
-            },
+            controllable: false,
+            reason: Some(MACOS_READ_ONLY_REASON.to_string()),
         },
     })
+}
+
+fn running_application_sessions() -> Vec<AppAudioSession> {
+    let workspace = NSWorkspace::sharedWorkspace();
+    let mut sessions = workspace
+        .runningApplications()
+        .iter()
+        .filter_map(|running_application| build_running_application_session(&running_application))
+        .collect::<Vec<_>>();
+
+    sessions.push(system_sounds_placeholder_session());
+    sessions
+}
+
+fn build_running_application_session(running_application: &NSRunningApplication) -> Option<AppAudioSession> {
+    if running_application.isTerminated() || !running_application.isFinishedLaunching() {
+        return None;
+    }
+
+    let pid = running_application.processIdentifier();
+    if pid <= 0 {
+        return None;
+    }
+
+    let raw_bundle_id = running_application
+        .bundleIdentifier()
+        .map(|value| value.to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("pid-{pid}"));
+    if raw_bundle_id == "com.jonathanreed.waves" {
+        return None;
+    }
+
+    let raw_display_name = running_application
+        .localizedName()
+        .map(|name| name.to_string())
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            if raw_bundle_id.starts_with("pid-") {
+                None
+            } else {
+                Some(friendly_app_name_from_bundle_id(&raw_bundle_id))
+            }
+        })
+        .unwrap_or_else(|| format!("Process {pid}"));
+
+    let (display_name, bundle_id, derived_from_helper) = resolve_session_identity(&raw_display_name, &raw_bundle_id);
+    let browser_like = is_browser_like_app(&display_name, Some(bundle_id.as_str()));
+    let allow_prohibited_process = derived_from_helper || browser_like || is_special_audio_process(&display_name, &bundle_id);
+    if running_application.activationPolicy() == NSApplicationActivationPolicy::Prohibited && !allow_prohibited_process {
+        return None;
+    }
+
+    if looks_like_background_audio_process(&display_name, &bundle_id) && !allow_prohibited_process {
+        return None;
+    }
+
+    let now = now_stamp();
+    Some(AppAudioSession {
+        id: format!("macos:{bundle_id}"),
+        display_name: display_name.clone(),
+        process_name: bundle_id.clone(),
+        bundle_id: Some(bundle_id.clone()),
+        detected: true,
+        audible: false,
+        running_output: false,
+        recent_signal: false,
+        recent_render: false,
+        last_seen_at: now,
+        last_signal_at: None,
+        category: infer_category(&display_name, Some(bundle_id.as_str())),
+        volume: 100,
+        muted: false,
+        active: false,
+        pinned_hint: false,
+        peak_level: IDLE_PEAK_FLOOR,
+        support: SessionSupport {
+            controllable: false,
+            reason: Some(MACOS_PENDING_SESSION_REASON.to_string()),
+        },
+    })
+}
+
+fn system_sounds_placeholder_session() -> AppAudioSession {
+    AppAudioSession {
+        id: "macos:com.apple.systemsounds".to_string(),
+        display_name: "System Sounds".to_string(),
+        process_name: "com.apple.systemsounds".to_string(),
+        bundle_id: Some("com.apple.systemsounds".to_string()),
+        detected: true,
+        audible: false,
+        running_output: false,
+        recent_signal: false,
+        recent_render: false,
+        last_seen_at: now_stamp(),
+        last_signal_at: None,
+        category: "System".to_string(),
+        volume: 100,
+        muted: false,
+        active: false,
+        pinned_hint: false,
+        peak_level: IDLE_PEAK_FLOOR,
+        support: SessionSupport {
+            controllable: false,
+            reason: Some(MACOS_SYSTEM_SOUNDS_REASON.to_string()),
+        },
+    }
 }
 
 fn looks_like_background_audio_process(display_name: &str, bundle_id: &str) -> bool {
@@ -560,7 +734,19 @@ fn looks_like_background_audio_process(display_name: &str, bundle_id: &str) -> b
     excluded_terms.iter().any(|term| haystack.contains(term))
 }
 
+fn is_special_audio_process(display_name: &str, bundle_id: &str) -> bool {
+    let haystack = format!("{} {}", display_name, bundle_id).to_lowercase();
+    haystack.contains("systemsound")
+        || haystack.contains("system sounds")
+        || haystack.contains("avconferenced")
+        || haystack.contains("callservicesd")
+}
+
 fn resolve_session_identity(display_name: &str, bundle_id: &str) -> (String, String, bool) {
+    if is_special_audio_process(display_name, bundle_id) {
+        return ("System Sounds".to_string(), "com.apple.systemsounds".to_string(), true);
+    }
+
     if bundle_id.eq_ignore_ascii_case("com.apple.WebKit.WebContent") || display_name.eq_ignore_ascii_case("Safari Web Content") {
         return ("Safari".to_string(), "com.apple.Safari".to_string(), true);
     }
@@ -672,7 +858,16 @@ fn device_supports_output(device_id: AudioObjectID) -> Result<bool, String> {
 }
 
 fn set_default_output_device(device_id: AudioObjectID) -> Result<(), String> {
-    let mut address = property_address(kAudioHardwarePropertyDefaultOutputDevice);
+    set_system_device_property(kAudioHardwarePropertyDefaultOutputDevice, device_id)?;
+    let _ = set_system_device_property(kAudioHardwarePropertyDefaultSystemOutputDevice, device_id);
+    Ok(())
+}
+
+fn set_system_device_property(
+    selector: AudioObjectPropertySelector,
+    device_id: AudioObjectID,
+) -> Result<(), String> {
+    let mut address = property_address(selector);
     let mut target_device_id = device_id;
     let status = unsafe {
         AudioObjectSetPropertyData(
@@ -686,7 +881,9 @@ fn set_default_output_device(device_id: AudioObjectID) -> Result<(), String> {
     };
 
     if status != 0 {
-        return Err(format!("Core Audio default output switch failed for device {device_id}: {status}"));
+        return Err(format!(
+            "Core Audio device switch failed for selector {selector:#x} on device {device_id}: {status}"
+        ));
     }
 
     Ok(())
@@ -783,7 +980,7 @@ fn create_tap_session(app_id: &str, process_object: AudioObjectID, gain: f32) ->
         tap_description.setName(&tap_name);
         tap_description.setPrivate(true);
         tap_description.setExclusive(false);
-        tap_description.setMuteBehavior(CATapMuteBehavior::MutedWhenTapped);
+        tap_description.setMuteBehavior(CATapMuteBehavior::Unmuted);
     }
 
     let mut tap_id = 0;

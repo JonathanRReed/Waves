@@ -127,7 +127,7 @@ pub fn create_backend() -> Box<dyn MixerBackend> {
 
 #[cfg(target_os = "macos")]
 pub fn create_backend() -> Box<dyn MixerBackend> {
-    Box::new(macos::build_backend())
+    macos::create_backend()
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

@@ -72,11 +72,20 @@ fn app(
     controllable: bool,
     reason: Option<&str>,
 ) -> AppAudioSession {
+    let now = now_stamp();
+
     AppAudioSession {
         id: id.to_string(),
         display_name: display_name.to_string(),
         process_name: process_name.to_string(),
         bundle_id: bundle_id.map(str::to_string),
+        detected: true,
+        audible: active,
+        running_output: active,
+        recent_signal: active,
+        recent_render: active,
+        last_seen_at: now.clone(),
+        last_signal_at: active.then_some(now.clone()),
         category: category.to_string(),
         volume,
         muted: false,

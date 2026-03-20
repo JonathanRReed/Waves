@@ -32,7 +32,7 @@
     "active": true,
     "targets": ["app"],
     "shortDescription": "A cleaner cross-platform per-app audio mixer.",
-    "longDescription": "Waves is a sleek cross-platform desktop utility for per-app audio control, quick tray access, and a compact top bar workflow.",
+    "longDescription": "Waves is a sleek cross-platform desktop utility for per-app audio control, quick tray access, and a native macOS menu bar panel.",
     "category": "Music"
   }
 }

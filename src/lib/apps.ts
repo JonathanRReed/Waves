@@ -1,7 +1,6 @@
 import type { AppAudioSession } from '../types/waves'
 
 export type VolumeDrafts = Record<string, number>
-export type RecentActivityMap = Record<string, number>
 
 export type ViewApp = AppAudioSession & {
   pinned: boolean
@@ -38,13 +37,11 @@ export function buildViewApps(
   apps: AppAudioSession[],
   pinnedIds: string[],
   volumeDrafts: VolumeDrafts,
-  recentActivity: RecentActivityMap = {},
-  now = Date.now(),
 ): ViewApp[] {
   return apps
     .map((app) => {
       const pinned = pinnedIds.includes(app.id) || app.pinnedHint
-      const live = app.active || (recentActivity[app.id] ?? 0) > now
+      const live = app.active || app.recentSignal || app.recentRender
 
       return {
         ...app,
@@ -90,11 +87,12 @@ export function partitionViewApps(apps: ViewApp[], query: string, showHidden: bo
   const liveApps = filteredApps.filter((app) => app.live)
   const pinnedApps = filteredApps.filter((app) => !app.live && app.pinned)
   const hiddenIdleApps = filteredApps.filter((app) => !app.live && !app.pinned)
+  const shouldRevealIdleApps = showHidden || query.trim().length > 0 || (liveApps.length === 0 && hiddenIdleApps.length > 0)
 
   return {
     liveApps,
     pinnedApps,
-    hiddenApps: showHidden || query.trim().length > 0 ? hiddenIdleApps : [],
+    hiddenApps: shouldRevealIdleApps ? hiddenIdleApps : [],
     hiddenCount: hiddenIdleApps.length,
   }
 }

@@ -1,8 +1,16 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { buildViewApps, partitionViewApps, type RecentActivityMap, type ViewApp, type VolumeDrafts } from './lib/apps'
-import { getMixerSnapshot, getOutputDevices, refreshSessions, setAppVolume, setOutputDevice, toggleAppMute } from './lib/mixer'
+import { buildViewApps, partitionViewApps, type ViewApp, type VolumeDrafts } from './lib/apps'
+import {
+  getMixerSnapshot,
+  getOutputDevices,
+  installMacosDriver,
+  refreshSessions,
+  setAppVolume,
+  setOutputDevice,
+  toggleAppMute,
+} from './lib/mixer'
 import { getGlobalShortcutAction } from './lib/shortcuts'
-import { applyShellMode, getShellMode, hideMainWindow } from './lib/shell'
+import { applyShellMode, getShellMode, hideMainWindow, hidePanelWindow, showMainWindow } from './lib/shell'
 import {
   loadOnboardingComplete,
   loadPinnedApps,
@@ -17,8 +25,18 @@ function classNames(...names: Array<string | false | null | undefined>): string 
   return names.filter(Boolean).join(' ')
 }
 
-function describeShellMode(mode: ShellMode): string {
-  return mode === 'topbar' ? 'Top bar mode' : 'Desktop app'
+type SurfaceMode = 'desktop' | 'panel'
+
+function detectSurfaceMode(): SurfaceMode {
+  if (typeof window === 'undefined') {
+    return 'desktop'
+  }
+
+  try {
+    return new URL(window.location.href).searchParams.get('surface') === 'panel' ? 'panel' : 'desktop'
+  } catch {
+    return 'desktop'
+  }
 }
 
 function describeSessionState(app: Pick<ViewApp, 'live' | 'muted'>): string {
@@ -31,6 +49,18 @@ function describeSessionState(app: Pick<ViewApp, 'live' | 'muted'>): string {
   }
 
   return 'Idle'
+}
+
+function supportBadgeLabel(app: Pick<ViewApp, 'support'>): string | null {
+  if (app.support.controllable) {
+    return null
+  }
+
+  if (app.support.reason?.toLowerCase().includes('live metering is enabled')) {
+    return 'Meter only'
+  }
+
+  return 'Read only'
 }
 
 function omitRecordKey<T>(record: Record<string, T>, key: string): Record<string, T> {
@@ -109,6 +139,7 @@ function AppCard({
   const stateLabel = describeSessionState(app)
   const displayedVolume = app.muted && app.displayVolume === app.volume ? 0 : app.displayVolume
   const showSupportNote = !app.support.controllable && Boolean(app.support.reason)
+  const badgeLabel = supportBadgeLabel(app)
 
   return (
     <article className={classNames('app-card', !app.live && 'app-card--inactive', app.live && 'app-card--live')}>
@@ -124,7 +155,7 @@ function AppCard({
           <div className="app-card__copy">
             <div className="app-card__title-row">
               <h3>{app.displayName}</h3>
-              {!app.support.controllable ? <span className="status-pill status-pill--quiet">Read only</span> : null}
+              {badgeLabel ? <span className="status-pill status-pill--quiet">{badgeLabel}</span> : null}
             </div>
           </div>
         </div>
@@ -252,25 +283,21 @@ function AppSection({
 }
 
 function ShellControls({
-  shellMode,
-  platform,
+  surfaceMode,
   outputSnapshot,
-  busy,
   outputBusy,
-  onModeChange,
   onOutputChange,
-  onHideToTray,
+  onHideWindow,
+  onOpenDesktopApp,
 }: {
-  shellMode: ShellMode
-  platform: string
+  surfaceMode: SurfaceMode
   outputSnapshot: AudioOutputSnapshot
-  busy: boolean
   outputBusy: boolean
-  onModeChange(mode: ShellMode): void
   onOutputChange(deviceId: string): void
-  onHideToTray(): void
+  onHideWindow(): void
+  onOpenDesktopApp(): void
 }) {
-  if (shellMode === 'topbar') {
+  if (surfaceMode === 'panel') {
     return (
       <div className="utility-bar">
         <OutputControls outputSnapshot={outputSnapshot} busy={outputBusy} onSelect={onOutputChange} />
@@ -278,10 +305,9 @@ function ShellControls({
         <button
           type="button"
           className="control-button"
-          onClick={() => onModeChange('desktop')}
-          disabled={busy}
+          onClick={onOpenDesktopApp}
         >
-          Desktop mode
+          Open app
         </button>
       </div>
     )
@@ -291,51 +317,26 @@ function ShellControls({
     <div className="utility-bar">
       <OutputControls outputSnapshot={outputSnapshot} busy={outputBusy} onSelect={onOutputChange} />
 
-      <div className="mode-switch" role="group" aria-label="Shell mode">
-        <button
-          type="button"
-          className={classNames('mode-switch__button', 'mode-switch__button--active')}
-          onClick={() => onModeChange('desktop')}
-          disabled={busy}
-          aria-pressed
-        >
-          App mode
-        </button>
-        <button
-          type="button"
-          className="mode-switch__button"
-          onClick={() => onModeChange('topbar')}
-          disabled={busy}
-          aria-pressed={false}
-        >
-          Top bar mode
-        </button>
-      </div>
-
-      <button type="button" className="refresh-button" onClick={onHideToTray} disabled={busy}>
-        {platform === 'macos' ? 'Hide window' : 'Hide to tray'}
+      <button type="button" className="refresh-button" onClick={onHideWindow}>
+        Hide window
       </button>
     </div>
   )
 }
 
 function OnboardingOverlay({
-  shellMode,
   busy,
   loading,
   liveCount,
-  onModeChange,
   onRefresh,
   onComplete,
   onClose,
   completed,
   panelRef,
 }: {
-  shellMode: ShellMode
   busy: boolean
   loading: boolean
   liveCount: number
-  onModeChange(mode: ShellMode): void
   onRefresh(): void
   onComplete(): void
   onClose(): void
@@ -374,30 +375,15 @@ function OnboardingOverlay({
           </article>
 
           <article className="onboarding-card">
-            <p className="eyebrow">2. Choose your shell</p>
-            <h3>{describeShellMode(shellMode)}</h3>
+            <p className="eyebrow">2. Use the menu bar panel</p>
+            <h3>Real panel access</h3>
             <p>
-              Desktop mode gives you the full mixer surface. Top bar mode keeps Waves compact and always within reach like a native utility.
+              Click the Waves menu bar item for the compact panel. Use the full app window when you want the complete mixer and diagnostics view.
             </p>
-            <div className="mode-switch" role="group" aria-label="Onboarding shell mode">
-              <button
-                type="button"
-                className={classNames('mode-switch__button', shellMode === 'desktop' && 'mode-switch__button--active')}
-                onClick={() => onModeChange('desktop')}
-                disabled={busy}
-                aria-pressed={shellMode === 'desktop'}
-              >
-                App mode
-              </button>
-              <button
-                type="button"
-                className={classNames('mode-switch__button', shellMode === 'topbar' && 'mode-switch__button--active')}
-                onClick={() => onModeChange('topbar')}
-                disabled={busy}
-                aria-pressed={shellMode === 'topbar'}
-              >
-                Top bar mode
-              </button>
+            <div className="onboarding-card__stack">
+              <span>Tray click opens the compact panel.</span>
+              <span>The desktop app stays full-size.</span>
+              <span>Use the app when you need setup and troubleshooting.</span>
             </div>
           </article>
 
@@ -410,7 +396,7 @@ function OnboardingOverlay({
             <div className="onboarding-card__stack">
               <span>Pin the apps you touch most.</span>
               <span>Use search to jump to noisy apps fast.</span>
-              <span>Keep top bar mode for quick one-glance adjustments.</span>
+              <span>The menu bar panel stays compact while the main app stays full-size.</span>
             </div>
           </article>
         </div>
@@ -450,37 +436,32 @@ const emptyOutputSnapshot: AudioOutputSnapshot = {
   devices: [],
 }
 
-function isDocumentVisible(): boolean {
+function nextRefreshDelay(): number {
   if (typeof document === 'undefined') {
-    return true
+    return 420
   }
 
-  return document.visibilityState !== 'hidden'
-}
-
-function nextPresentationTickDelay(): number {
-  return isDocumentVisible() ? 600 : 2000
-}
-
-function nextRefreshDelay(): number {
-  return isDocumentVisible() ? 420 : 2400
+  const isVisible = document.visibilityState !== 'hidden'
+  return isVisible ? 420 : 2400
 }
 
 export default function App() {
+  const surfaceMode = detectSurfaceMode()
+  const isPanelSurface = surfaceMode === 'panel'
   const [snapshot, setSnapshot] = useState<MixerSnapshot>(emptySnapshot)
   const [outputSnapshot, setOutputSnapshot] = useState<AudioOutputSnapshot>(emptyOutputSnapshot)
   const [query, setQuery] = useState('')
   const deferredQuery = useDeferredValue(query)
   const [busyAppIds, setBusyAppIds] = useState<string[]>([])
   const [volumeDrafts, setVolumeDrafts] = useState<VolumeDrafts>({})
-  const [recentActivity, setRecentActivity] = useState<RecentActivityMap>({})
   const [showHiddenApps, setShowHiddenApps] = useState(false)
   const [onboardingComplete, setOnboardingComplete] = useState<boolean>(() => loadOnboardingComplete())
-  const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => !loadOnboardingComplete())
+  const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => !loadOnboardingComplete() && detectSurfaceMode() !== 'panel')
   const [shellMode, setShellModeState] = useState<ShellMode>(() => loadShellMode())
   const [onboardingShellMode, setOnboardingShellMode] = useState<ShellMode>(() => loadShellMode())
   const [shellBusy, setShellBusy] = useState(false)
   const [outputBusy, setOutputBusy] = useState(false)
+  const [installingDriver, setInstallingDriver] = useState(false)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -494,7 +475,6 @@ export default function App() {
   const onboardingCompleteRef = useRef(onboardingComplete)
   const outputRefreshAtRef = useRef(0)
   const volumeCommitTimersRef = useRef<Record<string, number>>({})
-  const [presentationNow, setPresentationNow] = useState(() => Date.now())
 
   useEffect(() => {
     void (async () => {
@@ -527,6 +507,19 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!isPanelSurface) {
+      return
+    }
+
+    const handleBlur = () => {
+      void hidePanelWindow()
+    }
+
+    window.addEventListener('blur', handleBlur)
+    return () => window.removeEventListener('blur', handleBlur)
+  }, [isPanelSurface])
+
+  useEffect(() => {
     savePinnedApps(pinnedIds)
   }, [pinnedIds])
 
@@ -553,43 +546,6 @@ export default function App() {
   useEffect(() => {
     interactionBlockedRef.current = shellBusy || outputBusy
   }, [outputBusy, shellBusy])
-
-  useEffect(() => {
-    let timer = 0
-
-    function schedulePresentationTick() {
-      timer = window.setTimeout(() => {
-        setPresentationNow(Date.now())
-        schedulePresentationTick()
-      }, nextPresentationTickDelay())
-    }
-
-    schedulePresentationTick()
-
-    return () => window.clearTimeout(timer)
-  }, [])
-
-  useEffect(() => {
-    const now = Date.now()
-
-    setRecentActivity((current) => {
-      const next = { ...current }
-
-      for (const app of snapshot.apps) {
-        if (app.active) {
-          next[app.id] = now + 3_200
-        }
-      }
-
-      for (const [appId, expiresAt] of Object.entries(next)) {
-        if (expiresAt <= now) {
-          delete next[appId]
-        }
-      }
-
-      return next
-    })
-  }, [snapshot.apps])
 
   useEffect(() => {
     void (async () => {
@@ -757,8 +713,8 @@ export default function App() {
   }, [onboardingOpen])
 
   const baseApps = useMemo<ViewApp[]>(() => {
-    return buildViewApps(snapshot.apps, pinnedIds, volumeDrafts, recentActivity, presentationNow)
-  }, [pinnedIds, presentationNow, recentActivity, snapshot.apps, volumeDrafts])
+    return buildViewApps(snapshot.apps, pinnedIds, volumeDrafts)
+  }, [pinnedIds, snapshot.apps, volumeDrafts])
 
   const sections = useMemo(
     () => partitionViewApps(baseApps, deferredQuery, showHiddenApps),
@@ -774,8 +730,14 @@ export default function App() {
   const shownCount = liveApps.length + pinnedApps.length + hiddenApps.length
   const hasQuery = deferredQuery.trim().length > 0
   const snapshotTime = formatGeneratedAt(snapshot.generatedAt)
+  const controlUnavailable = !snapshot.platform.nativeControlReady
   const diagnostics = [...snapshot.platform.notes, ...(outputSnapshot.reason ? [`Output devices: ${outputSnapshot.reason}`] : [])]
-  const shouldShowDiagnostics = !snapshot.platform.discoveryReady || Boolean(outputSnapshot.reason)
+  const shouldShowDiagnostics = controlUnavailable || !snapshot.platform.discoveryReady || Boolean(outputSnapshot.reason)
+  const usingVirtualDevice = snapshot.platform.nativeBackend.includes('virtual-device')
+  const canInstallDriver =
+    snapshot.platform.platform === 'macos' &&
+    snapshot.platform.nativeBackend.includes('process-discovery') &&
+    diagnostics.some((note) => note.toLowerCase().includes('virtual-device engine is unavailable'))
 
   function clearVolumeCommit(appId: string) {
     const handle = volumeCommitTimersRef.current[appId]
@@ -925,6 +887,23 @@ export default function App() {
     }
   }
 
+  async function handleInstallDriver() {
+    setInstallingDriver(true)
+    setError(null)
+
+    try {
+      const nextSnapshot = await installMacosDriver()
+      setSnapshot(nextSnapshot)
+      const nextOutputs = await getOutputDevices()
+      setOutputSnapshot(nextOutputs)
+      outputRefreshAtRef.current = Date.now()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to install the Waves macOS driver')
+    } finally {
+      setInstallingDriver(false)
+    }
+  }
+
   async function handleShellModeChange(nextMode: ShellMode) {
     if (nextMode === shellMode) {
       return
@@ -951,6 +930,22 @@ export default function App() {
       await hideMainWindow()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to hide the Waves window')
+    } finally {
+      setShellBusy(false)
+    }
+  }
+
+  async function handleOpenDesktopApp() {
+    setShellBusy(true)
+    setError(null)
+
+    try {
+      await showMainWindow()
+      if (isPanelSurface) {
+        await hidePanelWindow()
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to open the Waves app window')
     } finally {
       setShellBusy(false)
     }
@@ -992,16 +987,14 @@ export default function App() {
   }
 
   return (
-    <main className={classNames('shell', shellMode === 'topbar' && 'shell--topbar')}>
+    <main className={classNames('shell', isPanelSurface && 'shell--panel')}>
       <div className="shell__backdrop" />
 
       {onboardingOpen ? (
         <OnboardingOverlay
-          shellMode={onboardingShellMode}
           busy={shellBusy || refreshing}
           loading={loading}
           liveCount={liveCount}
-          onModeChange={handleOnboardingShellModeChange}
           onRefresh={() => void handleRefresh()}
           onComplete={() => void handleCompleteOnboarding()}
           onClose={handleCloseOnboarding}
@@ -1028,14 +1021,12 @@ export default function App() {
             </div>
 
             <ShellControls
-              shellMode={shellMode}
-              platform={snapshot.platform.platform}
+              surfaceMode={surfaceMode}
               outputSnapshot={outputSnapshot}
-              busy={shellBusy}
               outputBusy={outputBusy}
-              onModeChange={(nextMode) => void handleShellModeChange(nextMode)}
               onOutputChange={(deviceId) => void handleOutputChange(deviceId)}
-              onHideToTray={() => void handleHideToTray()}
+              onHideWindow={() => void handleHideToTray()}
+              onOpenDesktopApp={() => void handleOpenDesktopApp()}
             />
           </div>
 
@@ -1064,7 +1055,7 @@ export default function App() {
                 </button>
               ) : null}
 
-              {!onboardingComplete && shellMode !== 'topbar' ? (
+              {!onboardingComplete && !isPanelSurface ? (
                 <button type="button" className="control-button" onClick={() => setOnboardingOpen(true)}>
                   Finish setup
                 </button>
@@ -1076,7 +1067,7 @@ export default function App() {
                 </button>
               ) : null}
 
-              {shellMode !== 'topbar' ? (
+              {!isPanelSurface ? (
                 <button type="button" className="refresh-button" onClick={() => void handleRefresh()}>
                   {refreshing ? 'Refreshing…' : 'Refresh sessions'}
                 </button>
@@ -1085,7 +1076,13 @@ export default function App() {
           </div>
 
           <div className="control-deck__row control-deck__row--secondary">
-            <p className="control-deck__hint">Live audio appears immediately. Pinned apps stay close when quiet.</p>
+            <p className="control-deck__hint">
+              {usingVirtualDevice
+                ? 'Per-app volume is running through the Waves virtual audio device.'
+                : controlUnavailable
+                  ? 'macOS is currently running in safe meter-only mode until the Waves virtual audio engine is installed.'
+                : 'Live audio appears immediately. Pinned apps stay close when quiet.'}
+            </p>
           </div>
         </section>
 
@@ -1094,6 +1091,11 @@ export default function App() {
             {diagnostics.map((note) => (
               <p key={note}>{note}</p>
             ))}
+            {canInstallDriver ? (
+              <button type="button" className="refresh-button" onClick={() => void handleInstallDriver()} disabled={installingDriver}>
+                {installingDriver ? 'Installing macOS driver…' : 'Install macOS audio engine'}
+              </button>
+            ) : null}
           </section>
         ) : null}
 

@@ -2,13 +2,16 @@ mod backend;
 mod models;
 
 use std::{fs, path::PathBuf, sync::Mutex};
+#[cfg(target_os = "macos")]
+use std::{process::Command, thread, time::Duration};
 
 use backend::{create_backend, MixerBackend};
 use models::{AudioOutputSnapshot, MixerSnapshot};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, LogicalPosition, LogicalSize, Manager, Position, RunEvent, Size, State, WebviewWindow,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Position, Rect, RunEvent, Size, State, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
 struct WavesState {
@@ -24,11 +27,8 @@ struct TrayState {
 const SHELL_MODE_FILENAME: &str = "shell-mode.txt";
 
 fn normalize_shell_mode(mode: String) -> String {
-    if mode == "topbar" {
-        "topbar".to_string()
-    } else {
-        "desktop".to_string()
-    }
+    let _ = mode;
+    "desktop".to_string()
 }
 
 fn main_window(app: &AppHandle) -> Result<WebviewWindow, String> {
@@ -42,55 +42,110 @@ fn focus_window(window: &WebviewWindow) -> Result<(), String> {
     window.set_focus().map_err(|cause| cause.to_string())
 }
 
-fn position_topbar_window(window: &WebviewWindow) -> Result<(), String> {
-    let Some(monitor) = window.current_monitor().map_err(|cause| cause.to_string())? else {
-        return Ok(());
-    };
-
-    let scale_factor = monitor.scale_factor();
-    let monitor_size = monitor.size().to_logical::<f64>(scale_factor);
-    let monitor_position = monitor.position().to_logical::<f64>(scale_factor);
-    let width = 640.0;
-    let x = monitor_position.x + ((monitor_size.width - width) / 2.0).max(0.0);
-    let y = monitor_position.y + 16.0;
-
-    window
-        .set_position(Position::Logical(LogicalPosition::new(x, y)))
-        .map_err(|cause| cause.to_string())
-}
-
 fn apply_shell_mode_to_window(window: &WebviewWindow, mode: &str) -> Result<(), String> {
-    match mode {
-        "topbar" => {
-            window
-                .set_min_size(Some(Size::Logical(LogicalSize::new(520.0, 560.0))))
-                .map_err(|cause| cause.to_string())?;
-            window
-                .set_size(Size::Logical(LogicalSize::new(640.0, 620.0)))
-                .map_err(|cause| cause.to_string())?;
-            position_topbar_window(window)?;
-            window
-                .set_always_on_top(true)
-                .map_err(|cause| cause.to_string())?;
-            window
-                .set_title("Waves • Top Bar")
-                .map_err(|cause| cause.to_string())?;
-        }
-        _ => {
-            window
-                .set_min_size(Some(Size::Logical(LogicalSize::new(980.0, 720.0))))
-                .map_err(|cause| cause.to_string())?;
-            window
-                .set_size(Size::Logical(LogicalSize::new(1180.0, 860.0)))
-                .map_err(|cause| cause.to_string())?;
-            window
-                .set_always_on_top(false)
-                .map_err(|cause| cause.to_string())?;
-            window.set_title("Waves").map_err(|cause| cause.to_string())?;
-        }
-    }
+    let _ = mode;
+    window
+        .set_min_size(Some(Size::Logical(LogicalSize::new(980.0, 720.0))))
+        .map_err(|cause| cause.to_string())?;
+    window
+        .set_size(Size::Logical(LogicalSize::new(1180.0, 860.0)))
+        .map_err(|cause| cause.to_string())?;
+    window
+        .set_always_on_top(false)
+        .map_err(|cause| cause.to_string())?;
+    window.set_title("Waves").map_err(|cause| cause.to_string())?;
 
     focus_window(window)
+}
+
+#[cfg(target_os = "macos")]
+fn panel_window(app: &AppHandle) -> Result<WebviewWindow, String> {
+    app.get_webview_window("panel")
+        .ok_or_else(|| "Waves panel window is unavailable".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn build_panel_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    if let Some(existing) = app.get_webview_window("panel") {
+        return Ok(existing);
+    }
+
+    let panel = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App("index.html?surface=panel".into()))
+        .title("Waves Panel")
+        .inner_size(440.0, 560.0)
+        .min_inner_size(440.0, 560.0)
+        .resizable(false)
+        .decorations(false)
+        .visible(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .build()?;
+
+    let panel_clone = panel.clone();
+    panel.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Focused(false)) {
+            let _ = panel_clone.hide();
+        }
+    });
+
+    Ok(panel)
+}
+
+#[cfg(target_os = "macos")]
+fn rect_to_logical_components(rect: &Rect) -> (f64, f64, f64, f64) {
+    let (x, y) = match rect.position {
+        Position::Physical(position) => (position.x as f64, position.y as f64),
+        Position::Logical(position) => (position.x, position.y),
+    };
+    let (width, height) = match rect.size {
+        Size::Physical(size) => (size.width as f64, size.height as f64),
+        Size::Logical(size) => (size.width, size.height),
+    };
+
+    (x, y, width, height)
+}
+
+#[cfg(target_os = "macos")]
+fn position_panel_window(window: &WebviewWindow, rect: Option<&Rect>) -> Result<(), String> {
+    let panel_width = 440.0;
+    let panel_height = 560.0;
+    window
+        .set_size(Size::Logical(LogicalSize::new(panel_width, panel_height)))
+        .map_err(|cause| cause.to_string())?;
+
+    if let Some(rect) = rect {
+        let (x, y, width, height) = rect_to_logical_components(rect);
+        let anchor_x = x + (width / 2.0) - (panel_width / 2.0);
+        let anchor_y = y + height + 10.0;
+        window
+            .set_position(Position::Logical(LogicalPosition::new(anchor_x.max(12.0), anchor_y.max(12.0))))
+            .map_err(|cause| cause.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn show_panel_window_internal(app: &AppHandle, rect: Option<&Rect>) -> Result<(), String> {
+    let window = panel_window(app)?;
+    position_panel_window(&window, rect)?;
+    focus_window(&window)
+}
+
+#[cfg(target_os = "macos")]
+fn hide_panel_window_internal(app: &AppHandle) -> Result<(), String> {
+    panel_window(app)?.hide().map_err(|cause| cause.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn toggle_panel_window(app: &AppHandle, rect: Option<&Rect>) -> Result<(), String> {
+    let window = panel_window(app)?;
+    let is_visible = window.is_visible().map_err(|cause| cause.to_string())?;
+    if is_visible {
+        hide_panel_window_internal(app)
+    } else {
+        show_panel_window_internal(app, rect)
+    }
 }
 
 fn shell_mode_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -135,7 +190,7 @@ fn hide_main_window_internal(app: &AppHandle) -> Result<(), String> {
     let window = main_window(app)?;
     #[cfg(target_os = "macos")]
     {
-        return window.minimize().map_err(|cause| cause.to_string());
+        return window.hide().map_err(|cause| cause.to_string());
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -156,6 +211,7 @@ fn show_main_window_internal(app: &AppHandle) -> Result<(), String> {
     apply_shell_mode_to_window(&window, &shell_mode)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn toggle_main_window(app: &AppHandle) -> Result<(), String> {
     let window = main_window(app)?;
     let is_visible = window.is_visible().map_err(|cause| cause.to_string())?;
@@ -171,9 +227,9 @@ fn toggle_main_window(app: &AppHandle) -> Result<(), String> {
 fn handle_tray_menu_event(app: &AppHandle, item_id: &str) {
     let result = match item_id {
         "show" => show_main_window_internal(app),
+        #[cfg(target_os = "macos")]
+        "panel" => show_panel_window_internal(app, None),
         "hide" => hide_main_window_internal(app),
-        "desktop" => set_shell_mode_internal(app, "desktop".to_string()).map(|_| ()),
-        "topbar" => set_shell_mode_internal(app, "topbar".to_string()).map(|_| ()),
         "quit" => {
             app.exit(0);
             Ok(())
@@ -189,15 +245,20 @@ fn handle_tray_menu_event(app: &AppHandle, item_id: &str) {
 fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
     let show = MenuItemBuilder::with_id("show", "Show Waves").build(app)?;
     #[cfg(target_os = "macos")]
+    let panel = MenuItemBuilder::with_id("panel", "Open Menu Bar Panel").build(app)?;
+    #[cfg(target_os = "macos")]
     let hide = MenuItemBuilder::with_id("hide", "Hide Window").build(app)?;
     #[cfg(not(target_os = "macos"))]
     let hide = MenuItemBuilder::with_id("hide", "Hide to Tray").build(app)?;
-    let desktop = MenuItemBuilder::with_id("desktop", "Desktop Mode").build(app)?;
-    let topbar = MenuItemBuilder::with_id("topbar", "Top Bar Mode").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Waves").build(app)?;
 
+    #[cfg(target_os = "macos")]
     let menu = MenuBuilder::new(app)
-        .items(&[&show, &hide, &desktop, &topbar, &quit])
+        .items(&[&show, &panel, &hide, &quit])
+        .build()?;
+    #[cfg(not(target_os = "macos"))]
+    let menu = MenuBuilder::new(app)
+        .items(&[&show, &hide, &quit])
         .build()?;
 
     let mut builder = TrayIconBuilder::new()
@@ -211,11 +272,17 @@ fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
+                rect,
                 ..
             } = event
             {
                 let app = tray.app_handle();
-                if let Err(cause) = toggle_main_window(&app) {
+                #[cfg(target_os = "macos")]
+                let result = toggle_panel_window(&app, Some(&rect));
+                #[cfg(not(target_os = "macos"))]
+                let result = toggle_main_window(&app);
+
+                if let Err(cause) = result {
                     eprintln!("{cause}");
                 }
             }
@@ -242,6 +309,51 @@ fn augment_snapshot_with_shell_state(snapshot: &mut MixerSnapshot, tray_ready: b
             .notes
             .push("Waves could not create its menu bar item. Reopen from the Dock while troubleshooting tray setup.".to_string());
     }
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(target_os = "macos")]
+fn apple_script_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_driver_bundle(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("macos").join("WavesAudio.driver"));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest_dir.join("../native/macos/WavesAudioDriver/build/WavesAudio.driver"));
+    candidates.push(manifest_dir.join("../native/macos/WavesAudioDriver/build2/WavesAudio.driver"));
+
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| "Waves could not find a bundled macOS audio driver to install.".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn rebuild_backend_snapshot(app: &AppHandle, state: &WavesState) -> Result<MixerSnapshot, String> {
+    let tray_ready = *state
+        .tray_ready
+        .lock()
+        .map_err(|_| "Shell state is unavailable".to_string())?;
+    let mut backend = state
+        .backend
+        .lock()
+        .map_err(|_| "Mixer backend is unavailable".to_string())?;
+    *backend = create_backend();
+    let mut snapshot = backend.snapshot();
+    augment_snapshot_with_shell_state(&mut snapshot, tray_ready);
+    let _ = app;
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -323,6 +435,46 @@ fn set_output_device(
     backend.set_output_device(&device_id)
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn install_macos_driver(app: AppHandle, state: State<'_, WavesState>) -> Result<MixerSnapshot, String> {
+    let driver_bundle = resolve_macos_driver_bundle(&app)?;
+    let driver_bundle_str = driver_bundle
+        .to_str()
+        .ok_or_else(|| "The Waves macOS driver path contains unsupported characters.".to_string())?;
+
+    let install_script = format!(
+        "mkdir -p /Library/Audio/Plug-Ins/HAL && rm -rf /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && cp -R {source} /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && chown -R root:wheel /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && killall coreaudiod",
+        source = shell_quote(driver_bundle_str),
+    );
+    let apple_script = format!(
+        "do shell script {} with administrator privileges",
+        apple_script_quote(&install_script)
+    );
+
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(apple_script)
+        .output()
+        .map_err(|cause| format!("Waves could not launch the macOS driver installer: {cause}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Waves driver installation failed: {}",
+            stderr.trim().trim_matches('"')
+        ));
+    }
+
+    thread::sleep(Duration::from_millis(1800));
+    rebuild_backend_snapshot(&app, state.inner())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn install_macos_driver(_app: AppHandle, _state: State<'_, WavesState>) -> Result<MixerSnapshot, String> {
+    Err("The macOS driver installer is only available on macOS.".to_string())
+}
+
 #[tauri::command]
 fn set_shell_mode(
     mode: String,
@@ -343,6 +495,18 @@ fn get_shell_mode(state: State<'_, WavesState>) -> Result<String, String> {
 #[tauri::command]
 fn hide_main_window(app: AppHandle) -> Result<(), String> {
     hide_main_window_internal(&app)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn hide_panel_window(app: AppHandle) -> Result<(), String> {
+    hide_panel_window_internal(&app)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn hide_panel_window(_app: AppHandle) -> Result<(), String> {
+    Ok(())
 }
 
 #[tauri::command]
@@ -377,6 +541,8 @@ pub fn run() {
                 .map_err(|cause| -> Box<dyn std::error::Error> {
                     Box::new(std::io::Error::new(std::io::ErrorKind::Other, cause))
                 })?;
+            #[cfg(target_os = "macos")]
+            build_panel_window(&app_handle)?;
             let tray = match build_tray(&app_handle) {
                 Ok(tray) => {
                     let state = app.state::<WavesState>();
@@ -402,9 +568,11 @@ pub fn run() {
             toggle_app_mute,
             get_output_devices,
             set_output_device,
+            install_macos_driver,
             set_shell_mode,
             get_shell_mode,
             hide_main_window,
+            hide_panel_window,
             show_main_window
         ])
         .build(tauri::generate_context!())

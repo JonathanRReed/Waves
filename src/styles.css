@@ -687,81 +687,81 @@ input[type='range']:disabled {
   line-height: 1.4;
 }
 
-.shell--topbar .frame {
-  width: min(640px, calc(100vw - 14px));
+.shell--panel .frame {
+  width: min(440px, calc(100vw - 14px));
   padding-top: 6px;
 }
 
-.shell--topbar .control-deck {
+.shell--panel .control-deck {
   gap: 6px;
   padding: 6px;
 }
 
-.shell--topbar .control-deck__row {
+.shell--panel .control-deck__row {
   flex-direction: column;
   align-items: stretch;
 }
 
-.shell--topbar .command-bar__brand p,
-.shell--topbar .command-bar__status,
-.shell--topbar .control-deck__hint,
-.shell--topbar .notes-panel {
+.shell--panel .command-bar__brand p,
+.shell--panel .command-bar__status,
+.shell--panel .control-deck__hint,
+.shell--panel .notes-panel {
   display: none;
 }
 
-.shell--topbar .command-bar__brand h1 {
+.shell--panel .command-bar__brand h1 {
   font-size: 1.02rem;
 }
 
-.shell--topbar .command-bar__actions {
+.shell--panel .command-bar__actions {
   width: 100%;
   justify-content: space-between;
 }
 
-.shell--topbar .utility-bar {
+.shell--panel .utility-bar {
   width: 100%;
   justify-content: space-between;
 }
 
-.shell--topbar .output-select {
+.shell--panel .output-select {
   width: 100%;
   justify-content: space-between;
 }
 
-.shell--topbar .output-select select {
+.shell--panel .output-select select {
   min-width: 0;
-  width: min(100%, 260px);
+  width: min(100%, 200px);
 }
 
-.shell--topbar .search-box input {
+.shell--panel .search-box input {
   padding: 9px 12px;
 }
 
-.shell--topbar .app-list {
+.shell--panel .app-list {
   gap: 6px;
 }
 
-.shell--topbar .session-panel {
+.shell--panel .session-panel {
   background: transparent;
   border-color: rgba(255, 255, 255, 0.03);
   box-shadow: none;
   backdrop-filter: none;
 }
 
-.shell--topbar .panel__header {
+.shell--panel .panel__header {
   padding: 10px 12px 0;
 }
 
-.shell--topbar .panel__header .eyebrow,
-.shell--topbar .panel__summary {
+.shell--panel .panel__header .eyebrow,
+.shell--panel .panel__summary {
   display: none;
 }
 
-.shell--topbar .panel__header h2 {
+.shell--panel .panel__header h2 {
   font-size: 0.92rem;
 }
 
-.shell--topbar .app-card {
+.shell--panel .app-card {
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   padding: 8px 10px;
@@ -769,30 +769,30 @@ input[type='range']:disabled {
   background: rgba(255, 255, 255, 0.018);
 }
 
-.shell--topbar .app-card__controls {
+.shell--panel .app-card__controls {
   flex-direction: row;
   justify-content: flex-end;
   gap: 8px;
 }
 
-.shell--topbar .app-card__wave {
+.shell--panel .app-card__wave {
   min-width: 0;
 }
 
-.shell--topbar .wave-rail {
+.shell--panel .wave-rail {
   height: 26px;
 }
 
-.shell--topbar .control-button,
-.shell--topbar .refresh-button {
+.shell--panel .control-button,
+.shell--panel .refresh-button {
   padding: 8px 11px;
 }
 
-.shell--topbar .onboarding-overlay {
+.shell--panel .onboarding-overlay {
   padding: 14px;
 }
 
-.shell--topbar .onboarding-panel {
+.shell--panel .onboarding-panel {
   max-height: calc(100vh - 28px);
   padding: 20px;
 }
