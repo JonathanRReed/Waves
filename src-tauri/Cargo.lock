@@ -4323,6 +4323,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "crossbeam-queue",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-core-audio",

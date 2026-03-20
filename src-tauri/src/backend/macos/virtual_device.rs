@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use objc2_app_kit::NSRunningApplication;
 use objc2_core_audio::{
     AudioObjectID, kAudioDevicePropertyDeviceUID, kAudioHardwarePropertyDefaultOutputDevice,
     kAudioHardwarePropertyDevices, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
@@ -200,6 +199,7 @@ fn build_app_sessions(
 ) -> (Vec<AppAudioSession>, HashMap<String, String>) {
     let mut apps_by_id = HashMap::new();
     let mut app_keys = HashMap::new();
+    let running_apps = super::running_applications_by_pid();
 
     for session in &snapshot.sessions {
         let bundle_id = session
@@ -208,7 +208,7 @@ fn build_app_sessions(
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| format!("pid-{}", session.pid));
         let (display_name, canonical_bundle_id, _) =
-            resolve_driver_identity(session, &bundle_id, session.pid);
+            resolve_driver_identity(session, &bundle_id, session.pid, &running_apps);
         let app_id = format!("macos:{canonical_bundle_id}");
         app_keys.insert(app_id.clone(), session.key.clone());
 
@@ -277,25 +277,26 @@ fn build_app_sessions(
     (apps, app_keys)
 }
 
-fn resolve_driver_identity(session: &DriverSession, fallback_bundle_id: &str, fallback_pid: i32) -> (String, String, bool) {
+fn resolve_driver_identity(
+    session: &DriverSession,
+    fallback_bundle_id: &str,
+    fallback_pid: i32,
+    running_apps: &HashMap<i32, objc2::rc::Retained<objc2_app_kit::NSRunningApplication>>,
+) -> (String, String, bool) {
+    if fallback_pid > 0 {
+        if let Some((display_name, bundle_id, _)) =
+            super::resolve_running_application_identity(fallback_pid, running_apps)
+        {
+            return resolve_session_identity(&display_name, &bundle_id);
+        }
+    }
+
     let bundle_id = session
         .bundle_id
         .clone()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback_bundle_id.to_string());
-
-    let running_application = if fallback_pid > 0 {
-        NSRunningApplication::runningApplicationWithProcessIdentifier(fallback_pid)
-    } else {
-        None
-    };
-    let display_name = running_application
-        .as_ref()
-        .and_then(|application| application.localizedName())
-        .map(|name| name.to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| friendly_app_name_from_bundle_id(&bundle_id));
-
+    let display_name = friendly_app_name_from_bundle_id(&bundle_id);
     resolve_session_identity(&display_name, &bundle_id)
 }
 
