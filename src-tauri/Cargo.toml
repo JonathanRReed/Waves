@@ -21,6 +21,7 @@ tauri = { version = "2.0.0", features = ["tray-icon"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "0.17.0"
 crossbeam-queue = "0.3.12"
+libc = "0.2"
 objc2 = "0.6.3"
 objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace"] }
 objc2-core-audio = { version = "0.3.2", features = ["AudioHardware"] }

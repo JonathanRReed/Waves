@@ -12,6 +12,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use libc::{c_char, dlsym, pid_t, RTLD_DEFAULT};
 use objc2::{rc::Retained, AnyThread};
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
 use objc2_core_audio::{
@@ -26,7 +27,8 @@ use objc2_core_audio::{
     kAudioHardwarePropertyDefaultSystemOutputDevice,
     kAudioHardwarePropertyDevices, kAudioHardwarePropertyProcessIsAudible,
     kAudioHardwarePropertyProcessObjectList, kAudioObjectPropertyElementMain, kAudioObjectPropertyName,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioProcessPropertyIsRunningOutput,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioProcessPropertyIsRunning,
+    kAudioProcessPropertyIsRunningOutput,
     kAudioProcessPropertyPID, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
 };
 use objc2_core_audio_types::{
@@ -49,10 +51,6 @@ const IDLE_PEAK_FLOOR: f32 = 0.04;
 const LIVE_PEAK_FLOOR: f32 = 0.08;
 const MACOS_READ_ONLY_REASON: &str =
     "Live metering is enabled, but per-app attenuation is temporarily disabled on macOS to avoid interrupting system audio output.";
-const MACOS_PENDING_SESSION_REASON: &str =
-    "This app is open in Waves. Start playback to let the macOS audio engine attach live controls.";
-const MACOS_SYSTEM_SOUNDS_REASON: &str =
-    "System Sounds stay visible here so short macOS alerts and UI sounds are easier to verify.";
 
 pub fn create_backend() -> Box<dyn MixerBackend> {
     match virtual_device::build_virtual_backend() {
@@ -435,19 +433,16 @@ fn discover_state() -> Result<(MixerSnapshot, HashMap<String, Vec<AudioObjectID>
         kAudioObjectSystemObject as AudioObjectID,
         kAudioHardwarePropertyProcessObjectList,
     )?;
+    let running_apps = running_applications_by_pid();
 
     let mut deduped_apps: HashMap<String, (AppAudioSession, Vec<AudioObjectID>)> = HashMap::new();
 
     for process_object in process_objects {
-        let app = match build_session(process_object) {
+        let app = match build_session(process_object, &running_apps) {
             Some(app) => app,
             _ => continue,
         };
         merge_discovered_app(&mut deduped_apps, app, Some(process_object));
-    }
-
-    for app in running_application_sessions() {
-        merge_discovered_app(&mut deduped_apps, app, None);
     }
 
     let mut process_map = HashMap::new();
@@ -535,17 +530,23 @@ fn merge_discovered_app(
     }
 }
 
-fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
-    let pid = read_value::<i32>(process_object, kAudioProcessPropertyPID).ok()?;
-    if pid <= 0 {
-        return None;
-    }
+pub(super) fn running_applications_by_pid() -> HashMap<i32, Retained<NSRunningApplication>> {
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .iter()
+        .filter_map(|application| {
+            let pid = application.processIdentifier();
+            (pid > 0).then_some((pid, application))
+        })
+        .collect()
+}
 
-    let audible = read_bool(process_object, kAudioHardwarePropertyProcessIsAudible).unwrap_or(false);
-    let running_output = read_bool(process_object, kAudioProcessPropertyIsRunningOutput).unwrap_or(false);
-
-    let running_application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid as _)?;
-    if running_application.isTerminated() || !running_application.isFinishedLaunching() {
+pub(super) fn resolve_running_application_identity(
+    pid: i32,
+    running_apps: &HashMap<i32, Retained<NSRunningApplication>>,
+) -> Option<(String, String, NSApplicationActivationPolicy)> {
+    let running_application = resolved_running_application_for_pid(pid, running_apps)?;
+    if running_application.isTerminated() {
         return None;
     }
 
@@ -554,6 +555,10 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
         .map(|value| value.to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("pid-{pid}"));
+    if raw_bundle_id == "com.jonathanreed.waves" {
+        return None;
+    }
+
     let raw_display_name = running_application
         .localizedName()
         .map(|name| name.to_string())
@@ -567,6 +572,70 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
         })
         .unwrap_or_else(|| format!("Process {pid}"));
 
+    Some((raw_display_name, raw_bundle_id, running_application.activationPolicy()))
+}
+
+fn resolved_running_application_for_pid(
+    pid: i32,
+    running_apps: &HashMap<i32, Retained<NSRunningApplication>>,
+) -> Option<Retained<NSRunningApplication>> {
+    let direct_application = running_apps.get(&pid).cloned();
+    if let Some(application) = direct_application.clone() {
+        if is_real_app_bundle(&application) {
+            return Some(application);
+        }
+    }
+
+    if let Some(responsible_pid) = responsible_pid_for(pid) {
+        if let Some(application) = running_apps.get(&responsible_pid).cloned() {
+            if is_real_app_bundle(&application) {
+                return Some(application);
+            }
+        }
+    }
+
+    direct_application
+}
+
+fn responsible_pid_for(pid: i32) -> Option<i32> {
+    type ResponsibilityFunc = unsafe extern "C" fn(pid_t) -> pid_t;
+    const SYMBOL: &[u8] = b"responsibility_get_pid_responsible_for_pid\0";
+
+    let symbol = unsafe { dlsym(RTLD_DEFAULT, SYMBOL.as_ptr().cast::<c_char>()) };
+    if symbol.is_null() {
+        return None;
+    }
+
+    let function: ResponsibilityFunc = unsafe { std::mem::transmute(symbol) };
+    let responsible_pid = unsafe { function(pid as pid_t) };
+    (responsible_pid > 0 && responsible_pid != pid as pid_t).then_some(responsible_pid as i32)
+}
+
+fn is_real_app_bundle(application: &NSRunningApplication) -> bool {
+    application
+        .bundleURL()
+        .and_then(|url| url.pathExtension())
+        .map(|extension| extension.to_string().eq_ignore_ascii_case("app"))
+        .unwrap_or(false)
+}
+
+fn build_session(
+    process_object: AudioObjectID,
+    running_apps: &HashMap<i32, Retained<NSRunningApplication>>,
+) -> Option<AppAudioSession> {
+    let pid = read_value::<i32>(process_object, kAudioProcessPropertyPID).ok()?;
+    if pid <= 0 {
+        return None;
+    }
+    if !read_bool(process_object, kAudioProcessPropertyIsRunning).unwrap_or(true) {
+        return None;
+    }
+
+    let audible = read_bool(process_object, kAudioHardwarePropertyProcessIsAudible).unwrap_or(false);
+    let running_output = read_bool(process_object, kAudioProcessPropertyIsRunningOutput).unwrap_or(false);
+    let (raw_display_name, raw_bundle_id, activation_policy) =
+        resolve_running_application_identity(pid, running_apps)?;
+
     let (display_name, bundle_id, derived_from_helper) = resolve_session_identity(&raw_display_name, &raw_bundle_id);
     let browser_like = is_browser_like_app(&display_name, Some(bundle_id.as_str()));
     let active = audible || running_output;
@@ -574,11 +643,15 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
         derived_from_helper || raw_display_name.to_lowercase().contains("web content")
             || browser_like
             || is_special_audio_process(&display_name, &bundle_id);
-    if running_application.activationPolicy() == NSApplicationActivationPolicy::Prohibited && !allow_prohibited_process {
+    if activation_policy == NSApplicationActivationPolicy::Prohibited && !allow_prohibited_process {
         return None;
     }
 
-    if looks_like_background_audio_process(&display_name, &bundle_id) && !is_special_audio_process(&display_name, &bundle_id) {
+    if is_filtered_system_daemon(&bundle_id, &display_name) {
+        return None;
+    }
+
+    if looks_like_background_audio_process(&display_name, &bundle_id) && !allow_prohibited_process {
         return None;
     }
 
@@ -610,113 +683,6 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
     })
 }
 
-fn running_application_sessions() -> Vec<AppAudioSession> {
-    let workspace = NSWorkspace::sharedWorkspace();
-    let mut sessions = workspace
-        .runningApplications()
-        .iter()
-        .filter_map(|running_application| build_running_application_session(&running_application))
-        .collect::<Vec<_>>();
-
-    sessions.push(system_sounds_placeholder_session());
-    sessions
-}
-
-fn build_running_application_session(running_application: &NSRunningApplication) -> Option<AppAudioSession> {
-    if running_application.isTerminated() || !running_application.isFinishedLaunching() {
-        return None;
-    }
-
-    let pid = running_application.processIdentifier();
-    if pid <= 0 {
-        return None;
-    }
-
-    let raw_bundle_id = running_application
-        .bundleIdentifier()
-        .map(|value| value.to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("pid-{pid}"));
-    if raw_bundle_id == "com.jonathanreed.waves" {
-        return None;
-    }
-
-    let raw_display_name = running_application
-        .localizedName()
-        .map(|name| name.to_string())
-        .filter(|name| !name.is_empty())
-        .or_else(|| {
-            if raw_bundle_id.starts_with("pid-") {
-                None
-            } else {
-                Some(friendly_app_name_from_bundle_id(&raw_bundle_id))
-            }
-        })
-        .unwrap_or_else(|| format!("Process {pid}"));
-
-    let (display_name, bundle_id, derived_from_helper) = resolve_session_identity(&raw_display_name, &raw_bundle_id);
-    let browser_like = is_browser_like_app(&display_name, Some(bundle_id.as_str()));
-    let allow_prohibited_process = derived_from_helper || browser_like || is_special_audio_process(&display_name, &bundle_id);
-    if running_application.activationPolicy() == NSApplicationActivationPolicy::Prohibited && !allow_prohibited_process {
-        return None;
-    }
-
-    if looks_like_background_audio_process(&display_name, &bundle_id) && !allow_prohibited_process {
-        return None;
-    }
-
-    let now = now_stamp();
-    Some(AppAudioSession {
-        id: format!("macos:{bundle_id}"),
-        display_name: display_name.clone(),
-        process_name: bundle_id.clone(),
-        bundle_id: Some(bundle_id.clone()),
-        detected: true,
-        audible: false,
-        running_output: false,
-        recent_signal: false,
-        recent_render: false,
-        last_seen_at: now,
-        last_signal_at: None,
-        category: infer_category(&display_name, Some(bundle_id.as_str())),
-        volume: 100,
-        muted: false,
-        active: false,
-        pinned_hint: false,
-        peak_level: IDLE_PEAK_FLOOR,
-        support: SessionSupport {
-            controllable: false,
-            reason: Some(MACOS_PENDING_SESSION_REASON.to_string()),
-        },
-    })
-}
-
-fn system_sounds_placeholder_session() -> AppAudioSession {
-    AppAudioSession {
-        id: "macos:com.apple.systemsounds".to_string(),
-        display_name: "System Sounds".to_string(),
-        process_name: "com.apple.systemsounds".to_string(),
-        bundle_id: Some("com.apple.systemsounds".to_string()),
-        detected: true,
-        audible: false,
-        running_output: false,
-        recent_signal: false,
-        recent_render: false,
-        last_seen_at: now_stamp(),
-        last_signal_at: None,
-        category: "System".to_string(),
-        volume: 100,
-        muted: false,
-        active: false,
-        pinned_hint: false,
-        peak_level: IDLE_PEAK_FLOOR,
-        support: SessionSupport {
-            controllable: false,
-            reason: Some(MACOS_SYSTEM_SOUNDS_REASON.to_string()),
-        },
-    }
-}
-
 fn looks_like_background_audio_process(display_name: &str, bundle_id: &str) -> bool {
     let haystack = format!("{} {}", display_name, bundle_id).to_lowercase();
     let excluded_terms = [
@@ -734,12 +700,46 @@ fn looks_like_background_audio_process(display_name: &str, bundle_id: &str) -> b
     excluded_terms.iter().any(|term| haystack.contains(term))
 }
 
+fn is_filtered_system_daemon(bundle_id: &str, display_name: &str) -> bool {
+    let lower_bundle_id = bundle_id.to_lowercase();
+    let lower_display_name = display_name.to_lowercase();
+    let bundle_prefixes = [
+        "com.apple.siri",
+        "com.apple.assistant",
+        "com.apple.audio",
+        "com.apple.coreaudio",
+        "com.apple.mediaremote",
+        "com.apple.notificationcenter",
+        "com.apple.usernotifications",
+        "com.apple.speech",
+        "com.apple.corespeech",
+        "com.apple.voicecontrol",
+        "com.apple.callservicesd",
+        "com.apple.avconference",
+    ];
+    let process_prefixes = [
+        "systemsoundserverd",
+        "systemsoundserv",
+        "coreaudiod",
+        "audiomxd",
+        "speechrecognitiond",
+        "dictationd",
+        "corespeech",
+        "avconferenced",
+        "callservicesd",
+    ];
+
+    bundle_prefixes
+        .iter()
+        .any(|prefix| lower_bundle_id.starts_with(prefix))
+        || process_prefixes
+            .iter()
+            .any(|prefix| lower_display_name.starts_with(prefix))
+}
+
 fn is_special_audio_process(display_name: &str, bundle_id: &str) -> bool {
     let haystack = format!("{} {}", display_name, bundle_id).to_lowercase();
-    haystack.contains("systemsound")
-        || haystack.contains("system sounds")
-        || haystack.contains("avconferenced")
-        || haystack.contains("callservicesd")
+    haystack.contains("systemsound") || haystack.contains("system sounds")
 }
 
 fn resolve_session_identity(display_name: &str, bundle_id: &str) -> (String, String, bool) {
@@ -766,6 +766,12 @@ fn canonical_bundle_id(bundle_id: &str) -> String {
     let lower_bundle_id = bundle_id.to_lowercase();
     if lower_bundle_id.contains("com.apple.webkit.webcontent") {
         return "com.apple.Safari".to_string();
+    }
+
+    match lower_bundle_id.as_str() {
+        "org.mozilla.plugincontainer" => return "org.mozilla.firefox".to_string(),
+        "org.mozilla.nightly.plugincontainer" => return "org.mozilla.nightly".to_string(),
+        _ => {}
     }
 
     if let Some(index) = lower_bundle_id.find(".helper") {
