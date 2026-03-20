@@ -22,9 +22,7 @@ export async function applyShellMode(mode: ShellMode): Promise<ShellMode> {
     return 'desktop'
   }
 
-  return invoke<ShellMode>('set_shell_mode', {
-    mode: mode === 'topbar' ? 'desktop' : mode,
-  })
+  return invoke<ShellMode>('set_shell_mode', { mode })
 }
 
 export async function getShellMode(): Promise<ShellMode> {

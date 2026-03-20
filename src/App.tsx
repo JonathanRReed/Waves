@@ -63,6 +63,18 @@ function supportBadgeLabel(app: Pick<ViewApp, 'support'>): string | null {
   return 'Read only'
 }
 
+function sessionSupportCopy(app: Pick<ViewApp, 'support'>): string | null {
+  if (app.support.controllable) {
+    return null
+  }
+
+  if (app.support.reason?.toLowerCase().includes('live metering is enabled')) {
+    return 'Live meter only'
+  }
+
+  return app.support.reason
+}
+
 function omitRecordKey<T>(record: Record<string, T>, key: string): Record<string, T> {
   if (!(key in record)) {
     return record
@@ -123,6 +135,23 @@ function AppIcon({ label }: { label: string }) {
   return <div className="app-icon" aria-hidden="true">{initials}</div>
 }
 
+function SurfaceMetric({
+  label,
+  value,
+  tone = 'default',
+}: {
+  label: string
+  value: string
+  tone?: 'default' | 'accent'
+}) {
+  return (
+    <div className={classNames('surface-metric', tone === 'accent' && 'surface-metric--accent')}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
 function AppCard({
   app,
   busy,
@@ -138,7 +167,7 @@ function AppCard({
 }) {
   const stateLabel = describeSessionState(app)
   const displayedVolume = app.muted && app.displayVolume === app.volume ? 0 : app.displayVolume
-  const showSupportNote = !app.support.controllable && Boolean(app.support.reason)
+  const supportCopy = sessionSupportCopy(app)
   const badgeLabel = supportBadgeLabel(app)
 
   return (
@@ -155,8 +184,16 @@ function AppCard({
           <div className="app-card__copy">
             <div className="app-card__title-row">
               <h3>{app.displayName}</h3>
+              <span className={classNames('status-pill', app.live ? 'status-pill--live' : app.muted ? 'status-pill--muted' : 'status-pill--idle')}>
+                {stateLabel}
+              </span>
               {badgeLabel ? <span className="status-pill status-pill--quiet">{badgeLabel}</span> : null}
             </div>
+            <div className="app-card__subline">
+              <span>{app.category}</span>
+              <span>{app.processName}</span>
+            </div>
+            {supportCopy ? <p className="app-card__support">{supportCopy}</p> : null}
           </div>
         </div>
       </div>
@@ -178,7 +215,6 @@ function AppCard({
           onChange={(event) => onVolumeChange(app.id, Number(event.target.value))}
           style={{ ['--track-fill' as string]: `${app.displayVolume}%` }}
         />
-        {showSupportNote ? <div className="slider-metrics">{app.support.reason}</div> : null}
       </div>
 
       <div className="app-card__controls">
@@ -727,6 +763,7 @@ export default function App() {
   const hiddenCount = sections.hiddenCount
   const liveCount = liveApps.length
   const pinnedCount = pinnedApps.length
+  const detectedCount = baseApps.length
   const shownCount = liveApps.length + pinnedApps.length + hiddenApps.length
   const hasQuery = deferredQuery.trim().length > 0
   const snapshotTime = formatGeneratedAt(snapshot.generatedAt)
@@ -1014,8 +1051,10 @@ export default function App() {
                 <h1>Waves</h1>
                 <p>
                   {loading
-                    ? 'Listening for active audio…'
-                    : `${liveCount} live · ${pinnedCount} pinned${hiddenCount > 0 ? ` · ${hiddenCount} hidden idle` : ''}`}
+                    ? 'Reading Core Audio sessions and routing state…'
+                    : usingVirtualDevice
+                      ? 'Virtual-device engine live. Per-app control is active.'
+                      : 'Discovery is live. macOS is still in meter-first fallback.'}
                 </p>
               </div>
             </div>
@@ -1028,6 +1067,15 @@ export default function App() {
               onHideWindow={() => void handleHideToTray()}
               onOpenDesktopApp={() => void handleOpenDesktopApp()}
             />
+          </div>
+
+          <div className="control-deck__row control-deck__row--metrics">
+            <div className="surface-metrics" aria-label="Mixer status summary">
+              <SurfaceMetric label="Live" value={String(liveCount)} tone="accent" />
+              <SurfaceMetric label="Pinned" value={String(pinnedCount)} />
+              <SurfaceMetric label="Detected" value={String(detectedCount)} />
+              <SurfaceMetric label="Engine" value={usingVirtualDevice ? 'Virtual' : 'Meter'} />
+            </div>
           </div>
 
           <div className="control-deck__row control-deck__row--primary">
@@ -1078,10 +1126,10 @@ export default function App() {
           <div className="control-deck__row control-deck__row--secondary">
             <p className="control-deck__hint">
               {usingVirtualDevice
-                ? 'Per-app volume is running through the Waves virtual audio device.'
+                ? 'Per-app volume is running through the Waves virtual audio device. Open apps should stay visible as soon as macOS hands Waves a real session.'
                 : controlUnavailable
-                  ? 'macOS is currently running in safe meter-only mode until the Waves virtual audio engine is installed.'
-                : 'Live audio appears immediately. Pinned apps stay close when quiet.'}
+                  ? 'macOS is currently running in safe meter-only mode. Waves will surface detected sessions, but read-only rows cannot attenuate audio yet.'
+                  : 'Live audio appears immediately. Pinned apps stay close when quiet.'}
             </p>
           </div>
         </section>
