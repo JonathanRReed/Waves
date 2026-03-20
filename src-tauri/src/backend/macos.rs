@@ -64,15 +64,19 @@ struct MacosTapSession {
     aggregate_device_id: AudioObjectID,
     io_proc_id: AudioDeviceIOProcID,
     io_state: Box<TapIoState>,
+    last_peak_at_ms: u64,
+    last_render_at_ms: u64,
+    last_signal_at_ms: u64,
+    observed_render_count: u64,
+    observed_signal_count: u64,
 }
 
 struct TapIoState {
     format: AudioStreamBasicDescription,
     gain_bits: AtomicU32,
     peak_bits: AtomicU32,
-    last_peak_at_ms: AtomicU64,
-    last_render_at_ms: AtomicU64,
-    last_signal_at_ms: AtomicU64,
+    render_count: AtomicU64,
+    signal_count: AtomicU64,
 }
 
 impl TapIoState {
@@ -81,9 +85,8 @@ impl TapIoState {
             format,
             gain_bits: AtomicU32::new(gain.to_bits()),
             peak_bits: AtomicU32::new(0.0_f32.to_bits()),
-            last_peak_at_ms: AtomicU64::new(0),
-            last_render_at_ms: AtomicU64::new(0),
-            last_signal_at_ms: AtomicU64::new(0),
+            render_count: AtomicU64::new(0),
+            signal_count: AtomicU64::new(0),
         }
     }
 
@@ -100,8 +103,7 @@ impl TapIoState {
     }
 
     fn note_render(&self, peak: f32) {
-        let now_ms = current_time_millis();
-        self.last_render_at_ms.store(now_ms, Ordering::Relaxed);
+        self.render_count.fetch_add(1, Ordering::Relaxed);
 
         let clamped_peak = peak.clamp(0.0, 1.0);
         if clamped_peak < SIGNAL_THRESHOLD {
@@ -109,34 +111,28 @@ impl TapIoState {
         }
 
         self.peak_bits.store(clamped_peak.to_bits(), Ordering::Relaxed);
-        self.last_peak_at_ms.store(now_ms, Ordering::Relaxed);
-        self.last_signal_at_ms.store(now_ms, Ordering::Relaxed);
+        self.signal_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn has_seen_render(&self) -> bool {
-        self.last_render_at_ms.load(Ordering::Relaxed) > 0
+    fn render_count(&self) -> u64 {
+        self.render_count.load(Ordering::Relaxed)
     }
 
-    fn has_recent_signal(&self, now_ms: u64) -> bool {
-        let last_signal_at_ms = self.last_signal_at_ms.load(Ordering::Relaxed);
-        last_signal_at_ms > 0 && now_ms.saturating_sub(last_signal_at_ms) <= SIGNAL_HOLD_MS
+    fn signal_count(&self) -> u64 {
+        self.signal_count.load(Ordering::Relaxed)
     }
 
-    fn peak_level(&self, now_ms: u64) -> f32 {
-        let peak = f32::from_bits(self.peak_bits.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-        let last_peak_at_ms = self.last_peak_at_ms.load(Ordering::Relaxed);
-
-        if peak < SIGNAL_THRESHOLD || last_peak_at_ms == 0 {
-            return 0.0;
-        }
-
-        let elapsed_ms = now_ms.saturating_sub(last_peak_at_ms);
-        if elapsed_ms >= PEAK_DECAY_MS {
-            return 0.0;
-        }
-
-        peak * (1.0 - (elapsed_ms as f32 / PEAK_DECAY_MS as f32))
+    fn peak(&self) -> f32 {
+        f32::from_bits(self.peak_bits.load(Ordering::Relaxed)).clamp(0.0, 1.0)
     }
+}
+
+struct TapMeterState {
+    gain: f32,
+    passthrough: bool,
+    peak: f32,
+    recent_signal: bool,
+    saw_render: bool,
 }
 
 impl Drop for MacosTapSession {
@@ -146,6 +142,43 @@ impl Drop for MacosTapSession {
             let _ = AudioDeviceDestroyIOProcID(self.aggregate_device_id, self.io_proc_id);
             let _ = AudioHardwareDestroyAggregateDevice(self.aggregate_device_id);
             let _ = AudioHardwareDestroyProcessTap(self.tap_id);
+        }
+    }
+}
+
+impl MacosTapSession {
+    fn sync_meter_state(&mut self, now_ms: u64) -> TapMeterState {
+        let render_count = self.io_state.render_count();
+        if render_count != self.observed_render_count {
+            self.observed_render_count = render_count;
+            self.last_render_at_ms = now_ms;
+        }
+
+        let signal_count = self.io_state.signal_count();
+        if signal_count != self.observed_signal_count {
+            self.observed_signal_count = signal_count;
+            self.last_signal_at_ms = now_ms;
+            self.last_peak_at_ms = now_ms;
+        }
+
+        let raw_peak = self.io_state.peak();
+        let peak = if raw_peak < SIGNAL_THRESHOLD || self.last_peak_at_ms == 0 {
+            0.0
+        } else {
+            let elapsed_ms = now_ms.saturating_sub(self.last_peak_at_ms);
+            if elapsed_ms >= PEAK_DECAY_MS {
+                0.0
+            } else {
+                raw_peak * (1.0 - (elapsed_ms as f32 / PEAK_DECAY_MS as f32))
+            }
+        };
+
+        TapMeterState {
+            gain: self.io_state.gain(),
+            passthrough: self.io_state.is_passthrough(),
+            peak,
+            recent_signal: self.last_signal_at_ms > 0 && now_ms.saturating_sub(self.last_signal_at_ms) <= SIGNAL_HOLD_MS,
+            saw_render: self.observed_render_count > 0,
         }
     }
 }
@@ -173,19 +206,21 @@ impl MacosMixerBackend {
         let now_ms = current_time_millis();
 
         for app in &mut self.snapshot.apps {
-            if let Some(sessions) = self.tap_sessions.get(&app.id) {
-                let gain = sessions
-                    .first()
-                    .map(|session| session.io_state.gain())
-                    .unwrap_or(1.0);
-                let saw_render = sessions.iter().any(|session| session.io_state.has_seen_render());
-                let has_recent_signal = sessions
-                    .iter()
-                    .any(|session| session.io_state.has_recent_signal(now_ms));
-                let measured_peak = sessions
-                    .iter()
-                    .map(|session| session.io_state.peak_level(now_ms))
-                    .fold(0.0_f32, f32::max);
+            if let Some(sessions) = self.tap_sessions.get_mut(&app.id) {
+                let mut gain = 1.0;
+                let mut saw_render = false;
+                let mut has_recent_signal = false;
+                let mut measured_peak = 0.0_f32;
+
+                for (index, session) in sessions.iter_mut().enumerate() {
+                    let meter = session.sync_meter_state(now_ms);
+                    if index == 0 {
+                        gain = meter.gain;
+                    }
+                    saw_render |= meter.saw_render;
+                    has_recent_signal |= meter.recent_signal;
+                    measured_peak = measured_peak.max(meter.peak);
+                }
 
                 app.support.controllable = true;
                 app.support.reason = None;
@@ -213,8 +248,9 @@ impl MacosMixerBackend {
         }
     }
 
-    fn sync_live_taps(&mut self) {
+    fn sync_live_taps(&mut self) -> Vec<String> {
         let now_ms = current_time_millis();
+        let mut notes = Vec::new();
 
         self.tap_sessions.retain(|app_id, sessions| {
             if !self.process_objects.contains_key(app_id) {
@@ -228,10 +264,9 @@ impl MacosMixerBackend {
                 .find(|app| app.id == app_id.as_str())
                 .map(|app| app.active)
                 .unwrap_or(false);
-            let should_keep = sessions.iter().any(|session| {
-                !session.io_state.is_passthrough()
-                    || session.io_state.has_recent_signal(now_ms)
-                    || (is_discovery_active && !session.io_state.has_seen_render())
+            let should_keep = sessions.iter_mut().any(|session| {
+                let meter = session.sync_meter_state(now_ms);
+                !meter.passthrough || meter.recent_signal || (is_discovery_active && !meter.saw_render)
             });
 
             should_keep
@@ -242,8 +277,8 @@ impl MacosMixerBackend {
             .apps
             .iter()
             .filter(|app| {
-                app.active
-                    && self.process_objects.contains_key(&app.id)
+                self.process_objects.contains_key(&app.id)
+                    && app.active
                     && is_browser_like_app(&app.display_name, app.bundle_id.as_deref())
             })
             .map(|app| {
@@ -252,13 +287,17 @@ impl MacosMixerBackend {
                 } else {
                     (app.volume as f32 / 100.0).clamp(0.0, 1.0)
                 };
-                (app.id.clone(), gain)
+                (app.id.clone(), app.display_name.clone(), gain)
             })
             .collect::<Vec<_>>();
 
-        for (app_id, gain) in active_apps {
-            let _ = self.ensure_tap_session(&app_id, gain);
+        for (app_id, display_name, gain) in active_apps {
+            if let Err(reason) = self.ensure_tap_session(&app_id, gain) {
+                notes.push(format!("Waves could not attach live metering for {display_name}: {reason}"));
+            }
         }
+
+        notes
     }
 }
 
@@ -276,8 +315,9 @@ impl MixerBackend for MacosMixerBackend {
             Err(reason) => apply_discovery_error(&mut self.snapshot, reason),
         }
 
-        self.sync_live_taps();
+        let tap_sync_notes = self.sync_live_taps();
         self.apply_tap_overrides();
+        self.snapshot.platform.notes.extend(tap_sync_notes.into_iter().take(3));
         self.snapshot.clone()
     }
 
@@ -467,7 +507,7 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
 
     let (display_name, bundle_id, derived_from_helper) = resolve_session_identity(&raw_display_name, &raw_bundle_id);
     let browser_like = is_browser_like_app(&display_name, Some(bundle_id.as_str()));
-    let active = audible || running_output || browser_like;
+    let active = audible || running_output;
     let allow_prohibited_process =
         derived_from_helper || raw_display_name.to_lowercase().contains("web content")
             || browser_like;
@@ -833,6 +873,11 @@ fn create_tap_session(app_id: &str, process_object: AudioObjectID, gain: f32) ->
         aggregate_device_id,
         io_proc_id,
         io_state,
+        last_peak_at_ms: 0,
+        last_render_at_ms: 0,
+        last_signal_at_ms: 0,
+        observed_render_count: 0,
+        observed_signal_count: 0,
     })
 }
 

@@ -18,13 +18,12 @@ export type MixerSections = {
 
 export function hasValidSessionIdentity(app: Pick<AppAudioSession, 'displayName' | 'processName'>): boolean {
   const displayName = app.displayName.trim()
-  const processName = app.processName.trim()
 
   if (!displayName || /^process\s+\d+$/i.test(displayName)) {
     return false
   }
 
-  if (!processName || /^pid-\d+$/i.test(processName)) {
+  if (!app.processName.trim()) {
     return false
   }
 

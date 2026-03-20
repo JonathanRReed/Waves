@@ -253,6 +253,7 @@ function AppSection({
 
 function ShellControls({
   shellMode,
+  platform,
   outputSnapshot,
   busy,
   outputBusy,
@@ -261,6 +262,7 @@ function ShellControls({
   onHideToTray,
 }: {
   shellMode: ShellMode
+  platform: string
   outputSnapshot: AudioOutputSnapshot
   busy: boolean
   outputBusy: boolean
@@ -311,7 +313,7 @@ function ShellControls({
       </div>
 
       <button type="button" className="refresh-button" onClick={onHideToTray} disabled={busy}>
-        Hide to tray
+        {platform === 'macos' ? 'Hide window' : 'Hide to tray'}
       </button>
     </div>
   )
@@ -403,7 +405,7 @@ function OnboardingOverlay({
             <p className="eyebrow">3. Operate like a utility</p>
             <h3>Tray and relaunch behavior</h3>
             <p>
-              Hide Waves to the tray when you want it out of the way. Left-click the tray icon to reopen it, and reopen this guide any time from the command bar.
+              Hide Waves when you want it out of the way. Reopen it from the menu bar or Dock, then reopen this guide any time from the command bar.
             </p>
             <div className="onboarding-card__stack">
               <span>Pin the apps you touch most.</span>
@@ -490,6 +492,7 @@ export default function App() {
   const refreshingRef = useRef(false)
   const interactionBlockedRef = useRef(false)
   const onboardingCompleteRef = useRef(onboardingComplete)
+  const outputRefreshAtRef = useRef(0)
   const volumeCommitTimersRef = useRef<Record<string, number>>({})
   const [presentationNow, setPresentationNow] = useState(() => Date.now())
 
@@ -505,6 +508,7 @@ export default function App() {
 
       if (outputResult.status === 'fulfilled') {
         setOutputSnapshot(outputResult.value)
+        outputRefreshAtRef.current = Date.now()
       } else {
         setOutputSnapshot({
           supported: false,
@@ -578,7 +582,7 @@ export default function App() {
       }
 
       for (const [appId, expiresAt] of Object.entries(next)) {
-        if (expiresAt <= now && !snapshot.apps.some((app) => app.id === appId)) {
+        if (expiresAt <= now) {
           delete next[appId]
         }
       }
@@ -605,7 +609,8 @@ export default function App() {
         return
       }
 
-      void handleRefresh({ includeOutput: false, silent: true })
+      const includeOutput = Date.now() - outputRefreshAtRef.current > 5_000
+      void handleRefresh({ includeOutput, silent: true })
     }
   })
 
@@ -889,6 +894,7 @@ export default function App() {
 
     if (outputResult?.status === 'fulfilled') {
       setOutputSnapshot(outputResult.value)
+      outputRefreshAtRef.current = Date.now()
     } else if (outputResult?.status === 'rejected') {
       setOutputSnapshot((current) => ({
         ...current,
@@ -911,6 +917,7 @@ export default function App() {
     try {
       const nextOutputSnapshot = await setOutputDevice(deviceId)
       setOutputSnapshot(nextOutputSnapshot)
+      outputRefreshAtRef.current = Date.now()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to change output device')
     } finally {
@@ -943,7 +950,7 @@ export default function App() {
     try {
       await hideMainWindow()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Unable to hide Waves to the tray')
+      setError(cause instanceof Error ? cause.message : 'Unable to hide the Waves window')
     } finally {
       setShellBusy(false)
     }
@@ -1022,6 +1029,7 @@ export default function App() {
 
             <ShellControls
               shellMode={shellMode}
+              platform={snapshot.platform.platform}
               outputSnapshot={outputSnapshot}
               busy={shellBusy}
               outputBusy={outputBusy}

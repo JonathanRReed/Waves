@@ -14,6 +14,7 @@ use tauri::{
 struct WavesState {
     backend: Mutex<Box<dyn MixerBackend>>,
     shell_mode: Mutex<String>,
+    tray_ready: Mutex<bool>,
 }
 
 struct TrayState {
@@ -132,7 +133,15 @@ fn set_shell_mode_internal(app: &AppHandle, mode: String) -> Result<String, Stri
 
 fn hide_main_window_internal(app: &AppHandle) -> Result<(), String> {
     let window = main_window(app)?;
-    window.hide().map_err(|cause| cause.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        return window.minimize().map_err(|cause| cause.to_string());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.hide().map_err(|cause| cause.to_string())
+    }
 }
 
 fn show_main_window_internal(app: &AppHandle) -> Result<(), String> {
@@ -149,8 +158,11 @@ fn show_main_window_internal(app: &AppHandle) -> Result<(), String> {
 
 fn toggle_main_window(app: &AppHandle) -> Result<(), String> {
     let window = main_window(app)?;
-    if window.is_visible().map_err(|cause| cause.to_string())? {
-        window.hide().map_err(|cause| cause.to_string())
+    let is_visible = window.is_visible().map_err(|cause| cause.to_string())?;
+    let is_minimized = window.is_minimized().map_err(|cause| cause.to_string())?;
+
+    if is_visible && !is_minimized {
+        hide_main_window_internal(app)
     } else {
         show_main_window_internal(app)
     }
@@ -176,6 +188,9 @@ fn handle_tray_menu_event(app: &AppHandle, item_id: &str) {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
     let show = MenuItemBuilder::with_id("show", "Show Waves").build(app)?;
+    #[cfg(target_os = "macos")]
+    let hide = MenuItemBuilder::with_id("hide", "Hide Window").build(app)?;
+    #[cfg(not(target_os = "macos"))]
     let hide = MenuItemBuilder::with_id("hide", "Hide to Tray").build(app)?;
     let desktop = MenuItemBuilder::with_id("desktop", "Desktop Mode").build(app)?;
     let topbar = MenuItemBuilder::with_id("topbar", "Top Bar Mode").build(app)?;
@@ -208,14 +223,25 @@ fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
 
     #[cfg(target_os = "macos")]
     {
-        builder = builder.title("Waves").icon_as_template(true);
+        builder = builder.title("Waves");
     }
 
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon().cloned() {
         builder = builder.icon(icon);
     }
 
     builder.build(app)
+}
+
+fn augment_snapshot_with_shell_state(snapshot: &mut MixerSnapshot, tray_ready: bool) {
+    #[cfg(target_os = "macos")]
+    if !tray_ready {
+        snapshot
+            .platform
+            .notes
+            .push("Waves could not create its menu bar item. Reopen from the Dock while troubleshooting tray setup.".to_string());
+    }
 }
 
 #[tauri::command]
@@ -224,8 +250,14 @@ fn get_mixer_snapshot(state: State<'_, WavesState>) -> Result<MixerSnapshot, Str
         .backend
         .lock()
         .map_err(|_| "Mixer backend is unavailable".to_string())?;
+    let tray_ready = *state
+        .tray_ready
+        .lock()
+        .map_err(|_| "Shell state is unavailable".to_string())?;
 
-    Ok(backend.snapshot())
+    let mut snapshot = backend.snapshot();
+    augment_snapshot_with_shell_state(&mut snapshot, tray_ready);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -234,8 +266,14 @@ fn refresh_sessions(state: State<'_, WavesState>) -> Result<MixerSnapshot, Strin
         .backend
         .lock()
         .map_err(|_| "Mixer backend is unavailable".to_string())?;
+    let tray_ready = *state
+        .tray_ready
+        .lock()
+        .map_err(|_| "Shell state is unavailable".to_string())?;
 
-    Ok(backend.refresh())
+    let mut snapshot = backend.refresh();
+    augment_snapshot_with_shell_state(&mut snapshot, tray_ready);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -317,6 +355,7 @@ pub fn run() {
         .manage(WavesState {
             backend: Mutex::new(create_backend()),
             shell_mode: Mutex::new("desktop".to_string()),
+            tray_ready: Mutex::new(false),
         })
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -338,14 +377,21 @@ pub fn run() {
                 .map_err(|cause| -> Box<dyn std::error::Error> {
                     Box::new(std::io::Error::new(std::io::ErrorKind::Other, cause))
                 })?;
-            app.manage(TrayState {
-                _tray: Mutex::new(match build_tray(&app_handle) {
-                    Ok(tray) => Some(tray),
-                    Err(cause) => {
-                        eprintln!("Failed to initialize Waves tray icon: {cause}");
-                        None
+            let tray = match build_tray(&app_handle) {
+                Ok(tray) => {
+                    let state = app.state::<WavesState>();
+                    if let Ok(mut tray_ready) = state.tray_ready.lock() {
+                        *tray_ready = true;
                     }
-                }),
+                    Some(tray)
+                }
+                Err(cause) => {
+                    eprintln!("Failed to initialize Waves tray icon: {cause}");
+                    None
+                }
+            };
+            app.manage(TrayState {
+                _tray: Mutex::new(tray),
             });
             Ok(())
         })
