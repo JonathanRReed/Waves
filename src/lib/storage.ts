@@ -39,12 +39,7 @@ export function savePinnedApps(ids: string[]): void {
 }
 
 export function loadShellMode(): ShellMode {
-  if (typeof window === 'undefined') {
-    return 'desktop'
-  }
-
-  const raw = window.localStorage.getItem(SHELL_MODE_KEY)
-  return raw === 'topbar' ? 'topbar' : 'desktop'
+  return 'desktop'
 }
 
 export function saveShellMode(mode: ShellMode): void {
@@ -52,7 +47,7 @@ export function saveShellMode(mode: ShellMode): void {
     return
   }
 
-  window.localStorage.setItem(SHELL_MODE_KEY, mode)
+  window.localStorage.setItem(SHELL_MODE_KEY, mode === 'topbar' ? 'desktop' : mode)
 }
 
 export function loadOnboardingComplete(): boolean {

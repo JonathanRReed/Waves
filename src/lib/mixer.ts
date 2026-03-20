@@ -37,6 +37,13 @@ function createApp(
     displayName,
     processName,
     bundleId: options.bundleId ?? null,
+    detected: options.detected ?? true,
+    audible: options.audible ?? options.active ?? true,
+    runningOutput: options.runningOutput ?? options.active ?? true,
+    recentSignal: options.recentSignal ?? options.active ?? true,
+    recentRender: options.recentRender ?? options.active ?? true,
+    lastSeenAt: options.lastSeenAt ?? new Date().toISOString(),
+    lastSignalAt: options.lastSignalAt ?? ((options.active ?? true) ? new Date().toISOString() : null),
     category: options.category ?? 'Utility',
     volume,
     muted: options.muted ?? false,
@@ -246,4 +253,8 @@ export function setOutputDevice(deviceId: string): Promise<AudioOutputSnapshot> 
   return invokeMixer<AudioOutputSnapshot>('set_output_device', {
     deviceId,
   })
+}
+
+export function installMacosDriver(): Promise<MixerSnapshot> {
+  return invokeMixer<MixerSnapshot>('install_macos_driver')
 }

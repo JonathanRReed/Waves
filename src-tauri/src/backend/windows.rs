@@ -296,6 +296,7 @@ fn build_native_session(
         format!("windows:{session_id}")
     };
     let active = state == AudioSessionStateActive;
+    let now = now_stamp();
 
     Ok(Some(NativeWindowsSession {
         id: id.clone(),
@@ -307,6 +308,13 @@ fn build_native_session(
                 .as_deref()
                 .and_then(file_stem)
                 .map(|stem| stem.to_ascii_lowercase()),
+            detected: true,
+            audible: active,
+            running_output: active,
+            recent_signal: active,
+            recent_render: active,
+            last_seen_at: now.clone(),
+            last_signal_at: active.then_some(now.clone()),
             category: infer_category(&display_name, &process_name),
             volume,
             muted,

@@ -62,12 +62,12 @@ describe('storage helpers', () => {
     expect(loadPinnedApps()).toEqual([])
   })
 
-  test('saveShellMode persists top bar mode', () => {
+  test('saveShellMode normalizes retired top bar mode back to desktop', () => {
     ;(globalThis as { window?: Window }).window = createWindow() as unknown as Window
 
     saveShellMode('topbar')
 
-    expect(loadShellMode()).toEqual('topbar')
+    expect(loadShellMode()).toEqual('desktop')
   })
 
   test('loadShellMode falls back to desktop when unset', () => {
