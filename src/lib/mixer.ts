@@ -88,27 +88,31 @@ function createBrowserSnapshot(): MixerSnapshot {
 }
 
 function createBrowserOutputs(): AudioOutputSnapshot {
+  const platform = detectPlatform()
+  const platformOutputs =
+    platform === 'windows'
+      ? [
+          { id: 'default-speakers', name: 'Default Speakers', current: true },
+          { id: 'default-headphones', name: 'USB Headset', current: false },
+          { id: 'default-display', name: 'HDMI Output', current: false },
+        ]
+      : platform === 'macos'
+        ? [
+            { id: 'default-speakers', name: 'MacBook Speakers', current: true },
+            { id: 'default-headphones', name: 'Headphones', current: false },
+            { id: 'default-display', name: 'Studio Display', current: false },
+          ]
+        : [
+            { id: 'default-speakers', name: 'System Speakers', current: true },
+            { id: 'default-headphones', name: 'Headphones', current: false },
+            { id: 'default-display', name: 'External Output', current: false },
+          ]
+
   return {
     supported: true,
     reason: null,
     currentDeviceId: 'default-speakers',
-    devices: [
-      {
-        id: 'default-speakers',
-        name: 'MacBook Speakers',
-        current: true,
-      },
-      {
-        id: 'default-headphones',
-        name: 'Headphones',
-        current: false,
-      },
-      {
-        id: 'default-display',
-        name: 'Studio Display',
-        current: false,
-      },
-    ],
+    devices: platformOutputs,
   }
 }
 

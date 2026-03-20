@@ -4,6 +4,10 @@ const PINS_KEY = 'waves:pinned-apps'
 const SHELL_MODE_KEY = 'waves:shell-mode'
 const ONBOARDING_KEY = 'waves:onboarding-complete'
 
+function dedupeStrings(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
+}
+
 export function loadPinnedApps(): string[] {
   if (typeof window === 'undefined') {
     return []
@@ -20,7 +24,7 @@ export function loadPinnedApps(): string[] {
       return []
     }
 
-    return parsed.filter((value): value is string => typeof value === 'string')
+    return dedupeStrings(parsed.filter((value): value is string => typeof value === 'string'))
   } catch {
     return []
   }
@@ -31,7 +35,7 @@ export function savePinnedApps(ids: string[]): void {
     return
   }
 
-  window.localStorage.setItem(PINS_KEY, JSON.stringify(ids))
+  window.localStorage.setItem(PINS_KEY, JSON.stringify(dedupeStrings(ids)))
 }
 
 export function loadShellMode(): ShellMode {

@@ -48,6 +48,14 @@ describe('storage helpers', () => {
     expect(loadPinnedApps()).toEqual(['spotify', 'discord'])
   })
 
+  test('savePinnedApps removes duplicates and blank ids', () => {
+    ;(globalThis as { window?: Window }).window = createWindow() as unknown as Window
+
+    savePinnedApps(['spotify', 'spotify', ' ', 'discord'])
+
+    expect(loadPinnedApps()).toEqual(['spotify', 'discord'])
+  })
+
   test('loadPinnedApps returns an empty list when local storage is missing data', () => {
     ;(globalThis as { window?: Window }).window = createWindow() as unknown as Window
 

@@ -4,7 +4,8 @@ use std::{
     mem::MaybeUninit,
     ptr,
     ptr::NonNull,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use objc2::{rc::Retained, AnyThread};
@@ -36,6 +37,12 @@ use crate::models::{
 
 use super::{now_stamp, MixerBackend};
 
+const SIGNAL_THRESHOLD: f32 = 0.003;
+const SIGNAL_HOLD_MS: u64 = 1_800;
+const PEAK_DECAY_MS: u64 = 900;
+const IDLE_PEAK_FLOOR: f32 = 0.04;
+const LIVE_PEAK_FLOOR: f32 = 0.08;
+
 pub fn build_backend() -> MacosMixerBackend {
     let (snapshot, process_objects) = discover_state().unwrap_or_else(state_from_error);
 
@@ -62,6 +69,10 @@ struct MacosTapSession {
 struct TapIoState {
     format: AudioStreamBasicDescription,
     gain_bits: AtomicU32,
+    peak_bits: AtomicU32,
+    last_peak_at_ms: AtomicU64,
+    last_render_at_ms: AtomicU64,
+    last_signal_at_ms: AtomicU64,
 }
 
 impl TapIoState {
@@ -69,6 +80,10 @@ impl TapIoState {
         Self {
             format,
             gain_bits: AtomicU32::new(gain.to_bits()),
+            peak_bits: AtomicU32::new(0.0_f32.to_bits()),
+            last_peak_at_ms: AtomicU64::new(0),
+            last_render_at_ms: AtomicU64::new(0),
+            last_signal_at_ms: AtomicU64::new(0),
         }
     }
 
@@ -78,6 +93,49 @@ impl TapIoState {
 
     fn set_gain(&self, gain: f32) {
         self.gain_bits.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed)
+    }
+
+    fn is_passthrough(&self) -> bool {
+        (self.gain() - 1.0).abs() < 0.005
+    }
+
+    fn note_render(&self, peak: f32) {
+        let now_ms = current_time_millis();
+        self.last_render_at_ms.store(now_ms, Ordering::Relaxed);
+
+        let clamped_peak = peak.clamp(0.0, 1.0);
+        if clamped_peak < SIGNAL_THRESHOLD {
+            return;
+        }
+
+        self.peak_bits.store(clamped_peak.to_bits(), Ordering::Relaxed);
+        self.last_peak_at_ms.store(now_ms, Ordering::Relaxed);
+        self.last_signal_at_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    fn has_seen_render(&self) -> bool {
+        self.last_render_at_ms.load(Ordering::Relaxed) > 0
+    }
+
+    fn has_recent_signal(&self, now_ms: u64) -> bool {
+        let last_signal_at_ms = self.last_signal_at_ms.load(Ordering::Relaxed);
+        last_signal_at_ms > 0 && now_ms.saturating_sub(last_signal_at_ms) <= SIGNAL_HOLD_MS
+    }
+
+    fn peak_level(&self, now_ms: u64) -> f32 {
+        let peak = f32::from_bits(self.peak_bits.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+        let last_peak_at_ms = self.last_peak_at_ms.load(Ordering::Relaxed);
+
+        if peak < SIGNAL_THRESHOLD || last_peak_at_ms == 0 {
+            return 0.0;
+        }
+
+        let elapsed_ms = now_ms.saturating_sub(last_peak_at_ms);
+        if elapsed_ms >= PEAK_DECAY_MS {
+            return 0.0;
+        }
+
+        peak * (1.0 - (elapsed_ms as f32 / PEAK_DECAY_MS as f32))
     }
 }
 
@@ -112,17 +170,36 @@ impl MacosMixerBackend {
     }
 
     fn apply_tap_overrides(&mut self) {
+        let now_ms = current_time_millis();
+
         for app in &mut self.snapshot.apps {
-            if let Some(session) = self.tap_sessions.get(&app.id).and_then(|sessions| sessions.first()) {
-                let gain = session.io_state.gain();
+            if let Some(sessions) = self.tap_sessions.get(&app.id) {
+                let gain = sessions
+                    .first()
+                    .map(|session| session.io_state.gain())
+                    .unwrap_or(1.0);
+                let saw_render = sessions.iter().any(|session| session.io_state.has_seen_render());
+                let has_recent_signal = sessions
+                    .iter()
+                    .any(|session| session.io_state.has_recent_signal(now_ms));
+                let measured_peak = sessions
+                    .iter()
+                    .map(|session| session.io_state.peak_level(now_ms))
+                    .fold(0.0_f32, f32::max);
+
                 app.support.controllable = true;
                 app.support.reason = None;
                 app.volume = (gain * 100.0).round().clamp(0.0, 100.0) as u8;
-                app.muted = app.volume == 0;
+                app.muted = gain <= 0.001;
+                if saw_render {
+                    app.active = has_recent_signal || measured_peak >= SIGNAL_THRESHOLD;
+                }
                 app.peak_level = if app.muted {
-                    0.04
+                    IDLE_PEAK_FLOOR
+                } else if app.active {
+                    measured_peak.max(LIVE_PEAK_FLOOR)
                 } else {
-                    (gain * 0.72).clamp(0.06, 1.0)
+                    IDLE_PEAK_FLOOR
                 };
                 continue;
             }
@@ -135,6 +212,54 @@ impl MacosMixerBackend {
             };
         }
     }
+
+    fn sync_live_taps(&mut self) {
+        let now_ms = current_time_millis();
+
+        self.tap_sessions.retain(|app_id, sessions| {
+            if !self.process_objects.contains_key(app_id) {
+                return false;
+            }
+
+            let is_discovery_active = self
+                .snapshot
+                .apps
+                .iter()
+                .find(|app| app.id == app_id.as_str())
+                .map(|app| app.active)
+                .unwrap_or(false);
+            let should_keep = sessions.iter().any(|session| {
+                !session.io_state.is_passthrough()
+                    || session.io_state.has_recent_signal(now_ms)
+                    || (is_discovery_active && !session.io_state.has_seen_render())
+            });
+
+            should_keep
+        });
+
+        let active_apps = self
+            .snapshot
+            .apps
+            .iter()
+            .filter(|app| {
+                app.active
+                    && self.process_objects.contains_key(&app.id)
+                    && is_browser_like_app(&app.display_name, app.bundle_id.as_deref())
+            })
+            .map(|app| {
+                let gain = if app.muted {
+                    0.0
+                } else {
+                    (app.volume as f32 / 100.0).clamp(0.0, 1.0)
+                };
+                (app.id.clone(), gain)
+            })
+            .collect::<Vec<_>>();
+
+        for (app_id, gain) in active_apps {
+            let _ = self.ensure_tap_session(&app_id, gain);
+        }
+    }
 }
 
 impl MixerBackend for MacosMixerBackend {
@@ -143,11 +268,15 @@ impl MixerBackend for MacosMixerBackend {
     }
 
     fn refresh(&mut self) -> MixerSnapshot {
-        let (snapshot, process_objects) = discover_state().unwrap_or_else(state_from_error);
-        self.snapshot = snapshot;
-        self.process_objects = process_objects;
-        self.tap_sessions
-            .retain(|app_id, _| self.process_objects.contains_key(app_id));
+        match discover_state() {
+            Ok((snapshot, process_objects)) => {
+                self.snapshot = snapshot;
+                self.process_objects = process_objects;
+            }
+            Err(reason) => apply_discovery_error(&mut self.snapshot, reason),
+        }
+
+        self.sync_live_taps();
         self.apply_tap_overrides();
         self.snapshot.clone()
     }
@@ -170,16 +299,10 @@ impl MixerBackend for MacosMixerBackend {
 
         let normalized = volume.min(100);
         let target_gain = normalized as f32 / 100.0;
-        let should_detach = normalized == 100 && !app.muted;
-
-        if should_detach {
-            self.tap_sessions.remove(app_id);
-        } else {
-            self.ensure_tap_session(app_id, target_gain)?;
-            if let Some(sessions) = self.tap_sessions.get(app_id) {
-                for session in sessions {
-                    session.io_state.set_gain(target_gain);
-                }
+        self.ensure_tap_session(app_id, target_gain)?;
+        if let Some(sessions) = self.tap_sessions.get(app_id) {
+            for session in sessions {
+                session.io_state.set_gain(target_gain);
             }
         }
 
@@ -217,14 +340,10 @@ impl MixerBackend for MacosMixerBackend {
             (app.volume as f32 / 100.0).clamp(0.0, 1.0)
         };
 
-        if !next_muted && app.volume >= 100 {
-            self.tap_sessions.remove(app_id);
-        } else {
-            self.ensure_tap_session(app_id, target_gain)?;
-            if let Some(sessions) = self.tap_sessions.get(app_id) {
-                for session in sessions {
-                    session.io_state.set_gain(target_gain);
-                }
+        self.ensure_tap_session(app_id, target_gain)?;
+        if let Some(sessions) = self.tap_sessions.get(app_id) {
+            for session in sessions {
+                session.io_state.set_gain(target_gain);
             }
         }
 
@@ -259,7 +378,7 @@ fn discover_state() -> Result<(MixerSnapshot, HashMap<String, Vec<AudioObjectID>
 
     for process_object in process_objects {
         let app = match build_session(process_object) {
-            Some(app) if app.active && app.support.controllable => app,
+            Some(app) => app,
             _ => continue,
         };
 
@@ -270,6 +389,11 @@ fn discover_state() -> Result<(MixerSnapshot, HashMap<String, Vec<AudioObjectID>
                 existing_app.peak_level = existing_app.peak_level.max(app.peak_level);
                 existing_app.active |= app.active;
                 existing_app.support.controllable |= app.support.controllable;
+                existing_app.support.reason = if existing_app.support.controllable {
+                    None
+                } else {
+                    app.support.reason.clone().or_else(|| existing_app.support.reason.clone())
+                };
             }
             Entry::Vacant(entry) => {
                 entry.insert((app, vec![process_object]));
@@ -317,31 +441,41 @@ fn build_session(process_object: AudioObjectID) -> Option<AppAudioSession> {
 
     let audible = read_bool(process_object, kAudioHardwarePropertyProcessIsAudible).unwrap_or(false);
     let running_output = read_bool(process_object, kAudioProcessPropertyIsRunningOutput).unwrap_or(false);
-    let active = audible || running_output;
-    if !active {
-        return None;
-    }
 
     let running_application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid as _)?;
     if running_application.isTerminated() || !running_application.isFinishedLaunching() {
         return None;
     }
 
-    let raw_display_name = running_application
-        .localizedName()
-        .map(|name| name.to_string())
-        .filter(|name| !name.is_empty())?;
     let raw_bundle_id = running_application
         .bundleIdentifier()
         .map(|value| value.to_string())
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("pid-{pid}"));
+    let raw_display_name = running_application
+        .localizedName()
+        .map(|name| name.to_string())
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            if raw_bundle_id.starts_with("pid-") {
+                None
+            } else {
+                Some(friendly_app_name_from_bundle_id(&raw_bundle_id))
+            }
+        })
+        .unwrap_or_else(|| format!("Process {pid}"));
 
     let (display_name, bundle_id, derived_from_helper) = resolve_session_identity(&raw_display_name, &raw_bundle_id);
-    if running_application.activationPolicy() == NSApplicationActivationPolicy::Prohibited && !derived_from_helper {
+    let browser_like = is_browser_like_app(&display_name, Some(bundle_id.as_str()));
+    let active = audible || running_output || browser_like;
+    let allow_prohibited_process =
+        derived_from_helper || raw_display_name.to_lowercase().contains("web content")
+            || browser_like;
+    if running_application.activationPolicy() == NSApplicationActivationPolicy::Prohibited && !allow_prohibited_process {
         return None;
     }
 
-    if looks_like_background_audio_process(&raw_display_name, &raw_bundle_id) {
+    if looks_like_background_audio_process(&display_name, &bundle_id) {
         return None;
     }
 
@@ -551,11 +685,7 @@ fn read_string_property(
 }
 
 fn infer_category(display_name: &str, bundle_id: Option<&str>) -> String {
-    let haystack = format!(
-        "{} {}",
-        display_name.to_lowercase(),
-        bundle_id.unwrap_or_default().to_lowercase()
-    );
+    let haystack = app_haystack(display_name, bundle_id);
 
     if haystack.contains("music") || haystack.contains("spotify") || haystack.contains("apple.music") {
         return "Music".to_string();
@@ -569,7 +699,7 @@ fn infer_category(display_name: &str, bundle_id: Option<&str>) -> String {
         return "Calls".to_string();
     }
 
-    if haystack.contains("safari") || haystack.contains("chrome") || haystack.contains("firefox") || haystack.contains("browser") {
+    if is_browser_like_app(display_name, bundle_id) {
         return "Browser".to_string();
     }
 
@@ -578,6 +708,26 @@ fn infer_category(display_name: &str, bundle_id: Option<&str>) -> String {
     }
 
     "Productivity".to_string()
+}
+
+fn app_haystack(display_name: &str, bundle_id: Option<&str>) -> String {
+    format!(
+        "{} {}",
+        display_name.to_lowercase(),
+        bundle_id.unwrap_or_default().to_lowercase()
+    )
+}
+
+fn is_browser_like_app(display_name: &str, bundle_id: Option<&str>) -> bool {
+    let haystack = app_haystack(display_name, bundle_id);
+    haystack.contains("safari")
+        || haystack.contains("chrome")
+        || haystack.contains("firefox")
+        || haystack.contains("browser")
+        || haystack.contains("brave")
+        || haystack.contains("edge")
+        || haystack.contains("arc")
+        || haystack.contains("helium")
 }
 
 fn create_tap_session(app_id: &str, process_object: AudioObjectID, gain: f32) -> Result<MacosTapSession, String> {
@@ -741,6 +891,10 @@ unsafe fn process_audio_buffer(input: &AudioBuffer, output: &mut AudioBuffer, io
     {
         let input_samples = std::slice::from_raw_parts(input.mData.cast::<f32>(), byte_len / std::mem::size_of::<f32>());
         let output_samples = std::slice::from_raw_parts_mut(output.mData.cast::<f32>(), byte_len / std::mem::size_of::<f32>());
+        let peak = input_samples
+            .iter()
+            .fold(0.0_f32, |current, sample| current.max(sample.abs()));
+        io_state.note_render(peak);
         for (source, target) in input_samples.iter().zip(output_samples.iter_mut()) {
             *target = *source * gain;
         }
@@ -753,6 +907,10 @@ unsafe fn process_audio_buffer(input: &AudioBuffer, output: &mut AudioBuffer, io
     {
         let input_samples = std::slice::from_raw_parts(input.mData.cast::<i16>(), byte_len / std::mem::size_of::<i16>());
         let output_samples = std::slice::from_raw_parts_mut(output.mData.cast::<i16>(), byte_len / std::mem::size_of::<i16>());
+        let peak = input_samples.iter().fold(0.0_f32, |current, sample| {
+            current.max((*sample as f32).abs() / i16::MAX as f32)
+        });
+        io_state.note_render(peak);
         for (source, target) in input_samples.iter().zip(output_samples.iter_mut()) {
             *target = ((*source as f32) * gain).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         }
@@ -765,6 +923,10 @@ unsafe fn process_audio_buffer(input: &AudioBuffer, output: &mut AudioBuffer, io
     {
         let input_samples = std::slice::from_raw_parts(input.mData.cast::<i32>(), byte_len / std::mem::size_of::<i32>());
         let output_samples = std::slice::from_raw_parts_mut(output.mData.cast::<i32>(), byte_len / std::mem::size_of::<i32>());
+        let peak = input_samples.iter().fold(0.0_f32, |current, sample| {
+            current.max(((*sample as f64).abs() / i32::MAX as f64) as f32)
+        });
+        io_state.note_render(peak);
         for (source, target) in input_samples.iter().zip(output_samples.iter_mut()) {
             *target = ((*source as f64) * gain as f64)
                 .round()
@@ -772,6 +934,8 @@ unsafe fn process_audio_buffer(input: &AudioBuffer, output: &mut AudioBuffer, io
         }
         return;
     }
+
+    io_state.note_render(0.0);
 
     if (gain - 1.0).abs() < f32::EPSILON {
         ptr::copy_nonoverlapping(input.mData.cast::<u8>(), output.mData.cast::<u8>(), byte_len);
@@ -795,20 +959,29 @@ unsafe fn buffer_list_slice_mut(list: NonNull<AudioBufferList>) -> &'static mut 
 }
 
 fn state_from_error(reason: String) -> (MixerSnapshot, HashMap<String, Vec<AudioObjectID>>) {
-    (MixerSnapshot {
+    let mut snapshot = MixerSnapshot {
         platform: PlatformSupport {
             platform: "macos".to_string(),
             native_backend: "macos-process-discovery".to_string(),
             native_control_ready: false,
             discovery_ready: false,
-            notes: vec![
-                "Waves could not enumerate macOS Core Audio process objects.".to_string(),
-                reason,
-            ],
+            notes: Vec::new(),
         },
         generated_at: now_stamp(),
         apps: Vec::new(),
-    }, HashMap::new())
+    };
+    apply_discovery_error(&mut snapshot, reason);
+    (snapshot, HashMap::new())
+}
+
+fn apply_discovery_error(snapshot: &mut MixerSnapshot, reason: String) {
+    snapshot.platform.native_control_ready = false;
+    snapshot.platform.discovery_ready = false;
+    snapshot.platform.notes = vec![
+        "Waves could not enumerate macOS Core Audio process objects.".to_string(),
+        reason,
+    ];
+    snapshot.generated_at = now_stamp();
 }
 
 fn read_bool(object_id: AudioObjectID, selector: AudioObjectPropertySelector) -> Result<bool, String> {
@@ -887,4 +1060,11 @@ fn property_address_for_scope(selector: AudioObjectPropertySelector, scope: u32)
         mScope: scope,
         mElement: kAudioObjectPropertyElementMain,
     }
+}
+
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
