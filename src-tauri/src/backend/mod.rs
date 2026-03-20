@@ -7,7 +7,9 @@ pub mod windows;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::models::{AppAudioSession, AudioOutputSnapshot, MixerSnapshot};
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+use crate::models::AppAudioSession;
+use crate::models::{AudioOutputSnapshot, MixerSnapshot};
 
 pub trait MixerBackend: Send {
     fn snapshot(&self) -> MixerSnapshot;
@@ -29,10 +31,12 @@ pub trait MixerBackend: Send {
     }
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub struct SnapshotMixerBackend {
     snapshot: MixerSnapshot,
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 impl SnapshotMixerBackend {
     pub fn new(snapshot: MixerSnapshot) -> Self {
         Self { snapshot }
@@ -51,6 +55,7 @@ impl SnapshotMixerBackend {
     }
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(crate) fn session_control_error(app: &AppAudioSession) -> String {
     app.support
         .reason
@@ -58,6 +63,7 @@ pub(crate) fn session_control_error(app: &AppAudioSession) -> String {
         .unwrap_or_else(|| "This session is not controllable yet".to_string())
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(crate) fn update_peak_levels(apps: &mut [AppAudioSession]) {
     let tick = tick_seed();
 
@@ -73,6 +79,7 @@ pub(crate) fn update_peak_levels(apps: &mut [AppAudioSession]) {
     }
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 impl MixerBackend for SnapshotMixerBackend {
     fn snapshot(&self) -> MixerSnapshot {
         self.snapshot.clone()
@@ -136,6 +143,7 @@ pub fn now_stamp() -> String {
         .to_string()
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn tick_seed() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -143,6 +151,7 @@ fn tick_seed() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn stable_seed(value: &str) -> u64 {
     value
         .bytes()

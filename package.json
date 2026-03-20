@@ -13,7 +13,7 @@
     "check": "bun run lint && bun run typecheck && bun test && cargo check --manifest-path src-tauri/Cargo.toml",
     "release:app": "tauri build --bundles app",
     "release:binary": "tauri build --no-bundle",
-    "release:dmg": "tauri build --bundles dmg",
+    "release:dmg": "./scripts/release-dmg.sh",
     "tauri": "tauri"
   },
   "dependencies": {

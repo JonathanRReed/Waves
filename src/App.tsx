@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { buildViewApps, partitionViewApps, type RecentActivityMap, type ViewApp, type VolumeDrafts } from './lib/apps'
 import { getMixerSnapshot, getOutputDevices, refreshSessions, setAppVolume, setOutputDevice, toggleAppMute } from './lib/mixer'
-import { applyShellMode, hideMainWindow } from './lib/shell'
+import { getGlobalShortcutAction } from './lib/shortcuts'
+import { applyShellMode, getShellMode, hideMainWindow } from './lib/shell'
 import {
   loadOnboardingComplete,
   loadPinnedApps,
@@ -11,12 +13,6 @@ import {
 } from './lib/storage'
 import type { AppAudioSession, AudioOutputSnapshot, MixerSnapshot, ShellMode } from './types/waves'
 
-type ViewApp = AppAudioSession & {
-  pinned: boolean
-}
-
-type QuickFilter = 'all' | 'pinned'
-
 function classNames(...names: Array<string | false | null | undefined>): string {
   return names.filter(Boolean).join(' ')
 }
@@ -25,48 +21,59 @@ function describeShellMode(mode: ShellMode): string {
   return mode === 'topbar' ? 'Top bar mode' : 'Desktop app'
 }
 
-function describeSessionState(app: AppAudioSession): string {
+function describeSessionState(app: Pick<ViewApp, 'live' | 'muted'>): string {
   if (app.muted) {
     return 'Muted'
   }
 
-  if (app.active) {
+  if (app.live) {
     return 'Live'
   }
 
   return 'Idle'
 }
 
-function isDisplayableApp(app: AppAudioSession): boolean {
-  if (!app.active || !app.support.controllable) {
-    return false
+function omitRecordKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) {
+    return record
   }
 
-  const displayName = app.displayName.trim()
-  const processName = app.processName.trim()
-
-  if (!displayName || /^process\s+\d+$/i.test(displayName)) {
-    return false
-  }
-
-  if (!processName || /^pid-\d+$/i.test(processName)) {
-    return false
-  }
-
-  return true
+  const nextRecord = { ...record }
+  delete nextRecord[key]
+  return nextRecord
 }
 
-function WaveRail({ level, muted }: { level: number; muted: boolean }) {
+function formatGeneratedAt(value: string): string | null {
+  if (!value || value === '0') {
+    return null
+  }
+
+  const numericValue = Number(value)
+  const parsed = Number.isFinite(numericValue)
+    ? new Date(value.length > 10 ? numericValue : numericValue * 1000)
+    : new Date(value)
+
+  if (Number.isNaN(parsed.getTime())) {
+    return null
+  }
+
+  return parsed.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function WaveRail({ level, live, muted }: { level: number; live: boolean; muted: boolean }) {
   const bars = Array.from({ length: 12 }, (_, index) => {
-    const intensity = muted ? 0.12 : Math.max(0.18, level * (0.55 + ((index % 4) + 1) * 0.14))
+    const intensity = muted ? 0.08 : Math.max(live ? 0.16 : 0.08, level * (0.5 + ((index % 4) + 1) * 0.16))
     return (
       <span
         key={index}
-        className="wave-rail__bar"
+        className={classNames('wave-rail__bar', live && 'wave-rail__bar--live')}
         style={{
           height: `${Math.min(100, intensity * 100)}%`,
-          opacity: muted ? 0.26 : 0.4 + (index % 3) * 0.16,
-          animationDelay: `${index * 55}ms`,
+          opacity: muted ? 0.2 : live ? 0.38 + (index % 3) * 0.14 : 0.2 + (index % 4) * 0.04,
         }}
       />
     )
@@ -83,7 +90,7 @@ function AppIcon({ label }: { label: string }) {
     .map((part) => part.charAt(0).toUpperCase())
     .join('')
 
-  return <div className="app-icon">{initials}</div>
+  return <div className="app-icon" aria-hidden="true">{initials}</div>
 }
 
 function AppCard({
@@ -100,52 +107,47 @@ function AppCard({
   onVolumeChange(appId: string, volume: number): void
 }) {
   const stateLabel = describeSessionState(app)
+  const displayedVolume = app.muted && app.displayVolume === app.volume ? 0 : app.displayVolume
+  const showSupportNote = !app.support.controllable && Boolean(app.support.reason)
 
   return (
-    <article className={classNames('app-card', !app.active && 'app-card--inactive')}>
+    <article className={classNames('app-card', !app.live && 'app-card--inactive', app.live && 'app-card--live')}>
       <div className="app-card__main">
         <div className="app-card__identity">
           <div className="app-card__media">
             <AppIcon label={app.displayName} />
             <div className="app-card__wave">
-              <WaveRail level={app.peakLevel} muted={app.muted} />
+              <WaveRail level={app.peakLevel} live={app.live} muted={app.muted} />
             </div>
           </div>
 
           <div className="app-card__copy">
             <div className="app-card__title-row">
               <h3>{app.displayName}</h3>
-              <span className={classNames('status-pill', app.muted && 'status-pill--muted', !app.active && 'status-pill--idle')}>
-                {stateLabel}
-              </span>
-              {app.pinned ? <span className="category-pill">Pinned</span> : null}
-              <span className="category-pill">{app.category}</span>
+              {!app.support.controllable ? <span className="status-pill status-pill--quiet">Read only</span> : null}
             </div>
           </div>
         </div>
       </div>
 
       <div className="app-card__slider-zone">
-        <div className="slider-label-row">
-          <label className="slider-label" htmlFor={`slider-${app.id}`}>
-            Level
-          </label>
-          <strong className="slider-value">{app.muted ? '00' : String(app.volume).padStart(2, '0')}</strong>
+        <div className="slider-value-row">
+          <strong className="slider-value" aria-label={`${stateLabel} volume ${displayedVolume}`}>
+            {String(displayedVolume).padStart(2, '0')}
+          </strong>
         </div>
         <input
           id={`slider-${app.id}`}
           type="range"
           min={0}
           max={100}
-          value={app.volume}
+          value={app.displayVolume}
+          aria-label={`${app.displayName} volume`}
           disabled={!app.support.controllable || busy}
           onChange={(event) => onVolumeChange(app.id, Number(event.target.value))}
-          style={{ ['--track-fill' as string]: `${app.volume}%` }}
+          style={{ ['--track-fill' as string]: `${app.displayVolume}%` }}
         />
-        <div className="slider-metrics">
-          <span>{busy ? 'Syncing changes…' : app.support.controllable ? 'Instant control' : 'Read only'}</span>
-          <span>{app.active ? 'Live session' : 'Waiting for audio'}</span>
-        </div>
+        {showSupportNote ? <div className="slider-metrics">{app.support.reason}</div> : null}
       </div>
 
       <div className="app-card__controls">
@@ -168,39 +170,6 @@ function AppCard({
         </button>
       </div>
     </article>
-  )
-}
-
-function QuickFilters({
-  activeFilter,
-  shownCount,
-  pinnedCount,
-  onSelect,
-}: {
-  activeFilter: QuickFilter
-  shownCount: number
-  pinnedCount: number
-  onSelect(filter: QuickFilter): void
-}) {
-  const options: Array<{ filter: QuickFilter; label: string; count: number }> = [
-    { filter: 'all', label: 'All', count: shownCount },
-    { filter: 'pinned', label: 'Pinned', count: pinnedCount },
-  ]
-
-  return (
-    <div className="filter-strip" role="tablist" aria-label="Session filters">
-      {options.map((option) => (
-        <button
-          key={option.filter}
-          type="button"
-          className={classNames('filter-chip', activeFilter === option.filter && 'filter-chip--active')}
-          onClick={() => onSelect(option.filter)}
-        >
-          <span>{option.label}</span>
-          <strong>{option.count}</strong>
-        </button>
-      ))}
-    </div>
   )
 }
 
@@ -237,15 +206,17 @@ function OutputControls({
 
 function AppSection({
   title,
+  eyebrow,
   apps,
-  busyAppId,
+  busyAppIds,
   onPin,
   onMute,
   onVolumeChange,
 }: {
   title: string
+  eyebrow: string
   apps: ViewApp[]
-  busyAppId: string | null
+  busyAppIds: string[]
   onPin(appId: string): void
   onMute(appId: string): void
   onVolumeChange(appId: string, volume: number): void
@@ -258,10 +229,10 @@ function AppSection({
     <section className="panel session-panel">
       <div className="panel__header">
         <div>
-          <p className="eyebrow">{title === 'Pinned' ? 'Quick access' : 'Mixer surface'}</p>
+          <p className="eyebrow">{eyebrow}</p>
           <h2>{title}</h2>
         </div>
-        <span className="panel__count">{apps.length}</span>
+        <p className="panel__summary">{apps.length} source{apps.length === 1 ? '' : 's'}</p>
       </div>
 
       <div className="app-list">
@@ -269,7 +240,7 @@ function AppSection({
           <AppCard
             key={app.id}
             app={app}
-            busy={busyAppId === app.id}
+            busy={busyAppIds.includes(app.id)}
             onPin={onPin}
             onMute={onMute}
             onVolumeChange={onVolumeChange}
@@ -297,24 +268,43 @@ function ShellControls({
   onOutputChange(deviceId: string): void
   onHideToTray(): void
 }) {
+  if (shellMode === 'topbar') {
+    return (
+      <div className="utility-bar">
+        <OutputControls outputSnapshot={outputSnapshot} busy={outputBusy} onSelect={onOutputChange} />
+
+        <button
+          type="button"
+          className="control-button"
+          onClick={() => onModeChange('desktop')}
+          disabled={busy}
+        >
+          Desktop mode
+        </button>
+      </div>
+    )
+  }
+
   return (
     <div className="utility-bar">
       <OutputControls outputSnapshot={outputSnapshot} busy={outputBusy} onSelect={onOutputChange} />
 
-      <div className="mode-switch" role="tablist" aria-label="Shell mode">
+      <div className="mode-switch" role="group" aria-label="Shell mode">
         <button
           type="button"
-          className={classNames('mode-switch__button', shellMode === 'desktop' && 'mode-switch__button--active')}
+          className={classNames('mode-switch__button', 'mode-switch__button--active')}
           onClick={() => onModeChange('desktop')}
           disabled={busy}
+          aria-pressed
         >
           App mode
         </button>
         <button
           type="button"
-          className={classNames('mode-switch__button', shellMode === 'topbar' && 'mode-switch__button--active')}
+          className="mode-switch__button"
           onClick={() => onModeChange('topbar')}
           disabled={busy}
+          aria-pressed={false}
         >
           Top bar mode
         </button>
@@ -337,6 +327,7 @@ function OnboardingOverlay({
   onComplete,
   onClose,
   completed,
+  panelRef,
 }: {
   shellMode: ShellMode
   busy: boolean
@@ -347,12 +338,13 @@ function OnboardingOverlay({
   onComplete(): void
   onClose(): void
   completed: boolean
+  panelRef(element: HTMLElement | null): void
 }) {
   return (
     <div className="onboarding-overlay" role="dialog" aria-modal="true" aria-labelledby="waves-onboarding-title">
       <div className="onboarding-overlay__scrim" />
 
-      <section className="panel onboarding-panel">
+      <section ref={panelRef} className="panel onboarding-panel">
         <div className="onboarding-panel__header">
           <div>
             <p className="eyebrow">Launch guide</p>
@@ -385,12 +377,13 @@ function OnboardingOverlay({
             <p>
               Desktop mode gives you the full mixer surface. Top bar mode keeps Waves compact and always within reach like a native utility.
             </p>
-            <div className="mode-switch" role="tablist" aria-label="Onboarding shell mode">
+            <div className="mode-switch" role="group" aria-label="Onboarding shell mode">
               <button
                 type="button"
                 className={classNames('mode-switch__button', shellMode === 'desktop' && 'mode-switch__button--active')}
                 onClick={() => onModeChange('desktop')}
                 disabled={busy}
+                aria-pressed={shellMode === 'desktop'}
               >
                 App mode
               </button>
@@ -399,6 +392,7 @@ function OnboardingOverlay({
                 className={classNames('mode-switch__button', shellMode === 'topbar' && 'mode-switch__button--active')}
                 onClick={() => onModeChange('topbar')}
                 disabled={busy}
+                aria-pressed={shellMode === 'topbar'}
               >
                 Top bar mode
               </button>
@@ -454,12 +448,31 @@ const emptyOutputSnapshot: AudioOutputSnapshot = {
   devices: [],
 }
 
+function isDocumentVisible(): boolean {
+  if (typeof document === 'undefined') {
+    return true
+  }
+
+  return document.visibilityState !== 'hidden'
+}
+
+function nextPresentationTickDelay(): number {
+  return isDocumentVisible() ? 600 : 2000
+}
+
+function nextRefreshDelay(): number {
+  return isDocumentVisible() ? 420 : 2400
+}
+
 export default function App() {
   const [snapshot, setSnapshot] = useState<MixerSnapshot>(emptySnapshot)
   const [outputSnapshot, setOutputSnapshot] = useState<AudioOutputSnapshot>(emptyOutputSnapshot)
   const [query, setQuery] = useState('')
-  const [quickFilter, setQuickFilter] = useState<QuickFilter>('all')
-  const [busyAppId, setBusyAppId] = useState<string | null>(null)
+  const deferredQuery = useDeferredValue(query)
+  const [busyAppIds, setBusyAppIds] = useState<string[]>([])
+  const [volumeDrafts, setVolumeDrafts] = useState<VolumeDrafts>({})
+  const [recentActivity, setRecentActivity] = useState<RecentActivityMap>({})
+  const [showHiddenApps, setShowHiddenApps] = useState(false)
   const [onboardingComplete, setOnboardingComplete] = useState<boolean>(() => loadOnboardingComplete())
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => !loadOnboardingComplete())
   const [shellMode, setShellModeState] = useState<ShellMode>(() => loadShellMode())
@@ -471,29 +484,41 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [pinnedIds, setPinnedIds] = useState<string[]>(() => loadPinnedApps())
   const searchRef = useRef<HTMLInputElement | null>(null)
+  const onboardingPanelRef = useRef<HTMLElement | null>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
+  const refreshActionRef = useRef<(() => void) | null>(null)
+  const refreshingRef = useRef(false)
+  const interactionBlockedRef = useRef(false)
+  const onboardingCompleteRef = useRef(onboardingComplete)
+  const volumeCommitTimersRef = useRef<Record<string, number>>({})
+  const [presentationNow, setPresentationNow] = useState(() => Date.now())
 
   useEffect(() => {
     void (async () => {
-      try {
-        const nextSnapshot = await getMixerSnapshot()
-        setSnapshot(nextSnapshot)
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'Unable to load mixer state')
+      setError(null)
+
+      const [snapshotResult, outputResult] = await Promise.allSettled([getMixerSnapshot(), getOutputDevices()])
+
+      if (snapshotResult.status === 'fulfilled') {
+        setSnapshot(snapshotResult.value)
       }
 
-      try {
-        const nextOutputSnapshot = await getOutputDevices()
-        setOutputSnapshot(nextOutputSnapshot)
-      } catch (cause) {
+      if (outputResult.status === 'fulfilled') {
+        setOutputSnapshot(outputResult.value)
+      } else {
         setOutputSnapshot({
           supported: false,
-          reason: cause instanceof Error ? cause.message : 'Unable to load output devices',
+          reason: outputResult.reason instanceof Error ? outputResult.reason.message : 'Unable to load output devices',
           currentDeviceId: null,
           devices: [],
         })
-      } finally {
-        setLoading(false)
       }
+
+      if (snapshotResult.status === 'rejected') {
+        setError(snapshotResult.reason instanceof Error ? snapshotResult.reason.message : 'Unable to load mixer state')
+      }
+
+      setLoading(false)
     })()
   }, [])
 
@@ -510,6 +535,10 @@ export default function App() {
   }, [onboardingComplete])
 
   useEffect(() => {
+    onboardingCompleteRef.current = onboardingComplete
+  }, [onboardingComplete])
+
+  useEffect(() => {
     if (!onboardingOpen) {
       return
     }
@@ -518,15 +547,168 @@ export default function App() {
   }, [onboardingOpen, shellMode])
 
   useEffect(() => {
+    interactionBlockedRef.current = shellBusy || outputBusy
+  }, [outputBusy, shellBusy])
+
+  useEffect(() => {
+    let timer = 0
+
+    function schedulePresentationTick() {
+      timer = window.setTimeout(() => {
+        setPresentationNow(Date.now())
+        schedulePresentationTick()
+      }, nextPresentationTickDelay())
+    }
+
+    schedulePresentationTick()
+
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  useEffect(() => {
+    const now = Date.now()
+
+    setRecentActivity((current) => {
+      const next = { ...current }
+
+      for (const app of snapshot.apps) {
+        if (app.active) {
+          next[app.id] = now + 3_200
+        }
+      }
+
+      for (const [appId, expiresAt] of Object.entries(next)) {
+        if (expiresAt <= now && !snapshot.apps.some((app) => app.id === appId)) {
+          delete next[appId]
+        }
+      }
+
+      return next
+    })
+  }, [snapshot.apps])
+
+  useEffect(() => {
     void (async () => {
       try {
-        const applied = await applyShellMode(shellMode)
-        setShellModeState(applied)
+        const currentShellMode = await getShellMode()
+        setShellModeState(currentShellMode)
+        setOnboardingShellMode(currentShellMode)
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'Unable to apply shell mode')
+        setError(cause instanceof Error ? cause.message : 'Unable to read shell mode')
       }
     })()
   }, [])
+
+  useEffect(() => {
+    refreshActionRef.current = () => {
+      if (interactionBlockedRef.current) {
+        return
+      }
+
+      void handleRefresh({ includeOutput: false, silent: true })
+    }
+  })
+
+  useEffect(() => {
+    function handleWindowFocus() {
+      refreshActionRef.current?.()
+    }
+
+    function handleVisibilityChange() {
+      refreshActionRef.current?.()
+    }
+
+    let timer = 0
+
+    function scheduleRefresh() {
+      timer = window.setTimeout(() => {
+        refreshActionRef.current?.()
+        scheduleRefresh()
+      }, nextRefreshDelay())
+    }
+
+    scheduleRefresh()
+
+    window.addEventListener('focus', handleWindowFocus)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('focus', handleWindowFocus)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      Object.values(volumeCommitTimersRef.current).forEach((handle) => {
+        window.clearTimeout(handle)
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!onboardingOpen) {
+      return
+    }
+
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+
+    const panel = onboardingPanelRef.current
+    const focusTimer = window.setTimeout(() => {
+      const firstInteractiveElement = panel?.querySelector<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )
+      firstInteractiveElement?.focus()
+    }, 0)
+
+    function handleOnboardingKeyDown(event: KeyboardEvent) {
+      if (!panel) {
+        return
+      }
+
+      if (event.key === 'Escape') {
+        if (onboardingCompleteRef.current) {
+          event.preventDefault()
+          handleCloseOnboarding()
+        }
+        return
+      }
+
+      if (event.key !== 'Tab') {
+        return
+      }
+
+      const focusableElements = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.hasAttribute('disabled') && element.tabIndex !== -1)
+
+      if (focusableElements.length === 0) {
+        return
+      }
+
+      const firstElement = focusableElements[0]
+      const lastElement = focusableElements[focusableElements.length - 1]
+
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault()
+        lastElement?.focus()
+      } else if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault()
+        firstElement?.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleOnboardingKeyDown)
+
+    return () => {
+      window.clearTimeout(focusTimer)
+      document.removeEventListener('keydown', handleOnboardingKeyDown)
+      previousFocusRef.current?.focus()
+    }
+  }, [onboardingOpen])
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -537,96 +719,82 @@ export default function App() {
         target instanceof HTMLSelectElement ||
         (target instanceof HTMLElement && target.isContentEditable)
 
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        searchRef.current?.focus()
-        searchRef.current?.select()
+      const action = getGlobalShortcutAction({
+        ctrlKey: event.ctrlKey,
+        inEditableField,
+        key: event.key,
+        metaKey: event.metaKey,
+        onboardingOpen,
+      })
+
+      if (!action) {
         return
       }
 
-      if (!inEditableField && event.key === '/') {
-        event.preventDefault()
-        searchRef.current?.focus()
-        return
-      }
+      event.preventDefault()
 
-      if (!inEditableField && event.key.toLowerCase() === 'r') {
-        event.preventDefault()
-        void handleRefresh()
-        return
-      }
-
-      if (!inEditableField && event.key === '?') {
-        event.preventDefault()
-        setOnboardingOpen(true)
+      switch (action) {
+        case 'focus-search':
+          searchRef.current?.focus()
+          searchRef.current?.select()
+          return
+        case 'refresh':
+          void handleRefresh()
+          return
+        case 'open-guide':
+          setOnboardingOpen(true)
+          return
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [refreshing, shellBusy])
+  }, [onboardingOpen])
 
   const baseApps = useMemo<ViewApp[]>(() => {
-    return snapshot.apps
-      .filter(isDisplayableApp)
-      .map((app) => ({
-        ...app,
-        pinned: pinnedIds.includes(app.id) || app.pinnedHint,
-      }))
-      .sort((left, right) => {
-        if (left.pinned !== right.pinned) {
-          return left.pinned ? -1 : 1
-        }
+    return buildViewApps(snapshot.apps, pinnedIds, volumeDrafts, recentActivity, presentationNow)
+  }, [pinnedIds, presentationNow, recentActivity, snapshot.apps, volumeDrafts])
 
-        if (left.active !== right.active) {
-          return left.active ? -1 : 1
-        }
+  const sections = useMemo(
+    () => partitionViewApps(baseApps, deferredQuery, showHiddenApps),
+    [baseApps, deferredQuery, showHiddenApps],
+  )
 
-        return right.peakLevel - left.peakLevel
-      })
-  }, [snapshot.apps, pinnedIds])
+  const liveApps = sections.liveApps
+  const pinnedApps = sections.pinnedApps
+  const hiddenApps = sections.hiddenApps
+  const hiddenCount = sections.hiddenCount
+  const liveCount = liveApps.length
+  const pinnedCount = pinnedApps.length
+  const shownCount = liveApps.length + pinnedApps.length + hiddenApps.length
+  const hasQuery = deferredQuery.trim().length > 0
+  const snapshotTime = formatGeneratedAt(snapshot.generatedAt)
+  const diagnostics = [...snapshot.platform.notes, ...(outputSnapshot.reason ? [`Output devices: ${outputSnapshot.reason}`] : [])]
+  const shouldShowDiagnostics = !snapshot.platform.discoveryReady || Boolean(outputSnapshot.reason)
 
-  const apps = useMemo<ViewApp[]>(() => {
-    const normalizedQuery = query.trim().toLowerCase()
+  function clearVolumeCommit(appId: string) {
+    const handle = volumeCommitTimersRef.current[appId]
+    if (typeof handle === 'undefined') {
+      return
+    }
 
-    return baseApps
-      .filter((app) => {
-        const matchesQuery =
-          !normalizedQuery ||
-          [app.displayName, app.processName, app.category]
-            .join(' ')
-            .toLowerCase()
-            .includes(normalizedQuery)
+    window.clearTimeout(handle)
+    delete volumeCommitTimersRef.current[appId]
+  }
 
-        if (!matchesQuery) {
-          return false
-        }
+  function setAppBusy(appId: string, busy: boolean) {
+    setBusyAppIds((current) => {
+      if (busy) {
+        return current.includes(appId) ? current : [...current, appId]
+      }
 
-        switch (quickFilter) {
-          case 'pinned':
-            return app.pinned
-          default:
-            return true
-        }
-      })
-  }, [baseApps, query, quickFilter])
+      return current.filter((id) => id !== appId)
+    })
+  }
 
-  const pinnedApps = apps.filter((app) => app.pinned)
-  const activeApps = apps.filter((app) => !app.pinned)
-  const liveCount = baseApps.length
-  const pinnedCount = baseApps.filter((app) => app.pinned).length
-  const shownCount = apps.length
-  const totalCount = baseApps.length
-  const hasQuery = query.trim().length > 0
-  const hasFilters = hasQuery || quickFilter !== 'all'
-  const diagnostics = [
-    ...snapshot.platform.notes,
-    ...(outputSnapshot.reason ? [`Output devices: ${outputSnapshot.reason}`] : []),
-  ]
-
-  async function updateSnapshot(task: Promise<MixerSnapshot>, appId?: string) {
+  async function updateSnapshot(task: Promise<MixerSnapshot>, appId?: string): Promise<boolean> {
     if (appId) {
-      setBusyAppId(appId)
+      setAppBusy(appId, true)
     }
 
     setError(null)
@@ -634,11 +802,13 @@ export default function App() {
     try {
       const nextSnapshot = await task
       setSnapshot(nextSnapshot)
+      return true
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Mixer action failed')
+      return false
     } finally {
       if (appId) {
-        setBusyAppId(null)
+        setAppBusy(appId, false)
       }
     }
   }
@@ -649,30 +819,84 @@ export default function App() {
     )
   }
 
+  async function commitVolumeChange(appId: string, volume: number) {
+    const completed = await updateSnapshot(setAppVolume(appId, volume), appId)
+
+    setVolumeDrafts((current) => {
+      if (current[appId] !== volume) {
+        return current
+      }
+
+      return omitRecordKey(current, appId)
+    })
+
+    if (!completed) {
+      clearVolumeCommit(appId)
+    }
+  }
+
   function handleVolumeChange(appId: string, volume: number) {
-    void updateSnapshot(setAppVolume(appId, volume), appId)
+    setVolumeDrafts((current) => ({
+      ...current,
+      [appId]: volume,
+    }))
+
+    clearVolumeCommit(appId)
+    volumeCommitTimersRef.current[appId] = window.setTimeout(() => {
+      delete volumeCommitTimersRef.current[appId]
+      void commitVolumeChange(appId, volume)
+    }, 160)
   }
 
   function handleMute(appId: string) {
+    clearVolumeCommit(appId)
+    setVolumeDrafts((current) => omitRecordKey(current, appId))
     void updateSnapshot(toggleAppMute(appId), appId)
   }
 
-  async function handleRefresh() {
-    setRefreshing(true)
-    await updateSnapshot(refreshSessions())
-
-    try {
-      const nextOutputSnapshot = await getOutputDevices()
-      setOutputSnapshot(nextOutputSnapshot)
-    } catch (cause) {
-      setOutputSnapshot({
-        supported: false,
-        reason: cause instanceof Error ? cause.message : 'Unable to refresh output devices',
-        currentDeviceId: null,
-        devices: [],
-      })
+  async function handleRefresh(options: { includeOutput?: boolean; silent?: boolean } = {}) {
+    if (refreshingRef.current) {
+      return
     }
 
+    refreshingRef.current = true
+    if (!options.silent) {
+      setRefreshing(true)
+    }
+
+    setError(null)
+
+    const snapshotResult = await refreshSessions()
+      .then((value) => ({ status: 'fulfilled' as const, value }))
+      .catch((reason) => ({ status: 'rejected' as const, reason }))
+
+    let outputResult:
+      | { status: 'fulfilled'; value: AudioOutputSnapshot }
+      | { status: 'rejected'; reason: unknown }
+      | null = null
+
+    if (options.includeOutput !== false) {
+      outputResult = await getOutputDevices()
+        .then((value) => ({ status: 'fulfilled' as const, value }))
+        .catch((reason) => ({ status: 'rejected' as const, reason }))
+    }
+
+    if (snapshotResult.status === 'fulfilled') {
+      setSnapshot(snapshotResult.value)
+    } else {
+      setError(snapshotResult.reason instanceof Error ? snapshotResult.reason.message : 'Unable to refresh mixer sessions')
+    }
+
+    if (outputResult?.status === 'fulfilled') {
+      setOutputSnapshot(outputResult.value)
+    } else if (outputResult?.status === 'rejected') {
+      setOutputSnapshot((current) => ({
+        ...current,
+        reason: outputResult.reason instanceof Error ? outputResult.reason.message : 'Unable to refresh output devices',
+      }))
+    }
+
+    refreshingRef.current = false
     setRefreshing(false)
   }
 
@@ -756,7 +980,7 @@ export default function App() {
 
   function handleClearDiscoveryFilters() {
     setQuery('')
-    setQuickFilter('all')
+    setShowHiddenApps(false)
     searchRef.current?.focus()
   }
 
@@ -775,6 +999,9 @@ export default function App() {
           onComplete={() => void handleCompleteOnboarding()}
           onClose={handleCloseOnboarding}
           completed={onboardingComplete}
+          panelRef={(element) => {
+            onboardingPanelRef.current = element
+          }}
         />
       ) : null}
 
@@ -786,8 +1013,9 @@ export default function App() {
               <div>
                 <h1>Waves</h1>
                 <p>
-                  {loading ? 'Checking live apps…' : `${shownCount} live app${shownCount === 1 ? '' : 's'}`}
-                  {quickFilter === 'pinned' ? ' · pinned only' : ''}
+                  {loading
+                    ? 'Listening for active audio…'
+                    : `${liveCount} live · ${pinnedCount} pinned${hiddenCount > 0 ? ` · ${hiddenCount} hidden idle` : ''}`}
                 </p>
               </div>
             </div>
@@ -806,71 +1034,94 @@ export default function App() {
           <div className="control-deck__row control-deck__row--primary">
             <div className="search-box">
               <input
+                id="session-search"
                 ref={searchRef}
                 type="search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search live apps"
+                placeholder="Search active or pinned apps"
+                aria-label="Search audio sessions"
+                name="query"
+                autoComplete="off"
+                spellCheck={false}
               />
             </div>
 
             <div className="command-bar__actions">
-              {!onboardingComplete ? (
+              {snapshotTime ? <span className="command-bar__status">Updated {snapshotTime}</span> : null}
+
+              {hiddenCount > 0 && !hasQuery ? (
+                <button type="button" className="control-button" onClick={() => setShowHiddenApps((current) => !current)}>
+                  {showHiddenApps ? 'Hide idle' : `Show idle (${hiddenCount})`}
+                </button>
+              ) : null}
+
+              {!onboardingComplete && shellMode !== 'topbar' ? (
                 <button type="button" className="control-button" onClick={() => setOnboardingOpen(true)}>
                   Finish setup
                 </button>
               ) : null}
 
-              {hasFilters ? (
+              {hasQuery ? (
                 <button type="button" className="control-button" onClick={handleClearDiscoveryFilters}>
                   Clear filters
                 </button>
               ) : null}
 
-              <button type="button" className="refresh-button" onClick={() => void handleRefresh()}>
-                {refreshing ? 'Refreshing…' : 'Refresh sessions'}
-              </button>
+              {shellMode !== 'topbar' ? (
+                <button type="button" className="refresh-button" onClick={() => void handleRefresh()}>
+                  {refreshing ? 'Refreshing…' : 'Refresh sessions'}
+                </button>
+              ) : null}
             </div>
           </div>
 
           <div className="control-deck__row control-deck__row--secondary">
-            <QuickFilters
-              activeFilter={quickFilter}
-              shownCount={totalCount}
-              pinnedCount={pinnedCount}
-              onSelect={setQuickFilter}
-            />
+            <p className="control-deck__hint">Live audio appears immediately. Pinned apps stay close when quiet.</p>
           </div>
         </section>
 
-        {diagnostics.length > 0 ? (
-          <section className="panel notes-panel">
+        {shouldShowDiagnostics && diagnostics.length > 0 ? (
+          <section className="panel notes-panel" role="status" aria-live="polite">
             {diagnostics.map((note) => (
               <p key={note}>{note}</p>
             ))}
           </section>
         ) : null}
 
-        {error ? <section className="panel error-panel">{error}</section> : null}
+        {error ? (
+          <section className="panel error-panel" role="alert" aria-live="assertive">
+            {error}
+          </section>
+        ) : null}
 
-        {!loading && apps.length === 0 ? (
-          <section className="panel empty-panel">
-            <p className="eyebrow">{hasFilters ? 'No matches' : snapshot.platform.discoveryReady ? 'No sessions found' : 'Discovery unavailable'}</p>
+        {!loading && shownCount === 0 ? (
+          <section className="panel empty-panel" aria-live="polite">
+            <p className="eyebrow">{hasQuery ? 'No matches' : snapshot.platform.discoveryReady ? 'No live audio yet' : 'Discovery unavailable'}</p>
             <h2>
-              {hasFilters
+              {hasQuery
                 ? 'Nothing matches your current focus.'
                 : snapshot.platform.discoveryReady
-                  ? 'Nothing is playing right now.'
+                  ? hiddenCount > 0
+                    ? 'Nothing is actively playing right now.'
+                    : 'Nothing is producing audio right now.'
                   : 'Waves could not read live macOS sessions.'}
             </h2>
             <p>
-              {hasFilters
-                ? 'Clear the search or switch filters to widen the mixer view again.'
+              {hasQuery
+                ? 'Clear the search to widen the mixer view again.'
                 : snapshot.platform.discoveryReady
-                  ? 'Launch audio apps and refresh. If something is already playing, check the diagnostics above.'
+                  ? hiddenCount > 0
+                    ? 'You can reveal detected idle apps below, or start playback to bring sessions into the live surface instantly.'
+                    : 'Launch audio apps and start playback. Waves will surface them as soon as macOS exposes the session.'
                   : 'Check the diagnostics above, then refresh after reopening the apps that should be audible.'}
             </p>
-            {hasFilters ? (
+            {hiddenCount > 0 && !showHiddenApps && !hasQuery ? (
+              <button type="button" className="refresh-button empty-panel__action" onClick={() => setShowHiddenApps(true)}>
+                Show detected idle apps
+              </button>
+            ) : null}
+            {hasQuery ? (
               <button type="button" className="refresh-button empty-panel__action" onClick={handleClearDiscoveryFilters}>
                 Reset view
               </button>
@@ -879,18 +1130,30 @@ export default function App() {
         ) : null}
 
         <AppSection
-          title="Pinned"
-          apps={pinnedApps}
-          busyAppId={busyAppId}
+          title="Live Now"
+          eyebrow="Immediate control"
+          apps={liveApps}
+          busyAppIds={busyAppIds}
           onPin={handlePin}
           onMute={handleMute}
           onVolumeChange={handleVolumeChange}
         />
 
         <AppSection
-          title="All sessions"
-          apps={activeApps}
-          busyAppId={busyAppId}
+          title="Pinned"
+          eyebrow="Quiet but close"
+          apps={pinnedApps}
+          busyAppIds={busyAppIds}
+          onPin={handlePin}
+          onMute={handleMute}
+          onVolumeChange={handleVolumeChange}
+        />
+
+        <AppSection
+          title={hasQuery ? 'Detected Matches' : 'Other Detected'}
+          eyebrow={hasQuery ? 'Search results' : 'Hidden by default'}
+          apps={hiddenApps}
+          busyAppIds={busyAppIds}
           onPin={handlePin}
           onMute={handleMute}
           onVolumeChange={handleVolumeChange}

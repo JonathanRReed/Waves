@@ -1,14 +1,14 @@
 mod backend;
 mod models;
 
-use std::sync::Mutex;
+use std::{fs, path::PathBuf, sync::Mutex};
 
 use backend::{create_backend, MixerBackend};
 use models::{AudioOutputSnapshot, MixerSnapshot};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, LogicalSize, Manager, RunEvent, Size, State, WebviewWindow,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Position, RunEvent, Size, State, WebviewWindow,
 };
 
 struct WavesState {
@@ -19,6 +19,8 @@ struct WavesState {
 struct TrayState {
     _tray: Mutex<Option<TrayIcon>>,
 }
+
+const SHELL_MODE_FILENAME: &str = "shell-mode.txt";
 
 fn normalize_shell_mode(mode: String) -> String {
     if mode == "topbar" {
@@ -39,12 +41,33 @@ fn focus_window(window: &WebviewWindow) -> Result<(), String> {
     window.set_focus().map_err(|cause| cause.to_string())
 }
 
+fn position_topbar_window(window: &WebviewWindow) -> Result<(), String> {
+    let Some(monitor) = window.current_monitor().map_err(|cause| cause.to_string())? else {
+        return Ok(());
+    };
+
+    let scale_factor = monitor.scale_factor();
+    let monitor_size = monitor.size().to_logical::<f64>(scale_factor);
+    let monitor_position = monitor.position().to_logical::<f64>(scale_factor);
+    let width = 640.0;
+    let x = monitor_position.x + ((monitor_size.width - width) / 2.0).max(0.0);
+    let y = monitor_position.y + 16.0;
+
+    window
+        .set_position(Position::Logical(LogicalPosition::new(x, y)))
+        .map_err(|cause| cause.to_string())
+}
+
 fn apply_shell_mode_to_window(window: &WebviewWindow, mode: &str) -> Result<(), String> {
     match mode {
         "topbar" => {
             window
+                .set_min_size(Some(Size::Logical(LogicalSize::new(520.0, 560.0))))
+                .map_err(|cause| cause.to_string())?;
+            window
                 .set_size(Size::Logical(LogicalSize::new(640.0, 620.0)))
                 .map_err(|cause| cause.to_string())?;
+            position_topbar_window(window)?;
             window
                 .set_always_on_top(true)
                 .map_err(|cause| cause.to_string())?;
@@ -53,6 +76,9 @@ fn apply_shell_mode_to_window(window: &WebviewWindow, mode: &str) -> Result<(), 
                 .map_err(|cause| cause.to_string())?;
         }
         _ => {
+            window
+                .set_min_size(Some(Size::Logical(LogicalSize::new(980.0, 720.0))))
+                .map_err(|cause| cause.to_string())?;
             window
                 .set_size(Size::Logical(LogicalSize::new(1180.0, 860.0)))
                 .map_err(|cause| cause.to_string())?;
@@ -66,6 +92,28 @@ fn apply_shell_mode_to_window(window: &WebviewWindow, mode: &str) -> Result<(), 
     focus_window(window)
 }
 
+fn shell_mode_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app.path().app_config_dir().map_err(|cause| cause.to_string())?;
+    fs::create_dir_all(&config_dir).map_err(|cause| cause.to_string())?;
+    Ok(config_dir.join(SHELL_MODE_FILENAME))
+}
+
+fn read_persisted_shell_mode(app: &AppHandle) -> String {
+    let Ok(path) = shell_mode_path(app) else {
+        return "desktop".to_string();
+    };
+
+    match fs::read_to_string(path) {
+        Ok(contents) => normalize_shell_mode(contents.trim().to_string()),
+        Err(_) => "desktop".to_string(),
+    }
+}
+
+fn persist_shell_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
+    let path = shell_mode_path(app)?;
+    fs::write(path, mode).map_err(|cause| cause.to_string())
+}
+
 fn set_shell_mode_internal(app: &AppHandle, mode: String) -> Result<String, String> {
     let normalized = normalize_shell_mode(mode);
     let window = main_window(app)?;
@@ -77,6 +125,7 @@ fn set_shell_mode_internal(app: &AppHandle, mode: String) -> Result<String, Stri
         .lock()
         .map_err(|_| "Shell mode state is unavailable".to_string())?;
     *shell_mode = normalized.clone();
+    persist_shell_mode(app, &normalized)?;
 
     Ok(normalized)
 }
@@ -245,6 +294,15 @@ fn set_shell_mode(
 }
 
 #[tauri::command]
+fn get_shell_mode(state: State<'_, WavesState>) -> Result<String, String> {
+    state
+        .shell_mode
+        .lock()
+        .map_err(|_| "Shell mode state is unavailable".to_string())
+        .map(|mode| mode.clone())
+}
+
+#[tauri::command]
 fn hide_main_window(app: AppHandle) -> Result<(), String> {
     hide_main_window_internal(&app)
 }
@@ -256,17 +314,40 @@ fn show_main_window(app: AppHandle) -> Result<(), String> {
 
 pub fn run() {
     let app = tauri::Builder::default()
-        .setup(|app| {
-            let app_handle = app.handle().clone();
-            let tray = build_tray(&app_handle).map_err(|cause| -> Box<dyn std::error::Error> { Box::new(cause) })?;
-            app.manage(TrayState {
-                _tray: Mutex::new(Some(tray)),
-            });
-            Ok(())
-        })
         .manage(WavesState {
             backend: Mutex::new(create_backend()),
             shell_mode: Mutex::new("desktop".to_string()),
+        })
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            let initial_shell_mode = read_persisted_shell_mode(&app_handle);
+            {
+                let state = app.state::<WavesState>();
+                let mut shell_mode = state
+                    .shell_mode
+                    .lock()
+                    .map_err(|_| -> Box<dyn std::error::Error> {
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "Shell mode state is unavailable",
+                        ))
+                    })?;
+                *shell_mode = initial_shell_mode.clone();
+            }
+            set_shell_mode_internal(&app_handle, initial_shell_mode)
+                .map_err(|cause| -> Box<dyn std::error::Error> {
+                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, cause))
+                })?;
+            app.manage(TrayState {
+                _tray: Mutex::new(match build_tray(&app_handle) {
+                    Ok(tray) => Some(tray),
+                    Err(cause) => {
+                        eprintln!("Failed to initialize Waves tray icon: {cause}");
+                        None
+                    }
+                }),
+            });
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_mixer_snapshot,
@@ -276,6 +357,7 @@ pub fn run() {
             get_output_devices,
             set_output_device,
             set_shell_mode,
+            get_shell_mode,
             hide_main_window,
             show_main_window
         ])
