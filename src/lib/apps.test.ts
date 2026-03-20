@@ -150,4 +150,15 @@ describe('app helpers', () => {
       ),
     ).toEqual(false)
   })
+
+  test('keeps pid-backed sessions when the display name is still meaningful', () => {
+    expect(
+      hasValidSessionIdentity(
+        createApp({
+          displayName: 'Helium',
+          processName: 'pid-1044',
+        }),
+      ),
+    ).toEqual(true)
+  })
 })

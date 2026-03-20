@@ -141,43 +141,6 @@ input[type='range']:disabled {
   backdrop-filter: blur(20px);
 }
 
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(300px, 0.9fr);
-  align-items: center;
-  gap: 18px;
-  padding: 22px 24px;
-  border-radius: 28px;
-  overflow: hidden;
-}
-
-.hero::after {
-  content: '';
-  position: absolute;
-  inset: auto -15% -52% 24%;
-  height: 160px;
-  background: radial-gradient(circle, rgba(108, 226, 222, 0.12), transparent 72%);
-  pointer-events: none;
-}
-
-.hero__main {
-  display: flex;
-  align-items: center;
-}
-
-.hero__brand {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.hero__title-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
 .hero__mark {
   display: grid;
   place-items: center;
@@ -194,29 +157,11 @@ input[type='range']:disabled {
   color: #ecfbfb;
 }
 
-.hero__brand h1,
 .panel__header h2,
 .empty-panel h2 {
   margin: 0;
   font-size: clamp(1.35rem, 1.7vw, 2rem);
   letter-spacing: 0.01em;
-}
-
-.hero__copy,
-.hero__backend {
-  margin: 8px 0 0;
-  color: var(--text-muted);
-}
-
-.hero__copy {
-  max-width: 680px;
-}
-
-.hero__backend {
-  font-family: "SF Mono", "Roboto Mono", "Cascadia Code", monospace;
-  font-size: 0.8rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 .eyebrow {
@@ -227,67 +172,14 @@ input[type='range']:disabled {
   font-size: 0.72rem;
 }
 
-.hero__meta {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.hero-stat,
-.summary-card {
-  padding: 14px 16px;
-  border-radius: 18px;
-  background: var(--panel-fill-strong);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.hero-stat span,
-.summary-card__copy,
 .notes-panel p,
 .empty-panel p {
   color: var(--text-muted);
 }
 
-.hero-stat span,
-.hero-stat strong,
-.summary-card__value,
 .slider-metrics,
 .panel__summary {
   font-family: "SF Mono", "Roboto Mono", "Cascadia Code", monospace;
-}
-
-.hero-stat strong {
-  display: block;
-  margin-top: 5px;
-  color: #f6f2e7;
-  font-size: 0.9rem;
-}
-
-.mode-pill--ready {
-  background: rgba(108, 226, 222, 0.16);
-  color: #b6fbf7;
-}
-
-.top-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 18px;
-}
-
-.summary-card {
-  min-height: 168px;
-  border-radius: 24px;
-}
-
-.summary-card__value {
-  margin-top: 18px;
-  font-size: clamp(2rem, 3vw, 3rem);
-  color: #f7f3ea;
-}
-
-.summary-card__value--ready {
-  color: var(--accent);
 }
 
 .mode-pill {
@@ -313,7 +205,7 @@ input[type='range']:disabled {
 .empty-panel,
 .control-deck,
 .session-panel,
-.panel:not(.hero):not(.summary-card) {
+.panel {
   border-radius: 26px;
 }
 
@@ -381,46 +273,6 @@ input[type='range']:disabled {
 .command-bar__brand p {
   margin: 4px 0 0;
   color: var(--text-muted);
-}
-
-.focus-bar {
-  display: grid;
-  justify-content: space-between;
-  gap: 18px;
-  flex: 1;
-  min-width: 0;
-  padding: 16px 18px;
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.focus-bar__group {
-  display: grid;
-  gap: 10px;
-}
-
-.focus-bar__group--meta {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  justify-items: stretch;
-}
-
-.focus-stat {
-  display: grid;
-  gap: 6px;
-  padding: 12px 13px;
-  min-width: 0;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.focus-stat span {
-  color: var(--text-muted);
-}
-
-.focus-stat strong {
-  font-family: "SF Mono", "Roboto Mono", "Cascadia Code", monospace;
 }
 
 .utility-bar {
@@ -966,20 +818,13 @@ input[type='range']:disabled {
     padding-top: 18px;
   }
 
-  .hero,
   .onboarding-panel__header,
   .onboarding-card__meta {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .hero__meta,
-  .focus-bar__group--meta,
   .onboarding-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .hero {
     grid-template-columns: 1fr;
   }
 
@@ -996,17 +841,8 @@ input[type='range']:disabled {
     min-width: 0;
   }
 
-  .utility-bar,
-  .focus-bar {
+  .utility-bar {
     min-width: 0;
-  }
-
-  .utility-bar__group--controls {
-    justify-items: stretch;
-  }
-
-  .focus-bar__group--meta {
-    justify-items: stretch;
   }
 
   .mode-switch {
