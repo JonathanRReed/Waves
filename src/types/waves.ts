@@ -6,7 +6,7 @@ export type PlatformSupport = {
   notes: string[]
 }
 
-export type ShellMode = 'desktop' | 'topbar'
+export type ShellMode = 'desktop'
 
 export type SessionSupport = {
   controllable: boolean

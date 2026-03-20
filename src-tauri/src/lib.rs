@@ -290,6 +290,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
 
     #[cfg(target_os = "macos")]
     {
+        if let Some(icon) = app.default_window_icon().cloned() {
+            builder = builder.icon(icon).icon_as_template(true);
+        }
         builder = builder.title("Waves");
     }
 

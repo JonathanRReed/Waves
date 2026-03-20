@@ -47,7 +47,7 @@ export function saveShellMode(mode: ShellMode): void {
     return
   }
 
-  window.localStorage.setItem(SHELL_MODE_KEY, mode === 'topbar' ? 'desktop' : mode)
+  window.localStorage.setItem(SHELL_MODE_KEY, mode)
 }
 
 export function loadOnboardingComplete(): boolean {

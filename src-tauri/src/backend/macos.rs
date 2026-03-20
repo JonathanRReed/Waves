@@ -49,6 +49,7 @@ const SIGNAL_HOLD_MS: u64 = 1_800;
 const PEAK_DECAY_MS: u64 = 900;
 const IDLE_PEAK_FLOOR: f32 = 0.04;
 const LIVE_PEAK_FLOOR: f32 = 0.08;
+const K_AUDIO_PROCESS_PROPERTY_BUNDLE_ID: AudioObjectPropertySelector = 1_885_497_700;
 const MACOS_READ_ONLY_REASON: &str =
     "Live metering is enabled, but per-app attenuation is temporarily disabled on macOS to avoid interrupting system audio output.";
 
@@ -575,6 +576,17 @@ pub(super) fn resolve_running_application_identity(
     Some((raw_display_name, raw_bundle_id, running_application.activationPolicy()))
 }
 
+fn read_process_bundle_id(process_object: AudioObjectID) -> Option<String> {
+    read_string_property(
+        process_object,
+        K_AUDIO_PROCESS_PROPERTY_BUNDLE_ID,
+        kAudioObjectPropertyScopeGlobal,
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
 fn resolved_running_application_for_pid(
     pid: i32,
     running_apps: &HashMap<i32, Retained<NSRunningApplication>>,
@@ -633,8 +645,30 @@ fn build_session(
 
     let audible = read_bool(process_object, kAudioHardwarePropertyProcessIsAudible).unwrap_or(false);
     let running_output = read_bool(process_object, kAudioProcessPropertyIsRunningOutput).unwrap_or(false);
-    let (raw_display_name, raw_bundle_id, activation_policy) =
-        resolve_running_application_identity(pid, running_apps)?;
+    let process_bundle_id = read_process_bundle_id(process_object);
+    let running_application_identity = resolve_running_application_identity(pid, running_apps);
+    let direct_process_name = read_string_property(
+        process_object,
+        kAudioObjectPropertyName,
+        kAudioObjectPropertyScopeGlobal,
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty());
+    let raw_bundle_id = running_application_identity
+        .as_ref()
+        .map(|(_, bundle_id, _)| bundle_id.clone())
+        .or_else(|| process_bundle_id.clone())
+        .unwrap_or_else(|| format!("pid-{pid}"));
+    let raw_display_name = running_application_identity
+        .as_ref()
+        .map(|(display_name, _, _)| display_name.clone())
+        .or_else(|| process_bundle_id.as_ref().map(|bundle_id| friendly_app_name_from_bundle_id(bundle_id)))
+        .or(direct_process_name)
+        .unwrap_or_else(|| format!("Process {pid}"));
+    let activation_policy = running_application_identity
+        .as_ref()
+        .map(|(_, _, activation_policy)| *activation_policy);
 
     let (display_name, bundle_id, derived_from_helper) = resolve_session_identity(&raw_display_name, &raw_bundle_id);
     let browser_like = is_browser_like_app(&display_name, Some(bundle_id.as_str()));
@@ -643,7 +677,7 @@ fn build_session(
         derived_from_helper || raw_display_name.to_lowercase().contains("web content")
             || browser_like
             || is_special_audio_process(&display_name, &bundle_id);
-    if activation_policy == NSApplicationActivationPolicy::Prohibited && !allow_prohibited_process {
+    if matches!(activation_policy, Some(NSApplicationActivationPolicy::Prohibited)) && !allow_prohibited_process {
         return None;
     }
 
