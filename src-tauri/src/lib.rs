@@ -325,6 +325,23 @@ fn apple_script_quote(value: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
+fn install_restart_script(source: &str) -> String {
+    format!(
+        "mkdir -p /Library/Audio/Plug-Ins/HAL && \
+rm -rf /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && \
+cp -R {source} /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && \
+chown -R root:wheel /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && \
+(launchctl kickstart -k system/com.apple.audio.coreaudiod >/dev/null 2>&1 || \
+launchctl kill SIGTERM system/com.apple.audio.coreaudiod >/dev/null 2>&1 || \
+launchctl kill TERM system/com.apple.audio.coreaudiod >/dev/null 2>&1 || \
+launchctl kill 15 system/com.apple.audio.coreaudiod >/dev/null 2>&1 || \
+launchctl kill -15 system/com.apple.audio.coreaudiod >/dev/null 2>&1 || \
+killall coreaudiod >/dev/null 2>&1)",
+        source = shell_quote(source),
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn resolve_macos_driver_bundle(app: &AppHandle) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
 
@@ -359,8 +376,35 @@ fn rebuild_backend_snapshot(app: &AppHandle, state: &WavesState) -> Result<Mixer
     Ok(snapshot)
 }
 
+#[cfg(target_os = "macos")]
+fn try_promote_virtual_backend(state: &WavesState) -> Result<bool, String> {
+    let mut backend = state
+        .backend
+        .lock()
+        .map_err(|_| "Mixer backend is unavailable".to_string())?;
+    let current_snapshot = backend.snapshot();
+    if !current_snapshot.platform.native_backend.contains("process-discovery") {
+        return Ok(false);
+    }
+
+    if let Some(candidate) = backend::macos::try_virtual_backend() {
+        let candidate_snapshot = candidate.snapshot();
+        let ready = candidate_snapshot.platform.native_backend.contains("virtual-device")
+            && candidate_snapshot.platform.native_control_ready
+            && candidate_snapshot.platform.discovery_ready;
+        if ready {
+            *backend = candidate;
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 #[tauri::command]
 fn get_mixer_snapshot(state: State<'_, WavesState>) -> Result<MixerSnapshot, String> {
+    #[cfg(target_os = "macos")]
+    let _ = try_promote_virtual_backend(state.inner())?;
     let backend = state
         .backend
         .lock()
@@ -377,6 +421,8 @@ fn get_mixer_snapshot(state: State<'_, WavesState>) -> Result<MixerSnapshot, Str
 
 #[tauri::command]
 fn refresh_sessions(state: State<'_, WavesState>) -> Result<MixerSnapshot, String> {
+    #[cfg(target_os = "macos")]
+    let _ = try_promote_virtual_backend(state.inner())?;
     let mut backend = state
         .backend
         .lock()
@@ -417,6 +463,8 @@ fn toggle_app_mute(app_id: String, state: State<'_, WavesState>) -> Result<Mixer
 
 #[tauri::command]
 fn get_output_devices(state: State<'_, WavesState>) -> Result<AudioOutputSnapshot, String> {
+    #[cfg(target_os = "macos")]
+    let _ = try_promote_virtual_backend(state.inner())?;
     let backend = state
         .backend
         .lock()
@@ -430,6 +478,8 @@ fn set_output_device(
     device_id: String,
     state: State<'_, WavesState>,
 ) -> Result<AudioOutputSnapshot, String> {
+    #[cfg(target_os = "macos")]
+    let _ = try_promote_virtual_backend(state.inner())?;
     let mut backend = state
         .backend
         .lock()
@@ -445,11 +495,7 @@ fn install_macos_driver(app: AppHandle, state: State<'_, WavesState>) -> Result<
     let driver_bundle_str = driver_bundle
         .to_str()
         .ok_or_else(|| "The Waves macOS driver path contains unsupported characters.".to_string())?;
-
-    let install_script = format!(
-        "mkdir -p /Library/Audio/Plug-Ins/HAL && rm -rf /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && cp -R {source} /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && chown -R root:wheel /Library/Audio/Plug-Ins/HAL/WavesAudio.driver && killall coreaudiod",
-        source = shell_quote(driver_bundle_str),
-    );
+    let install_script = install_restart_script(driver_bundle_str);
     let apple_script = format!(
         "do shell script {} with administrator privileges",
         apple_script_quote(&install_script)
@@ -468,8 +514,20 @@ fn install_macos_driver(app: AppHandle, state: State<'_, WavesState>) -> Result<
         ));
     }
 
-    thread::sleep(Duration::from_millis(1800));
-    rebuild_backend_snapshot(&app, state.inner())
+    let mut last_snapshot = None;
+    for _ in 0..12 {
+        thread::sleep(Duration::from_millis(1000));
+        let snapshot = rebuild_backend_snapshot(&app, state.inner())?;
+        let ready = snapshot.platform.native_backend.contains("virtual-device") && snapshot.platform.native_control_ready;
+        last_snapshot = Some(snapshot.clone());
+        if ready {
+            return Ok(snapshot);
+        }
+    }
+
+    Err(last_snapshot
+        .and_then(|snapshot| snapshot.platform.notes.into_iter().find(|note| note.to_lowercase().contains("virtual-device engine is unavailable") || note.to_lowercase().contains("lost contact")))
+        .unwrap_or_else(|| "Waves installed the macOS driver, but the virtual audio engine never came online after restarting coreaudiod.".to_string()))
 }
 
 #[cfg(not(target_os = "macos"))]

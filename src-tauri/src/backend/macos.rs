@@ -50,20 +50,57 @@ const PEAK_DECAY_MS: u64 = 900;
 const IDLE_PEAK_FLOOR: f32 = 0.04;
 const LIVE_PEAK_FLOOR: f32 = 0.08;
 const K_AUDIO_PROCESS_PROPERTY_BUNDLE_ID: AudioObjectPropertySelector = 1_885_497_700;
+const PROC_PIDT_BSDINFO: i32 = 3;
+const WAVES_APP_BUNDLE_ID: &str = "com.jonathanreed.waves";
 const MACOS_READ_ONLY_REASON: &str =
     "Live metering is enabled, but per-app attenuation is temporarily disabled on macOS to avoid interrupting system audio output.";
+
+#[repr(C)]
+struct ProcBsdInfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    rfu_1: u32,
+    pbi_comm: [u8; 17],
+    pbi_name: [u8; 34],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+
+unsafe extern "C" {
+    fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut c_void, buffersize: i32) -> i32;
+}
 
 pub fn create_backend() -> Box<dyn MixerBackend> {
     match virtual_device::build_virtual_backend() {
         Ok(backend) => Box::new(backend),
         Err(reason) => {
             let mut backend = build_backend();
-            backend.snapshot.platform.notes.push(
-                format!("Waves virtual-device engine is unavailable, so macOS is using safe meter-only fallback: {reason}"),
-            );
+            backend.virtual_device_unavailable_reason = Some(reason);
+            backend.append_runtime_notes();
             Box::new(backend)
         }
     }
+}
+
+pub fn try_virtual_backend() -> Option<Box<dyn MixerBackend>> {
+    virtual_device::build_virtual_backend()
+        .ok()
+        .map(|backend| Box::new(backend) as Box<dyn MixerBackend>)
 }
 
 pub fn build_backend() -> MacosMixerBackend {
@@ -73,14 +110,12 @@ pub fn build_backend() -> MacosMixerBackend {
         snapshot,
         process_objects,
         tap_sessions: HashMap::new(),
+        virtual_device_unavailable_reason: None,
     };
     let tap_sync_notes = backend.sync_live_taps();
     backend.apply_tap_overrides();
-    backend
-        .snapshot
-        .platform
-        .notes
-        .extend(tap_sync_notes.into_iter().take(3));
+    backend.snapshot.platform.notes.extend(tap_sync_notes.into_iter().take(3));
+    backend.append_runtime_notes();
     backend
 }
 
@@ -88,6 +123,7 @@ pub struct MacosMixerBackend {
     snapshot: MixerSnapshot,
     process_objects: HashMap<String, Vec<AudioObjectID>>,
     tap_sessions: HashMap<String, Vec<MacosTapSession>>,
+    virtual_device_unavailable_reason: Option<String>,
 }
 
 struct MacosTapSession {
@@ -211,6 +247,16 @@ impl MacosTapSession {
 }
 
 impl MacosMixerBackend {
+    fn append_runtime_notes(&mut self) {
+        if let Some(reason) = self.virtual_device_unavailable_reason.as_deref() {
+            let note =
+                format!("Waves virtual-device engine is unavailable, so macOS is using safe meter-only fallback: {reason}");
+            if !self.snapshot.platform.notes.iter().any(|entry| entry == &note) {
+                self.snapshot.platform.notes.push(note);
+            }
+        }
+    }
+
     fn ensure_tap_session(&mut self, app_id: &str, gain: f32) -> Result<(), String> {
         if self.tap_sessions.contains_key(app_id) {
             return Ok(());
@@ -221,10 +267,21 @@ impl MacosMixerBackend {
             .get(app_id)
             .cloned()
             .ok_or_else(|| format!("The macOS audio session for {app_id} is no longer available."))?;
-        let sessions = process_objects
-            .into_iter()
-            .map(|process_object| create_tap_session(app_id, process_object, gain))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut sessions = Vec::new();
+        let mut errors = Vec::new();
+        for process_object in process_objects {
+            match create_tap_session(app_id, process_object, gain) {
+                Ok(session) => sessions.push(session),
+                Err(reason) => errors.push(reason),
+            }
+        }
+
+        if sessions.is_empty() {
+            return Err(errors.into_iter().next().unwrap_or_else(|| {
+                format!("Waves could not attach a live meter to any process objects for {app_id}.")
+            }));
+        }
+
         self.tap_sessions.insert(app_id.to_string(), sessions);
         Ok(())
     }
@@ -339,6 +396,7 @@ impl MixerBackend for MacosMixerBackend {
         let tap_sync_notes = self.sync_live_taps();
         self.apply_tap_overrides();
         self.snapshot.platform.notes.extend(tap_sync_notes.into_iter().take(3));
+        self.append_runtime_notes();
         self.snapshot.clone()
     }
 
@@ -606,6 +664,24 @@ fn resolved_running_application_for_pid(
         }
     }
 
+    let mut current_pid = pid;
+    let mut visited = std::collections::HashSet::new();
+    while current_pid > 1 && visited.insert(current_pid) {
+        if let Some(application) = running_apps.get(&current_pid).cloned() {
+            if is_real_app_bundle(&application) {
+                return Some(application);
+            }
+        }
+
+        let Some(parent_pid) = parent_pid_for(current_pid) else {
+            break;
+        };
+        if parent_pid <= 1 || parent_pid == current_pid {
+            break;
+        }
+        current_pid = parent_pid;
+    }
+
     direct_application
 }
 
@@ -623,6 +699,26 @@ fn responsible_pid_for(pid: i32) -> Option<i32> {
     (responsible_pid > 0 && responsible_pid != pid as pid_t).then_some(responsible_pid as i32)
 }
 
+fn parent_pid_for(pid: i32) -> Option<i32> {
+    let mut info = MaybeUninit::<ProcBsdInfo>::zeroed();
+    let expected_size = std::mem::size_of::<ProcBsdInfo>() as i32;
+    let bytes_written = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDT_BSDINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            expected_size,
+        )
+    };
+    if bytes_written != expected_size {
+        return None;
+    }
+
+    let info = unsafe { info.assume_init() };
+    (info.pbi_ppid > 0).then_some(info.pbi_ppid as i32)
+}
+
 fn is_real_app_bundle(application: &NSRunningApplication) -> bool {
     application
         .bundleURL()
@@ -637,6 +733,9 @@ fn build_session(
 ) -> Option<AppAudioSession> {
     let pid = read_value::<i32>(process_object, kAudioProcessPropertyPID).ok()?;
     if pid <= 0 {
+        return None;
+    }
+    if pid == std::process::id() as i32 {
         return None;
     }
     if !read_bool(process_object, kAudioProcessPropertyIsRunning).unwrap_or(true) {
@@ -669,8 +768,14 @@ fn build_session(
     let activation_policy = running_application_identity
         .as_ref()
         .map(|(_, _, activation_policy)| *activation_policy);
+    if raw_bundle_id == WAVES_APP_BUNDLE_ID {
+        return None;
+    }
 
     let (display_name, bundle_id, derived_from_helper) = resolve_session_identity(&raw_display_name, &raw_bundle_id);
+    if bundle_id == WAVES_APP_BUNDLE_ID {
+        return None;
+    }
     let browser_like = is_browser_like_app(&display_name, Some(bundle_id.as_str()));
     let active = audible || running_output;
     let allow_prohibited_process =
