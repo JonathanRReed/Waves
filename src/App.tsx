@@ -771,10 +771,11 @@ export default function App() {
   const diagnostics = [...snapshot.platform.notes, ...(outputSnapshot.reason ? [`Output devices: ${outputSnapshot.reason}`] : [])]
   const shouldShowDiagnostics = controlUnavailable || !snapshot.platform.discoveryReady || Boolean(outputSnapshot.reason)
   const usingVirtualDevice = snapshot.platform.nativeBackend.includes('virtual-device')
+  const virtualEngineUnavailable = diagnostics.some((note) => note.toLowerCase().includes('virtual-device engine is unavailable'))
   const canInstallDriver =
     snapshot.platform.platform === 'macos' &&
     snapshot.platform.nativeBackend.includes('process-discovery') &&
-    diagnostics.some((note) => note.toLowerCase().includes('virtual-device engine is unavailable'))
+    virtualEngineUnavailable
 
   function clearVolumeCommit(appId: string) {
     const handle = volumeCommitTimersRef.current[appId]
@@ -1054,7 +1055,9 @@ export default function App() {
                     ? 'Reading Core Audio sessions and routing state…'
                     : usingVirtualDevice
                       ? 'Virtual-device engine live. Per-app control is active.'
-                      : 'Discovery is live. macOS is still in meter-first fallback.'}
+                      : virtualEngineUnavailable
+                        ? 'The macOS audio engine is offline. Install or reload it to enable per-app control.'
+                        : 'Discovery is live. Waves is waiting for real macOS audio sessions.'}
                 </p>
               </div>
             </div>
@@ -1127,6 +1130,8 @@ export default function App() {
             <p className="control-deck__hint">
               {usingVirtualDevice
                 ? 'Per-app volume is running through the Waves virtual audio device. Open apps should stay visible as soon as macOS hands Waves a real session.'
+                : canInstallDriver
+                  ? 'Waves can already read session discovery, but true per-app control is waiting on the macOS audio engine. Install it below and Waves will switch over automatically.'
                 : controlUnavailable
                   ? 'macOS is currently running in safe meter-only mode. Waves will surface detected sessions, but read-only rows cannot attenuate audio yet.'
                   : 'Live audio appears immediately. Pinned apps stay close when quiet.'}
