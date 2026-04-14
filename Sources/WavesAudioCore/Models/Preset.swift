@@ -1,0 +1,35 @@
+import Foundation
+
+public struct Preset: Identifiable, Codable, Hashable, Sendable {
+  public var id: UUID
+  public var name: String
+  public var entries: [PresetEntry]
+  public var createdAt: Date
+  public var updatedAt: Date
+
+  public init(
+    id: UUID = UUID(),
+    name: String,
+    entries: [PresetEntry],
+    createdAt: Date = .now,
+    updatedAt: Date = .now
+  ) {
+    self.id = id
+    self.name = name
+    self.entries = entries
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+  }
+}
+
+public struct PresetEntry: Codable, Hashable, Sendable {
+  public var appID: String
+  public var desiredVolume: Float
+  public var isMuted: Bool
+
+  public init(appID: String, desiredVolume: Float, isMuted: Bool) {
+    self.appID = appID
+    self.desiredVolume = desiredVolume
+    self.isMuted = isMuted
+  }
+}
