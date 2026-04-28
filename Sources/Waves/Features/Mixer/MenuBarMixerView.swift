@@ -7,62 +7,79 @@ struct MenuBarMixerView: View {
   @Environment(\.openSettings) private var openSettings
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
-      HStack {
-        VStack(alignment: .leading, spacing: 2) {
-          Text("Waves")
-            .font(.headline)
-          Text(store.currentDeviceName)
-            .font(.caption)
-            .foregroundStyle(.secondary)
+    ZStack(alignment: .topTrailing) {
+      VStack(alignment: .leading, spacing: 14) {
+        HStack {
+          WavesBrandLogo(size: 16)
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Waves")
+              .font(.headline)
+            Text(store.currentDeviceName)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+          Spacer()
+          Button {
+            store.refresh()
+          } label: {
+            Image(systemName: "arrow.clockwise")
+          }
+          .buttonStyle(.borderless)
         }
-        Spacer()
-        Button {
-          store.refresh()
-        } label: {
-          Image(systemName: "arrow.clockwise")
+
+        if store.isLoading {
+          HStack(spacing: 8) {
+            ProgressView()
+              .controlSize(.small)
+            Text("Refreshing audio sessions")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
         }
-        .buttonStyle(.borderless)
+
+        PresetQuickPicker()
+
+        if !store.pinnedApps.isEmpty {
+          CompactSection(title: "Pinned", apps: store.pinnedApps)
+        }
+
+        CompactSection(title: "Frontmost", apps: store.activeApps)
+
+        if store.preferences.showRecentApps {
+          CompactSection(title: "Recent", apps: Array(store.recentApps.prefix(3)))
+        }
+
+        Divider()
+
+        HStack {
+          Button("Open Waves") {
+            openWindow(id: AppSceneID.mainWindow)
+          }
+          Button("Settings") {
+            openSettings()
+          }
+          Spacer()
+          Toggle(
+            isOn: Binding(
+              get: { store.launchAtLoginEnabled },
+              set: { store.launchAtLoginEnabled = $0 }
+            )
+          ) {
+            Text("Login")
+          }
+          .toggleStyle(.switch)
+          .labelsHidden()
+        }
       }
+      .padding(14)
 
-      PresetQuickPicker()
-
-      if !store.pinnedApps.isEmpty {
-        CompactSection(title: "Pinned", apps: store.pinnedApps)
-      }
-
-      CompactSection(title: "Frontmost", apps: store.activeApps)
-
-      if store.preferences.showRecentApps {
-        CompactSection(title: "Recent", apps: Array(store.recentApps.prefix(3)))
-      }
-
-      Divider()
-
-      HStack {
-        Button("Open Waves") {
-          openWindow(id: AppSceneID.mainWindow)
-        }
-        Button("Settings") {
-          openSettings()
-        }
-        Spacer()
-        Toggle(
-          isOn: Binding(
-            get: { store.launchAtLoginEnabled },
-            set: { store.launchAtLoginEnabled = $0 }
-          )
-        ) {
-          Text("Login")
-        }
-        .toggleStyle(.switch)
-        .labelsHidden()
-      }
+      AppToastStack()
+        .padding(.top, 10)
+        .padding(.trailing, 10)
+        .frame(maxWidth: 360)
     }
-    .padding(14)
     .task {
       store.start()
-      store.refresh()
     }
   }
 }

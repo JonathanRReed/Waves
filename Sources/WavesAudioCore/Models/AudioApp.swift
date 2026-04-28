@@ -11,7 +11,6 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public let category: AppCategory
 
   public var isActive: Bool
-  public var isAudible: Bool
   public var peakLevel: Float
   public var rmsLevel: Float
   public var desiredVolume: Float
@@ -20,7 +19,6 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public var isPinned: Bool
   public var routingState: RoutingState
   public var compatibility: CompatibilityState
-  public var lastSeenAt: Date
   public var notes: String?
 
   public init(
@@ -33,7 +31,6 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     iconTIFFData: Data? = nil,
     category: AppCategory,
     isActive: Bool = false,
-    isAudible: Bool = false,
     peakLevel: Float = 0,
     rmsLevel: Float = 0,
     desiredVolume: Float = 1,
@@ -42,7 +39,6 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     isPinned: Bool = false,
     routingState: RoutingState = .recent,
     compatibility: CompatibilityState = .planned,
-    lastSeenAt: Date = .now,
     notes: String? = nil
   ) {
     self.id = id
@@ -54,7 +50,6 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.iconTIFFData = iconTIFFData
     self.category = category
     self.isActive = isActive
-    self.isAudible = isAudible
     self.peakLevel = peakLevel
     self.rmsLevel = rmsLevel
     self.desiredVolume = desiredVolume
@@ -63,7 +58,6 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.isPinned = isPinned
     self.routingState = routingState
     self.compatibility = compatibility
-    self.lastSeenAt = lastSeenAt
     self.notes = notes
   }
 }

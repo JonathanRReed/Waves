@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
   name: "Waves",
   platforms: [
-    .macOS(.v14)
+    .macOS("14.2")
   ],
   products: [
     .executable(name: "Waves", targets: ["Waves"]),
@@ -20,7 +20,10 @@ let package = Package(
     .executableTarget(
       name: "Waves",
       dependencies: ["WavesAudioCore"],
-      path: "Sources/Waves"
+      path: "Sources/Waves",
+      resources: [
+        .process("Resources")
+      ]
     ),
     .target(
       name: "WavesAudioCore",
