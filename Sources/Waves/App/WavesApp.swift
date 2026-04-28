@@ -1,5 +1,4 @@
 import AppKit
-import ServiceManagement
 import SwiftUI
 import WavesAudioCore
 
@@ -10,6 +9,7 @@ struct WavesApp: App {
     backend: WorkspaceAudioControlBackend(),
     preferencesStore: PreferencesStore(),
     presetStore: PresetStore(),
+    sessionStore: SessionStore(),
     loginItemService: LoginItemService()
   )
   @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
@@ -44,8 +44,14 @@ struct WavesApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
+    applyLogoBranding()
     NSApp.setActivationPolicy(.regular)
     NSApp.activate(ignoringOtherApps: true)
+  }
+
+  private func applyLogoBranding() {
+    guard let logoImage = WavesBrandAssets.logoImage else { return }
+    NSApp.applicationIconImage = logoImage
   }
 }
 

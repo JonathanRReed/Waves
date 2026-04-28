@@ -5,8 +5,6 @@ struct UserPreferences: Codable, Sendable {
   var showRecentApps = true
   var showSystemProcesses = false
   var sortMode: SortMode = .activity
-  var menuBarCompactMode = false
-  var accentColorName = "cyan"
 }
 
 enum SortMode: String, Codable, CaseIterable, Identifiable, Sendable {

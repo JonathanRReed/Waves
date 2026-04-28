@@ -8,7 +8,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var presets: [Preset]
   private let currentBundleID = Bundle.main.bundleIdentifier
   private var controllers: [String: PerAppTapController] = [:]
-  private let callbackQueue = DispatchQueue(label: "com.waves.backend.tap", qos: .userInitiated)
 
   init(presets: [Preset] = Preset.defaults) {
     self.presets = presets
@@ -38,7 +37,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     let target = max(0.0, min(1.0, volume))
     snapshot.apps[index].desiredVolume = target
-    snapshot.apps[index].lastSeenAt = .now
 
     do {
       try applyRoute(for: snapshot.apps[index], toVolume: target, muted: snapshot.apps[index].isMuted)
@@ -63,7 +61,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     snapshot.apps[index].isMuted = isMuted
-    snapshot.apps[index].lastSeenAt = .now
 
     do {
       try applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: isMuted)
@@ -92,7 +89,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     snapshot.apps[index].isPinned = isPinned
-    snapshot.apps[index].lastSeenAt = .now
   }
 
   func applyPreset(_ preset: Preset) async throws -> AudioSessionSnapshot {
@@ -103,7 +99,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
       snapshot.apps[index].desiredVolume = entry.desiredVolume
       snapshot.apps[index].isMuted = entry.isMuted
-      snapshot.apps[index].lastSeenAt = .now
 
       do {
         try applyRoute(
@@ -139,10 +134,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func recoverRoutes() async throws -> AudioSessionSnapshot {
+    let managedLogicalIDs = Set(
+      snapshot.apps
+        .filter { $0.routingState == .managed || controllers[$0.id]?.isActive == true }
+        .map(\.logicalID)
+    )
+
     disposeControllers(keeping: [])
     snapshot.backendStatus.isRouteRecoveryHealthy = true
     snapshot.backendStatus.lastError = nil
     snapshot = await buildSnapshot(merging: snapshot)
+
+    if !managedLogicalIDs.isEmpty {
+      reattachRoutes(forLogicalIDs: managedLogicalIDs)
+    }
+
     return snapshot
   }
 
@@ -195,7 +201,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
     }
 
-    if let controller = controllers[app.id], controller.isActive {
+    let processObjectIDs = try resolveProcessObjectIDs(for: app)
+
+    if let controller = controllers[app.id], controller.isActive, controller.matches(processObjectIDs) {
       controller.apply(volume: volume, muted: muted)
       return
     }
@@ -205,89 +213,153 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       controllers.removeValue(forKey: app.id)
     }
 
-    let controller = try createController(for: app)
+    let controller = try createController(for: app, processObjectIDs: processObjectIDs)
     controllers[app.id] = controller
     controller.apply(volume: volume, muted: muted)
   }
 
-  private func createController(for app: AudioApp) throws -> PerAppTapController {
-    guard let pid = app.pid else {
-      throw BackendError.unsupportedOperation("App \(app.displayName) has no process identifier.")
-    }
+  private func createController(for app: AudioApp, processObjectIDs: [AudioObjectID]) throws -> PerAppTapController {
 
-    guard let processObjectID = try translateProcessID(forPID: pid), processObjectID != .unknown else {
-      throw BackendError.managedRouteUnavailable(
-        "Unable to resolve Core Audio process object for \(app.displayName)."
+    if #available(macOS 14.2, *) {
+      let defaultOutputDeviceUID = try currentDefaultOutputDeviceUID()
+
+      let tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+      tapDescription.name = "Waves-\(app.displayName)"
+      tapDescription.uuid = UUID()
+      tapDescription.muteBehavior = CATapMuteBehavior.mutedWhenTapped
+      tapDescription.isPrivate = true
+
+      var tapID: AudioObjectID = .unknown
+      do {
+        try withStatusCheck(
+          AudioHardwareCreateProcessTap(tapDescription, &tapID),
+          action: "create process tap"
+        )
+      } catch {
+        throw error
+      }
+
+      let tapUID = try readTapUID(tapID)
+      let aggregateDeviceDescription: [String: Any] = [
+        kAudioAggregateDeviceNameKey: "Waves-\(app.displayName)",
+        kAudioAggregateDeviceUIDKey: "com.waves.aggregate.\(UUID().uuidString)",
+        kAudioAggregateDeviceMainSubDeviceKey: defaultOutputDeviceUID,
+        kAudioAggregateDeviceClockDeviceKey: defaultOutputDeviceUID,
+        kAudioAggregateDeviceIsPrivateKey: true,
+        kAudioAggregateDeviceIsStackedKey: false,
+        kAudioAggregateDeviceTapAutoStartKey: true,
+        kAudioAggregateDeviceSubDeviceListKey: [
+          [
+            kAudioSubDeviceUIDKey: defaultOutputDeviceUID,
+            kAudioSubDeviceDriftCompensationKey: false,
+          ],
+        ],
+        kAudioAggregateDeviceTapListKey: [
+          [
+            kAudioSubTapDriftCompensationKey: true,
+            kAudioSubTapUIDKey: tapUID,
+          ],
+        ],
+      ]
+
+      var aggregateID: AudioObjectID = .unknown
+      do {
+        try withStatusCheck(
+          AudioHardwareCreateAggregateDevice(aggregateDeviceDescription as CFDictionary, &aggregateID),
+          action: "create aggregate device"
+        )
+      } catch {
+        _ = AudioHardwareDestroyProcessTap(tapID)
+        throw error
+      }
+
+      let tapFormat = readTapFormat(tapID)
+      let controller = try PerAppTapController(
+        appID: app.id,
+        appName: app.displayName,
+        targetProcessObjectIDs: processObjectIDs,
+        tapID: tapID,
+        aggregateDeviceID: aggregateID,
+        volume: app.desiredVolume,
+        muted: app.isMuted,
+        tapFormat: tapFormat
       )
+
+      do {
+        try controller.start()
+      } catch {
+        controller.dispose()
+        throw error
+      }
+
+      return controller
     }
 
-    let defaultOutputDeviceUID = try currentDefaultOutputDeviceUID()
+    throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
+  }
 
-    let tapDescription = CATapDescription(processes: [NSNumber(value: processObjectID)])
-    tapDescription.name = "Waves-\(app.displayName)"
-    tapDescription.uuid = UUID()
-    tapDescription.muteBehavior = .mutedWhenTapped
-    tapDescription.isPrivate = true
+  private func resolveProcessObjectIDs(for app: AudioApp) throws -> [AudioObjectID] {
+    var candidatePIDs = Set<pid_t>()
 
-    var tapID: AudioObjectID = .unknown
+    if let bundleID = app.bundleID, !bundleID.isEmpty {
+      let runningFamilyPIDs = NSWorkspace.shared.runningApplications
+        .filter { runningApp in
+          Self.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: runningApp.bundleIdentifier)
+        }
+        .map(\.processIdentifier)
+      candidatePIDs.formUnion(runningFamilyPIDs)
+    }
+
+    if let pid = app.pid {
+      candidatePIDs.insert(pid)
+    }
+
+    let processObjectIDs = try candidatePIDs
+      .compactMap { pid -> AudioObjectID? in
+        guard let processObjectID = try translateProcessID(forPID: pid), processObjectID != .unknown else {
+          return nil
+        }
+        return processObjectID
+      }
+
+    let uniqueProcessObjectIDs = Array(Set(processObjectIDs)).sorted { $0 < $1 }
+    if !uniqueProcessObjectIDs.isEmpty {
+      return uniqueProcessObjectIDs
+    }
+
+    if let pid = app.pid, let processObjectID = try translateProcessID(forPID: pid), processObjectID != .unknown {
+      return [processObjectID]
+    }
+
+    throw BackendError.managedRouteUnavailable(
+      "Unable to resolve active Core Audio process objects for \(app.displayName)."
+    )
+  }
+
+  private func readTapUID(_ tapID: AudioObjectID) throws -> String {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioTapPropertyUID,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+
+    var uidSize: UInt32 = 0
     try withStatusCheck(
-      AudioHardwareCreateProcessTap(tapDescription, &tapID),
-      action: "create process tap"
+      AudioObjectGetPropertyDataSize(tapID, &address, 0, nil, &uidSize),
+      action: "read tap uid size"
     )
 
-    let aggregateDeviceDescription: [CFString: Any] = [
-      kAudioAggregateDeviceNameKey: "Waves-\(app.displayName)",
-      kAudioAggregateDeviceUIDKey: "com.waves.aggregate.\(UUID().uuidString)",
-      kAudioAggregateDeviceMainSubDeviceKey: defaultOutputDeviceUID,
-      kAudioAggregateDeviceClockDeviceKey: defaultOutputDeviceUID,
-      kAudioAggregateDeviceIsPrivateKey: true,
-      kAudioAggregateDeviceIsStackedKey: true,
-      kAudioAggregateDeviceTapAutoStartKey: true,
-      kAudioAggregateDeviceSubDeviceListKey: [
-        [
-          kAudioSubDeviceUIDKey: defaultOutputDeviceUID,
-          kAudioSubDeviceDriftCompensationKey: false,
-        ],
-      ],
-      kAudioAggregateDeviceTapListKey: [
-        [
-          kAudioSubTapDriftCompensationKey: true,
-          kAudioSubTapUIDKey: tapDescription.uuid.uuidString,
-        ],
-      ],
-    ]
+    var rawUID: CFString?
+    let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
+      AudioObjectGetPropertyData(tapID, &address, 0, nil, &uidSize, $0)
+    }
+    try withStatusCheck(uidStatus, action: "read tap uid")
 
-    var aggregateID: AudioObjectID = .unknown
-    do {
-      try withStatusCheck(
-        AudioHardwareCreateAggregateDevice(aggregateDeviceDescription as CFDictionary, &aggregateID),
-        action: "create aggregate device"
-      )
-    } catch {
-      _ = AudioHardwareDestroyProcessTap(tapID)
-      throw
+    guard let rawUID else {
+      throw BackendError.managedRouteUnavailable("No process tap UID returned.")
     }
 
-    let isFloatFormat = readTapFormatIsFloat(tapID)
-    let controller = PerAppTapController(
-      appID: app.id,
-      appName: app.displayName,
-      tapID: tapID,
-      aggregateDeviceID: aggregateID,
-      volume: app.desiredVolume,
-      muted: app.isMuted,
-      floatFormat: isFloatFormat,
-      callbackQueue: callbackQueue
-    )
-
-    do {
-      try controller.start()
-    } catch {
-      controller.dispose()
-      throw
-    }
-
-    return controller
+    return rawUID as String
   }
 
   private func currentDefaultOutputDeviceUID() throws -> String {
@@ -320,11 +392,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       action: "read default output uid size"
     )
 
-    var rawUID: CFString = "" as CFString
-    try withStatusCheck(
-      AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, &rawUID),
-      action: "read default output uid"
-    )
+    var rawUID: CFString?
+    let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
+      AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, $0)
+    }
+    try withStatusCheck(uidStatus, action: "read default output uid")
+
+    guard let rawUID else {
+      throw BackendError.managedRouteUnavailable("No output device UID returned.")
+    }
 
     return rawUID as String
   }
@@ -355,7 +431,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return processObjectID == .unknown ? nil : processObjectID
   }
 
-  private func readTapFormatIsFloat(_ tapID: AudioObjectID) -> Bool {
+  private func readTapFormat(_ tapID: AudioObjectID) -> TapAudioFormat {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioTapPropertyFormat,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -367,14 +443,29 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &asbdSize, &asbd)
 
     guard status == noErr else {
-      return true
+      return .fallback
     }
 
-    return (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && asbd.mBitsPerChannel == 32
+    if (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && asbd.mBitsPerChannel == 32 {
+      return TapAudioFormat(streamDescription: asbd, sampleFormat: .float32)
+    }
+
+    if (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 {
+      if asbd.mBitsPerChannel == 16 {
+        return TapAudioFormat(streamDescription: asbd, sampleFormat: .int16)
+      }
+      if asbd.mBitsPerChannel == 32 {
+        return TapAudioFormat(streamDescription: asbd, sampleFormat: .int32)
+      }
+    }
+
+    return TapAudioFormat(streamDescription: asbd, sampleFormat: .unknown)
   }
 
   private func buildSnapshot(merging previousSnapshot: AudioSessionSnapshot?) async -> AudioSessionSnapshot {
-    let runningApps = await MainActor.run { discoverRunningApps() }
+    let runningApps = await Task.detached { [currentBundleID] in
+      Self.discoverRunningApps(currentBundleID: currentBundleID)
+    }.value
     let previousByLogicalID = dictionaryByLogicalID(previousSnapshot?.apps ?? [])
     let now = Date()
 
@@ -394,26 +485,28 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     for index in mergedApps.indices {
       if !supportsPerAppRouting {
-        mergedApps[index].routingState = .monitorOnly
+        mergedApps[index].routingState = RoutingState.monitorOnly
         mergedApps[index].notes = "Per-app route requires macOS 14.2+"
-        mergedApps[index].compatibility = .planned
+        mergedApps[index].compatibility = CompatibilityState.planned
         continue
       }
 
       if let controller = controllers[mergedApps[index].id], controller.isActive {
-        mergedApps[index].routingState = .managed
+        mergedApps[index].routingState = RoutingState.managed
         mergedApps[index].appliedVolume = mergedApps[index].isMuted ? 0 : mergedApps[index].appliedVolume
         mergedApps[index].notes = nil
       } else {
-        mergedApps[index].routingState = .monitorOnly
+        mergedApps[index].routingState = RoutingState.monitorOnly
         mergedApps[index].notes = nil
       }
     }
 
-    let runningIDs = Set(mergedApps.map(\.$id))
+    let runningIDs: Set<String> = Set(mergedApps.map(\.id))
     disposeControllers(keeping: runningIDs)
 
     let backendError = snapshot.backendStatus.lastError
+    let hasRouteErrors = mergedApps.contains { $0.routingState == .error }
+    let managedCount = mergedApps.filter { $0.routingState == .managed }.count
 
     return AudioSessionSnapshot(
       apps: mergedApps,
@@ -439,7 +532,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       backendStatus: BackendStatus(
         isAudioComponentInstalled: supportsPerAppRouting,
         hasRequiredPermissions: true,
-        isRouteRecoveryHealthy: !supportsPerAppRouting ? false : snapshot.backendStatus.isRouteRecoveryHealthy,
+        isRouteRecoveryHealthy: supportsPerAppRouting && !hasRouteErrors && managedCount > 0,
         lastError: backendError
       ),
       updatedAt: now
@@ -454,15 +547,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  @MainActor
-  private func discoverRunningApps() -> [AudioApp] {
+  private static func discoverRunningApps(currentBundleID: String?) -> [AudioApp] {
     let candidateApps = NSWorkspace.shared.runningApplications
       .filter { app in
         guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
         guard app.activationPolicy != .prohibited else { return false }
         guard let localizedName = app.localizedName, !localizedName.isEmpty else { return false }
         guard app.bundleIdentifier != currentBundleID else { return false }
-        guard Self.isUserFacingApp(named: localizedName, bundleID: app.bundleIdentifier) else { return false }
+        guard Self.isManageableApp(named: localizedName, bundleID: app.bundleIdentifier) else { return false }
         return true
       }
       .sorted {
@@ -491,16 +583,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         let pid = app.processIdentifier
 
         return AudioApp(
-          id: Self.runtimeAppID(logicalID: logicalID, pid: pid),
+          id: logicalID,
           logicalID: logicalID,
           pid: pid,
           bundleID: bundleID,
           displayName: name,
           iconName: Self.iconName(for: category),
-          iconTIFFData: app.icon?.tiffRepresentation,
+          iconTIFFData: nil,
           category: category,
           isActive: app.isActive,
-          isAudible: false,
           peakLevel: 0,
           rmsLevel: 0,
           desiredVolume: 1,
@@ -509,7 +600,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           isPinned: false,
           routingState: .monitorOnly,
           compatibility: .supported,
-          lastSeenAt: .now,
           notes: nil
         )
       }
@@ -521,20 +611,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private static func logicalAppID(bundleID: String?, displayName: String) -> String {
+  private static func logicalAppID(bundleID: String?, displayName: String, pid: Int32? = nil) -> String {
+    let normalizedName = normalizedProcessName(displayName)
+
     if let bundleID, !bundleID.isEmpty {
+      if isCompanionAudioProcess(named: displayName, bundleID: bundleID) {
+        if let pid {
+          return "\(bundleID)::\(normalizedName)::pid-\(pid)"
+        }
+        return "\(bundleID)::\(normalizedName)"
+      }
       return bundleID
     }
-
-    let normalizedName = displayName
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-      .lowercased()
-      .replacingOccurrences(
-        of: #"[^a-z0-9]+"#,
-        with: "-",
-        options: .regularExpression
-      )
-      .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
 
     return normalizedName.isEmpty ? "unknown-app" : "name-\(normalizedName)"
   }
@@ -577,16 +665,31 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return .unknown
   }
 
-  private static func isUserFacingApp(named displayName: String, bundleID: String?) -> Bool {
+  private static func normalizedProcessName(_ displayName: String) -> String {
+    displayName
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+      .replacingOccurrences(
+        of: #"[^a-z0-9]+"#,
+        with: "-",
+        options: .regularExpression
+      )
+      .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+  }
+
+  private static func isManageableApp(named displayName: String, bundleID: String?) -> Bool {
     let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
 
     let excludedMarkers = [
-      "helper",
       "daemon",
       "updater",
       "launcher",
       "agent",
       "service",
+      "crashpad",
+      "login item",
+      "xpc",
+      "helper",
       "web content",
       "networking",
       "graphics and media",
@@ -595,15 +698,34 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       "gpu",
       "utility process",
       "plugincontainer",
-      "xpc",
+      "content synchronizer",
+      "extension helper",
     ]
 
     if excludedMarkers.contains(where: { token.contains($0) }) {
-      let keepIfLikelyRealApp = inferCategory(bundleID: bundleID, displayName: displayName) != .unknown
-      return keepIfLikelyRealApp
+      return false
     }
 
     return true
+  }
+
+  private static func isCompanionAudioProcess(named displayName: String, bundleID: String?) -> Bool {
+    let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
+    let companionMarkers = [
+      "helper",
+      "web content",
+      "networking",
+      "graphics and media",
+      "isolated",
+      "renderer",
+      "gpu",
+      "utility process",
+      "plugincontainer",
+      "content synchronizer",
+      "extension helper",
+    ]
+
+    return companionMarkers.contains(where: { token.contains($0) })
   }
 
   private static func preferredRepresentative(
@@ -635,7 +757,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       value += 1
     }
 
-    if ["helper", "web content", "networking", "graphics and media", "isolated", "renderer", "gpu", "utility process", "plugincontainer", "xpc"]
+    if let localizedName = app.localizedName,
+      !isCompanionAudioProcess(named: localizedName, bundleID: app.bundleIdentifier)
+    {
+      value += 6
+    } else {
+      value -= 4
+    }
+
+    if ["daemon", "updater", "agent", "service", "crashpad", "login item", "xpc"]
       .contains(where: { token.contains($0) })
     {
       value -= 6
@@ -661,10 +791,48 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
+  private static func bundleFamilyMatches(appBundleID: String, candidateBundleID: String?) -> Bool {
+    guard let candidateBundleID, !candidateBundleID.isEmpty else { return false }
+    if candidateBundleID == appBundleID {
+      return true
+    }
+    return candidateBundleID.hasPrefix(appBundleID + ".")
+  }
+
   private func withStatusCheck(_ status: OSStatus, action: String) throws {
     if status != noErr {
       throw BackendError.managedRouteUnavailable("\(action) failed (OSStatus: \(status)).")
     }
+  }
+
+  private func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) {
+    var recoveredAnyRoute = false
+    var lastError: String?
+
+    for index in snapshot.apps.indices {
+      guard logicalIDs.contains(snapshot.apps[index].logicalID) else { continue }
+
+      do {
+        try applyRoute(
+          for: snapshot.apps[index],
+          toVolume: snapshot.apps[index].desiredVolume,
+          muted: snapshot.apps[index].isMuted
+        )
+        snapshot.apps[index].routingState = .managed
+        snapshot.apps[index].appliedVolume =
+          snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+        snapshot.apps[index].notes = nil
+        recoveredAnyRoute = true
+      } catch {
+        snapshot.apps[index].routingState = .error
+        snapshot.apps[index].notes = error.localizedDescription
+        lastError = error.localizedDescription
+      }
+    }
+
+    snapshot.backendStatus.isRouteRecoveryHealthy = recoveredAnyRoute
+    snapshot.backendStatus.lastError = lastError
+    snapshot.updatedAt = .now
   }
 }
 
@@ -678,92 +846,118 @@ private struct TapRenderState {
   var isActive: UInt32
 }
 
+private enum TapSampleFormat {
+  case float32
+  case int16
+  case int32
+  case unknown
+}
+
+private struct TapAudioFormat {
+  var streamDescription: AudioStreamBasicDescription
+  var sampleFormat: TapSampleFormat
+
+  static var fallback: TapAudioFormat {
+    TapAudioFormat(
+      streamDescription: AudioStreamBasicDescription(
+        mSampleRate: 48_000,
+        mFormatID: kAudioFormatLinearPCM,
+        mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+        mBytesPerPacket: 8,
+        mFramesPerPacket: 1,
+        mBytesPerFrame: 8,
+        mChannelsPerFrame: 2,
+        mBitsPerChannel: 32,
+        mReserved: 0
+      ),
+      sampleFormat: .float32
+    )
+  }
+}
+
 private final class PerAppTapController {
   let appID: String
   let appName: String
+  let targetProcessObjectIDs: [AudioObjectID]
   let tapID: AudioObjectID
   let aggregateDeviceID: AudioObjectID
 
   private let state: UnsafeMutablePointer<TapRenderState>
-  private let floatFormat: Bool
+  private let tapFormat: TapAudioFormat
   private let callbackQueue: DispatchQueue
-  private let stateAccessQueue = DispatchQueue(label: "com.waves.backend.tap.state")
+  private let callbackQueueKey = DispatchSpecificKey<UUID>()
+  private let callbackQueueToken = UUID()
   private var ioProcID: AudioDeviceIOProcID?
   private var didDispose = false
 
   init(
     appID: String,
     appName: String,
+    targetProcessObjectIDs: [AudioObjectID],
     tapID: AudioObjectID,
     aggregateDeviceID: AudioObjectID,
     volume: Float,
     muted: Bool,
-    floatFormat: Bool,
-    callbackQueue: DispatchQueue
-  ) {
+    tapFormat: TapAudioFormat
+  ) throws {
     self.appID = appID
     self.appName = appName
+    self.targetProcessObjectIDs = targetProcessObjectIDs
     self.tapID = tapID
     self.aggregateDeviceID = aggregateDeviceID
-    self.floatFormat = floatFormat
-    self.callbackQueue = callbackQueue
+    self.tapFormat = tapFormat
+    self.callbackQueue = DispatchQueue(label: "com.waves.backend.tap.\(appID)", qos: .userInitiated)
     state = UnsafeMutablePointer<TapRenderState>.allocate(capacity: 1)
     state.pointee = TapRenderState(volume: volume, isMuted: muted ? 1 : 0, isActive: 1)
+    self.callbackQueue.setSpecific(key: callbackQueueKey, value: callbackQueueToken)
   }
 
   var isActive: Bool {
-    stateAccessQueue.sync {
-      state.pointee.isActive != 0 && ioProcID != nil && aggregateDeviceID != .unknown
-    }
+    state.pointee.isActive != 0 && ioProcID != nil && aggregateDeviceID != .unknown
+  }
+
+  func matches(_ processObjectIDs: [AudioObjectID]) -> Bool {
+    targetProcessObjectIDs == processObjectIDs
   }
 
   func apply(volume: Float, muted: Bool) {
-    stateAccessQueue.sync {
-      state.pointee.volume = max(0.0, min(1.0, volume))
-      state.pointee.isMuted = muted ? 1 : 0
-    }
+    state.pointee.volume = max(0.0, min(1.0, volume))
+    state.pointee.isMuted = muted ? 1 : 0
   }
 
   func start() throws {
     var procID: AudioDeviceIOProcID?
-    let floatFormat = floatFormat
     let statePointer = state
-    let stateAccessQueue = stateAccessQueue
+    let sampleFormat = tapFormat.sampleFormat
 
     let status = AudioDeviceCreateIOProcIDWithBlock(
       &procID,
       aggregateDeviceID,
       callbackQueue
-    ) { _, _, _, outOutputData, _ in
-      let currentState = stateAccessQueue.sync { statePointer.pointee }
+    ) { _, inputData, _, outOutputData, _ in
+      let currentState = statePointer.pointee
       guard currentState.isActive != 0 else {
-        zeroOutput(outOutputData)
+        self.zeroOutput(outOutputData)
         return
       }
 
       if currentState.isMuted != 0 {
-        zeroOutput(outOutputData)
+        self.zeroOutput(outOutputData)
         return
       }
 
       let volume = currentState.volume
-      let isFloat = floatFormat
-      if !isFloat || volume == 0.0 {
-        zeroOutput(outOutputData)
+      if volume == 0.0 {
+        self.zeroOutput(outOutputData)
         return
       }
 
-      let buffers = UnsafeMutableAudioBufferListPointer(outOutputData)
-      for buffer in buffers {
-        guard let data = buffer.mData else { continue }
-        let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-        guard sampleCount > 0 else { continue }
-
-        let floats = data.assumingMemoryBound(to: Float.self)
-        for index in 0..<sampleCount {
-          floats[index] *= volume
-        }
-      }
+      self.renderTappedAudio(
+        inputData,
+        to: outOutputData,
+        sampleFormat: sampleFormat,
+        volume: volume
+      )
     }
 
     if status != noErr {
@@ -779,6 +973,8 @@ private final class PerAppTapController {
     }
 
     ioProcID = procID
+    try configureStreamUsage(for: procID)
+    try configureStreamUsage(for: procID, scope: kAudioObjectPropertyScopeOutput)
 
     let startStatus = AudioDeviceStart(aggregateDeviceID, procID)
     if startStatus != noErr {
@@ -790,6 +986,99 @@ private final class PerAppTapController {
     }
   }
 
+  private func configureStreamUsage(for procID: AudioDeviceIOProcID) throws {
+    try configureStreamUsage(for: procID, scope: kAudioObjectPropertyScopeInput)
+  }
+
+  private func configureStreamUsage(
+    for procID: AudioDeviceIOProcID,
+    scope: AudioObjectPropertyScope
+  ) throws {
+    let streamCount = try streamCount(scope: scope)
+    guard streamCount > 0 else { return }
+
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyIOProcStreamUsage,
+      mScope: scope,
+      mElement: kAudioObjectPropertyElementMain
+    )
+
+    let usageSize = MemoryLayout<AudioHardwareIOProcStreamUsage>.size
+      + (Int(streamCount) - 1) * MemoryLayout<UInt32>.stride
+    let usagePointer = UnsafeMutableRawPointer.allocate(
+      byteCount: usageSize,
+      alignment: MemoryLayout<AudioHardwareIOProcStreamUsage>.alignment
+    )
+    defer { usagePointer.deallocate() }
+
+    usagePointer.initializeMemory(as: UInt8.self, repeating: 0, count: usageSize)
+    let typedUsage = usagePointer.assumingMemoryBound(to: AudioHardwareIOProcStreamUsage.self)
+    typedUsage.pointee.mIOProc = unsafeBitCast(procID, to: UnsafeMutableRawPointer.self)
+    typedUsage.pointee.mNumberStreams = streamCount
+
+    let streamsOffset = MemoryLayout<AudioHardwareIOProcStreamUsage>.offset(of: \.mStreamIsOn) ?? 0
+    let streams = usagePointer
+      .advanced(by: streamsOffset)
+      .assumingMemoryBound(to: UInt32.self)
+    for index in 0..<Int(streamCount) {
+      streams[index] = 1
+    }
+
+    let status = AudioObjectSetPropertyData(
+      aggregateDeviceID,
+      &address,
+      0,
+      nil,
+      UInt32(usageSize),
+      usagePointer
+    )
+
+    if status != noErr {
+      throw BackendError.managedRouteUnavailable(
+        "Failed to enable aggregate stream usage for \(appName) (OSStatus: \(status))."
+      )
+    }
+  }
+
+  private func streamCount(scope: AudioObjectPropertyScope) throws -> UInt32 {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyStreamConfiguration,
+      mScope: scope,
+      mElement: kAudioObjectPropertyElementMain
+    )
+
+    var dataSize: UInt32 = 0
+    var status = AudioObjectGetPropertyDataSize(aggregateDeviceID, &address, 0, nil, &dataSize)
+    if status != noErr {
+      throw BackendError.managedRouteUnavailable(
+        "Failed to read stream configuration size for \(appName) (OSStatus: \(status))."
+      )
+    }
+
+    let bufferListPointer = UnsafeMutableRawPointer.allocate(
+      byteCount: Int(dataSize),
+      alignment: MemoryLayout<AudioBufferList>.alignment
+    )
+    defer { bufferListPointer.deallocate() }
+
+    status = AudioObjectGetPropertyData(
+      aggregateDeviceID,
+      &address,
+      0,
+      nil,
+      &dataSize,
+      bufferListPointer
+    )
+    if status != noErr {
+      throw BackendError.managedRouteUnavailable(
+        "Failed to read stream configuration for \(appName) (OSStatus: \(status))."
+      )
+    }
+
+    let audioBufferList = bufferListPointer.assumingMemoryBound(to: AudioBufferList.self)
+    return UInt32(UnsafeMutableAudioBufferListPointer(audioBufferList).count)
+  }
+
   func invalidate() {
     guard ioProcID != nil else { return }
 
@@ -798,39 +1087,140 @@ private final class PerAppTapController {
       return
     }
 
-    guard let procID else { return }
+    guard let procID = ioProcID else { return }
 
     _ = AudioDeviceStop(aggregateDeviceID, procID)
     _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
     ioProcID = nil
+    drainCallbackQueue()
   }
 
   func dispose() {
     guard !didDispose else { return }
     didDispose = true
 
-    if let procID {
+    if let procID = ioProcID {
       _ = AudioDeviceStop(aggregateDeviceID, procID)
       _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
     }
 
     ioProcID = nil
     state.pointee.isActive = 0
+    drainCallbackQueue()
 
     if aggregateDeviceID != .unknown {
       _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
     }
 
-    if tapID != .unknown {
-      _ = AudioHardwareDestroyProcessTap(tapID)
+    if #available(macOS 14.2, *) {
+      if tapID != .unknown {
+        _ = AudioHardwareDestroyProcessTap(tapID)
+      }
     }
 
     state.deinitialize(count: 1)
     state.deallocate()
   }
 
-  deinit {
+    deinit {
     dispose()
+  }
+
+  private static func scaleSigned16(_ sample: Int16, volume: Float) -> Int16 {
+    let scaled = Float(sample) * volume
+    if scaled >= Float(Int16.max) {
+      return Int16.max
+    }
+    if scaled <= Float(Int16.min) {
+      return Int16.min
+    }
+
+    return Int16(scaled.rounded())
+  }
+
+  private static func scaleSigned32(_ sample: Int32, volume: Float) -> Int32 {
+    let scaled = Float(sample) * volume
+    if scaled >= Float(Int32.max) {
+      return Int32.max
+    }
+    if scaled <= Float(Int32.min) {
+      return Int32.min
+    }
+
+    return Int32(scaled.rounded())
+  }
+
+  private func renderTappedAudio(
+    _ inputData: UnsafePointer<AudioBufferList>?,
+    to outputData: UnsafeMutablePointer<AudioBufferList>,
+    sampleFormat: TapSampleFormat,
+    volume: Float
+  ) {
+    guard let inputData else {
+      zeroOutput(outputData)
+      return
+    }
+
+    let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+    let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
+
+    for index in outputBuffers.indices {
+      let outputBuffer = outputBuffers[index]
+      guard let outputPointer = outputBuffer.mData else { continue }
+      guard index < inputBuffers.count else {
+        memset(outputPointer, 0, Int(outputBuffer.mDataByteSize))
+        continue
+      }
+
+      let inputBuffer = inputBuffers[index]
+      guard let inputPointer = inputBuffer.mData else {
+        memset(outputPointer, 0, Int(outputBuffer.mDataByteSize))
+        continue
+      }
+
+      let outputByteCount = Int(outputBuffer.mDataByteSize)
+      let copyByteCount = min(Int(inputBuffer.mDataByteSize), outputByteCount)
+      guard copyByteCount > 0 else { continue }
+
+      memcpy(outputPointer, inputPointer, copyByteCount)
+      if outputByteCount > copyByteCount {
+        memset(outputPointer.advanced(by: copyByteCount), 0, outputByteCount - copyByteCount)
+      }
+
+      scaleOutput(outputPointer, byteCount: copyByteCount, sampleFormat: sampleFormat, volume: volume)
+    }
+  }
+
+  private func scaleOutput(
+    _ data: UnsafeMutableRawPointer,
+    byteCount: Int,
+    sampleFormat: TapSampleFormat,
+    volume: Float
+  ) {
+    guard volume != 1.0 else { return }
+
+    switch sampleFormat {
+    case .float32:
+      let typedPointer = data.assumingMemoryBound(to: Float.self)
+      let sampleTotal = byteCount / MemoryLayout<Float>.size
+      for index in 0..<sampleTotal {
+        typedPointer[index] *= volume
+      }
+    case .int16:
+      let typedPointer = data.assumingMemoryBound(to: Int16.self)
+      let sampleTotal = byteCount / MemoryLayout<Int16>.size
+      for index in 0..<sampleTotal {
+        typedPointer[index] = Self.scaleSigned16(typedPointer[index], volume: volume)
+      }
+    case .int32:
+      let typedPointer = data.assumingMemoryBound(to: Int32.self)
+      let sampleTotal = byteCount / MemoryLayout<Int32>.size
+      for index in 0..<sampleTotal {
+        typedPointer[index] = Self.scaleSigned32(typedPointer[index], volume: volume)
+      }
+    case .unknown:
+      break
+    }
   }
 
   private func zeroOutput(_ outOutputData: UnsafeMutablePointer<AudioBufferList>) {
@@ -840,4 +1230,13 @@ private final class PerAppTapController {
       memset(data, 0, Int(buffer.mDataByteSize))
     }
   }
+
+  private func drainCallbackQueue() {
+    if DispatchQueue.getSpecific(key: callbackQueueKey) == callbackQueueToken {
+      return
+    }
+
+    callbackQueue.sync {}
+  }
 }
+

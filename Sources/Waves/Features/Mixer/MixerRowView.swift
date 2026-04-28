@@ -28,6 +28,8 @@ struct MixerRowView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+
+          RoutingStateIndicator(state: app.routingState)
         }
 
         Spacer(minLength: 16)
@@ -37,10 +39,16 @@ struct MixerRowView: View {
             get: { Double(app.desiredVolume) },
             set: { store.setDesiredVolume(Float($0), for: app) }
           ),
-          in: 0...1
+          in: 0...1,
+          onEditingChanged: { isEditing in
+            if !isEditing {
+              store.commitDesiredVolume(for: app)
+            }
+          }
         )
         .controlSize(.small)
         .frame(minWidth: 160, idealWidth: 220, maxWidth: 260)
+        .help(sliderHelp)
 
         Text("\(Int(app.desiredVolume * 100))%")
           .font(.callout.monospacedDigit())
@@ -53,7 +61,7 @@ struct MixerRowView: View {
           Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
         }
         .buttonStyle(.borderless)
-        .help(app.isMuted ? "Unmute" : "Mute")
+        .help(muteHelp)
       }
 
       if app.routingState == .error, let notes = app.notes {
@@ -85,6 +93,40 @@ struct MixerRowView: View {
 
     return parts.joined(separator: ", ")
   }
+
+  private var canControlAudio: Bool {
+    app.routingState == .managed
+  }
+
+  private var sliderHelp: Text {
+    canControlAudio
+      ? Text("Adjust \(app.displayName) volume")
+      : Text("Adjust to enroll \(app.displayName) in managed routing.")
+  }
+
+  private var muteHelp: Text {
+    canControlAudio
+      ? Text(app.isMuted ? "Unmute" : "Mute")
+      : Text("Mute to enroll \(app.displayName) in managed routing.")
+  }
+}
+
+private struct MixerRowHelpers {
+  static func canControlAudio(_ app: AudioApp) -> Bool {
+    app.routingState == .managed
+  }
+
+  static func sliderHelp(for app: AudioApp) -> Text {
+    canControlAudio(app)
+      ? Text("Adjust \(app.displayName) volume")
+      : Text("Adjust to enroll \(app.displayName) in managed routing.")
+  }
+
+  static func muteHelp(for app: AudioApp) -> Text {
+    canControlAudio(app)
+      ? Text(app.isMuted ? "Unmute" : "Mute")
+      : Text("Mute to enroll \(app.displayName) in managed routing.")
+  }
 }
 
 struct CompactMixerRow: View {
@@ -99,6 +141,8 @@ struct CompactMixerRow: View {
       Text(app.displayName)
         .lineLimit(1)
 
+      RoutingStateDot(state: app.routingState)
+
       Spacer()
 
       Slider(
@@ -106,10 +150,17 @@ struct CompactMixerRow: View {
           get: { Double(app.desiredVolume) },
           set: { store.setDesiredVolume(Float($0), for: app) }
         ),
-        in: 0...1
+        in: 0...1,
+        onEditingChanged: { isEditing in
+          if !isEditing {
+            store.commitDesiredVolume(for: app)
+          }
+        }
       )
       .controlSize(.small)
       .frame(width: 110)
+      .padding(.trailing, 4)
+      .help(sliderHelp)
 
       Button {
         store.setMuted(!app.isMuted, for: app)
@@ -117,8 +168,88 @@ struct CompactMixerRow: View {
         Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.1.fill")
       }
       .buttonStyle(.borderless)
+      .help(muteHelp)
     }
   }
+
+  private var canControlAudio: Bool {
+    MixerRowHelpers.canControlAudio(app)
+  }
+
+  private var sliderHelp: Text {
+    MixerRowHelpers.sliderHelp(for: app)
+  }
+
+  private var muteHelp: Text {
+    MixerRowHelpers.muteHelp(for: app)
+  }
+}
+
+private extension RoutingState {
+  var indicatorColor: Color {
+    switch self {
+    case .managed:
+      .green
+    case .live:
+      WavesDesign.accent
+    case .monitorOnly:
+      .orange
+    case .recent:
+      .secondary
+    case .error:
+      .red
+    }
+  }
+}
+
+private struct RoutingStateIndicator: View {
+  let state: RoutingState
+
+  var body: some View {
+    HStack(spacing: 5) {
+      Circle()
+        .fill(color)
+        .frame(width: 6, height: 6)
+
+      Text(state.displayName)
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+    .help(Text(helpText))
+    .accessibilityLabel(Text(helpText))
+  }
+
+  private var color: Color { state.indicatorColor }
+
+  private var helpText: String {
+    switch state {
+    case .managed:
+      "Managed route is active."
+    case .live:
+      "Live audio source detected."
+    case .monitorOnly:
+      "Waves can see this app, but control is not active yet."
+    case .recent:
+      "Recent audio source."
+    case .error:
+      "Route setup failed."
+    }
+  }
+}
+
+private struct RoutingStateDot: View {
+  let state: RoutingState
+
+  var body: some View {
+    Circle()
+      .fill(color)
+      .frame(width: 7, height: 7)
+      .help(Text(state.displayName))
+      .accessibilityLabel(Text("Route state: \(state.displayName)"))
+  }
+
+  private var color: Color { state.indicatorColor }
 }
 
 struct AppIconView: View {

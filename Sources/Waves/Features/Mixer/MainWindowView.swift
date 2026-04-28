@@ -9,45 +9,78 @@ struct MainWindowView: View {
   @State private var presetName = ""
 
   var body: some View {
-    NavigationSplitView {
-      SidebarView(selection: $selection)
-        .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)
-    } detail: {
-      SourceListView(
-        filter: selection,
-        apps: filteredApps,
-        searchText: searchText
-      )
-    }
-    .navigationSplitViewStyle(.balanced)
-    .searchable(text: $searchText, placement: .sidebar, prompt: "Filter apps")
-    .toolbar {
-      ToolbarItem(placement: .principal) {
-        Text("Waves")
-          .font(.headline)
+    ZStack(alignment: .top) {
+      WavesDesign.windowGradient
+        .ignoresSafeArea()
+
+      NavigationSplitView {
+        SidebarView(selection: $selection)
+          .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)
+      } detail: {
+        SourceListView(
+          filter: selection,
+          apps: filteredApps,
+          searchText: searchText
+        )
+      }
+      .navigationSplitViewStyle(.balanced)
+      .searchable(text: $searchText, placement: .sidebar, prompt: "Filter apps")
+      .toolbar {
+        ToolbarItem(placement: .principal) {
+          HStack(spacing: 10) {
+            WavesBrandLogo(size: 18)
+            Text("Waves")
+              .font(.headline)
+          }
+        }
+
+        ToolbarItemGroup {
+          Button {
+            isPresentingSavePreset = true
+          } label: {
+            Image(systemName: "plus")
+          }
+          .help("Save preset")
+
+          Button {
+            store.refresh()
+          } label: {
+            Image(systemName: "arrow.clockwise")
+          }
+          .help("Refresh app list")
+
+          Button {
+            store.recoverRoutes()
+          } label: {
+            Image(systemName: "waveform.path")
+          }
+          .help("Recover managed routes")
+        }
       }
 
-      ToolbarItemGroup {
-        Button {
-          isPresentingSavePreset = true
-        } label: {
-          Image(systemName: "plus")
-        }
-        .help("Save preset")
+      AppToastStack()
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .frame(maxWidth: .infinity, alignment: .topTrailing)
 
-        Button {
-          store.refresh()
-        } label: {
-          Image(systemName: "arrow.clockwise")
+      if store.isLoading {
+        HStack(spacing: 10) {
+          ProgressView()
+            .controlSize(.small)
+          Text("Refreshing audio sessions")
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
-        .help("Refresh app list")
-
-        Button {
-          store.recoverRoutes()
-        } label: {
-          Image(systemName: "waveform.path")
-        }
-        .help("Recover managed routes")
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+          RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(WavesDesign.accent.opacity(0.22))
+        )
+        .padding(.top, 12)
+        .padding(.leading, 14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
       }
     }
     .sheet(isPresented: $isPresentingSavePreset) {
@@ -59,7 +92,6 @@ struct MainWindowView: View {
     }
     .task {
       store.start()
-      store.refresh()
     }
   }
 
@@ -290,8 +322,15 @@ private struct OutputSummaryView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
-      Text(store.currentDeviceName)
-        .font(.title2.weight(.semibold))
+      HStack(spacing: 8) {
+        Text(store.currentDeviceName)
+          .font(.title2.weight(.semibold))
+
+        if store.isLoading {
+          ProgressView()
+            .controlSize(.small)
+        }
+      }
       Text(filter.detail(count: visibleCount))
         .foregroundStyle(.secondary)
       Text("Showing user-facing running apps and their managed route state.")

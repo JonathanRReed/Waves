@@ -26,11 +26,8 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
       let nextPeak = min(1, max(0, snapshot.apps[index].desiredVolume * 0.65 + boost))
       snapshot.apps[index].peakLevel = snapshot.apps[index].isMuted ? 0 : nextPeak
       snapshot.apps[index].rmsLevel = snapshot.apps[index].isMuted ? 0 : max(0, nextPeak - 0.08)
-      snapshot.apps[index].isAudible = snapshot.apps[index].peakLevel > 0.05
       snapshot.apps[index].routingState =
         snapshot.apps[index].compatibility == .supported ? .managed : .monitorOnly
-      snapshot.apps[index].isActive = snapshot.apps[index].isAudible
-      snapshot.apps[index].lastSeenAt = .now
       snapshot.apps[index].appliedVolume =
         snapshot.apps[index].compatibility == .supported ? snapshot.apps[index].desiredVolume : nil
     }
