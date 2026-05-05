@@ -1,4 +1,5 @@
 import SwiftUI
+import WavesAudioCore
 
 struct SettingsView: View {
   @Environment(AppStore.self) private var store
@@ -27,6 +28,11 @@ struct SettingsView: View {
       DiagnosticsSettingsView()
         .tabItem {
           Label("Advanced", systemImage: "waveform.path.ecg")
+        }
+
+      HelpView()
+        .tabItem {
+          Label("Help", systemImage: "questionmark.circle")
         }
     }
     .padding(20)
@@ -69,6 +75,81 @@ private struct GeneralSettingsView: View {
           }
         ))
 
+      Toggle(
+        "Auto-restore device",
+        isOn: Binding(
+          get: { store.preferences.autoRestoreDevice },
+          set: {
+            store.preferences.autoRestoreDevice = $0
+            store.persistPreferences()
+          }
+        ))
+
+      Toggle(
+        "Auto-pause music during calls",
+        isOn: Binding(
+          get: { store.preferences.autoPauseMusicForConferencing },
+          set: {
+            store.preferences.autoPauseMusicForConferencing = $0
+            store.persistPreferences()
+          }
+        ))
+
+      Toggle(
+        "Enable keyboard shortcuts",
+        isOn: Binding(
+          get: { store.preferences.enableKeyboardShortcuts },
+          set: {
+            store.preferences.enableKeyboardShortcuts = $0
+            store.persistPreferences()
+          }
+        ))
+
+      Toggle(
+        "Per-device volume presets",
+        isOn: Binding(
+          get: { store.preferences.enablePerDeviceVolumePresets },
+          set: {
+            store.preferences.enablePerDeviceVolumePresets = $0
+            store.persistPreferences()
+          }
+        ))
+
+      if store.preferences.enableKeyboardShortcuts {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Keyboard shortcuts")
+            .font(.headline)
+
+          HStack {
+            Text("Increase volume")
+              .foregroundStyle(.secondary)
+            Spacer()
+            Text("⌘⌥↑")
+              .font(.system(.body, design: .monospaced))
+              .foregroundStyle(.secondary)
+          }
+
+          HStack {
+            Text("Decrease volume")
+              .foregroundStyle(.secondary)
+            Spacer()
+            Text("⌘⌥↓")
+              .font(.system(.body, design: .monospaced))
+              .foregroundStyle(.secondary)
+          }
+
+          HStack {
+            Text("Toggle mute")
+              .foregroundStyle(.secondary)
+            Spacer()
+            Text("⌘⌥M")
+              .font(.system(.body, design: .monospaced))
+              .foregroundStyle(.secondary)
+          }
+        }
+        .padding(.vertical, 8)
+      }
+
       Picker(
         "Sort apps by",
         selection: Binding(
@@ -98,6 +179,32 @@ private struct AudioSettingsView: View {
       Text(store.currentDeviceName)
         .foregroundStyle(.secondary)
 
+      if let device = store.session.currentDevice {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Volume control mode")
+            .font(.headline)
+
+          Picker(
+            "Volume control mode",
+            selection: Binding(
+              get: { device.volumeControlMode },
+              set: { store.setVolumeControlMode($0) }
+            )
+          ) {
+            ForEach(VolumeControlMode.allCases) { mode in
+              VStack(alignment: .leading, spacing: 2) {
+                Text(mode.displayName)
+                Text(mode.description)
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+              .tag(mode)
+            }
+          }
+          .pickerStyle(.radioGroup)
+        }
+      }
+
       Text("Managed routing")
         .font(.headline)
       Text(
@@ -117,17 +224,50 @@ private struct PresetSettingsView: View {
   @Environment(AppStore.self) private var store
 
   var body: some View {
-    List {
-      ForEach(store.presets) { preset in
-        VStack(alignment: .leading, spacing: 4) {
-          Text(preset.name)
-          Text("\(preset.entries.count) entries")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+    VStack(alignment: .leading, spacing: 16) {
+      HStack {
+        Text("Presets")
+          .font(.headline)
+
+        Spacer()
+
+        Button("Import") {
+          store.importPreset()
         }
+        .buttonStyle(.bordered)
+
+        Button("Export First") {
+          if let preset = store.presets.first {
+            store.exportPreset(preset)
+          }
+        }
+        .buttonStyle(.bordered)
+        .disabled(store.presets.isEmpty)
       }
-      .onDelete(perform: store.deletePresets)
+
+      List {
+        ForEach(store.presets) { preset in
+          HStack {
+            VStack(alignment: .leading, spacing: 4) {
+              Text(preset.name)
+              Text("\(preset.entries.count) entries")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button("Export") {
+              store.exportPreset(preset)
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+          }
+        }
+        .onDelete(perform: store.deletePresets)
+      }
     }
+    .padding(20)
   }
 }
 

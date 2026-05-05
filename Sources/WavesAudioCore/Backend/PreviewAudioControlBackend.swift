@@ -37,7 +37,7 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
   }
 
   public func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.id == appID }) else {
+    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
       throw BackendError.appNotFound(appID)
     }
 
@@ -49,7 +49,7 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
   }
 
   public func setMuted(_ isMuted: Bool, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.id == appID }) else {
+    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
       throw BackendError.appNotFound(appID)
     }
 
@@ -60,8 +60,23 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     }
   }
 
+  public func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws {
+    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
+      throw BackendError.appNotFound(appID)
+    }
+
+    let clampedBoost = max(1.0, min(4.0, boost))
+    snapshot.apps[index].volumeBoost = clampedBoost
+  }
+
+  public func setVolumeControlMode(_ mode: VolumeControlMode, forDeviceID deviceID: String) async throws {
+    if snapshot.currentDevice?.id == deviceID {
+      snapshot.currentDevice?.volumeControlMode = mode
+    }
+  }
+
   public func pinApp(_ isPinned: Bool, appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.id == appID }) else {
+    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
       throw BackendError.appNotFound(appID)
     }
 
@@ -102,6 +117,13 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     return snapshot
   }
 
+  public func autoRestoreDevice() async throws -> AudioSessionSnapshot {
+    if !snapshot.recentDeviceIDs.isEmpty {
+      snapshot.updatedAt = .now
+    }
+    return snapshot
+  }
+
   public func diagnosticsReport() async -> DiagnosticsReport {
     DiagnosticsReport(
       summary:
@@ -128,5 +150,11 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
         ),
       ]
     )
+  }
+}
+
+private extension Array where Element == AudioApp {
+  func firstIndex(matchingAppKey appKey: String) -> Index? {
+    firstIndex { $0.id == appKey || $0.logicalID == appKey }
   }
 }

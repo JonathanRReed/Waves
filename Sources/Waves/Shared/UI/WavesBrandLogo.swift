@@ -2,7 +2,9 @@ import AppKit
 import SwiftUI
 
 enum WavesBrandAssets {
-  static let logoImage: NSImage? = {
+  private static let queue = DispatchQueue(label: "com.waves.brandassets", qos: .userInitiated)
+
+  static let logoImage: NSImage? = queue.sync {
     let candidateBundles = [Bundle.main, Bundle.module]
     for bundle in candidateBundles {
       if let pngURL = bundle.url(forResource: "waves-logo", withExtension: "png"),
@@ -19,7 +21,7 @@ enum WavesBrandAssets {
     }
 
     return nil
-  }()
+  }
 }
 
 struct WavesBrandLogo: View {

@@ -28,10 +28,14 @@ public struct SupportMatrixEntry: Identifiable, Codable, Hashable, Sendable {
     state: CompatibilityState,
     notes: String? = nil
   ) {
-    self.appID = appID
-    self.displayName = displayName
+    // Validate string lengths to prevent excessive memory usage
+    self.appID = String(appID.prefix(256))
+    self.displayName = String(displayName.prefix(256))
+
+    // Validate notes length
+    self.notes = notes.map { String($0.prefix(1000)) }
+
     self.category = category
     self.state = state
-    self.notes = notes
   }
 }

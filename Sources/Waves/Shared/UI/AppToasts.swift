@@ -11,7 +11,6 @@ struct AppToastStack: View {
     }
     .padding(.horizontal, 14)
     .frame(maxWidth: 420, alignment: .top)
-    .frame(maxWidth: .infinity, alignment: .top)
     .animation(.spring(response: 0.24, dampingFraction: 0.9), value: store.toasts)
   }
 }
