@@ -21,7 +21,8 @@ extension AudioSessionSnapshot {
           isPinned: true,
           routingState: .managed,
           compatibility: .supported,
-          notes: "Validated in browser category."
+          notes: "Validated in browser category.",
+          volumeBoost: 1.0
         ),
         AudioApp(
           id: "us.zoom.xos",
@@ -40,7 +41,8 @@ extension AudioSessionSnapshot {
           isPinned: true,
           routingState: .managed,
           compatibility: .supported,
-          notes: "Call apps are highest priority in the support matrix."
+          notes: "Call apps are highest priority in the support matrix.",
+          volumeBoost: 1.0
         ),
         AudioApp(
           id: "com.spotify.client",
@@ -59,7 +61,8 @@ extension AudioSessionSnapshot {
           isPinned: false,
           routingState: .managed,
           compatibility: .supported,
-          notes: "Managed route active."
+          notes: "Managed route active.",
+          volumeBoost: 1.0
         ),
         AudioApp(
           id: "com.hnc.Discord",
@@ -78,7 +81,8 @@ extension AudioSessionSnapshot {
           isPinned: false,
           routingState: .monitorOnly,
           compatibility: .validating,
-          notes: "Daily-use category included, route support still validating."
+          notes: "Daily-use category included, route support still validating.",
+          volumeBoost: 1.0
         ),
       ],
       currentDevice: AudioDevice(
@@ -86,7 +90,8 @@ extension AudioSessionSnapshot {
         name: "MacBook Pro Speakers",
         kind: .builtInOutput,
         isCurrent: true,
-        isManagedRouteAvailable: true
+        isManagedRouteAvailable: true,
+        volumeControlMode: .software
       ),
       recentDeviceIDs: ["built-in-output", "airpods-pro"],
       supportMatrix: SupportMatrix(

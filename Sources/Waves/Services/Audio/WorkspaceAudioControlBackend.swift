@@ -1,6 +1,7 @@
 import AppKit
 import AudioToolbox
 import Foundation
+import OSLog
 import WavesAudioCore
 
 actor WorkspaceAudioControlBackend: AudioControlBackend {
@@ -8,6 +9,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var presets: [Preset]
   private let currentBundleID = Bundle.main.bundleIdentifier
   private var controllers: [String: PerAppTapController] = [:]
+  private var levelUpdateTask: Task<Void, Never>?
+  private var deviceChangeListenerToken: UInt32 = 0
+  private let logger = Logger(subsystem: "com.waves.backend", category: "AudioBackend")
 
   init(presets: [Preset] = Preset.defaults) {
     self.presets = presets
@@ -15,9 +19,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   func start() async throws {
     snapshot = await buildSnapshot(merging: snapshot)
+    startLevelUpdateTask()
+    addDeviceChangeListener()
   }
 
   func stop() async {
+    removeDeviceChangeListener()
+    stopLevelUpdateTask()
     disposeControllers(keeping: [])
   }
 
@@ -31,15 +39,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.id == appID }) else {
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
       throw BackendError.appNotFound(appID)
+    }
+
+    // Validate volume: handle NaN and infinity
+    guard volume.isFinite else {
+      logger.warning("Invalid volume value for \(appID): \(volume), defaulting to 1.0")
+      snapshot.apps[index].desiredVolume = 1.0
+      return
     }
 
     let target = max(0.0, min(1.0, volume))
     snapshot.apps[index].desiredVolume = target
 
     do {
-      try applyRoute(for: snapshot.apps[index], toVolume: target, muted: snapshot.apps[index].isMuted)
+      try await applyRoute(for: snapshot.apps[index], toVolume: target, muted: snapshot.apps[index].isMuted)
       snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : target
       snapshot.apps[index].routingState = .managed
       snapshot.apps[index].notes = nil
@@ -56,14 +71,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func setMuted(_ isMuted: Bool, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.id == appID }) else {
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
       throw BackendError.appNotFound(appID)
     }
 
     snapshot.apps[index].isMuted = isMuted
 
     do {
-      try applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: isMuted)
+      try await applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: isMuted)
       snapshot.apps[index].routingState = .managed
       snapshot.apps[index].peakLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].peakLevel)
       snapshot.apps[index].rmsLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].rmsLevel)
@@ -83,8 +98,43 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
+  func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws {
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
+      throw BackendError.appNotFound(appID)
+    }
+
+    let clampedBoost = max(1.0, min(4.0, boost))
+    snapshot.apps[index].volumeBoost = clampedBoost
+
+    // Update the controller if it exists
+    if let controller = controllers[snapshot.apps[index].id] {
+      controller.setVolumeBoost(clampedBoost)
+    }
+
+    // Re-apply the route with the new boost
+    do {
+      try await applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: snapshot.apps[index].isMuted)
+      snapshot.apps[index].routingState = .managed
+      snapshot.apps[index].notes = nil
+      snapshot.backendStatus.lastError = nil
+      snapshot.backendStatus.isRouteRecoveryHealthy = true
+    } catch {
+      snapshot.apps[index].routingState = .error
+      snapshot.apps[index].notes = error.localizedDescription
+      snapshot.backendStatus.lastError = error.localizedDescription
+      snapshot.backendStatus.isRouteRecoveryHealthy = false
+      throw error
+    }
+  }
+
+  func setVolumeControlMode(_ mode: VolumeControlMode, forDeviceID deviceID: String) async throws {
+    if snapshot.currentDevice?.id == deviceID {
+      snapshot.currentDevice?.volumeControlMode = mode
+    }
+  }
+
   func pinApp(_ isPinned: Bool, appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.id == appID }) else {
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
       throw BackendError.appNotFound(appID)
     }
 
@@ -101,7 +151,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       snapshot.apps[index].isMuted = entry.isMuted
 
       do {
-        try applyRoute(
+        try await applyRoute(
           for: snapshot.apps[index],
           toVolume: entry.desiredVolume,
           muted: entry.isMuted
@@ -146,7 +196,24 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot = await buildSnapshot(merging: snapshot)
 
     if !managedLogicalIDs.isEmpty {
-      reattachRoutes(forLogicalIDs: managedLogicalIDs)
+      await reattachRoutes(forLogicalIDs: managedLogicalIDs)
+    }
+
+    return snapshot
+  }
+
+  func autoRestoreDevice() async throws -> AudioSessionSnapshot {
+    let managedLogicalIDs = Set(
+      snapshot.apps
+        .filter { $0.routingState == .managed || controllers[$0.id]?.isActive == true }
+        .map(\.logicalID)
+    )
+
+    snapshot = await buildSnapshot(merging: snapshot)
+    snapshot.updatedAt = .now
+
+    if !managedLogicalIDs.isEmpty {
+      await reattachRoutes(forLogicalIDs: managedLogicalIDs)
     }
 
     return snapshot
@@ -196,7 +263,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return false
   }
 
-  private func applyRoute(for app: AudioApp, toVolume volume: Float, muted: Bool) throws {
+  private func applyRoute(for app: AudioApp, toVolume volume: Float, muted: Bool) async throws {
     guard supportsPerAppRouting else {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
     }
@@ -204,7 +271,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let processObjectIDs = try resolveProcessObjectIDs(for: app)
 
     if let controller = controllers[app.id], controller.isActive, controller.matches(processObjectIDs) {
-      controller.apply(volume: volume, muted: muted)
+      controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       return
     }
 
@@ -213,9 +280,44 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       controllers.removeValue(forKey: app.id)
     }
 
-    let controller = try createController(for: app, processObjectIDs: processObjectIDs)
+    let controller = try await createControllerWithRetry(for: app, processObjectIDs: processObjectIDs)
     controllers[app.id] = controller
-    controller.apply(volume: volume, muted: muted)
+    controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
+  }
+
+  private func createControllerWithRetry(for app: AudioApp, processObjectIDs: [AudioObjectID]) async throws -> PerAppTapController {
+    let maxRetries = 3
+    var lastError: Error?
+
+    for attempt in 1...maxRetries {
+      do {
+        let controller = try createController(for: app, processObjectIDs: processObjectIDs)
+        if attempt > 1 {
+          logger.info("Successfully created controller for \(app.displayName) on attempt \(attempt)")
+        }
+        return controller
+      } catch {
+        lastError = error
+        logger.warning("Failed to create controller for \(app.displayName) on attempt \(attempt): \(error.localizedDescription)")
+
+        // Clean up any partial state before retry
+        if attempt < maxRetries {
+          // Exponential backoff: 100ms, 400ms, 1600ms
+          let backoffMs = UInt64(100 * Int(pow(4.0, Double(attempt - 1))))
+          try await Task.sleep(nanoseconds: backoffMs * 1_000_000)
+
+          // Re-resolve process object IDs in case they changed
+          let refreshedProcessObjectIDs = try resolveProcessObjectIDs(for: app)
+          if refreshedProcessObjectIDs != processObjectIDs {
+            logger.info("Process object IDs changed for \(app.displayName) during retry")
+          }
+        }
+      }
+    }
+
+    throw BackendError.managedRouteUnavailable(
+      "Failed to create controller for \(app.displayName) after \(maxRetries) attempts: \(lastError?.localizedDescription ?? "Unknown error")"
+    )
   }
 
   private func createController(for app: AudioApp, processObjectIDs: [AudioObjectID]) throws -> PerAppTapController {
@@ -281,6 +383,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         tapID: tapID,
         aggregateDeviceID: aggregateID,
         volume: app.desiredVolume,
+        volumeBoost: app.volumeBoost,
         muted: app.isMuted,
         tapFormat: tapFormat
       )
@@ -431,6 +534,53 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return processObjectID == .unknown ? nil : processObjectID
   }
 
+  private func getAudibleProcessPIDs() -> Set<pid_t> {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyProcessObjectList,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+
+    var size: UInt32 = 0
+    let status = AudioObjectGetPropertyDataSize(
+      AudioObjectID(kAudioObjectSystemObject),
+      &address,
+      0,
+      nil,
+      &size
+    )
+
+    guard status == noErr else {
+      logger.warning("Failed to get process object list size (OSStatus: \(status))")
+      return Set<pid_t>()
+    }
+
+    let processObjectCount = Int(size) / MemoryLayout<AudioObjectID>.size
+    guard processObjectCount > 0 else {
+      return Set<pid_t>()
+    }
+
+    var processObjectIDs = [AudioObjectID](repeating: .unknown, count: processObjectCount)
+    let listStatus = AudioObjectGetPropertyData(
+      AudioObjectID(kAudioObjectSystemObject),
+      &address,
+      0,
+      nil,
+      &size,
+      &processObjectIDs
+    )
+
+    guard listStatus == noErr else {
+      logger.warning("Failed to get process object list (OSStatus: \(listStatus))")
+      return Set<pid_t>()
+    }
+
+    // Since we can't directly translate process object to PID without kAudioHardwarePropertyTranslateProcessObjectToPID,
+    // we'll return an empty set. This means we'll fall back to showing all running apps (previous behavior).
+    // TODO: Implement proper PID-to-process-object mapping when API becomes available
+    return Set<pid_t>()
+  }
+
   private func readTapFormat(_ tapID: AudioObjectID) -> TapAudioFormat {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioTapPropertyFormat,
@@ -463,8 +613,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func buildSnapshot(merging previousSnapshot: AudioSessionSnapshot?) async -> AudioSessionSnapshot {
-    let runningApps = await Task.detached { [currentBundleID] in
-      Self.discoverRunningApps(currentBundleID: currentBundleID)
+    let audiblePIDs = getAudibleProcessPIDs()
+    let runningApps = await Task.detached { [currentBundleID, audiblePIDs] in
+      Self.discoverRunningApps(currentBundleID: currentBundleID, audiblePIDs: audiblePIDs)
     }.value
     let previousByLogicalID = dictionaryByLogicalID(previousSnapshot?.apps ?? [])
     let now = Date()
@@ -547,7 +698,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private static func discoverRunningApps(currentBundleID: String?) -> [AudioApp] {
+  private static func discoverRunningApps(currentBundleID: String?, audiblePIDs: Set<pid_t>) -> [AudioApp] {
     let candidateApps = NSWorkspace.shared.runningApplications
       .filter { app in
         guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
@@ -555,6 +706,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         guard let localizedName = app.localizedName, !localizedName.isEmpty else { return false }
         guard app.bundleIdentifier != currentBundleID else { return false }
         guard Self.isManageableApp(named: localizedName, bundleID: app.bundleIdentifier) else { return false }
+        // Filter to only include apps that are actually producing audio
+        guard audiblePIDs.isEmpty || audiblePIDs.contains(app.processIdentifier) else { return false }
         return true
       }
       .sorted {
@@ -582,6 +735,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         let category = Self.inferCategory(bundleID: bundleID, displayName: name)
         let pid = app.processIdentifier
 
+        // Fetch real app icon
+        let iconTIFFData: Data? = if let icon = app.icon, let tiffData = icon.tiffRepresentation {
+          tiffData
+        } else {
+          nil
+        }
+
         return AudioApp(
           id: logicalID,
           logicalID: logicalID,
@@ -589,7 +749,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           bundleID: bundleID,
           displayName: name,
           iconName: Self.iconName(for: category),
-          iconTIFFData: nil,
+          iconTIFFData: iconTIFFData,
           category: category,
           isActive: app.isActive,
           peakLevel: 0,
@@ -600,7 +760,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           isPinned: false,
           routingState: .monitorOnly,
           compatibility: .supported,
-          notes: nil
+          notes: nil,
+          volumeBoost: 1.0
         )
       }
   }
@@ -805,7 +966,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) {
+  private func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) async {
     var recoveredAnyRoute = false
     var lastError: String?
 
@@ -813,7 +974,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       guard logicalIDs.contains(snapshot.apps[index].logicalID) else { continue }
 
       do {
-        try applyRoute(
+        try await applyRoute(
           for: snapshot.apps[index],
           toVolume: snapshot.apps[index].desiredVolume,
           muted: snapshot.apps[index].isMuted
@@ -834,6 +995,85 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.backendStatus.lastError = lastError
     snapshot.updatedAt = .now
   }
+
+  private func startLevelUpdateTask() {
+    levelUpdateTask?.cancel()
+    levelUpdateTask = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 250_000_000) // 0.25 seconds (optimized from 0.1s)
+        await self?.updateAudioLevels()
+      }
+    }
+  }
+
+  private func stopLevelUpdateTask() {
+    levelUpdateTask?.cancel()
+    levelUpdateTask = nil
+  }
+
+  private func updateAudioLevels() async {
+    guard !controllers.isEmpty else { return }
+
+    let appIndexMap = Dictionary(uniqueKeysWithValues: snapshot.apps.enumerated().map { ($0.element.logicalID, $0.offset) })
+
+    for (appID, controller) in controllers {
+      guard controller.isActive else { continue }
+
+      let (peak, rms) = controller.getCurrentLevels()
+
+      if let index = appIndexMap[appID] ?? snapshot.apps.firstIndex(where: { $0.id == appID }) {
+        snapshot.apps[index].peakLevel = peak
+        snapshot.apps[index].rmsLevel = rms
+      }
+    }
+  }
+
+  private func addDeviceChangeListener() {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+
+    let status = AudioObjectAddPropertyListenerBlock(
+      AudioObjectID(kAudioObjectSystemObject),
+      &address,
+      DispatchQueue.main
+    ) { @Sendable _, _ in
+      Task { [weak self] in
+        await self?.handleDeviceChange()
+      }
+    }
+
+    if status == noErr {
+      deviceChangeListenerToken = 1
+    } else {
+      logger.error("Failed to add device change listener: \(status)")
+    }
+  }
+
+  private func removeDeviceChangeListener() {
+    guard deviceChangeListenerToken != 0 else { return }
+
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+
+    _ = AudioObjectRemovePropertyListenerBlock(
+      AudioObjectID(kAudioObjectSystemObject),
+      &address,
+      DispatchQueue.main
+    ) { _, _ in }
+
+    deviceChangeListenerToken = 0
+  }
+
+  private func handleDeviceChange() async {
+    snapshot = await buildSnapshot(merging: snapshot)
+    logger.info("Output device changed, snapshot refreshed")
+  }
 }
 
 private extension AudioObjectID {
@@ -842,8 +1082,11 @@ private extension AudioObjectID {
 
 private struct TapRenderState {
   var volume: Float
+  var volumeBoost: Float
   var isMuted: UInt32
   var isActive: UInt32
+  var peakLevel: Float
+  var rmsLevel: Float
 }
 
 private enum TapSampleFormat {
@@ -875,14 +1118,96 @@ private struct TapAudioFormat {
   }
 }
 
-private final class PerAppTapController {
+private final class TapRenderStateBox {
+  let state: UnsafeMutablePointer<TapRenderState>
+  private let stateLock = NSLock()
+  private var stateBox = TapRenderState(volume: 1.0, volumeBoost: 1.0, isMuted: 0, isActive: 0, peakLevel: 0, rmsLevel: 0)
+
+  init(initialState: TapRenderState) {
+    state = UnsafeMutablePointer<TapRenderState>.allocate(capacity: 1)
+    state.pointee = initialState
+    stateBox = initialState
+  }
+
+  deinit {
+    state.deinitialize(count: 1)
+    state.deallocate()
+  }
+
+  func read() -> TapRenderState {
+    stateLock.lock()
+    let value = state.pointee
+    stateLock.unlock()
+    return value
+  }
+
+  func tryRead() -> TapRenderState? {
+    guard stateLock.try() else { return nil }
+    let value = state.pointee
+    stateLock.unlock()
+    return value
+  }
+
+  func write(volume: Float, volumeBoost: Float, muted: Bool, isActive: UInt32, peakLevel: Float, rmsLevel: Float) {
+    stateLock.lock()
+    state.pointee.volume = volume
+    state.pointee.volumeBoost = volumeBoost
+    state.pointee.isMuted = muted ? 1 : 0
+    state.pointee.isActive = isActive
+    state.pointee.peakLevel = peakLevel
+    state.pointee.rmsLevel = rmsLevel
+    stateBox.volume = volume
+    stateBox.volumeBoost = volumeBoost
+    stateBox.isMuted = muted ? 1 : 0
+    stateBox.isActive = isActive
+    stateBox.peakLevel = peakLevel
+    stateBox.rmsLevel = rmsLevel
+    stateLock.unlock()
+  }
+
+  func writeVolumeAndMute(volume: Float, volumeBoost: Float, muted: Bool) {
+    stateLock.lock()
+    state.pointee.volume = volume
+    state.pointee.volumeBoost = volumeBoost
+    state.pointee.isMuted = muted ? 1 : 0
+    stateBox.volume = volume
+    stateBox.volumeBoost = volumeBoost
+    stateBox.isMuted = muted ? 1 : 0
+    stateLock.unlock()
+  }
+
+  func writeLevels(peakLevel: Float, rmsLevel: Float) {
+    stateLock.lock()
+    state.pointee.peakLevel = peakLevel
+    state.pointee.rmsLevel = rmsLevel
+    stateBox.peakLevel = peakLevel
+    stateBox.rmsLevel = rmsLevel
+    stateLock.unlock()
+  }
+
+  func readLevels() -> (peak: Float, rms: Float) {
+    stateLock.lock()
+    let levels = (state.pointee.peakLevel, state.pointee.rmsLevel)
+    stateLock.unlock()
+    return levels
+  }
+
+  func setInactive() {
+    stateLock.lock()
+    state.pointee.isActive = 0
+    stateBox.isActive = 0
+    stateLock.unlock()
+  }
+}
+
+private final class PerAppTapController: @unchecked Sendable {
   let appID: String
   let appName: String
   let targetProcessObjectIDs: [AudioObjectID]
   let tapID: AudioObjectID
   let aggregateDeviceID: AudioObjectID
 
-  private let state: UnsafeMutablePointer<TapRenderState>
+  private let stateBox: TapRenderStateBox
   private let tapFormat: TapAudioFormat
   private let callbackQueue: DispatchQueue
   private let callbackQueueKey = DispatchSpecificKey<UUID>()
@@ -897,6 +1222,7 @@ private final class PerAppTapController {
     tapID: AudioObjectID,
     aggregateDeviceID: AudioObjectID,
     volume: Float,
+    volumeBoost: Float,
     muted: Bool,
     tapFormat: TapAudioFormat
   ) throws {
@@ -907,27 +1233,46 @@ private final class PerAppTapController {
     self.aggregateDeviceID = aggregateDeviceID
     self.tapFormat = tapFormat
     self.callbackQueue = DispatchQueue(label: "com.waves.backend.tap.\(appID)", qos: .userInitiated)
-    state = UnsafeMutablePointer<TapRenderState>.allocate(capacity: 1)
-    state.pointee = TapRenderState(volume: volume, isMuted: muted ? 1 : 0, isActive: 1)
+    let initialState = TapRenderState(volume: volume, volumeBoost: volumeBoost, isMuted: muted ? 1 : 0, isActive: 1, peakLevel: 0, rmsLevel: 0)
+    self.stateBox = TapRenderStateBox(initialState: initialState)
     self.callbackQueue.setSpecific(key: callbackQueueKey, value: callbackQueueToken)
   }
 
   var isActive: Bool {
-    state.pointee.isActive != 0 && ioProcID != nil && aggregateDeviceID != .unknown
+    stateBox.read().isActive != 0 && ioProcID != nil && aggregateDeviceID != .unknown
   }
 
   func matches(_ processObjectIDs: [AudioObjectID]) -> Bool {
     targetProcessObjectIDs == processObjectIDs
   }
 
-  func apply(volume: Float, muted: Bool) {
-    state.pointee.volume = max(0.0, min(1.0, volume))
-    state.pointee.isMuted = muted ? 1 : 0
+  func apply(volume: Float, volumeBoost: Float, muted: Bool) {
+    let clampedVolume = max(0.0, min(1.0, volume))
+    let clampedBoost = max(1.0, min(4.0, volumeBoost))
+    // Use async to avoid blocking the caller, especially important for real-time audio
+    callbackQueue.async { [weak self] in
+      self?.stateBox.writeVolumeAndMute(volume: clampedVolume, volumeBoost: clampedBoost, muted: muted)
+    }
+  }
+
+  func setVolumeBoost(_ boost: Float) {
+    let clampedBoost = max(1.0, min(4.0, boost))
+    let currentState = stateBox.read()
+    callbackQueue.async { [weak self] in
+      self?.stateBox.writeVolumeAndMute(
+        volume: currentState.volume,
+        volumeBoost: clampedBoost,
+        muted: currentState.isMuted != 0
+      )
+    }
+  }
+
+  func getCurrentLevels() -> (peak: Float, rms: Float) {
+    stateBox.readLevels()
   }
 
   func start() throws {
     var procID: AudioDeviceIOProcID?
-    let statePointer = state
     let sampleFormat = tapFormat.sampleFormat
 
     let status = AudioDeviceCreateIOProcIDWithBlock(
@@ -935,7 +1280,11 @@ private final class PerAppTapController {
       aggregateDeviceID,
       callbackQueue
     ) { _, inputData, _, outOutputData, _ in
-      let currentState = statePointer.pointee
+      guard let currentState = self.stateBox.tryRead() else {
+        self.zeroOutput(outOutputData)
+        return
+      }
+
       guard currentState.isActive != 0 else {
         self.zeroOutput(outOutputData)
         return
@@ -947,6 +1296,7 @@ private final class PerAppTapController {
       }
 
       let volume = currentState.volume
+      let volumeBoost = currentState.volumeBoost
       if volume == 0.0 {
         self.zeroOutput(outOutputData)
         return
@@ -956,7 +1306,8 @@ private final class PerAppTapController {
         inputData,
         to: outOutputData,
         sampleFormat: sampleFormat,
-        volume: volume
+        volume: volume,
+        volumeBoost: volumeBoost
       )
     }
 
@@ -1105,7 +1456,7 @@ private final class PerAppTapController {
     }
 
     ioProcID = nil
-    state.pointee.isActive = 0
+    stateBox.setInactive()
     drainCallbackQueue()
 
     if aggregateDeviceID != .unknown {
@@ -1117,12 +1468,9 @@ private final class PerAppTapController {
         _ = AudioHardwareDestroyProcessTap(tapID)
       }
     }
-
-    state.deinitialize(count: 1)
-    state.deallocate()
   }
 
-    deinit {
+  deinit {
     dispose()
   }
 
@@ -1154,7 +1502,8 @@ private final class PerAppTapController {
     _ inputData: UnsafePointer<AudioBufferList>?,
     to outputData: UnsafeMutablePointer<AudioBufferList>,
     sampleFormat: TapSampleFormat,
-    volume: Float
+    volume: Float,
+    volumeBoost: Float
   ) {
     guard let inputData else {
       zeroOutput(outputData)
@@ -1163,6 +1512,13 @@ private final class PerAppTapController {
 
     let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
     let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
+
+    var peak: Float = 0
+    var sum: Float = 0
+    var sampleCount: UInt32 = 0
+
+    // Apply volume boost to the volume
+    let effectiveVolume = volume * volumeBoost
 
     for index in outputBuffers.indices {
       let outputBuffer = outputBuffers[index]
@@ -1187,8 +1543,22 @@ private final class PerAppTapController {
         memset(outputPointer.advanced(by: copyByteCount), 0, outputByteCount - copyByteCount)
       }
 
-      scaleOutput(outputPointer, byteCount: copyByteCount, sampleFormat: sampleFormat, volume: volume)
+      // Compute peak and RMS before scaling
+      let (bufferPeak, bufferSum, bufferSamples) = computeLevels(
+        from: inputPointer,
+        byteCount: copyByteCount,
+        sampleFormat: sampleFormat
+      )
+      peak = max(peak, bufferPeak)
+      sum += bufferSum
+      sampleCount += bufferSamples
+
+      scaleOutput(outputPointer, byteCount: copyByteCount, sampleFormat: sampleFormat, volume: effectiveVolume)
     }
+
+    // Update state with computed levels
+    let rms = sampleCount > 0 ? sqrt(sum / Float(sampleCount)) : 0
+    stateBox.writeLevels(peakLevel: peak, rmsLevel: rms)
   }
 
   private func scaleOutput(
@@ -1221,6 +1591,50 @@ private final class PerAppTapController {
     case .unknown:
       break
     }
+  }
+
+  private func computeLevels(
+    from data: UnsafeRawPointer,
+    byteCount: Int,
+    sampleFormat: TapSampleFormat
+  ) -> (peak: Float, sum: Float, sampleCount: UInt32) {
+    var peak: Float = 0
+    var sum: Float = 0
+    var sampleCount: UInt32 = 0
+
+    switch sampleFormat {
+    case .float32:
+      let typedPointer = data.assumingMemoryBound(to: Float.self)
+      let totalSamples = byteCount / MemoryLayout<Float>.size
+      for index in 0..<totalSamples {
+        let sample = abs(typedPointer[index])
+        peak = max(peak, sample)
+        sum += sample * sample
+        sampleCount += 1
+      }
+    case .int16:
+      let typedPointer = data.assumingMemoryBound(to: Int16.self)
+      let totalSamples = byteCount / MemoryLayout<Int16>.size
+      for index in 0..<totalSamples {
+        let sample = abs(Float(typedPointer[index])) / Float(Int16.max)
+        peak = max(peak, sample)
+        sum += sample * sample
+        sampleCount += 1
+      }
+    case .int32:
+      let typedPointer = data.assumingMemoryBound(to: Int32.self)
+      let totalSamples = byteCount / MemoryLayout<Int32>.size
+      for index in 0..<totalSamples {
+        let sample = abs(Float(typedPointer[index])) / Float(Int32.max)
+        peak = max(peak, sample)
+        sum += sample * sample
+        sampleCount += 1
+      }
+    case .unknown:
+      break
+    }
+
+    return (peak, sum, sampleCount)
   }
 
   private func zeroOutput(_ outOutputData: UnsafeMutablePointer<AudioBufferList>) {

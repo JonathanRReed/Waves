@@ -1,62 +1,63 @@
 import Foundation
 import OSLog
 
-final class PreferencesStore: @unchecked Sendable {
+final class DeviceVolumePresetsStore: @unchecked Sendable {
   private let url: URL
   private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
-  private let logger = Logger(subsystem: "com.waves.preferences", category: "Persistence")
+  private let logger = Logger(subsystem: "com.waves.volumepresets", category: "Persistence")
   private let maxFileSize: Int64 = 10 * 1024 * 1024 // 10MB
-  private let queue = DispatchQueue(label: "com.waves.preferences.store", qos: .userInitiated)
+  private let queue = DispatchQueue(label: "com.waves.volumepresets.store", qos: .userInitiated)
 
   init(fileManager: FileManager = .default) {
     guard let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
       logger.error("Failed to get application support directory")
       let fallbackURL = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves")
-      url = fallbackURL.appendingPathComponent("preferences.json")
+      url = fallbackURL.appendingPathComponent("deviceVolumePresets.json")
       return
     }
     let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
     do {
       try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
     } catch {
-      logger.error("Failed to create preferences directory: \(error.localizedDescription)")
+      logger.error("Failed to create volume presets directory: \(error.localizedDescription)")
     }
-    url = directory.appendingPathComponent("preferences.json")
+    url = directory.appendingPathComponent("deviceVolumePresets.json")
   }
 
-  func load() -> UserPreferences {
+  func load() -> DeviceVolumePresets {
     return queue.sync {
       do {
         // Check file size before loading
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
-          logger.error("Preferences file exceeds size limit: \(fileSize) bytes")
-          let defaults = UserPreferences()
+          logger.error("Volume presets file exceeds size limit: \(fileSize) bytes")
+          let defaults = DeviceVolumePresets()
           save(defaults)
           return defaults
         }
 
         let data = try Data(contentsOf: url)
-        let preferences = try decoder.decode(UserPreferences.self, from: data)
-        return preferences
+        let presets = try decoder.decode(DeviceVolumePresets.self, from: data)
+        return presets
       } catch {
-        logger.warning("Failed to load preferences: \(error.localizedDescription). Using defaults.")
-        let defaults = UserPreferences()
+        logger.warning("Failed to load volume presets: \(error.localizedDescription). Using defaults.")
+        let defaults = DeviceVolumePresets()
         save(defaults)
         return defaults
       }
     }
   }
 
-  func save(_ preferences: UserPreferences) {
+  func save(_ presets: DeviceVolumePresets) {
     queue.async { [weak self] in
       guard let self else { return }
       do {
-        let data = try self.encoder.encode(preferences)
+        self.encoder.outputFormatting = .prettyPrinted
+        let data = try self.encoder.encode(presets)
         try data.write(to: self.url, options: .atomic)
       } catch {
-        self.logger.error("Failed to save preferences: \(error.localizedDescription)")
+        self.logger.error("Failed to save volume presets: \(error.localizedDescription)")
       }
     }
   }

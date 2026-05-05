@@ -28,8 +28,12 @@ public struct PresetEntry: Codable, Hashable, Sendable {
   public var isMuted: Bool
 
   public init(appID: String, desiredVolume: Float, isMuted: Bool) {
-    self.appID = appID
-    self.desiredVolume = desiredVolume
+    // Validate appID length to prevent excessive memory usage
+    self.appID = String(appID.prefix(256))
+
+    // Clamp desiredVolume to valid range [0.0, 1.0]
+    self.desiredVolume = max(0.0, min(1.0, desiredVolume))
+
     self.isMuted = isMuted
   }
 }

@@ -20,6 +20,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public var routingState: RoutingState
   public var compatibility: CompatibilityState
   public var notes: String?
+  public var volumeBoost: Float
 
   public init(
     id: String,
@@ -39,26 +40,43 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     isPinned: Bool = false,
     routingState: RoutingState = .recent,
     compatibility: CompatibilityState = .planned,
-    notes: String? = nil
+    notes: String? = nil,
+    volumeBoost: Float = 1.0
   ) {
-    self.id = id
-    self.logicalID = logicalID ?? id
+    // Validate string lengths to prevent excessive memory usage
+    self.id = String(id.prefix(256))
+    self.logicalID = (logicalID ?? id).isEmpty ? id : String((logicalID ?? id).prefix(256))
     self.pid = pid
-    self.bundleID = bundleID
-    self.displayName = displayName
+    self.bundleID = bundleID.map { String($0.prefix(256)) }
+    self.displayName = String(displayName.prefix(256))
+
+    // Validate iconTIFFData size (max 10MB to prevent excessive memory usage)
+    self.iconTIFFData = iconTIFFData.map { data in
+      data.count > 10_485_760 ? Data(data.prefix(10_485_760)) : data
+    }
+
     self.iconName = iconName
-    self.iconTIFFData = iconTIFFData
     self.category = category
     self.isActive = isActive
     self.peakLevel = peakLevel
     self.rmsLevel = rmsLevel
-    self.desiredVolume = desiredVolume
-    self.appliedVolume = appliedVolume
+
+    // Clamp desiredVolume to valid range [0.0, 1.0]
+    self.desiredVolume = max(0.0, min(1.0, desiredVolume))
+
+    // Clamp appliedVolume to valid range [0.0, 1.0] if present
+    self.appliedVolume = appliedVolume.map { max(0.0, min(1.0, $0)) }
+
     self.isMuted = isMuted
     self.isPinned = isPinned
     self.routingState = routingState
     self.compatibility = compatibility
-    self.notes = notes
+
+    // Validate notes length
+    self.notes = notes.map { String($0.prefix(1000)) }
+
+    // Clamp volumeBoost to reasonable range [0.0, 10.0]
+    self.volumeBoost = max(0.0, min(10.0, volumeBoost))
   }
 }
 

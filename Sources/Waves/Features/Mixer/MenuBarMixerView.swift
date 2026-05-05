@@ -25,6 +25,8 @@ struct MenuBarMixerView: View {
             Image(systemName: "arrow.clockwise")
           }
           .buttonStyle(.borderless)
+          .accessibilityLabel("Refresh app list")
+          .keyboardShortcut("r", modifiers: [.command])
         }
 
         if store.isLoading {
@@ -49,15 +51,32 @@ struct MenuBarMixerView: View {
           CompactSection(title: "Recent", apps: Array(store.recentApps.prefix(3)))
         }
 
+        if store.pinnedApps.isEmpty && store.activeApps.isEmpty && store.recentApps.isEmpty {
+          VStack(spacing: 8) {
+            Image(systemName: "speaker.slash")
+              .font(.title2)
+              .foregroundStyle(.secondary)
+            Text("No audio apps detected")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 20)
+        }
+
         Divider()
 
         HStack {
           Button("Open Waves") {
             openWindow(id: AppSceneID.mainWindow)
           }
+          .accessibilityLabel("Open Waves main window")
+
           Button("Settings") {
             openSettings()
           }
+          .accessibilityLabel("Open Settings")
+
           Spacer()
           Toggle(
             isOn: Binding(
@@ -65,10 +84,11 @@ struct MenuBarMixerView: View {
               set: { store.launchAtLoginEnabled = $0 }
             )
           ) {
-            Text("Login")
+            Text("Launch at login")
           }
           .toggleStyle(.switch)
           .labelsHidden()
+          .accessibilityLabel("Launch at login")
         }
       }
       .padding(14)

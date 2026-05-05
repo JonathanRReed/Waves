@@ -5,11 +5,15 @@ import WavesAudioCore
 struct MixerRowView: View {
   @Environment(AppStore.self) private var store
   let app: AudioApp
+  @State private var animateVolumeChange = false
+  @State private var animateMuteChange = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       HStack(spacing: 12) {
         AppIconView(app: app)
+          .scaleEffect(animateVolumeChange ? 1.1 : 1.0)
+          .animation(.spring(response: 0.3, dampingFraction: 0.6), value: animateVolumeChange)
 
         VStack(alignment: .leading, spacing: 2) {
           HStack(spacing: 6) {
@@ -21,6 +25,8 @@ struct MixerRowView: View {
               Image(systemName: "pin.fill")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .scaleEffect(animateMuteChange ? 1.2 : 1.0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: animateMuteChange)
             }
           }
 
@@ -37,7 +43,18 @@ struct MixerRowView: View {
         Slider(
           value: Binding(
             get: { Double(app.desiredVolume) },
-            set: { store.setDesiredVolume(Float($0), for: app) }
+            set: { newValue in
+              store.setDesiredVolume(Float(newValue), for: app)
+              withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                animateVolumeChange = true
+              }
+              Task {
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                if !Task.isCancelled {
+                  animateVolumeChange = false
+                }
+              }
+            }
           ),
           in: 0...1,
           onEditingChanged: { isEditing in
@@ -49,19 +66,35 @@ struct MixerRowView: View {
         .controlSize(.small)
         .frame(minWidth: 160, idealWidth: 220, maxWidth: 260)
         .help(sliderHelp)
+        .accessibilityLabel("Volume for \(app.displayName)")
+        .accessibilityValue("\(Int(app.desiredVolume * 100))%")
 
         Text("\(Int(app.desiredVolume * 100))%")
           .font(.callout.monospacedDigit())
           .foregroundStyle(.secondary)
           .frame(width: 44, alignment: .trailing)
+          .contentTransition(.numericText())
+          .animation(.spring(response: 0.2, dampingFraction: 0.7), value: app.desiredVolume)
+          .accessibilityLabel("Volume percentage")
 
         Button {
           store.setMuted(!app.isMuted, for: app)
+          withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+            animateMuteChange = true
+          }
+          Task {
+            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+            if !Task.isCancelled {
+              animateMuteChange = false
+            }
+          }
         } label: {
           Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+            .symbolEffect(.bounce, value: animateMuteChange)
         }
         .buttonStyle(.borderless)
         .help(muteHelp)
+        .accessibilityLabel(app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)")
       }
 
       if app.routingState == .error, let notes = app.notes {
@@ -132,11 +165,15 @@ private struct MixerRowHelpers {
 struct CompactMixerRow: View {
   @Environment(AppStore.self) private var store
   let app: AudioApp
+  @State private var animateVolumeChange = false
+  @State private var animateMuteChange = false
 
   var body: some View {
     HStack(spacing: 8) {
       AppIconView(app: app)
         .frame(width: 18, height: 18)
+        .scaleEffect(animateVolumeChange ? 1.15 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: animateVolumeChange)
 
       Text(app.displayName)
         .lineLimit(1)
@@ -148,7 +185,18 @@ struct CompactMixerRow: View {
       Slider(
         value: Binding(
           get: { Double(app.desiredVolume) },
-          set: { store.setDesiredVolume(Float($0), for: app) }
+          set: { newValue in
+            store.setDesiredVolume(Float(newValue), for: app)
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+              animateVolumeChange = true
+            }
+            Task {
+              try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+              if !Task.isCancelled {
+                animateVolumeChange = false
+              }
+            }
+          }
         ),
         in: 0...1,
         onEditingChanged: { isEditing in
@@ -164,8 +212,18 @@ struct CompactMixerRow: View {
 
       Button {
         store.setMuted(!app.isMuted, for: app)
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+          animateMuteChange = true
+        }
+        Task {
+          try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+          if !Task.isCancelled {
+            animateMuteChange = false
+          }
+        }
       } label: {
-        Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.1.fill")
+        Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+          .symbolEffect(.bounce, value: animateMuteChange)
       }
       .buttonStyle(.borderless)
       .help(muteHelp)

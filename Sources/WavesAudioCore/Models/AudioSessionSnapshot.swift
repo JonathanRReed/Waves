@@ -40,6 +40,8 @@ public struct BackendStatus: Codable, Hashable, Sendable {
     self.isAudioComponentInstalled = isAudioComponentInstalled
     self.hasRequiredPermissions = hasRequiredPermissions
     self.isRouteRecoveryHealthy = isRouteRecoveryHealthy
-    self.lastError = lastError
+
+    // Validate lastError length to prevent excessive memory usage
+    self.lastError = lastError.map { String($0.prefix(1000)) }
   }
 }

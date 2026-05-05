@@ -3,8 +3,22 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="Waves"
-BUNDLE_ID="com.jonathanreed.Waves"
+BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 MIN_SYSTEM_VERSION="14.2"
+
+# Validate MODE parameter
+VALID_MODES=("run" "--dmg" "--debug" "debug" "--logs" "logs" "--telemetry" "telemetry" "--verify" "verify")
+if [[ ! " ${VALID_MODES[@]} " =~ " ${MODE} " ]]; then
+  echo "Error: Invalid mode '$MODE'" >&2
+  echo "usage: $0 [run|--dmg|--debug|--logs|--telemetry|--verify]" >&2
+  exit 2
+fi
+
+# Validate critical tools are available
+if ! command -v swift >/dev/null 2>&1; then
+  echo "Error: swift not found. Please install Swift from https://swift.org" >&2
+  exit 1
+fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -27,56 +41,93 @@ generate_icns() {
   tmp_dir="$(mktemp -d)"
   iconset_dir="$tmp_dir/$APP_ICON_NAME.iconset"
 
+  # Clean up temporary directory on exit
+  trap 'rm -rf "$tmp_dir"' EXIT
+
   mkdir -p "$iconset_dir"
 
   # macOS icon sizes used by IconFamily
-  sips -s format png -z 16 16 "$source" --out "$iconset_dir/icon_16x16.png" >/dev/null 2>&1 || true
-  sips -s format png -z 32 32 "$source" --out "$iconset_dir/icon_16x16@2x.png" >/dev/null 2>&1 || true
-  sips -s format png -z 32 32 "$source" --out "$iconset_dir/icon_32x32.png" >/dev/null 2>&1 || true
-  sips -s format png -z 64 64 "$source" --out "$iconset_dir/icon_32x32@2x.png" >/dev/null 2>&1 || true
-  sips -s format png -z 128 128 "$source" --out "$iconset_dir/icon_128x128.png" >/dev/null 2>&1 || true
-  sips -s format png -z 256 256 "$source" --out "$iconset_dir/icon_128x128@2x.png" >/dev/null 2>&1 || true
-  sips -s format png -z 256 256 "$source" --out "$iconset_dir/icon_256x256.png" >/dev/null 2>&1 || true
-  sips -s format png -z 512 512 "$source" --out "$iconset_dir/icon_256x256@2x.png" >/dev/null 2>&1 || true
-  sips -s format png -z 512 512 "$source" --out "$iconset_dir/icon_512x512.png" >/dev/null 2>&1 || true
-  sips -s format png -z 1024 1024 "$source" --out "$iconset_dir/icon_512x512@2x.png" >/dev/null 2>&1 || true
+  if ! command -v sips >/dev/null 2>&1; then
+    echo "Warning: sips not found, skipping icon generation" >&2
+    return 1
+  fi
+
+  sips -s format png -z 16 16 "$source" --out "$iconset_dir/icon_16x16.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 16x16 icon" >&2
+  sips -s format png -z 32 32 "$source" --out "$iconset_dir/icon_16x16@2x.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 16x16@2x icon" >&2
+  sips -s format png -z 32 32 "$source" --out "$iconset_dir/icon_32x32.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 32x32 icon" >&2
+  sips -s format png -z 64 64 "$source" --out "$iconset_dir/icon_32x32@2x.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 32x32@2x icon" >&2
+  sips -s format png -z 128 128 "$source" --out "$iconset_dir/icon_128x128.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 128x128 icon" >&2
+  sips -s format png -z 256 256 "$source" --out "$iconset_dir/icon_128x128@2x.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 128x128@2x icon" >&2
+  sips -s format png -z 256 256 "$source" --out "$iconset_dir/icon_256x256.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 256x256 icon" >&2
+  sips -s format png -z 512 512 "$source" --out "$iconset_dir/icon_256x256@2x.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 256x256@2x icon" >&2
+  sips -s format png -z 512 512 "$source" --out "$iconset_dir/icon_512x512.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 512x512 icon" >&2
+  sips -s format png -z 1024 1024 "$source" --out "$iconset_dir/icon_512x512@2x.png" >/dev/null 2>&1 || echo "Warning: Failed to generate 512x512@2x icon" >&2
 
   if command -v iconutil >/dev/null 2>&1; then
-    iconutil --convert icns "$iconset_dir" --output "$output_icns" >/dev/null 2>&1 || true
+    if ! iconutil --convert icns "$iconset_dir" --output "$output_icns" >/dev/null 2>&1; then
+      echo "Warning: Failed to create .icns file" >&2
+      return 1
+    fi
+  else
+    echo "Warning: iconutil not found, skipping .icns generation" >&2
+    return 1
   fi
 }
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+# Kill existing app instance more safely - check bundle ID if possible
+if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+  # Try to kill by bundle ID first (more specific)
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+  fi
+fi
 
 BUILD_ARGS=()
 if [ "$MODE" = "--dmg" ]; then
   BUILD_ARGS=(-c release)
 fi
 
+# Build once and capture the binary path
+BUILD_OUTPUT_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 swift build "${BUILD_ARGS[@]}"
-BUILD_BINARY="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)/$APP_NAME"
+BUILD_BINARY="$BUILD_OUTPUT_DIR/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS"
 mkdir -p "$APP_RESOURCES"
-cp "$BUILD_BINARY" "$APP_BINARY"
+
+# Copy binary with error handling
+if ! cp "$BUILD_BINARY" "$APP_BINARY"; then
+  echo "Error: Failed to copy binary to $APP_BINARY" >&2
+  exit 1
+fi
 chmod +x "$APP_BINARY"
 
 if [ -f "$LOGO_RESOURCE" ]; then
-  cp "$LOGO_RESOURCE" "$APP_RESOURCES/waves-logo.svg"
-  SOURCE_LOGO="$LOGO_RESOURCE"
+  if ! cp "$LOGO_RESOURCE" "$APP_RESOURCES/waves-logo.svg"; then
+    echo "Warning: Failed to copy logo resource" >&2
+  else
+    SOURCE_LOGO="$LOGO_RESOURCE"
+  fi
 elif [ -f "$LOGO_RESOURCE_FALLBACK" ]; then
-  cp "$LOGO_RESOURCE_FALLBACK" "$APP_RESOURCES/waves-logo.svg"
-  SOURCE_LOGO="$LOGO_RESOURCE_FALLBACK"
+  if ! cp "$LOGO_RESOURCE_FALLBACK" "$APP_RESOURCES/waves-logo.svg"; then
+    echo "Warning: Failed to copy fallback logo resource" >&2
+  else
+    SOURCE_LOGO="$LOGO_RESOURCE_FALLBACK"
+  fi
 fi
 
 if [ -n "${SOURCE_LOGO-}" ] && [ -f "$SOURCE_LOGO" ]; then
   if command -v sips >/dev/null 2>&1; then
-    sips -s format png "$SOURCE_LOGO" --out "$APP_RESOURCES/waves-logo.png" >/dev/null 2>&1 || true
+    if ! sips -s format png "$SOURCE_LOGO" --out "$APP_RESOURCES/waves-logo.png" >/dev/null 2>&1; then
+      echo "Warning: Failed to convert logo to PNG" >&2
+    fi
+  else
+    echo "Warning: sips not found, skipping PNG conversion" >&2
   fi
 
   if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
-    generate_icns "$SOURCE_LOGO" "$APP_RESOURCES/$APP_ICON_NAME.icns"
+    generate_icns "$SOURCE_LOGO" "$APP_RESOURCES/$APP_ICON_NAME.icns" || true
   fi
 fi
 
@@ -105,16 +156,55 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
+# Validate Info.plist was created
+if [ ! -f "$INFO_PLIST" ]; then
+  echo "Error: Failed to create Info.plist" >&2
+  exit 1
+fi
+
 if [ -f "$APP_RESOURCES/$APP_ICON_NAME.icns" ] && command -v plutil >/dev/null 2>&1; then
   plutil -replace CFBundleIconFile -string "$APP_ICON_NAME" "$INFO_PLIST"
 fi
 
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1
+  if ! codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1; then
+    echo "Warning: Failed to code sign app bundle" >&2
+  fi
+else
+  echo "Warning: codesign not found, skipping code signing" >&2
 fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
+}
+
+verify_app() {
+  if [ ! -x "$APP_BINARY" ]; then
+    echo "$APP_BINARY is missing or not executable" >&2
+    exit 1
+  fi
+
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$INFO_PLIST" >/dev/null
+  fi
+
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --verify --deep --strict "$APP_BUNDLE"
+  fi
+
+  open_app
+
+  for _ in {1..30}; do
+    if pgrep -x "$APP_NAME" >/dev/null; then
+      sleep 1
+      pgrep -x "$APP_NAME" >/dev/null
+      return
+    fi
+    sleep 0.2
+  done
+
+  echo "$APP_NAME did not launch" >&2
+  exit 1
 }
 
 case "$MODE" in
@@ -137,9 +227,7 @@ case "$MODE" in
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
-    open_app
-    sleep 1
-    pgrep -x "$APP_NAME" >/dev/null
+    verify_app
     ;;
   *)
     echo "usage: $0 [run|--dmg|--debug|--logs|--telemetry|--verify]" >&2

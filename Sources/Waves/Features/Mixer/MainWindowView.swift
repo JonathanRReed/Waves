@@ -41,6 +41,7 @@ struct MainWindowView: View {
             Image(systemName: "plus")
           }
           .help("Save preset")
+          .keyboardShortcut("s", modifiers: [.command])
 
           Button {
             store.refresh()
@@ -48,6 +49,7 @@ struct MainWindowView: View {
             Image(systemName: "arrow.clockwise")
           }
           .help("Refresh app list")
+          .keyboardShortcut("r", modifiers: [.command])
 
           Button {
             store.recoverRoutes()
@@ -112,9 +114,13 @@ struct MainWindowView: View {
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !query.isEmpty else { return scopedApps }
 
+    // Limit search query length to prevent performance issues
+    let maxSearchLength = 100
+    let boundedQuery = String(query.prefix(maxSearchLength))
+
     return scopedApps.filter { app in
-      app.displayName.localizedCaseInsensitiveContains(query)
-        || app.category.displayName.localizedCaseInsensitiveContains(query)
+      app.displayName.localizedCaseInsensitiveContains(boundedQuery)
+        || app.category.displayName.localizedCaseInsensitiveContains(boundedQuery)
     }
   }
 
@@ -126,6 +132,11 @@ struct MainWindowView: View {
   private func savePreset() {
     let trimmed = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
+
+    // Validate preset name length
+    let maxLength = 100
+    guard trimmed.count <= maxLength else { return }
+
     store.savePreset(named: trimmed)
     dismissPresetSheet()
   }
@@ -279,6 +290,7 @@ private struct SourceFilterRow: View {
 }
 
 private struct SourceListView: View {
+  @Environment(AppStore.self) private var store
   let filter: SourceFilter
   let apps: [AudioApp]
   let searchText: String
@@ -302,6 +314,12 @@ private struct SourceListView: View {
           ForEach(apps) { app in
             MixerRowView(app: app)
               .listRowInsets(EdgeInsets(top: 7, leading: 24, bottom: 7, trailing: 24))
+              .listRowBackground(Color.clear)
+          }
+          .onMove { source, destination in
+            if filter == .running && store.preferences.sortMode == .manual {
+              store.reorderApps(from: source, to: destination)
+            }
           }
         }
         .listStyle(.inset)
