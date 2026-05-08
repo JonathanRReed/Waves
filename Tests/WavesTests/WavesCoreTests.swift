@@ -146,6 +146,42 @@ import Testing
   #expect(updatedApp.volumeBoost == 3.0)
 }
 
+@Test func presetSavesAndAppliesVolumeBoost() async throws {
+  let app = AudioApp(
+    id: "test.app",
+    logicalID: "test.app",
+    displayName: "Test App",
+    category: .media,
+    desiredVolume: 0.4,
+    isMuted: false,
+    volumeBoost: 3.0
+  )
+
+  let backend = PreviewAudioControlBackend(
+    snapshot: AudioSessionSnapshot(
+      apps: [app],
+      currentDevice: nil,
+      recentDeviceIDs: [],
+      supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(
+        isAudioComponentInstalled: true,
+        hasRequiredPermissions: true,
+        isRouteRecoveryHealthy: true
+      ),
+      updatedAt: .now
+    )
+  )
+
+  let saved = try await backend.saveCurrentPreset(named: "Boosted")
+  #expect(saved.entries[0].volumeBoost == 3.0)
+
+  try await backend.setVolumeBoost(1.0, forAppID: "test.app")
+  _ = try await backend.applyPreset(saved)
+
+  let restoredApp = await backend.currentSnapshot().apps[0]
+  #expect(restoredApp.volumeBoost == 3.0)
+}
+
 @Test func audioAppEncodesAndDecodesCorrectly() throws {
   let app = AudioApp(
     id: "test.app",
@@ -230,7 +266,7 @@ import Testing
     name: "Test Preset",
     entries: [
       PresetEntry(appID: "app1", desiredVolume: 0.5, isMuted: false),
-      PresetEntry(appID: "app2", desiredVolume: 0.75, isMuted: true)
+      PresetEntry(appID: "app2", desiredVolume: 0.75, isMuted: true, volumeBoost: 2.0)
     ],
     createdAt: .now,
     updatedAt: .now
@@ -245,6 +281,20 @@ import Testing
   #expect(decoded.entries.count == 2)
   #expect(decoded.entries[0].desiredVolume == 0.5)
   #expect(decoded.entries[1].isMuted == true)
+  #expect(decoded.entries[1].volumeBoost == 2.0)
+}
+
+@Test func presetEntryDecodesLegacyBoostAsDefaultAndClampsImportedValues() throws {
+  let legacyJSON = #"{"appID":"legacy.app","desiredVolume":1.5,"isMuted":false}"#.data(using: .utf8)!
+  let legacyEntry = try JSONDecoder().decode(PresetEntry.self, from: legacyJSON)
+
+  #expect(legacyEntry.appID == "legacy.app")
+  #expect(legacyEntry.desiredVolume == 1.0)
+  #expect(legacyEntry.volumeBoost == 1.0)
+
+  let boostedJSON = #"{"appID":"boosted.app","desiredVolume":0.5,"isMuted":true,"volumeBoost":12}"#.data(using: .utf8)!
+  let boostedEntry = try JSONDecoder().decode(PresetEntry.self, from: boostedJSON)
+  #expect(boostedEntry.volumeBoost == 4.0)
 }
 
 @Test func routingStateHasAllExpectedCases() {

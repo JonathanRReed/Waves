@@ -12,7 +12,7 @@ struct SettingsView: View {
         }
       OnboardingView()
         .tabItem {
-          Label("Onboarding", systemImage: "checklist")
+          Label("Setup", systemImage: "checklist")
         }
 
       AudioSettingsView()
@@ -208,13 +208,17 @@ private struct AudioSettingsView: View {
       Text("Managed routing")
         .font(.headline)
       Text(
-        "This scaffold keeps managed route ownership behind the audio backend boundary. The preview backend reports install state, route health, and support coverage without binding the app to a concrete audio component yet."
+        "Managed routes use Core Audio process taps to capture selected app audio, apply volume, mute, and boost, then play it back to the current output device. Audio is processed locally on this Mac."
       )
       .foregroundStyle(.secondary)
 
       Button("Recover routes now") {
         store.recoverRoutes()
       }
+
+      Text("Boost controls are available in each mixer row. Use 1x for transparent playback, and reserve 2x to 4x for quiet apps to avoid clipping.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
@@ -295,9 +299,47 @@ private struct DiagnosticsSettingsView: View {
             .background(
               .ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
           }
+        } else {
+          DiagnosticsUnavailableView()
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
     }
+    .onAppear {
+      store.refreshDiagnostics()
+    }
+  }
+}
+
+private struct DiagnosticsUnavailableView: View {
+  @Environment(AppStore.self) private var store
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Label("Diagnostics are not loaded", systemImage: "waveform.path.ecg")
+        .font(.headline)
+
+      Text(store.session.backendStatus.lastError ?? "Refresh diagnostics to inspect permissions, route recovery, and support coverage.")
+        .foregroundStyle(.secondary)
+
+      HStack(spacing: 10) {
+        Button {
+          store.refreshDiagnostics()
+        } label: {
+          Label("Refresh Diagnostics", systemImage: "arrow.clockwise")
+        }
+        .buttonStyle(.borderedProminent)
+
+        Button {
+          store.recoverRoutes()
+        } label: {
+          Label("Recover Routes", systemImage: "waveform.path")
+        }
+        .buttonStyle(.bordered)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(14)
+    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
   }
 }

@@ -21,7 +21,28 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
   init(desiredVolume: Float = 1.0, isMuted: Bool = false, volumeBoost: Float = 1.0) {
     self.desiredVolume = desiredVolume
     self.isMuted = isMuted
-    self.volumeBoost = volumeBoost
+    self.volumeBoost = max(1.0, min(4.0, volumeBoost))
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case desiredVolume
+    case isMuted
+    case volumeBoost
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let desiredVolume = try container.decodeIfPresent(Float.self, forKey: .desiredVolume) ?? 1.0
+    let isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+    let volumeBoost = try container.decodeIfPresent(Float.self, forKey: .volumeBoost) ?? 1.0
+    self.init(desiredVolume: desiredVolume, isMuted: isMuted, volumeBoost: volumeBoost)
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(desiredVolume, forKey: .desiredVolume)
+    try container.encode(isMuted, forKey: .isMuted)
+    try container.encode(volumeBoost, forKey: .volumeBoost)
   }
 }
 

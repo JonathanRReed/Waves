@@ -1,6 +1,6 @@
 # Waves
 
-A macOS audio control application that provides per-app volume management, routing, and automation features.
+Waves is a native macOS per-app audio mixer. It uses local Core Audio process taps on macOS 14.2 or newer to route selected app audio through per-app volume, mute, and boost controls before playback.
 
 ## Features
 
@@ -8,7 +8,7 @@ A macOS audio control application that provides per-app volume management, routi
 - **Per-App Volume Control**: Adjust volume levels individually for each running application
 - **Mute/Unmute Apps**: Quickly mute or unmute specific applications
 - **Volume Boost**: Enhance audio output with 2x, 3x, or 4x boost presets
-- **Smart Volume Detection**: Automatically detects and manages audio-active applications
+- **Audio-Aware Discovery**: Uses Core Audio process output state when available, with a manageable running-app fallback
 
 ### Device Management
 - **Device Auto-Restore**: Automatically re-establishes audio routes when switching output devices
@@ -32,12 +32,13 @@ A macOS audio control application that provides per-app volume management, routi
 - **Real-time Audio Levels**: Visual feedback for audio activity levels
 - **Smooth Animations**: Polished UI with spring animations and transitions
 - **Empty State UI**: Helpful guidance when no audio apps are detected
-- **Comprehensive Onboarding**: Step-by-step setup guide for new users
+- **Setup Checklist**: Settings-based setup status for permissions, output device visibility, and route health
 
 ## System Requirements
 
-- macOS 14.2 or later (for per-app routing features)
-- macOS 13.0 or later (for basic functionality)
+- macOS 14.2 or later
+- Accessibility permission for global shortcuts and helper app control
+- Audio capture permission when macOS prompts for Core Audio process taps
 
 ## Installation
 
@@ -49,24 +50,38 @@ git clone <repository-url>
 cd Waves
 ```
 
-2. Build the project:
+2. Build and launch the app bundle:
 ```bash
-swift build
+./script/build_and_run.sh
 ```
 
-3. Run the application:
+3. Build a local DMG:
 ```bash
-swift run Waves
+./script/build_and_run.sh --dmg
 ```
+
+4. Run local release validation:
+```bash
+./script/build_and_run.sh --release-check
+```
+
+5. Notarize a public distribution build:
+```bash
+xcrun notarytool store-credentials waves-notary --apple-id <apple-id> --team-id <team-id>
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE="waves-notary" ./script/build_and_run.sh --notarize
+```
+
+`--release-check` creates a locally verified DMG. `--notarize` requires a Developer ID Application certificate and a stored notarytool profile, then submits, staples, validates, and runs Gatekeeper assessment on the DMG.
 
 ## Usage
 
 ### Quick Start
 
-1. Launch Waves - it will automatically detect running audio applications
+1. Launch Waves. It will automatically detect manageable running apps and audio-active processes when Core Audio exposes them.
 2. Adjust volume sliders for individual apps
-3. Use the mute button to silence specific applications
-4. Pin important apps to keep them easily accessible
+3. Use the boost menu when an app is too quiet
+4. Use the mute button to silence specific applications
+5. Pin important apps to keep them easily accessible
 
 ### Keyboard Shortcuts
 
@@ -112,7 +127,7 @@ When switching audio devices:
 
 ### Audio Settings
 - View current output device information
-- Configure volume control mode (Hardware, Software, Automatic)
+- Choose the preferred route-control mode for Waves-managed sessions
 
 ### Presets
 - Create, delete, and manage volume presets
@@ -197,11 +212,11 @@ swift build
 
 ## License
 
-[Add your license information here]
+No open-source license is included in this checkout. Treat the code as all rights reserved unless a LICENSE file is added.
 
 ## Contributing
 
-[Add contribution guidelines here]
+Use focused pull requests, keep Core Audio changes covered by tests where possible, and verify `swift build`, `swift test`, and `./script/build_and_run.sh --release-check` before proposing release changes.
 
 ## Support
 

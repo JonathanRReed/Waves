@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WavesAudioCore
 
@@ -59,6 +60,15 @@ struct MenuBarMixerView: View {
             Text("No audio apps detected")
               .font(.caption)
               .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+              Button("Refresh") {
+                store.refresh()
+              }
+              Button("Settings") {
+                openSettings()
+              }
+            }
+            .controlSize(.small)
           }
           .frame(maxWidth: .infinity)
           .padding(.vertical, 20)
@@ -69,11 +79,13 @@ struct MenuBarMixerView: View {
         HStack {
           Button("Open Waves") {
             openWindow(id: AppSceneID.mainWindow)
+            NSApp.activate(ignoringOtherApps: true)
           }
           .accessibilityLabel("Open Waves main window")
 
           Button("Settings") {
             openSettings()
+            NSApp.activate(ignoringOtherApps: true)
           }
           .accessibilityLabel("Open Settings")
 

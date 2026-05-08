@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import AudioToolbox
 import Foundation
 import OSLog
@@ -11,6 +12,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var controllers: [String: PerAppTapController] = [:]
   private var levelUpdateTask: Task<Void, Never>?
   private var deviceChangeListenerToken: UInt32 = 0
+  private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
   private let logger = Logger(subsystem: "com.waves.backend", category: "AudioBackend")
 
   init(presets: [Preset] = Preset.defaults) {
@@ -149,6 +151,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
       snapshot.apps[index].desiredVolume = entry.desiredVolume
       snapshot.apps[index].isMuted = entry.isMuted
+      snapshot.apps[index].volumeBoost = entry.volumeBoost
 
       do {
         try await applyRoute(
@@ -176,7 +179,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let preset = Preset(
       name: name,
       entries: snapshot.apps.map {
-        PresetEntry(appID: $0.logicalID, desiredVolume: $0.desiredVolume, isMuted: $0.isMuted)
+        PresetEntry(
+          appID: $0.logicalID,
+          desiredVolume: $0.desiredVolume,
+          isMuted: $0.isMuted,
+          volumeBoost: $0.volumeBoost
+        )
       }
     )
     presets.append(preset)
@@ -231,10 +239,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
             : "Per-app routing needs macOS 14.2 or newer."
         ),
         DiagnosticsCheck(
+          title: "Accessibility permission",
+          status: hasRequiredPermissions ? .passed : .warning,
+          detail: hasRequiredPermissions
+            ? "Accessibility is granted for global shortcuts and app control helpers."
+            : "Grant Accessibility in System Settings to enable global shortcuts and full app control."
+        ),
+        DiagnosticsCheck(
           title: "Route recovery",
           status: snapshot.backendStatus.isRouteRecoveryHealthy ? .passed : .warning,
           detail: snapshot.backendStatus.isRouteRecoveryHealthy
-            ? "Per-app routing is active and can be reapplied." 
+            ? "Per-app routing is active and can be reapplied."
             : "There were active route setup or control errors. Recover routes and retry."
         ),
         DiagnosticsCheck(
@@ -263,6 +278,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return false
   }
 
+  private var hasRequiredPermissions: Bool {
+    supportsPerAppRouting && AXIsProcessTrusted()
+  }
+
   private func applyRoute(for app: AudioApp, toVolume volume: Float, muted: Bool) async throws {
     guard supportsPerAppRouting else {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
@@ -288,10 +307,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func createControllerWithRetry(for app: AudioApp, processObjectIDs: [AudioObjectID]) async throws -> PerAppTapController {
     let maxRetries = 3
     var lastError: Error?
+    var currentProcessObjectIDs = processObjectIDs
 
     for attempt in 1...maxRetries {
       do {
-        let controller = try createController(for: app, processObjectIDs: processObjectIDs)
+        let controller = try createController(for: app, processObjectIDs: currentProcessObjectIDs)
         if attempt > 1 {
           logger.info("Successfully created controller for \(app.displayName) on attempt \(attempt)")
         }
@@ -308,8 +328,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
           // Re-resolve process object IDs in case they changed
           let refreshedProcessObjectIDs = try resolveProcessObjectIDs(for: app)
-          if refreshedProcessObjectIDs != processObjectIDs {
+          if refreshedProcessObjectIDs != currentProcessObjectIDs {
             logger.info("Process object IDs changed for \(app.displayName) during retry")
+            currentProcessObjectIDs = refreshedProcessObjectIDs
           }
         }
       }
@@ -407,7 +428,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if let bundleID = app.bundleID, !bundleID.isEmpty {
       let runningFamilyPIDs = NSWorkspace.shared.runningApplications
         .filter { runningApp in
-          Self.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: runningApp.bundleIdentifier)
+          AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: runningApp.bundleIdentifier)
         }
         .map(\.processIdentifier)
       candidatePIDs.formUnion(runningFamilyPIDs)
@@ -575,10 +596,51 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return Set<pid_t>()
     }
 
-    // Since we can't directly translate process object to PID without kAudioHardwarePropertyTranslateProcessObjectToPID,
-    // we'll return an empty set. This means we'll fall back to showing all running apps (previous behavior).
-    // TODO: Implement proper PID-to-process-object mapping when API becomes available
-    return Set<pid_t>()
+    var audiblePIDs = Set<pid_t>()
+    for processObjectID in processObjectIDs where processObjectID != .unknown {
+      guard isProcessRunningOutput(processObjectID) else { continue }
+      if let pid = readProcessPID(processObjectID) {
+        audiblePIDs.insert(pid)
+      }
+    }
+
+    return audiblePIDs
+  }
+
+  private func readProcessPID(_ processObjectID: AudioObjectID) -> pid_t? {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioProcessPropertyPID,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+
+    var pid = pid_t()
+    var size = UInt32(MemoryLayout<pid_t>.size)
+    let status = AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &pid)
+    guard status == noErr else {
+      logger.warning("Failed to read process pid for object \(processObjectID) (OSStatus: \(status))")
+      return nil
+    }
+
+    return pid
+  }
+
+  private func isProcessRunningOutput(_ processObjectID: AudioObjectID) -> Bool {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioProcessPropertyIsRunningOutput,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+
+    var isRunningOutput: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    let status = AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &isRunningOutput)
+    guard status == noErr else {
+      logger.warning("Failed to read process output state for object \(processObjectID) (OSStatus: \(status))")
+      return false
+    }
+
+    return isRunningOutput != 0
   }
 
   private func readTapFormat(_ tapID: AudioObjectID) -> TapAudioFormat {
@@ -631,7 +693,28 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       app.isMuted = previous.isMuted
       app.isPinned = previous.isPinned
       app.compatibility = previous.compatibility
+      app.volumeBoost = previous.volumeBoost
       return app
+    }
+
+    var mergedLogicalIDs = Set(mergedApps.map(\.logicalID))
+    for previous in previousSnapshot?.apps ?? [] {
+      guard !mergedLogicalIDs.contains(previous.logicalID) else { continue }
+      guard Self.isStillRunning(previous, currentBundleID: currentBundleID) else { continue }
+
+      var retained = previous
+      retained.isActive = false
+      retained.peakLevel = 0
+      retained.rmsLevel = 0
+      if let controller = controllers[retained.id], controller.isActive {
+        retained.routingState = .managed
+        retained.appliedVolume = retained.isMuted ? 0 : retained.desiredVolume
+      } else {
+        retained.routingState = .monitorOnly
+      }
+      retained.notes = nil
+      mergedApps.append(retained)
+      mergedLogicalIDs.insert(retained.logicalID)
     }
 
     for index in mergedApps.indices {
@@ -682,7 +765,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       ),
       backendStatus: BackendStatus(
         isAudioComponentInstalled: supportsPerAppRouting,
-        hasRequiredPermissions: true,
+        hasRequiredPermissions: hasRequiredPermissions,
         isRouteRecoveryHealthy: supportsPerAppRouting && !hasRouteErrors && managedCount > 0,
         lastError: backendError
       ),
@@ -705,7 +788,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         guard app.activationPolicy != .prohibited else { return false }
         guard let localizedName = app.localizedName, !localizedName.isEmpty else { return false }
         guard app.bundleIdentifier != currentBundleID else { return false }
-        guard Self.isManageableApp(named: localizedName, bundleID: app.bundleIdentifier) else { return false }
+        guard AppDiscoveryPolicy.isManageableApp(named: localizedName, bundleID: app.bundleIdentifier) else { return false }
         // Filter to only include apps that are actually producing audio
         guard audiblePIDs.isEmpty || audiblePIDs.contains(app.processIdentifier) else { return false }
         return true
@@ -716,7 +799,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     var representativesByLogicalID: [String: NSRunningApplication] = [:]
     for app in candidateApps {
-      let logicalID = Self.logicalAppID(bundleID: app.bundleIdentifier, displayName: app.localizedName ?? "")
+      let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: app.bundleIdentifier, displayName: app.localizedName ?? "")
       if let existing = representativesByLogicalID[logicalID] {
         representativesByLogicalID[logicalID] = Self.preferredRepresentative(current: existing, candidate: app)
       } else {
@@ -731,16 +814,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       .map { app in
         let bundleID = app.bundleIdentifier
         let name = app.localizedName ?? "Unknown App"
-        let logicalID = Self.logicalAppID(bundleID: bundleID, displayName: name)
-        let category = Self.inferCategory(bundleID: bundleID, displayName: name)
+        let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: bundleID, displayName: name)
+        let category = AppDiscoveryPolicy.inferCategory(bundleID: bundleID, displayName: name)
         let pid = app.processIdentifier
-
-        // Fetch real app icon
-        let iconTIFFData: Data? = if let icon = app.icon, let tiffData = icon.tiffRepresentation {
-          tiffData
-        } else {
-          nil
-        }
 
         return AudioApp(
           id: logicalID,
@@ -748,8 +824,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           pid: pid,
           bundleID: bundleID,
           displayName: name,
-          iconName: Self.iconName(for: category),
-          iconTIFFData: iconTIFFData,
+          iconName: AppDiscoveryPolicy.iconName(for: category),
+          iconTIFFData: nil,
           category: category,
           isActive: app.isActive,
           peakLevel: 0,
@@ -772,128 +848,33 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private static func logicalAppID(bundleID: String?, displayName: String, pid: Int32? = nil) -> String {
-    let normalizedName = normalizedProcessName(displayName)
-
-    if let bundleID, !bundleID.isEmpty {
-      if isCompanionAudioProcess(named: displayName, bundleID: bundleID) {
-        if let pid {
-          return "\(bundleID)::\(normalizedName)::pid-\(pid)"
-        }
-        return "\(bundleID)::\(normalizedName)"
-      }
-      return bundleID
-    }
-
-    return normalizedName.isEmpty ? "unknown-app" : "name-\(normalizedName)"
-  }
-
-  private static func runtimeAppID(logicalID: String, pid: Int32) -> String {
-    "\(logicalID)#\(pid)"
-  }
-
-  private static func inferCategory(bundleID: String?, displayName: String) -> AppCategory {
-    let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
-
-    if token.contains("safari") || token.contains("chrome") || token.contains("firefox")
-      || token.contains("arc") || token.contains("browser")
-    {
-      return .browser
-    }
-
-    if token.contains("zoom") || token.contains("meet") || token.contains("teams")
-      || token.contains("webex") || token.contains("facetime")
-    {
-      return .conferencing
-    }
-
-    if token.contains("spotify") || token.contains("music") || token.contains("vlc")
-      || token.contains("podcast") || token.contains("tv")
-    {
-      return .media
-    }
-
-    if token.contains("discord") || token.contains("slack") || token.contains("messages")
-      || token.contains("telegram")
-    {
-      return .communication
-    }
-
-    if token.hasPrefix("com.apple.") {
-      return .system
-    }
-
-    return .unknown
-  }
-
-  private static func normalizedProcessName(_ displayName: String) -> String {
-    displayName
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-      .lowercased()
-      .replacingOccurrences(
-        of: #"[^a-z0-9]+"#,
-        with: "-",
-        options: .regularExpression
-      )
-      .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-  }
-
-  private static func isManageableApp(named displayName: String, bundleID: String?) -> Bool {
-    let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
-
-    let excludedMarkers = [
-      "daemon",
-      "updater",
-      "launcher",
-      "agent",
-      "service",
-      "crashpad",
-      "login item",
-      "xpc",
-      "helper",
-      "web content",
-      "networking",
-      "graphics and media",
-      "isolated",
-      "renderer",
-      "gpu",
-      "utility process",
-      "plugincontainer",
-      "content synchronizer",
-      "extension helper",
-    ]
-
-    if excludedMarkers.contains(where: { token.contains($0) }) {
-      return false
-    }
-
-    return true
-  }
-
-  private static func isCompanionAudioProcess(named displayName: String, bundleID: String?) -> Bool {
-    let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
-    let companionMarkers = [
-      "helper",
-      "web content",
-      "networking",
-      "graphics and media",
-      "isolated",
-      "renderer",
-      "gpu",
-      "utility process",
-      "plugincontainer",
-      "content synchronizer",
-      "extension helper",
-    ]
-
-    return companionMarkers.contains(where: { token.contains($0) })
-  }
-
   private static func preferredRepresentative(
     current: NSRunningApplication,
     candidate: NSRunningApplication
   ) -> NSRunningApplication {
     score(candidate) >= score(current) ? candidate : current
+  }
+
+  private static func isStillRunning(_ app: AudioApp, currentBundleID: String?) -> Bool {
+    NSWorkspace.shared.runningApplications.contains { candidate in
+      guard candidate.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
+      guard candidate.bundleIdentifier != currentBundleID else { return false }
+
+      if let pid = app.pid, candidate.processIdentifier == pid {
+        return true
+      }
+
+      if let bundleID = app.bundleID,
+        AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: candidate.bundleIdentifier)
+      {
+        return true
+      }
+
+      return AppDiscoveryPolicy.logicalAppID(
+        bundleID: candidate.bundleIdentifier,
+        displayName: candidate.localizedName ?? ""
+      ) == app.logicalID
+    }
   }
 
   private static func score(_ app: NSRunningApplication) -> Int {
@@ -919,7 +900,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     if let localizedName = app.localizedName,
-      !isCompanionAudioProcess(named: localizedName, bundleID: app.bundleIdentifier)
+      !AppDiscoveryPolicy.isCompanionAudioProcess(named: localizedName, bundleID: app.bundleIdentifier)
     {
       value += 6
     } else {
@@ -933,31 +914,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     return value
-  }
-
-  private static func iconName(for category: AppCategory) -> String {
-    switch category {
-    case .browser:
-      return "globe"
-    case .conferencing:
-      return "video.fill"
-    case .media:
-      return "music.note"
-    case .communication:
-      return "bubble.left.and.bubble.right.fill"
-    case .system:
-      return "gearshape.fill"
-    case .unknown:
-      return "app.fill"
-    }
-  }
-
-  private static func bundleFamilyMatches(appBundleID: String, candidateBundleID: String?) -> Bool {
-    guard let candidateBundleID, !candidateBundleID.isEmpty else { return false }
-    if candidateBundleID == appBundleID {
-      return true
-    }
-    return candidateBundleID.hasPrefix(appBundleID + ".")
   }
 
   private func withStatusCheck(_ status: OSStatus, action: String) throws {
@@ -1014,7 +970,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func updateAudioLevels() async {
     guard !controllers.isEmpty else { return }
 
-    let appIndexMap = Dictionary(uniqueKeysWithValues: snapshot.apps.enumerated().map { ($0.element.logicalID, $0.offset) })
+    let appIndexMap = snapshot.apps.enumerated().reduce(into: [String: Int]()) { result, pair in
+      result[pair.element.logicalID] = pair.offset
+    }
 
     for (appID, controller) in controllers {
       guard controller.isActive else { continue }
@@ -1035,18 +993,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       mElement: kAudioObjectPropertyElementMain
     )
 
-    let status = AudioObjectAddPropertyListenerBlock(
-      AudioObjectID(kAudioObjectSystemObject),
-      &address,
-      DispatchQueue.main
-    ) { @Sendable _, _ in
+    let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
       Task { [weak self] in
         await self?.handleDeviceChange()
       }
     }
 
+    let status = AudioObjectAddPropertyListenerBlock(
+      AudioObjectID(kAudioObjectSystemObject),
+      &address,
+      DispatchQueue.main,
+      listenerBlock
+    )
+
     if status == noErr {
       deviceChangeListenerToken = 1
+      deviceChangeListenerBlock = listenerBlock
     } else {
       logger.error("Failed to add device change listener: \(status)")
     }
@@ -1061,18 +1023,31 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       mElement: kAudioObjectPropertyElementMain
     )
 
+    guard let listenerBlock = deviceChangeListenerBlock else {
+      deviceChangeListenerToken = 0
+      return
+    }
+
     _ = AudioObjectRemovePropertyListenerBlock(
       AudioObjectID(kAudioObjectSystemObject),
       &address,
-      DispatchQueue.main
-    ) { _, _ in }
+      DispatchQueue.main,
+      listenerBlock
+    )
 
     deviceChangeListenerToken = 0
+    deviceChangeListenerBlock = nil
   }
 
   private func handleDeviceChange() async {
-    snapshot = await buildSnapshot(merging: snapshot)
-    logger.info("Output device changed, snapshot refreshed")
+    do {
+      _ = try await autoRestoreDevice()
+      logger.info("Output device changed, managed routes restored")
+    } catch {
+      snapshot.backendStatus.isRouteRecoveryHealthy = false
+      snapshot.backendStatus.lastError = error.localizedDescription
+      logger.error("Output device change recovery failed: \(error.localizedDescription)")
+    }
   }
 }
 
@@ -1653,4 +1628,3 @@ private final class PerAppTapController: @unchecked Sendable {
     callbackQueue.sync {}
   }
 }
-

@@ -5,13 +5,39 @@ MODE="${1:-run}"
 APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 MIN_SYSTEM_VERSION="14.2"
+APP_VERSION="${APP_VERSION:-1.0.0}"
+APP_BUILD="${APP_BUILD:-1}"
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
 # Validate MODE parameter
-VALID_MODES=("run" "--dmg" "--debug" "debug" "--logs" "logs" "--telemetry" "telemetry" "--verify" "verify")
+VALID_MODES=("run" "--dmg" "--release-check" "release-check" "--notarize" "notarize" "--debug" "debug" "--logs" "logs" "--telemetry" "telemetry" "--verify" "verify")
 if [[ ! " ${VALID_MODES[@]} " =~ " ${MODE} " ]]; then
   echo "Error: Invalid mode '$MODE'" >&2
-  echo "usage: $0 [run|--dmg|--debug|--logs|--telemetry|--verify]" >&2
+  echo "usage: $0 [run|--dmg|--release-check|--notarize|--debug|--logs|--telemetry|--verify]" >&2
   exit 2
+fi
+
+is_notarize_mode() {
+  [ "$MODE" = "--notarize" ] || [ "$MODE" = "notarize" ]
+}
+
+if is_notarize_mode; then
+  if [ -z "$SIGN_IDENTITY" ]; then
+    echo "Error: SIGN_IDENTITY must be set to a Developer ID Application identity for notarization." >&2
+    exit 2
+  fi
+
+  if [ -z "$NOTARY_PROFILE" ]; then
+    echo "Error: NOTARY_PROFILE must be set to a notarytool keychain profile." >&2
+    echo "Create one with: xcrun notarytool store-credentials <profile> --apple-id <apple-id> --team-id <team-id>" >&2
+    exit 2
+  fi
+
+  if ! command -v xcrun >/dev/null 2>&1; then
+    echo "Error: xcrun is required for notarytool and stapler." >&2
+    exit 1
+  fi
 fi
 
 # Validate critical tools are available
@@ -41,8 +67,7 @@ generate_icns() {
   tmp_dir="$(mktemp -d)"
   iconset_dir="$tmp_dir/$APP_ICON_NAME.iconset"
 
-  # Clean up temporary directory on exit
-  trap 'rm -rf "$tmp_dir"' EXIT
+  trap 'rm -rf "$tmp_dir"' RETURN
 
   mkdir -p "$iconset_dir"
 
@@ -83,7 +108,7 @@ if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
 fi
 
 BUILD_ARGS=()
-if [ "$MODE" = "--dmg" ]; then
+if [ "$MODE" = "--dmg" ] || [ "$MODE" = "--release-check" ] || [ "$MODE" = "release-check" ] || [ "$MODE" = "--notarize" ] || [ "$MODE" = "notarize" ]; then
   BUILD_ARGS=(-c release)
 fi
 
@@ -142,8 +167,25 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$APP_VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$APP_BUILD</string>
   <key>CFBundleIconFile</key>
   <string>$APP_ICON_NAME</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>$BUNDLE_ID.url</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>waves</string>
+      </array>
+    </dict>
+  </array>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.utilities</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
@@ -167,8 +209,10 @@ if [ -f "$APP_RESOURCES/$APP_ICON_NAME.icns" ] && command -v plutil >/dev/null 2
 fi
 
 if command -v codesign >/dev/null 2>&1; then
-  if ! codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1; then
-    echo "Warning: Failed to code sign app bundle" >&2
+  if [ -n "$SIGN_IDENTITY" ]; then
+    codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+  elif ! codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1; then
+    echo "Warning: Failed to ad hoc sign app bundle" >&2
   fi
 else
   echo "Warning: codesign not found, skipping code signing" >&2
@@ -207,13 +251,71 @@ verify_app() {
   exit 1
 }
 
+release_check() {
+  local dmg_path="$DIST_DIR/$APP_NAME.dmg"
+
+  if [ -z "$SIGN_IDENTITY" ]; then
+    echo "Warning: SIGN_IDENTITY is not set. This build is suitable for local testing, not public distribution." >&2
+  fi
+
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$INFO_PLIST" >/dev/null
+  fi
+
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --verify --deep --strict "$APP_BUNDLE"
+  fi
+
+  hdiutil create -volname "$APP_NAME" -srcfolder "$APP_BUNDLE" -ov -format UDZO "$dmg_path"
+  hdiutil imageinfo "$dmg_path" >/dev/null
+
+  if command -v spctl >/dev/null 2>&1 && [ -n "$SIGN_IDENTITY" ]; then
+    spctl --assess --type execute --verbose "$APP_BUNDLE"
+  fi
+}
+
+notarize_release() {
+  local dmg_path="$DIST_DIR/$APP_NAME.dmg"
+
+  if [ -z "$SIGN_IDENTITY" ]; then
+    echo "Error: SIGN_IDENTITY must be set to a Developer ID Application identity for notarization." >&2
+    exit 2
+  fi
+
+  if [ -z "$NOTARY_PROFILE" ]; then
+    echo "Error: NOTARY_PROFILE must be set to a notarytool keychain profile." >&2
+    echo "Create one with: xcrun notarytool store-credentials <profile> --apple-id <apple-id> --team-id <team-id>" >&2
+    exit 2
+  fi
+
+  if ! command -v xcrun >/dev/null 2>&1; then
+    echo "Error: xcrun is required for notarytool and stapler." >&2
+    exit 1
+  fi
+
+  release_check
+  xcrun notarytool submit "$dmg_path" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$dmg_path"
+  xcrun stapler validate "$dmg_path"
+
+  if command -v spctl >/dev/null 2>&1; then
+    spctl --assess --type open --context context:primary-signature --verbose "$dmg_path"
+  fi
+}
+
 case "$MODE" in
   run)
     open_app
     ;;
   --dmg)
-    hdiutil create -volname "$APP_NAME" -srcfolder "$APP_BUNDLE" -ov -format UDZO "$DIST_DIR/$APP_NAME.dmg"
+    release_check
     open "$DIST_DIR/$APP_NAME.dmg"
+    ;;
+  --release-check|release-check)
+    release_check
+    ;;
+  --notarize|notarize)
+    notarize_release
     ;;
   --debug|debug)
     lldb -- "$APP_BINARY"
@@ -230,7 +332,7 @@ case "$MODE" in
     verify_app
     ;;
   *)
-    echo "usage: $0 [run|--dmg|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--dmg|--release-check|--notarize|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac
