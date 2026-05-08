@@ -91,6 +91,7 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
 
       snapshot.apps[index].desiredVolume = entry.desiredVolume
       snapshot.apps[index].isMuted = entry.isMuted
+      snapshot.apps[index].volumeBoost = entry.volumeBoost
       snapshot.apps[index].appliedVolume =
         snapshot.apps[index].compatibility == .supported ? entry.desiredVolume : nil
     }
@@ -103,7 +104,12 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     let preset = Preset(
       name: name,
       entries: snapshot.apps.map {
-        PresetEntry(appID: $0.logicalID, desiredVolume: $0.desiredVolume, isMuted: $0.isMuted)
+        PresetEntry(
+          appID: $0.logicalID,
+          desiredVolume: $0.desiredVolume,
+          isMuted: $0.isMuted,
+          volumeBoost: $0.volumeBoost
+        )
       }
     )
     presets.append(preset)

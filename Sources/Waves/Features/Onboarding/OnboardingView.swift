@@ -6,13 +6,13 @@ struct OnboardingView: View {
 
   private let steps: [(title: String, detail: String, action: String)] = [
     (
-      "Install managed audio component",
-      "Waves requires a managed audio component to intercept and control per-app audio. This component runs locally and never sends audio data outside your Mac.",
-      "Install Component"
+      "Confirm managed audio support",
+      "Waves uses local Core Audio process taps on macOS 14.2 or newer. Audio stays on this Mac and is only replayed to your selected output device.",
+      "Refresh Status"
     ),
     (
       "Grant permissions",
-      "Waves needs accessibility and screen recording permissions to detect running apps and manage their audio streams. These permissions are required for macOS audio routing.",
+      "Waves needs Accessibility for global shortcuts and app-control helpers. macOS may also ask for audio capture consent when a managed route starts.",
       "Open System Settings"
     ),
     (
@@ -163,7 +163,9 @@ struct OnboardingView: View {
     case 0:
       store.refresh()
     case 1:
-      NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+      if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+        NSWorkspace.shared.open(url)
+      }
     case 2:
       store.refresh()
     case 3:

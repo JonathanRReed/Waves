@@ -73,11 +73,11 @@ public enum VolumeControlMode: String, Codable, CaseIterable, Hashable, Sendable
   public var description: String {
     switch self {
     case .hardware:
-      "Control volume at the device level (system-wide)"
+      "Prefer the system output device when a route supports it"
     case .software:
       "Control volume per-app using Waves routing"
     case .automatic:
-      "Automatically choose best method based on device"
+      "Let Waves choose based on the current route"
     }
   }
 }

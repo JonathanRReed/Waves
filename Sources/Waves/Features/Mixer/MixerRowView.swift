@@ -77,6 +77,8 @@ struct MixerRowView: View {
           .animation(.spring(response: 0.2, dampingFraction: 0.7), value: app.desiredVolume)
           .accessibilityLabel("Volume percentage")
 
+        BoostMenu(app: app, compact: false)
+
         Button {
           store.setMuted(!app.isMuted, for: app)
           withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
@@ -209,6 +211,11 @@ struct CompactMixerRow: View {
       .frame(width: 110)
       .padding(.trailing, 4)
       .help(sliderHelp)
+      .accessibilityLabel("Volume for \(app.displayName)")
+      .accessibilityValue("\(Int(app.desiredVolume * 100))%")
+      .accessibilityHint("Adjusts the per-app volume target.")
+
+      BoostMenu(app: app, compact: true)
 
       Button {
         store.setMuted(!app.isMuted, for: app)
@@ -227,6 +234,8 @@ struct CompactMixerRow: View {
       }
       .buttonStyle(.borderless)
       .help(muteHelp)
+      .accessibilityLabel(app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)")
+      .accessibilityHint(app.isMuted ? "Restores audio for this app." : "Silences this app.")
     }
   }
 
@@ -240,6 +249,32 @@ struct CompactMixerRow: View {
 
   private var muteHelp: Text {
     MixerRowHelpers.muteHelp(for: app)
+  }
+}
+
+private struct BoostMenu: View {
+  @Environment(AppStore.self) private var store
+  let app: AudioApp
+  let compact: Bool
+
+  private let boostOptions: [Float] = [1, 2, 3, 4]
+
+  var body: some View {
+    Menu {
+      ForEach(boostOptions, id: \.self) { boost in
+        Button("\(Int(boost))x") {
+          store.setVolumeBoost(boost, for: app)
+        }
+      }
+    } label: {
+      Text("\(Int(app.volumeBoost))x")
+        .font(compact ? .caption.monospacedDigit() : .callout.monospacedDigit())
+        .frame(width: compact ? 34 : 42)
+    }
+    .menuStyle(.borderlessButton)
+    .help("Set boost for \(app.displayName)")
+    .accessibilityLabel("Boost for \(app.displayName)")
+    .accessibilityValue("\(Int(app.volumeBoost))x")
   }
 }
 

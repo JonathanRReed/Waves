@@ -4,10 +4,18 @@ import WavesAudioCore
 import OSLog
 
 @main
+@MainActor
 struct WavesApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
-  @State private var store: AppStore?
+  @State private var store = AppStore(
+    backend: WorkspaceAudioControlBackend(),
+    preferencesStore: PreferencesStore(),
+    presetStore: PresetStore(),
+    sessionStore: SessionStore(),
+    loginItemService: LoginItemService(),
+    deviceVolumePresetsStore: DeviceVolumePresetsStore()
+  )
 
   var body: some Scene {
     WindowGroup("Waves", id: AppSceneID.mainWindow) {
@@ -15,11 +23,8 @@ struct WavesApp: App {
         .environment(store)
         .frame(minWidth: 980, minHeight: 620)
         .task {
-          if store == nil {
-            store = await createStore()
-            appDelegate.setStore(store)
-          }
-          store?.start()
+          appDelegate.setStore(store)
+          store.start()
         }
     }
     .defaultSize(width: 1100, height: 680)
@@ -32,7 +37,7 @@ struct WavesApp: App {
       }
       CommandGroup(after: .appInfo) {
         Button("Refresh") {
-          store?.refresh()
+          store.refresh()
         }
         .keyboardShortcut("r", modifiers: .command)
       }
@@ -46,7 +51,7 @@ struct WavesApp: App {
 
     MenuBarExtra(
       "Waves",
-      systemImage: store?.menuBarIconName ?? "speaker.wave.2.fill",
+      systemImage: store.menuBarIconName,
       isInserted: $showMenuBarExtra
     ) {
       MenuBarMixerView()
@@ -54,18 +59,6 @@ struct WavesApp: App {
         .frame(width: 400)
     }
     .menuBarExtraStyle(.window)
-  }
-
-  @MainActor
-  private func createStore() async -> AppStore {
-    AppStore(
-      backend: WorkspaceAudioControlBackend(),
-      preferencesStore: PreferencesStore(),
-      presetStore: PresetStore(),
-      sessionStore: SessionStore(),
-      loginItemService: LoginItemService(),
-      deviceVolumePresetsStore: DeviceVolumePresetsStore()
-    )
   }
 }
 
@@ -81,7 +74,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     applyLogoBranding()
     NSApp.setActivationPolicy(.regular)
-    NSApp.activate(ignoringOtherApps: true)
     setupGlobalHotkeys()
   }
 

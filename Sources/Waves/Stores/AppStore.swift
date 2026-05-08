@@ -386,6 +386,51 @@ final class AppStore {
     }
   }
 
+  func setVolumeBoost(_ boost: Float, for app: AudioApp) {
+    let appName = app.displayName
+    let appKey = app.logicalID
+    let clampedBoost = max(1.0, min(4.0, boost))
+
+    if let index = session.apps.firstIndex(matchingAppKey: appKey) {
+      session.apps[index].volumeBoost = clampedBoost
+      invalidateVisibleAppsCache()
+    }
+
+    if preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID {
+      let settings = AppVolumeSettings(
+        desiredVolume: app.desiredVolume,
+        isMuted: app.isMuted,
+        volumeBoost: clampedBoost
+      )
+      deviceVolumePresets.saveVolumeSettings(for: appKey, deviceID: deviceID, settings: settings)
+      Task {
+        deviceVolumePresetsStore.save(deviceVolumePresets)
+      }
+    }
+
+    Task {
+      do {
+        try await backend.setVolumeBoost(clampedBoost, forAppID: appKey)
+        session = await backend.currentSnapshot()
+        invalidateVisibleAppsCache()
+        diagnostics = await backend.diagnosticsReport()
+        persistSessionSnapshot()
+        showToast(
+          title: "Boost updated",
+          detail: "\(appName): \(Int(clampedBoost))x",
+          kind: .success,
+          duration: .seconds(1.1)
+        )
+      } catch {
+        session = await backend.currentSnapshot()
+        invalidateVisibleAppsCache()
+        diagnostics = await backend.diagnosticsReport()
+        persistSessionSnapshot()
+        showToast(title: "Boost update failed", detail: error.localizedDescription, kind: .error)
+      }
+    }
+  }
+
   func togglePinned(_ app: AudioApp) {
     let appName = app.displayName
     let willPin = !app.isPinned
@@ -831,7 +876,7 @@ final class AppStore {
       supportMatrix: SupportMatrix(entries: []),
       backendStatus: BackendStatus(
         isAudioComponentInstalled: false,
-        hasRequiredPermissions: true,
+        hasRequiredPermissions: false,
         isRouteRecoveryHealthy: false,
         lastError: "No cached session loaded yet."
       ),
@@ -842,7 +887,9 @@ final class AppStore {
   private func mergedSession(with liveSession: AudioSessionSnapshot, cached: AudioSessionSnapshot) -> AudioSessionSnapshot {
     guard !cached.apps.isEmpty else { return liveSession }
 
-    let cachedByLogicalID = Dictionary(uniqueKeysWithValues: cached.apps.map { ($0.logicalID, $0) })
+    let cachedByLogicalID = cached.apps.reduce(into: [String: AudioApp]()) { result, app in
+      result[app.logicalID] = app
+    }
 
     var mergedApps = liveSession.apps
     for index in mergedApps.indices {
@@ -856,6 +903,7 @@ final class AppStore {
       mergedApps[index].isMuted = cachedApp.isMuted
       mergedApps[index].isPinned = cachedApp.isPinned
       mergedApps[index].compatibility = cachedApp.compatibility
+      mergedApps[index].volumeBoost = cachedApp.volumeBoost
     }
 
     return AudioSessionSnapshot(
@@ -949,7 +997,7 @@ private extension Array where Element == AudioApp {
 
 struct OnboardingState {
   var audioComponentInstalled = false
-  var permissionsGranted = true
+  var permissionsGranted = false
   var outputDeviceVisible = true
   var routeHealthReady = false
   var launchAtLoginEnabled = false

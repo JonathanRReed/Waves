@@ -41,6 +41,8 @@ struct MainWindowView: View {
             Image(systemName: "plus")
           }
           .help("Save preset")
+          .accessibilityLabel("Save preset")
+          .accessibilityHint("Opens a sheet to save the current mixer settings as a preset.")
           .keyboardShortcut("s", modifiers: [.command])
 
           Button {
@@ -49,6 +51,8 @@ struct MainWindowView: View {
             Image(systemName: "arrow.clockwise")
           }
           .help("Refresh app list")
+          .accessibilityLabel("Refresh app list")
+          .accessibilityHint("Refreshes running apps and audio session state.")
           .keyboardShortcut("r", modifiers: [.command])
 
           Button {
@@ -57,6 +61,8 @@ struct MainWindowView: View {
             Image(systemName: "waveform.path")
           }
           .help("Recover managed routes")
+          .accessibilityLabel("Recover managed routes")
+          .accessibilityHint("Reattaches active per-app audio routes.")
         }
       }
 
@@ -291,6 +297,7 @@ private struct SourceFilterRow: View {
 
 private struct SourceListView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.openSettings) private var openSettings
   let filter: SourceFilter
   let apps: [AudioApp]
   let searchText: String
@@ -303,11 +310,29 @@ private struct SourceListView: View {
         .padding(.bottom, 16)
 
       if apps.isEmpty {
-        ContentUnavailableView(
-          filter.emptyTitle,
-          systemImage: "speaker.slash",
-          description: Text(filter.emptyMessage(searchText: searchText))
-        )
+        VStack(spacing: 14) {
+          ContentUnavailableView(
+            filter.emptyTitle,
+            systemImage: "speaker.slash",
+            description: Text(filter.emptyMessage(searchText: searchText))
+          )
+
+          HStack(spacing: 10) {
+            Button {
+              store.refresh()
+            } label: {
+              Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+              openSettings()
+            } label: {
+              Label("Settings", systemImage: "gearshape")
+            }
+            .buttonStyle(.bordered)
+          }
+        }
         Spacer(minLength: 0)
       } else {
         List {

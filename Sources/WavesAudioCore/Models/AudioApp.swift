@@ -78,6 +78,96 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     // Clamp volumeBoost to reasonable range [0.0, 10.0]
     self.volumeBoost = max(0.0, min(10.0, volumeBoost))
   }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case logicalID
+    case pid
+    case bundleID
+    case displayName
+    case iconName
+    case iconTIFFData
+    case category
+    case isActive
+    case peakLevel
+    case rmsLevel
+    case desiredVolume
+    case appliedVolume
+    case isMuted
+    case isPinned
+    case routingState
+    case compatibility
+    case notes
+    case volumeBoost
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let id = try container.decode(String.self, forKey: .id)
+    let logicalID = try container.decodeIfPresent(String.self, forKey: .logicalID)
+    let pid = try container.decodeIfPresent(Int32.self, forKey: .pid)
+    let bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID)
+    let displayName = try container.decode(String.self, forKey: .displayName)
+    let iconName = try container.decodeIfPresent(String.self, forKey: .iconName)
+    let iconTIFFData = try container.decodeIfPresent(Data.self, forKey: .iconTIFFData)
+    let category = try container.decodeIfPresent(AppCategory.self, forKey: .category) ?? .unknown
+    let isActive = try container.decodeIfPresent(Bool.self, forKey: .isActive) ?? false
+    let peakLevel = try container.decodeIfPresent(Float.self, forKey: .peakLevel) ?? 0
+    let rmsLevel = try container.decodeIfPresent(Float.self, forKey: .rmsLevel) ?? 0
+    let desiredVolume = try container.decodeIfPresent(Float.self, forKey: .desiredVolume) ?? 1
+    let appliedVolume = try container.decodeIfPresent(Float.self, forKey: .appliedVolume)
+    let isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+    let isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+    let routingState = try container.decodeIfPresent(RoutingState.self, forKey: .routingState) ?? .recent
+    let compatibility = try container.decodeIfPresent(CompatibilityState.self, forKey: .compatibility) ?? .planned
+    let notes = try container.decodeIfPresent(String.self, forKey: .notes)
+    let volumeBoost = try container.decodeIfPresent(Float.self, forKey: .volumeBoost) ?? 1.0
+
+    self.init(
+      id: id,
+      logicalID: logicalID,
+      pid: pid,
+      bundleID: bundleID,
+      displayName: displayName,
+      iconName: iconName,
+      iconTIFFData: iconTIFFData,
+      category: category,
+      isActive: isActive,
+      peakLevel: peakLevel,
+      rmsLevel: rmsLevel,
+      desiredVolume: desiredVolume,
+      appliedVolume: appliedVolume,
+      isMuted: isMuted,
+      isPinned: isPinned,
+      routingState: routingState,
+      compatibility: compatibility,
+      notes: notes,
+      volumeBoost: volumeBoost
+    )
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(id, forKey: .id)
+    try container.encode(logicalID, forKey: .logicalID)
+    try container.encodeIfPresent(pid, forKey: .pid)
+    try container.encodeIfPresent(bundleID, forKey: .bundleID)
+    try container.encode(displayName, forKey: .displayName)
+    try container.encodeIfPresent(iconName, forKey: .iconName)
+    try container.encodeIfPresent(iconTIFFData, forKey: .iconTIFFData)
+    try container.encode(category, forKey: .category)
+    try container.encode(isActive, forKey: .isActive)
+    try container.encode(peakLevel, forKey: .peakLevel)
+    try container.encode(rmsLevel, forKey: .rmsLevel)
+    try container.encode(desiredVolume, forKey: .desiredVolume)
+    try container.encodeIfPresent(appliedVolume, forKey: .appliedVolume)
+    try container.encode(isMuted, forKey: .isMuted)
+    try container.encode(isPinned, forKey: .isPinned)
+    try container.encode(routingState, forKey: .routingState)
+    try container.encode(compatibility, forKey: .compatibility)
+    try container.encodeIfPresent(notes, forKey: .notes)
+    try container.encode(volumeBoost, forKey: .volumeBoost)
+  }
 }
 
 public enum RoutingState: String, Codable, CaseIterable, Hashable, Sendable {
