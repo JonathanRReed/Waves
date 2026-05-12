@@ -115,6 +115,17 @@ private struct GeneralSettingsView: View {
           }
         ))
 
+      Toggle(
+        "URL scheme automation",
+        isOn: Binding(
+          get: { store.preferences.enableURLScheme },
+          set: {
+            store.preferences.enableURLScheme = $0
+            store.preferences.urlSchemeAutomationAcknowledged = true
+            store.persistPreferences()
+          }
+        ))
+
       if store.preferences.enableKeyboardShortcuts {
         VStack(alignment: .leading, spacing: 8) {
           Text("Keyboard shortcuts")

@@ -1,0 +1,9 @@
+.DS_Store
+.swiftpm/
+.build/
+DerivedData/
+dist/
+waves_logo_assets/
+
+*.xcuserstate
+xcuserdata/

@@ -130,7 +130,7 @@ struct HelpView: View {
         )
       }
 
-      Text("Use these URL schemes to integrate Waves with other automation tools and workflows.")
+      Text("Enable URL scheme automation in General Settings before using these commands.")
         .font(.caption)
         .foregroundStyle(.secondary)
     }

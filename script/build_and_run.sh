@@ -11,15 +11,19 @@ SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
 # Validate MODE parameter
-VALID_MODES=("run" "--dmg" "--release-check" "release-check" "--notarize" "notarize" "--debug" "debug" "--logs" "logs" "--telemetry" "telemetry" "--verify" "verify")
+VALID_MODES=("run" "--dmg" "--release-check" "release-check" "--publication-check" "publication-check" "--notarize" "notarize" "--debug" "debug" "--logs" "logs" "--telemetry" "telemetry" "--verify" "verify")
 if [[ ! " ${VALID_MODES[@]} " =~ " ${MODE} " ]]; then
   echo "Error: Invalid mode '$MODE'" >&2
-  echo "usage: $0 [run|--dmg|--release-check|--notarize|--debug|--logs|--telemetry|--verify]" >&2
+  echo "usage: $0 [run|--dmg|--release-check|--publication-check|--notarize|--debug|--logs|--telemetry|--verify]" >&2
   exit 2
 fi
 
 is_notarize_mode() {
   [ "$MODE" = "--notarize" ] || [ "$MODE" = "notarize" ]
+}
+
+is_publication_check_mode() {
+  [ "$MODE" = "--publication-check" ] || [ "$MODE" = "publication-check" ]
 }
 
 if is_notarize_mode; then
@@ -41,7 +45,7 @@ if is_notarize_mode; then
 fi
 
 # Validate critical tools are available
-if ! command -v swift >/dev/null 2>&1; then
+if ! is_publication_check_mode && ! command -v swift >/dev/null 2>&1; then
   echo "Error: swift not found. Please install Swift from https://swift.org" >&2
   exit 1
 fi
@@ -54,8 +58,7 @@ APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
-LOGO_RESOURCE="$ROOT_DIR/Sources/Waves/Resources/waves-logo.svg"
-LOGO_RESOURCE_FALLBACK="$ROOT_DIR/waves-logo.svg"
+LOGO_RESOURCE="$ROOT_DIR/Sources/Waves/Resources/waves-logo.png"
 APP_ICON_NAME="waves-logo"
 
 generate_icns() {
@@ -99,64 +102,51 @@ generate_icns() {
   fi
 }
 
-# Kill existing app instance more safely - check bundle ID if possible
-if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
-  # Try to kill by bundle ID first (more specific)
-  if command -v pkill >/dev/null 2>&1; then
-    pkill -x "$APP_NAME" >/dev/null 2>&1 || true
-  fi
-fi
-
-BUILD_ARGS=()
-if [ "$MODE" = "--dmg" ] || [ "$MODE" = "--release-check" ] || [ "$MODE" = "release-check" ] || [ "$MODE" = "--notarize" ] || [ "$MODE" = "notarize" ]; then
-  BUILD_ARGS=(-c release)
-fi
-
-# Build once and capture the binary path
-BUILD_OUTPUT_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
-swift build "${BUILD_ARGS[@]}"
-BUILD_BINARY="$BUILD_OUTPUT_DIR/$APP_NAME"
-
-rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS"
-mkdir -p "$APP_RESOURCES"
-
-# Copy binary with error handling
-if ! cp "$BUILD_BINARY" "$APP_BINARY"; then
-  echo "Error: Failed to copy binary to $APP_BINARY" >&2
-  exit 1
-fi
-chmod +x "$APP_BINARY"
-
-if [ -f "$LOGO_RESOURCE" ]; then
-  if ! cp "$LOGO_RESOURCE" "$APP_RESOURCES/waves-logo.svg"; then
-    echo "Warning: Failed to copy logo resource" >&2
-  else
-    SOURCE_LOGO="$LOGO_RESOURCE"
-  fi
-elif [ -f "$LOGO_RESOURCE_FALLBACK" ]; then
-  if ! cp "$LOGO_RESOURCE_FALLBACK" "$APP_RESOURCES/waves-logo.svg"; then
-    echo "Warning: Failed to copy fallback logo resource" >&2
-  else
-    SOURCE_LOGO="$LOGO_RESOURCE_FALLBACK"
-  fi
-fi
-
-if [ -n "${SOURCE_LOGO-}" ] && [ -f "$SOURCE_LOGO" ]; then
-  if command -v sips >/dev/null 2>&1; then
-    if ! sips -s format png "$SOURCE_LOGO" --out "$APP_RESOURCES/waves-logo.png" >/dev/null 2>&1; then
-      echo "Warning: Failed to convert logo to PNG" >&2
+if ! is_publication_check_mode; then
+  # Kill existing app instance more safely - check bundle ID if possible
+  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+    # Try to kill by bundle ID first (more specific)
+    if command -v pkill >/dev/null 2>&1; then
+      pkill -x "$APP_NAME" >/dev/null 2>&1 || true
     fi
-  else
-    echo "Warning: sips not found, skipping PNG conversion" >&2
   fi
 
-  if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
-    generate_icns "$SOURCE_LOGO" "$APP_RESOURCES/$APP_ICON_NAME.icns" || true
+  BUILD_ARGS=()
+  if [ "$MODE" = "--dmg" ] || [ "$MODE" = "--release-check" ] || [ "$MODE" = "release-check" ] || [ "$MODE" = "--notarize" ] || [ "$MODE" = "notarize" ]; then
+    BUILD_ARGS=(-c release)
   fi
-fi
 
-cat >"$INFO_PLIST" <<PLIST
+  # Build once and capture the binary path
+  BUILD_OUTPUT_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
+  swift build "${BUILD_ARGS[@]}"
+  BUILD_BINARY="$BUILD_OUTPUT_DIR/$APP_NAME"
+
+  rm -rf "$APP_BUNDLE"
+  mkdir -p "$APP_MACOS"
+  mkdir -p "$APP_RESOURCES"
+
+  # Copy binary with error handling
+  if ! cp "$BUILD_BINARY" "$APP_BINARY"; then
+    echo "Error: Failed to copy binary to $APP_BINARY" >&2
+    exit 1
+  fi
+  chmod +x "$APP_BINARY"
+
+  if [ -f "$LOGO_RESOURCE" ]; then
+    if ! cp "$LOGO_RESOURCE" "$APP_RESOURCES/waves-logo.png"; then
+      echo "Warning: Failed to copy logo resource" >&2
+    else
+      SOURCE_LOGO="$LOGO_RESOURCE"
+    fi
+  fi
+
+  if [ -n "${SOURCE_LOGO-}" ] && [ -f "$SOURCE_LOGO" ]; then
+    if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+      generate_icns "$SOURCE_LOGO" "$APP_RESOURCES/$APP_ICON_NAME.icns" || true
+    fi
+  fi
+
+  cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -198,24 +188,25 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-# Validate Info.plist was created
-if [ ! -f "$INFO_PLIST" ]; then
-  echo "Error: Failed to create Info.plist" >&2
-  exit 1
-fi
-
-if [ -f "$APP_RESOURCES/$APP_ICON_NAME.icns" ] && command -v plutil >/dev/null 2>&1; then
-  plutil -replace CFBundleIconFile -string "$APP_ICON_NAME" "$INFO_PLIST"
-fi
-
-if command -v codesign >/dev/null 2>&1; then
-  if [ -n "$SIGN_IDENTITY" ]; then
-    codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
-  elif ! codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1; then
-    echo "Warning: Failed to ad hoc sign app bundle" >&2
+  # Validate Info.plist was created
+  if [ ! -f "$INFO_PLIST" ]; then
+    echo "Error: Failed to create Info.plist" >&2
+    exit 1
   fi
-else
-  echo "Warning: codesign not found, skipping code signing" >&2
+
+  if [ -f "$APP_RESOURCES/$APP_ICON_NAME.icns" ] && command -v plutil >/dev/null 2>&1; then
+    plutil -replace CFBundleIconFile -string "$APP_ICON_NAME" "$INFO_PLIST"
+  fi
+
+  if command -v codesign >/dev/null 2>&1; then
+    if [ -n "$SIGN_IDENTITY" ]; then
+      codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+    elif ! codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1; then
+      echo "Warning: Failed to ad hoc sign app bundle" >&2
+    fi
+  else
+    echo "Warning: codesign not found, skipping code signing" >&2
+  fi
 fi
 
 open_app() {
@@ -303,6 +294,49 @@ notarize_release() {
   fi
 }
 
+publication_check() {
+  local dmg_path="$DIST_DIR/$APP_NAME.dmg"
+  local signature_info
+
+  if [ ! -d "$APP_BUNDLE" ]; then
+    echo "Error: $APP_BUNDLE does not exist. Run --release-check or --notarize first." >&2
+    exit 1
+  fi
+
+  if [ ! -f "$dmg_path" ]; then
+    echo "Error: $dmg_path does not exist. Run --release-check or --notarize first." >&2
+    exit 1
+  fi
+
+  if ! command -v codesign >/dev/null 2>&1; then
+    echo "Error: codesign is required for publication checks." >&2
+    exit 1
+  fi
+
+  signature_info="$(codesign -dvvv "$APP_BUNDLE" 2>&1 || true)"
+
+  if echo "$signature_info" | grep -q "Signature=adhoc"; then
+    echo "Error: $APP_BUNDLE is ad hoc signed. Public builds require a Developer ID Application signature." >&2
+    exit 1
+  fi
+
+  if echo "$signature_info" | grep -q "TeamIdentifier=not set"; then
+    echo "Error: $APP_BUNDLE has no TeamIdentifier. Public builds require a Developer ID Application signature." >&2
+    exit 1
+  fi
+
+  codesign --verify --deep --strict "$APP_BUNDLE"
+  hdiutil imageinfo "$dmg_path" >/dev/null
+
+  if ! command -v spctl >/dev/null 2>&1; then
+    echo "Error: spctl is required for publication checks." >&2
+    exit 1
+  fi
+
+  spctl --assess --type execute --verbose "$APP_BUNDLE"
+  spctl --assess --type open --context context:primary-signature --verbose "$dmg_path"
+}
+
 case "$MODE" in
   run)
     open_app
@@ -313,6 +347,9 @@ case "$MODE" in
     ;;
   --release-check|release-check)
     release_check
+    ;;
+  --publication-check|publication-check)
+    publication_check
     ;;
   --notarize|notarize)
     notarize_release
@@ -332,7 +369,7 @@ case "$MODE" in
     verify_app
     ;;
   *)
-    echo "usage: $0 [run|--dmg|--release-check|--notarize|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--dmg|--release-check|--publication-check|--notarize|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac

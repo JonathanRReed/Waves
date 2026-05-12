@@ -17,7 +17,7 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 
 ### Automation & Integration
 - **Keyboard Shortcuts**: Global hotkeys for quick volume adjustments (⌘⌥↑/↓ for volume, ⌘⌥M for mute)
-- **URL Scheme Automation**: Control Waves via custom URL schemes for integration with other tools
+- **URL Scheme Automation**: Opt-in custom URL schemes for integration with other tools
 - **Auto-Pause Music**: Automatically pause music apps when conferencing apps become active
 
 ### Presets & Organization
@@ -37,7 +37,7 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 ## System Requirements
 
 - macOS 14.2 or later
-- Accessibility permission for global shortcuts and helper app control
+- Accessibility permission is only required for global shortcuts
 - Audio capture permission when macOS prompts for Core Audio process taps
 
 ## Installation
@@ -65,13 +65,20 @@ cd Waves
 ./script/build_and_run.sh --release-check
 ```
 
-5. Notarize a public distribution build:
+5. Check whether the build is acceptable for public distribution:
+```bash
+./script/build_and_run.sh --publication-check
+```
+
+6. Notarize a public distribution build:
 ```bash
 xcrun notarytool store-credentials waves-notary --apple-id <apple-id> --team-id <team-id>
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE="waves-notary" ./script/build_and_run.sh --notarize
 ```
 
-`--release-check` creates a locally verified DMG. `--notarize` requires a Developer ID Application certificate and a stored notarytool profile, then submits, staples, validates, and runs Gatekeeper assessment on the DMG.
+`--release-check` creates a locally verified DMG. `--publication-check` fails unless the app has a Developer ID Application signature and passes Gatekeeper assessment. `--notarize` requires a Developer ID Application certificate and a stored notarytool profile, then submits, staples, validates, and runs Gatekeeper assessment on the DMG.
+
+See `docs/RELEASE.md` for the full release checklist.
 
 ## Usage
 
@@ -93,7 +100,7 @@ When keyboard shortcuts are enabled in Settings:
 
 ### URL Scheme Automation
 
-Control Waves via URL schemes:
+URL scheme automation is disabled by default for security. Enable it in General Settings before using these commands:
 
 - `waves://set-volume?app=APP_ID&volume=0.5` - Set volume for an app (0.0 to 1.0)
 - `waves://mute?app=APP_ID&muted=true` - Mute or unmute an app
@@ -123,6 +130,7 @@ When switching audio devices:
 - **Auto-pause music during calls**: Pause media when conferencing apps are active
 - **Enable keyboard shortcuts**: Use global hotkeys for volume control
 - **Per-device volume presets**: Remember volumes per audio device
+- **URL scheme automation**: Allow local `waves://` automation commands after explicit opt-in
 - **Sort apps by**: Choose sorting method (Activity, Name, Category, Manual)
 
 ### Audio Settings
@@ -212,7 +220,7 @@ swift build
 
 ## License
 
-No open-source license is included in this checkout. Treat the code as all rights reserved unless a LICENSE file is added.
+All rights reserved. See `LICENSE`.
 
 ## Contributing
 

@@ -46,7 +46,7 @@ struct MenuBarMixerView: View {
           CompactSection(title: "Pinned", apps: store.pinnedApps)
         }
 
-        CompactSection(title: "Frontmost", apps: store.activeApps)
+        CompactSection(title: "Live", apps: store.activeApps)
 
         if store.preferences.showRecentApps {
           CompactSection(title: "Recent", apps: Array(store.recentApps.prefix(3)))

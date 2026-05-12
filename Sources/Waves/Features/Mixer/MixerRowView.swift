@@ -9,16 +9,16 @@ struct MixerRowView: View {
   @State private var animateMuteChange = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack(spacing: 12) {
+    VStack(alignment: .leading, spacing: 5) {
+      HStack(spacing: 10) {
         AppIconView(app: app)
           .scaleEffect(animateVolumeChange ? 1.1 : 1.0)
           .animation(.spring(response: 0.3, dampingFraction: 0.6), value: animateVolumeChange)
 
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
           HStack(spacing: 6) {
             Text(app.displayName)
-              .font(.body.weight(.medium))
+              .font(.callout.weight(.medium))
               .lineLimit(1)
 
             if app.isPinned {
@@ -30,15 +30,18 @@ struct MixerRowView: View {
             }
           }
 
-          Text(subtitle)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
+          HStack(spacing: 6) {
+            Text(subtitle)
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
 
-          RoutingStateIndicator(state: app.routingState)
+            RoutingStateIndicator(state: app.routingState)
+          }
         }
+        .frame(minWidth: 150, idealWidth: 240, maxWidth: .infinity, alignment: .leading)
 
-        Spacer(minLength: 16)
+        Spacer(minLength: 10)
 
         Slider(
           value: Binding(
@@ -64,15 +67,20 @@ struct MixerRowView: View {
           }
         )
         .controlSize(.small)
-        .frame(minWidth: 160, idealWidth: 220, maxWidth: 260)
+        .tint(WavesDesign.accent)
+        .frame(minWidth: 150, idealWidth: 210, maxWidth: 250)
         .help(sliderHelp)
         .accessibilityLabel("Volume for \(app.displayName)")
         .accessibilityValue("\(Int(app.desiredVolume * 100))%")
+        .accessibilityHint("Adjusts the per-app volume target.")
+        .accessibilityAdjustableAction { direction in
+          adjustVolume(direction)
+        }
 
         Text("\(Int(app.desiredVolume * 100))%")
-          .font(.callout.monospacedDigit())
+          .font(.caption.monospacedDigit().weight(.medium))
           .foregroundStyle(.secondary)
-          .frame(width: 44, alignment: .trailing)
+          .frame(width: 40, alignment: .trailing)
           .contentTransition(.numericText())
           .animation(.spring(response: 0.2, dampingFraction: 0.7), value: app.desiredVolume)
           .accessibilityLabel("Volume percentage")
@@ -106,6 +114,8 @@ struct MixerRowView: View {
           .padding(.leading, 40)
       }
     }
+    .padding(.vertical, 5)
+    .contentShape(Rectangle())
     .contextMenu {
       Button(app.isPinned ? "Unpin" : "Pin") {
         store.togglePinned(app)
@@ -116,7 +126,11 @@ struct MixerRowView: View {
   private var subtitle: String {
     var parts: [String] = []
 
-    if app.isActive {
+    if app.routingState == .live {
+      parts.append("Playing audio")
+    } else if app.routingState == .managed && !app.isMuted && max(app.peakLevel, app.rmsLevel) > 0.001 {
+      parts.append("Playing audio")
+    } else if app.isActive {
       parts.append("Frontmost app")
     }
 
@@ -143,6 +157,23 @@ struct MixerRowView: View {
     canControlAudio
       ? Text(app.isMuted ? "Unmute" : "Mute")
       : Text("Mute to enroll \(app.displayName) in managed routing.")
+  }
+
+  private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
+    let step: Float = 0.05
+    let nextValue: Float
+
+    switch direction {
+    case .increment:
+      nextValue = min(app.desiredVolume + step, 1)
+    case .decrement:
+      nextValue = max(app.desiredVolume - step, 0)
+    @unknown default:
+      return
+    }
+
+    store.setDesiredVolume(nextValue, for: app)
+    store.commitDesiredVolume(for: app)
   }
 }
 
@@ -208,12 +239,16 @@ struct CompactMixerRow: View {
         }
       )
       .controlSize(.small)
+      .tint(WavesDesign.accent)
       .frame(width: 110)
       .padding(.trailing, 4)
       .help(sliderHelp)
       .accessibilityLabel("Volume for \(app.displayName)")
       .accessibilityValue("\(Int(app.desiredVolume * 100))%")
       .accessibilityHint("Adjusts the per-app volume target.")
+      .accessibilityAdjustableAction { direction in
+        adjustVolume(direction)
+      }
 
       BoostMenu(app: app, compact: true)
 
@@ -250,6 +285,23 @@ struct CompactMixerRow: View {
   private var muteHelp: Text {
     MixerRowHelpers.muteHelp(for: app)
   }
+
+  private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
+    let step: Float = 0.05
+    let nextValue: Float
+
+    switch direction {
+    case .increment:
+      nextValue = min(app.desiredVolume + step, 1)
+    case .decrement:
+      nextValue = max(app.desiredVolume - step, 0)
+    @unknown default:
+      return
+    }
+
+    store.setDesiredVolume(nextValue, for: app)
+    store.commitDesiredVolume(for: app)
+  }
 }
 
 private struct BoostMenu: View {
@@ -268,8 +320,9 @@ private struct BoostMenu: View {
       }
     } label: {
       Text("\(Int(app.volumeBoost))x")
-        .font(compact ? .caption.monospacedDigit() : .callout.monospacedDigit())
-        .frame(width: compact ? 34 : 42)
+        .font(compact ? .caption.monospacedDigit() : .caption.monospacedDigit().weight(.medium))
+        .foregroundStyle(.secondary)
+        .frame(width: compact ? 34 : 38)
     }
     .menuStyle(.borderlessButton)
     .help("Set boost for \(app.displayName)")
@@ -286,7 +339,7 @@ private extension RoutingState {
     case .live:
       WavesDesign.accent
     case .monitorOnly:
-      .orange
+      .secondary
     case .recent:
       .secondary
     case .error:
@@ -298,22 +351,53 @@ private extension RoutingState {
 private struct RoutingStateIndicator: View {
   let state: RoutingState
 
+  @ViewBuilder
   var body: some View {
-    HStack(spacing: 5) {
-      Circle()
-        .fill(color)
-        .frame(width: 6, height: 6)
+    if state != .monitorOnly {
+      HStack(spacing: 4) {
+        Image(systemName: symbolName)
+          .font(.system(size: 9, weight: .semibold))
+          .foregroundStyle(color)
+          .frame(width: 10)
 
-      Text(state.displayName)
-        .font(.caption2.weight(.medium))
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
+        Text(state.displayName)
+          .font(.caption2.weight(.medium))
+          .foregroundStyle(color)
+          .lineLimit(1)
+      }
+      .padding(.horizontal, 6)
+      .padding(.vertical, 2)
+      .background(color.opacity(backgroundOpacity), in: Capsule())
+      .help(Text(helpText))
+      .accessibilityLabel(Text(helpText))
     }
-    .help(Text(helpText))
-    .accessibilityLabel(Text(helpText))
   }
 
   private var color: Color { state.indicatorColor }
+
+  private var backgroundOpacity: Double {
+    switch state {
+    case .monitorOnly, .recent:
+      0.08
+    default:
+      0.12
+    }
+  }
+
+  private var symbolName: String {
+    switch state {
+    case .managed:
+      "checkmark.circle.fill"
+    case .live:
+      "waveform"
+    case .monitorOnly:
+      "checkmark.circle"
+    case .recent:
+      "clock.fill"
+    case .error:
+      "exclamationmark.triangle.fill"
+    }
+  }
 
   private var helpText: String {
     switch state {
@@ -322,7 +406,7 @@ private struct RoutingStateIndicator: View {
     case .live:
       "Live audio source detected."
     case .monitorOnly:
-      "Waves can see this app, but control is not active yet."
+      "Ready to manage. Move the slider or mute the app to start per-app control."
     case .recent:
       "Recent audio source."
     case .error:
@@ -335,14 +419,30 @@ private struct RoutingStateDot: View {
   let state: RoutingState
 
   var body: some View {
-    Circle()
-      .fill(color)
-      .frame(width: 7, height: 7)
+    Image(systemName: symbolName)
+      .font(.caption2.weight(.semibold))
+      .foregroundStyle(color)
+      .frame(width: 12, height: 12)
       .help(Text(state.displayName))
       .accessibilityLabel(Text("Route state: \(state.displayName)"))
   }
 
   private var color: Color { state.indicatorColor }
+
+  private var symbolName: String {
+    switch state {
+    case .managed:
+      "checkmark.circle.fill"
+    case .live:
+      "waveform"
+    case .monitorOnly:
+      "checkmark.circle"
+    case .recent:
+      "clock.fill"
+    case .error:
+      "exclamationmark.triangle.fill"
+    }
+  }
 }
 
 struct AppIconView: View {
@@ -354,12 +454,13 @@ struct AppIconView: View {
         .resizable()
         .scaledToFit()
         .frame(width: 28, height: 28)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     } else {
       Image(systemName: app.iconName ?? "app")
-        .font(.body)
+        .font(.callout)
         .foregroundStyle(.secondary)
         .frame(width: 28, height: 28)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(.tertiary.opacity(0.28), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
   }
 }
