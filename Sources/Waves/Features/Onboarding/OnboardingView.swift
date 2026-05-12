@@ -11,11 +11,6 @@ struct OnboardingView: View {
       "Refresh Status"
     ),
     (
-      "Grant permissions",
-      "Waves needs Accessibility for global shortcuts and app-control helpers. macOS may also ask for audio capture consent when a managed route starts.",
-      "Open System Settings"
-    ),
-    (
       "Validate output device visibility",
       "Waves needs to see your audio output devices to create managed routes. Ensure your speakers or headphones are connected and recognized by macOS.",
       "Refresh Devices"
@@ -24,22 +19,25 @@ struct OnboardingView: View {
       "Exercise route recovery",
       "Route recovery ensures that when you switch audio devices (e.g., from speakers to headphones), Waves automatically re-establishes managed routes without requiring an app restart.",
       "Test Recovery"
+    ),
+    (
+      "Enable keyboard shortcut permission",
+      "Optional: grant Accessibility if you want global shortcuts and app-control helpers. Per-app volume routing can work without this permission.",
+      "Open System Settings"
     )
   ]
 
   var completionProgress: Double {
     let completedSteps = [
       store.onboarding.audioComponentInstalled,
-      store.onboarding.permissionsGranted,
       store.onboarding.outputDeviceVisible,
       store.onboarding.routeHealthReady
     ].filter { $0 }.count
-    return Double(completedSteps) / Double(steps.count)
+    return Double(completedSteps) / 3
   }
 
   var isFullyComplete: Bool {
     store.onboarding.audioComponentInstalled &&
-    store.onboarding.permissionsGranted &&
     store.onboarding.outputDeviceVisible &&
     store.onboarding.routeHealthReady
   }
@@ -141,9 +139,9 @@ struct OnboardingView: View {
   private func isStepComplete(at index: Int) -> Bool {
     switch index {
     case 0: return store.onboarding.audioComponentInstalled
-    case 1: return store.onboarding.permissionsGranted
-    case 2: return store.onboarding.outputDeviceVisible
-    case 3: return store.onboarding.routeHealthReady
+    case 1: return store.onboarding.outputDeviceVisible
+    case 2: return store.onboarding.routeHealthReady
+    case 3: return store.onboarding.accessibilityPermissionGranted
     default: return false
     }
   }
@@ -151,9 +149,9 @@ struct OnboardingView: View {
   private func canPerformAction(for index: Int) -> Bool {
     switch index {
     case 0: return !store.onboarding.audioComponentInstalled
-    case 1: return !store.onboarding.permissionsGranted
-    case 2: return !store.onboarding.outputDeviceVisible
-    case 3: return store.onboarding.outputDeviceVisible && !store.onboarding.routeHealthReady
+    case 1: return !store.onboarding.outputDeviceVisible
+    case 2: return store.onboarding.outputDeviceVisible && !store.onboarding.routeHealthReady
+    case 3: return !store.onboarding.accessibilityPermissionGranted
     default: return false
     }
   }
@@ -163,13 +161,13 @@ struct OnboardingView: View {
     case 0:
       store.refresh()
     case 1:
+      store.refresh()
+    case 2:
+      store.recoverRoutes()
+    case 3:
       if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
         NSWorkspace.shared.open(url)
       }
-    case 2:
-      store.refresh()
-    case 3:
-      store.recoverRoutes()
     default:
       break
     }

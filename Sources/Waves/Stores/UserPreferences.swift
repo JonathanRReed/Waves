@@ -4,13 +4,14 @@ struct UserPreferences: Codable, Sendable {
   var launchAtLoginEnabled = false
   var showRecentApps = true
   var showSystemProcesses = false
-  var sortMode: SortMode = .activity
+  var sortMode: SortMode = .name
   var customAppOrder: [String] = []
   var autoRestoreDevice = true
   var autoPauseMusicForConferencing = true
   var enableKeyboardShortcuts = true
   var enablePerDeviceVolumePresets = true
-  var enableURLScheme = true
+  var enableURLScheme = false
+  var urlSchemeAutomationAcknowledged = false
 }
 
 struct AppVolumeSettings: Codable, Hashable, Sendable {

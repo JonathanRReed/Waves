@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Foundation
 import Observation
 import OSLog
@@ -51,6 +52,9 @@ final class AppStore {
   private var previousFrontmostApp: String?
   private var pausedMusicApps: Set<String> = []
   private let maxPendingTasks = 100
+  private var urlSchemeRequestTimes: [Date] = []
+  private let maxURLSchemeRequests = 10
+  private let urlSchemeRequestWindow: TimeInterval = 60
 
   init(
     backend: any AudioControlBackend,
@@ -70,6 +74,13 @@ final class AppStore {
     self.presets = presetStore.load(defaults: Preset.defaults)
     self.session = sessionStore.load() ?? Self.emptySession
     self.deviceVolumePresets = deviceVolumePresetsStore.load()
+    if preferences.sortMode == .activity && preferences.customAppOrder.isEmpty {
+      preferences.sortMode = .name
+    }
+    if !preferences.urlSchemeAutomationAcknowledged {
+      preferences.enableURLScheme = false
+      preferences.urlSchemeAutomationAcknowledged = true
+    }
     self.preferences.launchAtLoginEnabled = loginItemService.status.isEnabled
     self.onboarding = OnboardingState(
       launchAtLoginEnabled: loginItemService.status.isEnabled
@@ -82,9 +93,7 @@ final class AppStore {
     if needsVisibleAppsCacheUpdate {
       let filtered = session.apps
         .filter { preferences.showSystemProcesses || $0.category != .system }
-      cachedVisibleApps = preferences.sortMode == .manual
-        ? filtered.sorted(by: manualOrderComparator)
-        : filtered.sorted(using: sortComparator)
+      cachedVisibleApps = sortedApps(filtered)
       needsVisibleAppsCacheUpdate = false
     }
     return cachedVisibleApps
@@ -98,9 +107,17 @@ final class AppStore {
     visibleApps.filter(\.isActive)
   }
 
+  var liveApps: [AudioApp] {
+    visibleApps.filter { app in
+      app.routingState == .live
+        || (app.routingState == .managed && !app.isMuted && max(app.peakLevel, app.rmsLevel) > 0.001)
+    }
+  }
+
   var recentApps: [AudioApp] {
     guard preferences.showRecentApps else { return [] }
-    return visibleApps.filter { !$0.isActive }
+    let liveIDs = Set(liveApps.map(\.logicalID))
+    return visibleApps.filter { !liveIDs.contains($0.logicalID) }
   }
 
   var currentDeviceID: String? {
@@ -226,6 +243,104 @@ final class AppStore {
     }
   }
 
+  func handleURLScheme(_ url: URL) {
+    guard preferences.enableURLScheme else {
+      logger.warning("URL scheme invocation rejected because URL schemes are disabled")
+      return
+    }
+
+    guard checkURLSchemeRateLimit() else {
+      logger.warning("URL scheme invocation rejected because the rate limit was exceeded")
+      return
+    }
+
+    guard url.scheme == "waves",
+          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+          let host = components.host else {
+      return
+    }
+
+    logger.info("URL scheme invoked: \(host, privacy: .public)")
+
+    switch host {
+    case "set-volume":
+      handleURLSetVolume(components)
+    case "mute":
+      handleURLMute(components)
+    case "apply-preset":
+      handleURLApplyPreset(components)
+    case "refresh":
+      refresh()
+    default:
+      logger.warning("URL scheme invoked with unknown host: \(host, privacy: .public)")
+    }
+  }
+
+  private func handleURLSetVolume(_ components: URLComponents) {
+    guard let appID = components.queryItems?.first(where: { $0.name == "app" })?.value,
+          let volumeValue = components.queryItems?.first(where: { $0.name == "volume" })?.value,
+          appID.count <= 256,
+          volumeValue.count <= 32,
+          let volume = Float(volumeValue),
+          volume >= 0,
+          volume <= 1 else {
+      showToast(title: "URL command blocked", detail: "Set-volume command was invalid.", kind: .warning)
+      return
+    }
+
+    guard let app = session.apps.first(matchingAppKey: appID) else {
+      showToast(title: "URL command blocked", detail: "App not found: \(appID)", kind: .warning)
+      return
+    }
+
+    setDesiredVolume(volume, for: app)
+    commitDesiredVolume(for: app)
+  }
+
+  private func handleURLMute(_ components: URLComponents) {
+    guard let appID = components.queryItems?.first(where: { $0.name == "app" })?.value,
+          let muteValue = components.queryItems?.first(where: { $0.name == "muted" })?.value,
+          appID.count <= 256,
+          muteValue.count <= 16,
+          let shouldMute = Bool(muteValue) else {
+      showToast(title: "URL command blocked", detail: "Mute command was invalid.", kind: .warning)
+      return
+    }
+
+    guard let app = session.apps.first(matchingAppKey: appID) else {
+      showToast(title: "URL command blocked", detail: "App not found: \(appID)", kind: .warning)
+      return
+    }
+
+    setMuted(shouldMute, for: app)
+  }
+
+  private func handleURLApplyPreset(_ components: URLComponents) {
+    guard let presetName = components.queryItems?.first(where: { $0.name == "name" })?.value,
+          presetName.count <= 256 else {
+      showToast(title: "URL command blocked", detail: "Preset command was invalid.", kind: .warning)
+      return
+    }
+
+    guard let preset = presets.first(where: { $0.name.localizedCaseInsensitiveCompare(presetName) == .orderedSame }) else {
+      showToast(title: "URL command blocked", detail: "Preset not found: \(presetName)", kind: .warning)
+      return
+    }
+
+    applyPreset(preset)
+  }
+
+  private func checkURLSchemeRateLimit() -> Bool {
+    let now = Date()
+    let cutoff = now.addingTimeInterval(-urlSchemeRequestWindow)
+    urlSchemeRequestTimes.removeAll { $0 < cutoff }
+    guard urlSchemeRequestTimes.count < maxURLSchemeRequests else {
+      return false
+    }
+    urlSchemeRequestTimes.append(now)
+    return true
+  }
+
   func setDesiredVolume(_ value: Float, for app: AudioApp) {
     let appKey = app.logicalID
     guard let index = session.apps.firstIndex(matchingAppKey: appKey) else {
@@ -236,7 +351,9 @@ final class AppStore {
 
     let clampedValue = max(0.0, min(1.0, value))
     session.apps[index].desiredVolume = clampedValue
+    session.apps[index].appliedVolume = session.apps[index].isMuted ? 0 : clampedValue
     pendingVolumeTargets[appKey] = clampedValue
+    invalidateVisibleAppsCache()
 
     if preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID {
       let currentApp = session.apps[index]
@@ -287,7 +404,7 @@ final class AppStore {
         self.mergeAppState(from: backendSession, appID: appID)
         self.diagnostics = await self.backend.diagnosticsReport()
         self.persistSessionSnapshot()
-        let appName = self.session.apps.first(where: { $0.id == appID })?.displayName ?? "App"
+        let appName = self.session.apps.first(matchingAppKey: appID)?.displayName ?? "App"
         showToast(
           title: "Managed route active",
           detail: "\(appName) set to \(Int(target * 100))%",
@@ -311,7 +428,9 @@ final class AppStore {
 
         do {
           self.session = try await self.backend.refresh()
+          self.invalidateVisibleAppsCache()
           self.diagnostics = await self.backend.diagnosticsReport()
+          self.persistSessionSnapshot()
         } catch {
           // inner refresh failure is already surfaced by outer toast
         }
@@ -350,6 +469,12 @@ final class AppStore {
     let appName = app.displayName
     let appKey = app.logicalID
 
+    if let index = session.apps.firstIndex(matchingAppKey: appKey) {
+      session.apps[index].isMuted = isMuted
+      session.apps[index].appliedVolume = isMuted ? 0 : session.apps[index].desiredVolume
+      invalidateVisibleAppsCache()
+    }
+
     if preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID {
       let settings = AppVolumeSettings(
         desiredVolume: app.desiredVolume,
@@ -366,8 +491,8 @@ final class AppStore {
     Task {
       do {
         try await backend.setMuted(isMuted, forAppID: app.logicalID)
-        session = await backend.currentSnapshot()
-        invalidateVisibleAppsCache()
+        let backendSession = await backend.currentSnapshot()
+        mergeAppState(from: backendSession, appID: appKey)
         diagnostics = await backend.diagnosticsReport()
         persistSessionSnapshot()
         showToast(
@@ -377,8 +502,8 @@ final class AppStore {
           duration: .seconds(1.1)
         )
       } catch {
-        session = await backend.currentSnapshot()
-        invalidateVisibleAppsCache()
+        let backendSession = await backend.currentSnapshot()
+        mergeAppState(from: backendSession, appID: appKey)
         diagnostics = await backend.diagnosticsReport()
         persistSessionSnapshot()
         showToast(title: "Mute toggle failed", detail: error.localizedDescription, kind: .error)
@@ -411,8 +536,8 @@ final class AppStore {
     Task {
       do {
         try await backend.setVolumeBoost(clampedBoost, forAppID: appKey)
-        session = await backend.currentSnapshot()
-        invalidateVisibleAppsCache()
+        let backendSession = await backend.currentSnapshot()
+        mergeAppState(from: backendSession, appID: appKey)
         diagnostics = await backend.diagnosticsReport()
         persistSessionSnapshot()
         showToast(
@@ -422,8 +547,8 @@ final class AppStore {
           duration: .seconds(1.1)
         )
       } catch {
-        session = await backend.currentSnapshot()
-        invalidateVisibleAppsCache()
+        let backendSession = await backend.currentSnapshot()
+        mergeAppState(from: backendSession, appID: appKey)
         diagnostics = await backend.diagnosticsReport()
         persistSessionSnapshot()
         showToast(title: "Boost update failed", detail: error.localizedDescription, kind: .error)
@@ -812,17 +937,53 @@ final class AppStore {
     invalidateVisibleAppsCache()
   }
 
-  private var sortComparator: KeyPathComparator<AudioApp> {
+  private func sortedApps(_ apps: [AudioApp]) -> [AudioApp] {
     switch preferences.sortMode {
     case .name:
-      KeyPathComparator(\.displayName)
+      apps.sorted(by: displayNameComparator)
     case .activity:
-      KeyPathComparator(\.peakLevel, order: .reverse)
+      apps.sorted { app1, app2 in
+        let rank1 = activityRank(for: app1)
+        let rank2 = activityRank(for: app2)
+        if rank1 != rank2 {
+          return rank1 < rank2
+        }
+        return displayNameComparator(app1, app2)
+      }
     case .category:
-      KeyPathComparator(\.category.rawValue)
+      apps.sorted {
+        if $0.category.rawValue != $1.category.rawValue {
+          return $0.category.rawValue < $1.category.rawValue
+        }
+        return displayNameComparator($0, $1)
+      }
     case .manual:
-      KeyPathComparator(\.displayName)
+      apps.sorted(by: manualOrderComparator)
     }
+  }
+
+  private func activityRank(for app: AudioApp) -> Int {
+    if app.routingState == .live {
+      return 0
+    }
+
+    if app.routingState == .managed && !app.isMuted && max(app.peakLevel, app.rmsLevel) > 0.001 {
+      return 1
+    }
+
+    if app.isActive {
+      return 2
+    }
+
+    if app.routingState == .managed {
+      return 3
+    }
+
+    return 4
+  }
+
+  private func displayNameComparator(_ app1: AudioApp, _ app2: AudioApp) -> Bool {
+    app1.displayName.localizedCaseInsensitiveCompare(app2.displayName) == .orderedAscending
   }
 
   private var manualOrderComparator: (AudioApp, AudioApp) -> Bool {
@@ -861,6 +1022,7 @@ final class AppStore {
   private func syncOnboarding(using snapshot: AudioSessionSnapshot) {
     onboarding.audioComponentInstalled = snapshot.backendStatus.isAudioComponentInstalled
     onboarding.permissionsGranted = snapshot.backendStatus.hasRequiredPermissions
+    onboarding.accessibilityPermissionGranted = AXIsProcessTrusted()
     onboarding.outputDeviceVisible = snapshot.currentDevice != nil
     onboarding.routeHealthReady = snapshot.backendStatus.isRouteRecoveryHealthy
     let launchAtLoginEnabled = loginItemService.status.isEnabled
@@ -998,11 +1160,12 @@ private extension Array where Element == AudioApp {
 struct OnboardingState {
   var audioComponentInstalled = false
   var permissionsGranted = false
+  var accessibilityPermissionGranted = false
   var outputDeviceVisible = true
   var routeHealthReady = false
   var launchAtLoginEnabled = false
 
   var isReadyForEverydayUse: Bool {
-    permissionsGranted && outputDeviceVisible
+    permissionsGranted && outputDeviceVisible && routeHealthReady
   }
 }

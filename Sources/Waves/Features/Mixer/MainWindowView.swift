@@ -10,9 +10,6 @@ struct MainWindowView: View {
 
   var body: some View {
     ZStack(alignment: .top) {
-      WavesDesign.windowGradient
-        .ignoresSafeArea()
-
       NavigationSplitView {
         SidebarView(selection: $selection)
           .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)
@@ -26,14 +23,6 @@ struct MainWindowView: View {
       .navigationSplitViewStyle(.balanced)
       .searchable(text: $searchText, placement: .sidebar, prompt: "Filter apps")
       .toolbar {
-        ToolbarItem(placement: .principal) {
-          HStack(spacing: 10) {
-            WavesBrandLogo(size: 18)
-            Text("Waves")
-              .font(.headline)
-          }
-        }
-
         ToolbarItemGroup {
           Button {
             isPresentingSavePreset = true
@@ -75,7 +64,7 @@ struct MainWindowView: View {
         HStack(spacing: 10) {
           ProgressView()
             .controlSize(.small)
-          Text("Refreshing audio sessions")
+          Text("Refreshing")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -91,12 +80,16 @@ struct MainWindowView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
       }
     }
+    .background(Color(nsColor: .windowBackgroundColor))
     .sheet(isPresented: $isPresentingSavePreset) {
       SavePresetSheet(
         presetName: $presetName,
         onCancel: dismissPresetSheet,
         onSave: savePreset
       )
+    }
+    .onOpenURL { url in
+      store.handleURLScheme(url)
     }
     .task {
       store.start()
@@ -110,7 +103,7 @@ struct MainWindowView: View {
     case .pinned:
       store.pinnedApps
     case .frontmost:
-      store.activeApps
+      store.liveApps
     case .recent:
       store.recentApps
     }
@@ -163,7 +156,7 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
     case .pinned:
       "Pinned"
     case .frontmost:
-      "Frontmost"
+      "Live"
     case .recent:
       "Recent"
     }
@@ -177,7 +170,7 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
     case .pinned:
       store.pinnedApps.count
     case .frontmost:
-      store.activeApps.count
+      store.liveApps.count
     case .recent:
       store.recentApps.count
     }
@@ -191,12 +184,25 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
     case .pinned:
       label = count == 1 ? "pinned app" : "pinned apps"
     case .frontmost:
-      label = count == 1 ? "frontmost app" : "frontmost apps"
+      label = count == 1 ? "live app" : "live apps"
     case .recent:
       label = count == 1 ? "background app" : "background apps"
     }
 
     return "\(count) \(label)"
+  }
+
+  var systemImage: String {
+    switch self {
+    case .running:
+      "square.stack.3d.up.fill"
+    case .pinned:
+      "pin.fill"
+    case .frontmost:
+      "waveform"
+    case .recent:
+      "clock.fill"
+    }
   }
 
   var emptyTitle: String {
@@ -206,7 +212,7 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
     case .pinned:
       "No Pinned Apps"
     case .frontmost:
-      "No Frontmost App"
+      "No Live Apps"
     case .recent:
       "No Recent Apps"
     }
@@ -223,7 +229,7 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
     case .pinned:
       return "Pin apps from the source list to keep them here."
     case .frontmost:
-      return "This filter only shows the current frontmost app, not confirmed audio output."
+      return "Start playback in an app, then refresh if it does not appear here."
     case .recent:
       return "Background apps will appear here when they are not frontmost."
     }
@@ -252,13 +258,20 @@ private struct SidebarView: View {
             Button {
               store.applyPreset(preset)
             } label: {
-              VStack(alignment: .leading, spacing: 2) {
-                Text(preset.name)
-                  .lineLimit(1)
-                Text("\(preset.entries.count) apps")
-                  .font(.caption)
+              HStack(spacing: 9) {
+                Image(systemName: "slider.horizontal.3")
+                  .font(.callout)
                   .foregroundStyle(.secondary)
-                  .lineLimit(1)
+                  .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 1) {
+                  Text(preset.name)
+                    .lineLimit(1)
+                  Text("\(preset.entries.count) apps")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
               }
               .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -284,13 +297,20 @@ private struct SourceFilterRow: View {
   let countText: String
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 2) {
-      Text(filter.title)
-        .lineLimit(1)
-      Text(countText)
-        .font(.caption)
+    HStack(spacing: 9) {
+      Image(systemName: filter.systemImage)
+        .font(.callout)
         .foregroundStyle(.secondary)
-        .lineLimit(1)
+        .frame(width: 18)
+
+      VStack(alignment: .leading, spacing: 1) {
+        Text(filter.title)
+          .lineLimit(1)
+        Text(countText)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
     }
   }
 }
@@ -305,9 +325,6 @@ private struct SourceListView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       OutputSummaryView(filter: filter, visibleCount: apps.count)
-        .padding(.horizontal, 24)
-        .padding(.top, 24)
-        .padding(.bottom, 16)
 
       if apps.isEmpty {
         VStack(spacing: 14) {
@@ -338,7 +355,7 @@ private struct SourceListView: View {
         List {
           ForEach(apps) { app in
             MixerRowView(app: app)
-              .listRowInsets(EdgeInsets(top: 7, leading: 24, bottom: 7, trailing: 24))
+              .listRowInsets(EdgeInsets(top: 2, leading: 18, bottom: 2, trailing: 18))
               .listRowBackground(Color.clear)
           }
           .onMove { source, destination in
@@ -351,10 +368,10 @@ private struct SourceListView: View {
       }
 
       DiagnosticsPanel()
-        .padding(.horizontal, 24)
-        .padding(.top, 8)
-        .padding(.bottom, 16)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
     }
+    .background(Color(nsColor: .textBackgroundColor))
   }
 }
 
@@ -364,22 +381,91 @@ private struct OutputSummaryView: View {
   let visibleCount: Int
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      HStack(spacing: 8) {
-        Text(store.currentDeviceName)
-          .font(.title2.weight(.semibold))
+    HStack(spacing: 12) {
+      Image(systemName: "speaker.wave.2.fill")
+        .font(.system(size: 16, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .frame(width: 30, height: 30)
+        .background(.tertiary.opacity(0.22), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-        if store.isLoading {
-          ProgressView()
-            .controlSize(.small)
+      VStack(alignment: .leading, spacing: 1) {
+        Text(store.currentDeviceName)
+          .font(.headline.weight(.semibold))
+          .lineLimit(1)
+
+        HStack(spacing: 8) {
+          Text(filter.detail(count: visibleCount))
+            .foregroundStyle(.secondary)
+
+          if let liveSummary {
+            Label(liveSummary, systemImage: "waveform")
+              .foregroundStyle(WavesDesign.accent)
+          }
         }
-      }
-      Text(filter.detail(count: visibleCount))
-        .foregroundStyle(.secondary)
-      Text("Showing user-facing running apps and their managed route state.")
         .font(.caption)
-        .foregroundStyle(.secondary)
+        .lineLimit(1)
+      }
+
+      Spacer(minLength: 12)
+
+      RouteHealthBadge()
     }
+    .padding(.horizontal, 18)
+    .padding(.vertical, 12)
+    .background(.bar)
+    .overlay(Divider(), alignment: .bottom)
+  }
+
+  private var liveSummary: String? {
+    let liveApps = store.liveApps.prefix(3).map(\.displayName)
+    guard !liveApps.isEmpty else { return nil }
+
+    let names = liveApps.joined(separator: ", ")
+    let overflow = store.liveApps.count - liveApps.count
+    return overflow > 0 ? "\(names) +\(overflow) playing" : "\(names) playing"
+  }
+}
+
+private struct RouteHealthBadge: View {
+  @Environment(AppStore.self) private var store
+
+  var body: some View {
+    Label(title, systemImage: systemImage)
+      .font(.caption.weight(.medium))
+      .foregroundStyle(color)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 4)
+      .background(color.opacity(0.12), in: Capsule())
+      .help(helpText)
+      .accessibilityLabel(helpText)
+  }
+
+  private var title: String {
+    if store.session.backendStatus.isRouteRecoveryHealthy {
+      return "Ready"
+    }
+    if store.session.backendStatus.lastError != nil {
+      return "Needs attention"
+    }
+    return "Limited"
+  }
+
+  private var systemImage: String {
+    store.session.backendStatus.isRouteRecoveryHealthy ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+  }
+
+  private var color: Color {
+    if store.session.backendStatus.isRouteRecoveryHealthy {
+      return .green
+    }
+    if store.session.backendStatus.lastError != nil {
+      return .red
+    }
+    return .secondary
+  }
+
+  private var helpText: Text {
+    Text("Routing status: \(title)")
   }
 }
 
@@ -418,7 +504,7 @@ private struct DiagnosticsPanel: View {
         }
       } label: {
         Text("Diagnostics")
-          .font(.headline)
+          .font(.callout.weight(.semibold))
       }
     }
   }

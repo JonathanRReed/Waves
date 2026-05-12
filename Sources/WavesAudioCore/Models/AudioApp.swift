@@ -186,7 +186,7 @@ public enum RoutingState: String, Codable, CaseIterable, Hashable, Sendable {
     case .managed:
       "Managed"
     case .monitorOnly:
-      "Monitor only"
+      "Ready"
     case .error:
       "Error"
     }

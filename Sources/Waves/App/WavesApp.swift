@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import SwiftUI
 import WavesAudioCore
 import OSLog
@@ -8,14 +9,20 @@ import OSLog
 struct WavesApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
-  @State private var store = AppStore(
-    backend: WorkspaceAudioControlBackend(),
-    preferencesStore: PreferencesStore(),
-    presetStore: PresetStore(),
-    sessionStore: SessionStore(),
-    loginItemService: LoginItemService(),
-    deviceVolumePresetsStore: DeviceVolumePresetsStore()
-  )
+  @State private var store: AppStore
+
+  init() {
+    let store = AppStore(
+      backend: WorkspaceAudioControlBackend(),
+      preferencesStore: PreferencesStore(),
+      presetStore: PresetStore(),
+      sessionStore: SessionStore(),
+      loginItemService: LoginItemService(),
+      deviceVolumePresetsStore: DeviceVolumePresetsStore()
+    )
+    _store = State(initialValue: store)
+    AppDelegate.bootstrapStore = store
+  }
 
   var body: some Scene {
     WindowGroup("Waves", id: AppSceneID.mainWindow) {
@@ -64,16 +71,19 @@ struct WavesApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+  static var bootstrapStore: AppStore?
+
   private var store: AppStore?
   private var eventMonitor: Any?
 
-  // Rate limiting for URL scheme (max 10 requests per minute)
-  private let urlSchemeRateLimiter = RateLimiter(maxRequests: 10, timeWindow: 60.0)
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "URLScheme")
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    store = Self.bootstrapStore
+    store?.start()
     applyLogoBranding()
     NSApp.setActivationPolicy(.regular)
+    setupURLSchemeHandler()
     setupGlobalHotkeys()
   }
 
@@ -83,6 +93,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     removeGlobalHotkeys()
+    removeURLSchemeHandler()
+  }
+
+  private func setupURLSchemeHandler() {
+    NSAppleEventManager.shared().setEventHandler(
+      self,
+      andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+      forEventClass: AEEventClass(kInternetEventClass),
+      andEventID: AEEventID(kAEGetURL)
+    )
+  }
+
+  private func removeURLSchemeHandler() {
+    NSAppleEventManager.shared().removeEventHandler(
+      forEventClass: AEEventClass(kInternetEventClass),
+      andEventID: AEEventID(kAEGetURL)
+    )
+  }
+
+  @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
+    guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+          let url = URL(string: urlString) else {
+      logger.warning("URL scheme invocation rejected: Missing URL payload")
+      return
+    }
+
+    handleURLScheme(url)
   }
 
   private func setupGlobalHotkeys() {
@@ -132,93 +169,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func handleURLScheme(_ url: URL) {
-    // Check if URL scheme is enabled
-    guard store?.preferences.enableURLScheme == true else {
-      logger.warning("URL scheme invocation rejected: URL scheme is disabled")
-      return
-    }
-
-    // Apply rate limiting
-    guard urlSchemeRateLimiter.check() else {
-      logger.warning("URL scheme invocation rejected: Rate limit exceeded")
-      return
-    }
-
     guard url.scheme == "waves" else { return }
-
-    let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-    guard let host = components?.host else { return }
-
-    // Log the URL scheme invocation for audit purposes
-    logger.info("URL scheme invoked: \(host, privacy: .public)")
-
-    switch host {
-    case "set-volume":
-      handleSetVolume(components)
-    case "mute":
-      handleMute(components)
-    case "apply-preset":
-      handleApplyPreset(components)
-    case "refresh":
-      handleRefresh()
-    default:
-      logger.warning("URL scheme invoked with unknown host: \(host, privacy: .public)")
-    }
-  }
-
-  private func handleSetVolume(_ components: URLComponents?) {
-    guard let appID = components?.queryItems?.first(where: { $0.name == "app" })?.value,
-          let volumeValue = components?.queryItems?.first(where: { $0.name == "volume" })?.value,
-          let volume = Float(volumeValue) else { return }
-
-    // Validate input length
-    guard appID.count <= 256, volumeValue.count <= 32 else { return }
-
-    // Validate volume range
-    guard volume >= 0.0, volume <= 1.0 else { return }
-
-    if let store = store {
-      if let app = store.session.apps.first(where: { $0.logicalID == appID || $0.id == appID }) {
-        store.setDesiredVolume(volume, for: app)
-        store.commitDesiredVolume(for: app)
-        logger.info("Set volume for app: \(appID, privacy: .public) to \(volume)")
-      }
-    }
-  }
-
-  private func handleMute(_ components: URLComponents?) {
-    guard let appID = components?.queryItems?.first(where: { $0.name == "app" })?.value,
-          let muteValue = components?.queryItems?.first(where: { $0.name == "muted" })?.value,
-          let shouldMute = Bool(muteValue) else { return }
-
-    // Validate input length
-    guard appID.count <= 256, muteValue.count <= 16 else { return }
-
-    if let store = store {
-      if let app = store.session.apps.first(where: { $0.logicalID == appID || $0.id == appID }) {
-        store.setMuted(shouldMute, for: app)
-        logger.info("Set mute for app: \(appID, privacy: .public) to \(shouldMute)")
-      }
-    }
-  }
-
-  private func handleApplyPreset(_ components: URLComponents?) {
-    guard let presetName = components?.queryItems?.first(where: { $0.name == "name" })?.value else { return }
-
-    // Validate input length
-    guard presetName.count <= 256 else { return }
-
-    if let store = store {
-      if let preset = store.presets.first(where: { $0.name == presetName }) {
-        store.applyPreset(preset)
-        logger.info("Applied preset: \(presetName, privacy: .public)")
-      }
-    }
-  }
-
-  private func handleRefresh() {
-    store?.refresh()
-    logger.info("Refreshed audio sessions")
+    store?.handleURLScheme(url)
   }
 
   private func applyLogoBranding() {
@@ -229,36 +181,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 enum AppSceneID {
   static let mainWindow = "main-window"
-}
-
-// Simple rate limiter for URL scheme invocations
-private class RateLimiter {
-  private var requestTimes: [Date] = []
-  private let maxRequests: Int
-  private let timeWindow: TimeInterval
-  private let queue = DispatchQueue(label: "com.waves.ratelimiter", attributes: .concurrent)
-
-  init(maxRequests: Int, timeWindow: TimeInterval) {
-    self.maxRequests = maxRequests
-    self.timeWindow = timeWindow
-  }
-
-  func check() -> Bool {
-    return queue.sync(flags: .barrier) {
-      let now = Date()
-      let cutoff = now.addingTimeInterval(-timeWindow)
-
-      // Remove old requests outside the time window
-      requestTimes.removeAll { $0 < cutoff }
-
-      // Check if we've exceeded the limit
-      if requestTimes.count >= maxRequests {
-        return false
-      }
-
-      // Add this request
-      requestTimes.append(now)
-      return true
-    }
-  }
 }
