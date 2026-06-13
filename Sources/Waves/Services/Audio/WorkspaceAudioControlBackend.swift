@@ -1008,6 +1008,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       app.isPinned = previous.isPinned
       app.compatibility = previous.compatibility
       app.volumeBoost = previous.volumeBoost
+      app.muteSource = previous.muteSource
+      app.targetDeviceUID = previous.targetDeviceUID
       return app
     }
 
