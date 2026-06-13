@@ -12,6 +12,47 @@ struct UserPreferences: Codable, Sendable {
   var enablePerDeviceVolumePresets = true
   var enableURLScheme = false
   var urlSchemeAutomationAcknowledged = false
+
+  init() {}
+
+  private enum CodingKeys: String, CodingKey {
+    case launchAtLoginEnabled
+    case showRecentApps
+    case showSystemProcesses
+    case sortMode
+    case customAppOrder
+    case autoRestoreDevice
+    case autoPauseMusicForConferencing
+    case enableKeyboardShortcuts
+    case enablePerDeviceVolumePresets
+    case enableURLScheme
+    case urlSchemeAutomationAcknowledged
+  }
+
+  // Decode each field independently so a preferences file written by an older
+  // build (missing keys added in a later version) loads cleanly instead of
+  // throwing and wiping every saved setting on the first launch after an update.
+  init(from decoder: Decoder) throws {
+    let defaults = UserPreferences()
+    guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+      self = defaults
+      return
+    }
+    func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+      (try? container.decodeIfPresent(T.self, forKey: key)) ?? nil ?? fallback
+    }
+    launchAtLoginEnabled = value(.launchAtLoginEnabled, defaults.launchAtLoginEnabled)
+    showRecentApps = value(.showRecentApps, defaults.showRecentApps)
+    showSystemProcesses = value(.showSystemProcesses, defaults.showSystemProcesses)
+    sortMode = value(.sortMode, defaults.sortMode)
+    customAppOrder = value(.customAppOrder, defaults.customAppOrder)
+    autoRestoreDevice = value(.autoRestoreDevice, defaults.autoRestoreDevice)
+    autoPauseMusicForConferencing = value(.autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
+    enableKeyboardShortcuts = value(.enableKeyboardShortcuts, defaults.enableKeyboardShortcuts)
+    enablePerDeviceVolumePresets = value(.enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
+    enableURLScheme = value(.enableURLScheme, defaults.enableURLScheme)
+    urlSchemeAutomationAcknowledged = value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
+  }
 }
 
 struct AppVolumeSettings: Codable, Hashable, Sendable {

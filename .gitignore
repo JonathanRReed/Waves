@@ -5,5 +5,8 @@ DerivedData/
 dist/
 waves_logo_assets/
 
+# Internal agent/tooling config — not part of the published product
+.codex/
+
 *.xcuserstate
 xcuserdata/

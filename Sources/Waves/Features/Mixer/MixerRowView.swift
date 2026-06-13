@@ -4,16 +4,14 @@ import WavesAudioCore
 
 struct MixerRowView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let app: AudioApp
-  @State private var animateVolumeChange = false
   @State private var animateMuteChange = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 5) {
       HStack(spacing: 10) {
         AppIconView(app: app)
-          .scaleEffect(animateVolumeChange ? 1.1 : 1.0)
-          .animation(.spring(response: 0.3, dampingFraction: 0.6), value: animateVolumeChange)
 
         VStack(alignment: .leading, spacing: 1) {
           HStack(spacing: 6) {
@@ -25,8 +23,7 @@ struct MixerRowView: View {
               Image(systemName: "pin.fill")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .scaleEffect(animateMuteChange ? 1.2 : 1.0)
-                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: animateMuteChange)
+                .accessibilityLabel("Pinned")
             }
           }
 
@@ -48,15 +45,6 @@ struct MixerRowView: View {
             get: { Double(app.desiredVolume) },
             set: { newValue in
               store.setDesiredVolume(Float(newValue), for: app)
-              withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
-                animateVolumeChange = true
-              }
-              Task {
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                if !Task.isCancelled {
-                  animateVolumeChange = false
-                }
-              }
             }
           ),
           in: 0...1,
@@ -82,22 +70,14 @@ struct MixerRowView: View {
           .foregroundStyle(.secondary)
           .frame(width: 40, alignment: .trailing)
           .contentTransition(.numericText())
-          .animation(.spring(response: 0.2, dampingFraction: 0.7), value: app.desiredVolume)
-          .accessibilityLabel("Volume percentage")
+          .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.7), value: app.desiredVolume)
+          .accessibilityHidden(true)
 
         BoostMenu(app: app, compact: false)
 
         Button {
           store.setMuted(!app.isMuted, for: app)
-          withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-            animateMuteChange = true
-          }
-          Task {
-            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
-            if !Task.isCancelled {
-              animateMuteChange = false
-            }
-          }
+          if !reduceMotion { animateMuteChange.toggle() }
         } label: {
           Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
             .symbolEffect(.bounce, value: animateMuteChange)
@@ -120,6 +100,9 @@ struct MixerRowView: View {
       Button(app.isPinned ? "Unpin" : "Pin") {
         store.togglePinned(app)
       }
+    }
+    .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
+      store.togglePinned(app)
     }
   }
 
@@ -197,16 +180,14 @@ private struct MixerRowHelpers {
 
 struct CompactMixerRow: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let app: AudioApp
-  @State private var animateVolumeChange = false
   @State private var animateMuteChange = false
 
   var body: some View {
     HStack(spacing: 8) {
       AppIconView(app: app)
         .frame(width: 18, height: 18)
-        .scaleEffect(animateVolumeChange ? 1.15 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: animateVolumeChange)
 
       Text(app.displayName)
         .lineLimit(1)
@@ -220,15 +201,6 @@ struct CompactMixerRow: View {
           get: { Double(app.desiredVolume) },
           set: { newValue in
             store.setDesiredVolume(Float(newValue), for: app)
-            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
-              animateVolumeChange = true
-            }
-            Task {
-              try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-              if !Task.isCancelled {
-                animateVolumeChange = false
-              }
-            }
           }
         ),
         in: 0...1,
@@ -254,15 +226,7 @@ struct CompactMixerRow: View {
 
       Button {
         store.setMuted(!app.isMuted, for: app)
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-          animateMuteChange = true
-        }
-        Task {
-          try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
-          if !Task.isCancelled {
-            animateMuteChange = false
-          }
-        }
+        if !reduceMotion { animateMuteChange.toggle() }
       } label: {
         Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
           .symbolEffect(.bounce, value: animateMuteChange)
@@ -445,22 +409,45 @@ private struct RoutingStateDot: View {
   }
 }
 
+/// Caches decoded app icons so the icon PNG/TIFF is not re-decoded on every
+/// SwiftUI body evaluation (which happens on every level/volume update).
+@MainActor
+private enum AppIconCache {
+  static let shared = NSCache<NSString, NSImage>()
+
+  static func icon(for app: AudioApp) -> NSImage? {
+    guard let data = app.iconTIFFData else { return nil }
+    let key = app.id as NSString
+    if let cached = shared.object(forKey: key) {
+      return cached
+    }
+    guard let image = NSImage(data: data) else { return nil }
+    shared.setObject(image, forKey: key)
+    return image
+  }
+}
+
 struct AppIconView: View {
   let app: AudioApp
 
   var body: some View {
-    if let iconTIFFData = app.iconTIFFData, let icon = NSImage(data: iconTIFFData) {
-      Image(nsImage: icon)
-        .resizable()
-        .scaledToFit()
-        .frame(width: 28, height: 28)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-    } else {
-      Image(systemName: app.iconName ?? "app")
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .frame(width: 28, height: 28)
-        .background(.tertiary.opacity(0.28), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+    Group {
+      if let icon = AppIconCache.icon(for: app) {
+        Image(nsImage: icon)
+          .resizable()
+          .scaledToFit()
+          .frame(width: 28, height: 28)
+          .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+      } else {
+        Image(systemName: app.iconName ?? "app")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+          .frame(width: 28, height: 28)
+          .background(.tertiary.opacity(0.28), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+      }
     }
+    // The app name is already shown as text beside the icon, so the icon is
+    // decorative for VoiceOver.
+    .accessibilityHidden(true)
   }
 }

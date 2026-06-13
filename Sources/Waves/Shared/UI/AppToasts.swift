@@ -54,6 +54,7 @@ private struct AppToastBanner: View {
       }
       .buttonStyle(.plain)
       .help("Dismiss")
+      .accessibilityLabel("Dismiss notification")
     }
     .padding(.horizontal, 14)
     .padding(.vertical, 10)
@@ -63,15 +64,9 @@ private struct AppToastBanner: View {
       in: RoundedRectangle(cornerRadius: 14, style: .continuous)
     )
     .overlay(
-      RoundedRectangle(cornerRadius: 12, style: .continuous)
-        .strokeBorder(iconColor.opacity(0.4), lineWidth: 1)
+      RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .strokeBorder(WavesDesign.stroke, lineWidth: 1)
     )
-    .overlay(alignment: .leading) {
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .fill(iconColor)
-        .frame(width: 4)
-        .frame(maxHeight: .infinity)
-    }
     .shadow(color: .black.opacity(0.14), radius: 12, y: 6)
     .contentShape(Rectangle())
     .transition(.asymmetric(
@@ -79,6 +74,19 @@ private struct AppToastBanner: View {
       removal: .opacity
     ))
     .animation(.spring(response: 0.24, dampingFraction: 0.8), value: toast.id)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(accessibilityMessage)
+    .onAppear {
+      // VoiceOver does not announce transient banners on its own.
+      AccessibilityNotification.Announcement(accessibilityMessage).post()
+    }
+  }
+
+  private var accessibilityMessage: String {
+    if let detail = toast.detail, !detail.isEmpty {
+      return "\(toast.title). \(detail)"
+    }
+    return toast.title
   }
 
   private var iconName: String {

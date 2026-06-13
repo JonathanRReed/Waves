@@ -16,8 +16,8 @@ struct OnboardingView: View {
       "Refresh Devices"
     ),
     (
-      "Exercise route recovery",
-      "Route recovery ensures that when you switch audio devices (e.g., from speakers to headphones), Waves automatically re-establishes managed routes without requiring an app restart.",
+      "Test device switching",
+      "When you switch audio devices (for example, from speakers to headphones), Waves re-establishes managed routes automatically — no restart needed. Run a quick check here.",
       "Test Recovery"
     ),
     (
@@ -46,7 +46,7 @@ struct OnboardingView: View {
     VStack(alignment: .leading, spacing: 24) {
       VStack(alignment: .leading, spacing: 8) {
         Text("Welcome to Waves")
-          .font(.largeTitle.weight(.semibold))
+          .font(.title2.weight(.semibold))
 
         Text(isFullyComplete
           ? "You're all set! Waves is ready to manage your per-app audio."
@@ -188,6 +188,7 @@ private struct EnhancedSetupStepRow: View {
         Image(systemName: isComplete ? "checkmark.circle.fill" : canPerformAction ? "exclamationmark.triangle.fill" : "circle")
           .foregroundStyle(isComplete ? .green : canPerformAction ? WavesDesign.warning : .secondary)
           .font(.title3)
+          .accessibilityLabel(isComplete ? "Completed" : canPerformAction ? "Needs action" : "Pending")
 
         VStack(alignment: .leading, spacing: 4) {
           Text(title)

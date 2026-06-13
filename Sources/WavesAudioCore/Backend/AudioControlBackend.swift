@@ -15,6 +15,16 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func recoverRoutes() async throws -> AudioSessionSnapshot
   func autoRestoreDevice() async throws -> AudioSessionSnapshot
   func diagnosticsReport() async -> DiagnosticsReport
+
+  /// Emits once after the default output device changes and the backend has
+  /// re-established managed routes, so observers can refresh state and restore
+  /// per-device volume presets.
+  nonisolated var deviceChangeEvents: AsyncStream<Void> { get }
+
+  /// Tears down managed routes for an application that has quit, so its process
+  /// tap and aggregate device are released promptly instead of lingering until
+  /// the next manual refresh.
+  func releaseControllers(forBundleID bundleID: String?, pid: Int32) async
 }
 
 public struct DiagnosticsReport: Codable, Hashable, Sendable {

@@ -13,8 +13,9 @@ final class SessionStore: @unchecked Sendable {
   init(fileManager: FileManager = .default) {
     guard let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
       logger.error("Failed to get application support directory")
-      let fallbackURL = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves")
-      url = fallbackURL.appendingPathComponent("session.json")
+      let fallbackDirectory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves", isDirectory: true)
+      try? fileManager.createDirectory(at: fallbackDirectory, withIntermediateDirectories: true)
+      url = fallbackDirectory.appendingPathComponent("session.json")
       return
     }
     let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)

@@ -32,6 +32,7 @@ let package = Package(
     .testTarget(
       name: "WavesTests",
       dependencies: [
+        "Waves",
         "WavesAudioCore",
         .product(name: "Testing", package: "swift-testing"),
       ],

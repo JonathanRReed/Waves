@@ -99,10 +99,7 @@ private struct GeneralSettingsView: View {
         "Enable keyboard shortcuts",
         isOn: Binding(
           get: { store.preferences.enableKeyboardShortcuts },
-          set: {
-            store.preferences.enableKeyboardShortcuts = $0
-            store.persistPreferences()
-          }
+          set: { store.setKeyboardShortcutsEnabled($0) }
         ))
 
       Toggle(
@@ -125,6 +122,7 @@ private struct GeneralSettingsView: View {
             store.persistPreferences()
           }
         ))
+        .help("Lets other apps and links control Waves through waves:// URLs (set volume, mute, apply presets). Off by default — enable only if you rely on automation.")
 
       if store.preferences.enableKeyboardShortcuts {
         VStack(alignment: .leading, spacing: 8) {
@@ -223,7 +221,7 @@ private struct AudioSettingsView: View {
       )
       .foregroundStyle(.secondary)
 
-      Button("Recover routes now") {
+      Button("Recover Routes") {
         store.recoverRoutes()
       }
 
@@ -250,14 +248,13 @@ private struct PresetSettingsView: View {
           store.importPreset()
         }
         .buttonStyle(.bordered)
+      }
 
-        Button("Export First") {
-          if let preset = store.presets.first {
-            store.exportPreset(preset)
-          }
-        }
-        .buttonStyle(.bordered)
-        .disabled(store.presets.isEmpty)
+      if store.presets.isEmpty {
+        Text("No presets yet. Save a mix from the main window, or import one.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
       }
 
       List {
@@ -265,7 +262,7 @@ private struct PresetSettingsView: View {
           HStack {
             VStack(alignment: .leading, spacing: 4) {
               Text(preset.name)
-              Text("\(preset.entries.count) entries")
+              Text("\(preset.entries.count) \(preset.entries.count == 1 ? "app" : "apps")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
@@ -277,6 +274,15 @@ private struct PresetSettingsView: View {
             }
             .buttonStyle(.borderless)
             .controlSize(.small)
+
+            Button("Delete", role: .destructive) {
+              if let index = store.presets.firstIndex(where: { $0.id == preset.id }) {
+                store.deletePresets(at: IndexSet(integer: index))
+              }
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .accessibilityLabel("Delete preset \(preset.name)")
           }
         }
         .onDelete(perform: store.deletePresets)

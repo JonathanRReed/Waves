@@ -25,7 +25,9 @@ struct WavesApp: App {
   }
 
   var body: some Scene {
-    WindowGroup("Waves", id: AppSceneID.mainWindow) {
+    // A single, unique main window for this menu-bar utility. `Window` (rather
+    // than `WindowGroup`) prevents duplicate mixer windows from being opened.
+    Window("Waves", id: AppSceneID.mainWindow) {
       MainWindowView()
         .environment(store)
         .frame(minWidth: 980, minHeight: 620)
@@ -36,13 +38,9 @@ struct WavesApp: App {
     }
     .defaultSize(width: 1100, height: 680)
     .commands {
-      CommandGroup(replacing: .appSettings) {
-        Button("Settings...") {
-          NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        }
-        .keyboardShortcut(",", modifiers: .command)
-      }
-      CommandGroup(after: .appInfo) {
+      // The Settings scene below already provides the standard "Settings…"
+      // item (⌘,) in the app menu, so no custom command is needed here.
+      CommandGroup(after: .toolbar) {
         Button("Refresh") {
           store.refresh()
         }
@@ -83,8 +81,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     store?.start()
     applyLogoBranding()
     NSApp.setActivationPolicy(.regular)
+    // Waves' visual language is a dark audio-console surface (see DESIGN.md).
+    // Pin the app to a dark appearance so custom dark gradients never sit under
+    // light-mode (near-black) system label colors, which would render the
+    // Settings, Help, and Onboarding text effectively invisible in light mode.
+    NSApp.appearance = NSAppearance(named: .darkAqua)
     setupURLSchemeHandler()
-    setupGlobalHotkeys()
+    updateGlobalHotkeysState()
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(keyboardShortcutsPreferenceChanged),
+      name: .wavesKeyboardShortcutsPreferenceChanged,
+      object: nil
+    )
+  }
+
+  @objc private func keyboardShortcutsPreferenceChanged() {
+    updateGlobalHotkeysState()
+  }
+
+  /// Installs the system-wide key monitor only while the user has keyboard
+  /// shortcuts enabled, so Waves never observes global keystrokes otherwise.
+  private func updateGlobalHotkeysState() {
+    let enabled = store?.preferences.enableKeyboardShortcuts ?? false
+    if enabled {
+      setupGlobalHotkeys()
+    } else {
+      removeGlobalHotkeys()
+    }
   }
 
   func setStore(_ store: AppStore?) {
@@ -94,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationWillTerminate(_ notification: Notification) {
     removeGlobalHotkeys()
     removeURLSchemeHandler()
+    store?.shutdown()
   }
 
   private func setupURLSchemeHandler() {
@@ -123,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func setupGlobalHotkeys() {
+    guard eventMonitor == nil else { return }
     eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
       self?.handleGlobalKeyEvent(event)
     }
