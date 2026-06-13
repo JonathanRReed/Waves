@@ -28,8 +28,10 @@ public enum AppDiscoveryPolicy {
     let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
 
     if token.contains("safari") || token.contains("chrome") || token.contains("firefox")
-      || token.contains("arc") || token.contains("browser")
+      || token.range(of: #"\barc\b"#, options: .regularExpression) != nil || token.contains("browser")
     {
+      // Match "arc" only as a whole word so unrelated apps like "Archive
+      // Utility" or "Monarch" are not misclassified as browsers.
       return .browser
     }
 

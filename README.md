@@ -46,7 +46,7 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/JonathanRReed/Waves.git
 cd Waves
 ```
 
@@ -220,7 +220,7 @@ swift build
 
 ## License
 
-All rights reserved. See `LICENSE`.
+Waves is released under the MIT License. See [`LICENSE`](LICENSE).
 
 ## Contributing
 

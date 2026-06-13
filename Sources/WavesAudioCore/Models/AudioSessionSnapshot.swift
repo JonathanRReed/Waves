@@ -23,6 +23,23 @@ public struct AudioSessionSnapshot: Codable, Hashable, Sendable {
     self.backendStatus = backendStatus
     self.updatedAt = updatedAt
   }
+
+  /// A neutral, empty session with no apps and no fabricated state. Used as the
+  /// initial value for the live backend before the first real snapshot is built.
+  public static var empty: AudioSessionSnapshot {
+    AudioSessionSnapshot(
+      apps: [],
+      currentDevice: nil,
+      recentDeviceIDs: [],
+      supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(
+        isAudioComponentInstalled: false,
+        hasRequiredPermissions: false,
+        isRouteRecoveryHealthy: false,
+        lastError: nil
+      )
+    )
+  }
 }
 
 public struct BackendStatus: Codable, Hashable, Sendable {

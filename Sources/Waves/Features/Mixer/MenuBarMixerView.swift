@@ -46,13 +46,13 @@ struct MenuBarMixerView: View {
           CompactSection(title: "Pinned", apps: store.pinnedApps)
         }
 
-        CompactSection(title: "Live", apps: store.activeApps)
+        CompactSection(title: "Live", apps: store.liveApps)
 
         if store.preferences.showRecentApps {
           CompactSection(title: "Recent", apps: Array(store.recentApps.prefix(3)))
         }
 
-        if store.pinnedApps.isEmpty && store.activeApps.isEmpty && store.recentApps.isEmpty {
+        if store.pinnedApps.isEmpty && store.liveApps.isEmpty && store.recentApps.isEmpty {
           VStack(spacing: 8) {
             Image(systemName: "speaker.slash")
               .font(.title2)

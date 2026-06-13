@@ -6,7 +6,10 @@ import OSLog
 import WavesAudioCore
 
 actor WorkspaceAudioControlBackend: AudioControlBackend {
-  private var snapshot: AudioSessionSnapshot = .preview
+  // Start from a neutral, empty session. Using `.preview` here would seed the
+  // live backend with fabricated apps, volumes, and a fake error string that
+  // could surface before the first real snapshot is built.
+  private var snapshot: AudioSessionSnapshot = .empty
   private var presets: [Preset]
   private let currentBundleID = Bundle.main.bundleIdentifier
   private var controllers: [String: PerAppTapController] = [:]
@@ -15,8 +18,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
   private let logger = Logger(subsystem: "com.waves.backend", category: "AudioBackend")
 
+  nonisolated let deviceChangeEvents: AsyncStream<Void>
+  private nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
+
   init(presets: [Preset] = Preset.defaults) {
     self.presets = presets
+    let (stream, continuation) = AsyncStream<Void>.makeStream()
+    self.deviceChangeEvents = stream
+    self.deviceChangeContinuation = continuation
   }
 
   func start() async throws {
@@ -29,6 +38,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     removeDeviceChangeListener()
     stopLevelUpdateTask()
     disposeControllers(keeping: [])
+    deviceChangeContinuation.finish()
   }
 
   func currentSnapshot() async -> AudioSessionSnapshot {
@@ -295,12 +305,19 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return
     }
 
-    if let existing = controllers[app.id] {
-      existing.invalidate()
-      controllers.removeValue(forKey: app.id)
+    if let existing = controllers.removeValue(forKey: app.id) {
+      // Fully tear down the old route. invalidate() only stops the IO proc and
+      // would leak the aggregate device and process tap.
+      existing.dispose()
     }
 
     let controller = try await createControllerWithRetry(for: app, processObjectIDs: processObjectIDs)
+    // The actor can suspend at the await above, so a reentrant applyRoute may
+    // have installed a controller for this app meanwhile. Dispose it before
+    // replacing, otherwise we orphan a live tap/aggregate (leak + double audio).
+    if let raced = controllers.removeValue(forKey: app.id) {
+      raced.dispose()
+    }
     controllers[app.id] = controller
     controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
   }
@@ -337,8 +354,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
     }
 
+    // The technical cause (OSStatus, attempt count) is already logged above.
+    // Surface a plain-language, actionable message to the user.
+    logger.error("Giving up on managed route for \(app.displayName) after \(maxRetries) attempts: \(lastError?.localizedDescription ?? "unknown error")")
     throw BackendError.managedRouteUnavailable(
-      "Failed to create controller for \(app.displayName) after \(maxRetries) attempts: \(lastError?.localizedDescription ?? "Unknown error")"
+      "Waves couldn't take over audio for \(app.displayName). If this keeps happening, check that audio capture is allowed in System Settings › Privacy & Security."
     )
   }
 
@@ -363,7 +383,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         throw error
       }
 
-      let tapUID = try readTapUID(tapID)
+      let tapUID: String
+      do {
+        tapUID = try readTapUID(tapID)
+      } catch {
+        // Destroy the tap we just created so a UID-read failure does not leak it.
+        _ = AudioHardwareDestroyProcessTap(tapID)
+        throw error
+      }
       let aggregateDeviceDescription: [String: Any] = [
         kAudioAggregateDeviceNameKey: "Waves-\(app.displayName)",
         kAudioAggregateDeviceUIDKey: "com.waves.aggregate.\(UUID().uuidString)",
@@ -852,6 +879,28 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
   }
 
+  func releaseControllers(forBundleID bundleID: String?, pid: Int32) async {
+    let targetIDs = snapshot.apps.filter { app in
+      (bundleID != nil && app.bundleID == bundleID) || (app.pid != nil && app.pid == pid)
+    }.map(\.id)
+
+    guard !targetIDs.isEmpty else { return }
+
+    for id in targetIDs {
+      if let controller = controllers.removeValue(forKey: id) {
+        controller.dispose()
+      }
+    }
+
+    for index in snapshot.apps.indices where targetIDs.contains(snapshot.apps[index].id) {
+      snapshot.apps[index].routingState = .monitorOnly
+      snapshot.apps[index].isActive = false
+      snapshot.apps[index].appliedVolume = nil
+      snapshot.apps[index].peakLevel = 0
+      snapshot.apps[index].rmsLevel = 0
+    }
+  }
+
   private func disposeControllers(keeping appIDs: Set<String>) {
     let stale = Set(controllers.keys).subtracting(appIDs)
     for appID in stale {
@@ -1132,6 +1181,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func addDeviceChangeListener() {
+    // Avoid registering a second listener (and leaking the previous block) if
+    // start() runs more than once.
+    guard deviceChangeListenerToken == 0 else { return }
+
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyDefaultOutputDevice,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -1193,6 +1246,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       snapshot.backendStatus.lastError = error.localizedDescription
       logger.error("Output device change recovery failed: \(error.localizedDescription)")
     }
+    // Notify observers (the store) so they can refresh UI state and restore
+    // per-device volume presets, regardless of whether restoration succeeded.
+    deviceChangeContinuation.yield()
   }
 }
 
@@ -1297,7 +1353,10 @@ private final class TapRenderStateBox {
   }
 
   func writeLevels(peakLevel: Float, rmsLevel: Float) {
-    stateLock.lock()
+    // Invoked from the realtime IO render thread, which must never block. If the
+    // lock is contended, skip this update — level meters are cosmetic and the
+    // next render cycle will refresh them.
+    guard stateLock.try() else { return }
     state.pointee.peakLevel = peakLevel
     state.pointee.rmsLevel = rmsLevel
     stateBox.peakLevel = peakLevel
@@ -1694,7 +1753,9 @@ private final class PerAppTapController: @unchecked Sendable {
       let typedPointer = data.assumingMemoryBound(to: Float.self)
       let sampleTotal = byteCount / MemoryLayout<Float>.size
       for index in 0..<sampleTotal {
-        typedPointer[index] *= volume
+        // Clamp to the valid [-1, 1] range so boost (up to 4x) saturates
+        // cleanly instead of emitting out-of-range samples that clip harshly.
+        typedPointer[index] = min(1.0, max(-1.0, typedPointer[index] * volume))
       }
     case .int16:
       let typedPointer = data.assumingMemoryBound(to: Int16.self)

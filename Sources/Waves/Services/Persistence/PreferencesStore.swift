@@ -12,8 +12,9 @@ final class PreferencesStore: @unchecked Sendable {
   init(fileManager: FileManager = .default) {
     guard let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
       logger.error("Failed to get application support directory")
-      let fallbackURL = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves")
-      url = fallbackURL.appendingPathComponent("preferences.json")
+      let fallbackDirectory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves", isDirectory: true)
+      try? fileManager.createDirectory(at: fallbackDirectory, withIntermediateDirectories: true)
+      url = fallbackDirectory.appendingPathComponent("preferences.json")
       return
     }
     let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
@@ -27,25 +28,41 @@ final class PreferencesStore: @unchecked Sendable {
 
   func load() -> UserPreferences {
     return queue.sync {
+      // A missing file is the normal first-launch case: return defaults without
+      // writing anything yet.
+      guard FileManager.default.fileExists(atPath: url.path) else {
+        return UserPreferences()
+      }
       do {
         // Check file size before loading
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
           logger.error("Preferences file exceeds size limit: \(fileSize) bytes")
-          let defaults = UserPreferences()
-          save(defaults)
-          return defaults
+          backupCorruptFile()
+          return UserPreferences()
         }
 
         let data = try Data(contentsOf: url)
         let preferences = try decoder.decode(UserPreferences.self, from: data)
         return preferences
       } catch {
-        logger.warning("Failed to load preferences: \(error.localizedDescription). Using defaults.")
-        let defaults = UserPreferences()
-        save(defaults)
-        return defaults
+        // Preserve the unreadable file for recovery instead of silently
+        // overwriting the user's saved preferences with defaults.
+        logger.warning("Failed to load preferences: \(error.localizedDescription). Preserving file and using defaults.")
+        backupCorruptFile()
+        return UserPreferences()
       }
+    }
+  }
+
+  private func backupCorruptFile() {
+    let backupURL = url.appendingPathExtension("corrupt")
+    try? FileManager.default.removeItem(at: backupURL)
+    do {
+      try FileManager.default.moveItem(at: url, to: backupURL)
+      logger.warning("Moved unreadable preferences file to \(backupURL.lastPathComponent)")
+    } catch {
+      logger.error("Failed to back up unreadable preferences file: \(error.localizedDescription)")
     }
   }
 

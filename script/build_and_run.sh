@@ -198,15 +198,36 @@ PLIST
     plutil -replace CFBundleIconFile -string "$APP_ICON_NAME" "$INFO_PLIST"
   fi
 
+  # Entitlements: Core Audio process taps require the audio-input entitlement.
+  # Under the hardened runtime (used for notarized distribution) audio capture
+  # is denied without it. The app is intentionally not sandboxed because process
+  # taps and the global hotkey monitor need that access.
+  # Write the entitlements file OUTSIDE the bundle so codesign does not seal it
+  # into the signature (which would break verification once it is removed).
+  ENTITLEMENTS="${APP_BUNDLE}.entitlements"
+  cat >"$ENTITLEMENTS" <<'ENTITLEMENTS_PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>
+ENTITLEMENTS_PLIST
+
   if command -v codesign >/dev/null 2>&1; then
     if [ -n "$SIGN_IDENTITY" ]; then
-      codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
-    elif ! codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1; then
+      codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+    elif ! codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP_BUNDLE" >/dev/null 2>&1; then
       echo "Warning: Failed to ad hoc sign app bundle" >&2
     fi
   else
     echo "Warning: codesign not found, skipping code signing" >&2
   fi
+
+  # The entitlements file is consumed by codesign and does not belong in the bundle.
+  rm -f "$ENTITLEMENTS"
 fi
 
 open_app() {

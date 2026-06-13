@@ -186,7 +186,7 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
     case .frontmost:
       label = count == 1 ? "live app" : "live apps"
     case .recent:
-      label = count == 1 ? "background app" : "background apps"
+      label = count == 1 ? "recent app" : "recent apps"
     }
 
     return "\(count) \(label)"
@@ -225,13 +225,13 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
 
     switch self {
     case .running:
-      return "Waves has not found any user-facing running apps."
+      return "Waves hasn't found any running apps yet."
     case .pinned:
       return "Pin apps from the source list to keep them here."
     case .frontmost:
       return "Start playback in an app, then refresh if it does not appear here."
     case .recent:
-      return "Background apps will appear here when they are not frontmost."
+      return "Apps appear here when they're not actively playing audio."
     }
   }
 }
@@ -267,7 +267,7 @@ private struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 1) {
                   Text(preset.name)
                     .lineLimit(1)
-                  Text("\(preset.entries.count) apps")
+                  Text("\(preset.entries.count) \(preset.entries.count == 1 ? "app" : "apps")")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -490,8 +490,11 @@ private struct DiagnosticsPanel: View {
                   Circle()
                     .fill(color(for: check.status))
                     .frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
                   Text(check.title)
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(statusLabel(for: check.status)): \(check.title)")
 
                 Text(check.detail)
                   .font(.caption)
@@ -519,6 +522,19 @@ private struct DiagnosticsPanel: View {
       .red
     case .informational:
       .secondary
+    }
+  }
+
+  private func statusLabel(for status: DiagnosticsStatus) -> String {
+    switch status {
+    case .passed:
+      "Passed"
+    case .warning:
+      "Warning"
+    case .failed:
+      "Failed"
+    case .informational:
+      "Info"
     }
   }
 }

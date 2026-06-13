@@ -4,6 +4,12 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
   private var snapshot: AudioSessionSnapshot
   private var presets: [Preset]
 
+  // The preview backend has no real audio hardware, so it never reports device
+  // changes. An immediately-finishing stream lets observers attach harmlessly.
+  public nonisolated var deviceChangeEvents: AsyncStream<Void> {
+    AsyncStream { $0.finish() }
+  }
+
   public init(
     snapshot: AudioSessionSnapshot = .preview,
     presets: [Preset] = Preset.defaults
@@ -128,6 +134,10 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
       snapshot.updatedAt = .now
     }
     return snapshot
+  }
+
+  public func releaseControllers(forBundleID bundleID: String?, pid: Int32) async {
+    // No real audio routes in the preview backend.
   }
 
   public func diagnosticsReport() async -> DiagnosticsReport {

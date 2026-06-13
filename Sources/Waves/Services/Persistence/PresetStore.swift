@@ -13,8 +13,9 @@ final class PresetStore: @unchecked Sendable {
   init(fileManager: FileManager = .default) {
     guard let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
       logger.error("Failed to get application support directory")
-      let fallbackURL = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves")
-      url = fallbackURL.appendingPathComponent("presets.json")
+      let fallbackDirectory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves", isDirectory: true)
+      try? fileManager.createDirectory(at: fallbackDirectory, withIntermediateDirectories: true)
+      url = fallbackDirectory.appendingPathComponent("presets.json")
       return
     }
     let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
@@ -28,12 +29,17 @@ final class PresetStore: @unchecked Sendable {
 
   func load(defaults: [Preset]) -> [Preset] {
     return queue.sync {
+      // A missing file is the normal first-launch case: seed defaults on disk.
+      guard FileManager.default.fileExists(atPath: url.path) else {
+        save(defaults)
+        return defaults
+      }
       do {
         // Check file size before loading
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
           logger.error("Presets file exceeds size limit: \(fileSize) bytes")
-          save(defaults)
+          backupCorruptFile()
           return defaults
         }
 
@@ -41,10 +47,23 @@ final class PresetStore: @unchecked Sendable {
         let presets = try decoder.decode([Preset].self, from: data)
         return presets
       } catch {
-        logger.warning("Failed to load presets: \(error.localizedDescription). Using defaults.")
-        save(defaults)
+        // Preserve the unreadable file for recovery instead of destroying the
+        // user's saved presets.
+        logger.warning("Failed to load presets: \(error.localizedDescription). Preserving file and using defaults.")
+        backupCorruptFile()
         return defaults
       }
+    }
+  }
+
+  private func backupCorruptFile() {
+    let backupURL = url.appendingPathExtension("corrupt")
+    try? FileManager.default.removeItem(at: backupURL)
+    do {
+      try FileManager.default.moveItem(at: url, to: backupURL)
+      logger.warning("Moved unreadable presets file to \(backupURL.lastPathComponent)")
+    } catch {
+      logger.error("Failed to back up unreadable presets file: \(error.localizedDescription)")
     }
   }
 

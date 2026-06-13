@@ -1,8 +1,7 @@
 # Product
 
-## Register
-
-product
+Waves is a native macOS per-app audio mixer that gives every running app its own
+volume, mute, and boost from the menu bar.
 
 ## Users
 
