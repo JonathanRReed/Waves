@@ -32,6 +32,8 @@ import Testing
   prefs.enableURLScheme = true
   prefs.sortMode = .category
   prefs.customAppOrder = ["com.a", "com.b"]
+  prefs.excludedAppIDs = ["com.apple.logic", "com.zoom.xos"]
+  prefs.autoPauseOnAnyAudio = true
 
   let data = try JSONEncoder().encode(prefs)
   let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
@@ -39,6 +41,15 @@ import Testing
   #expect(decoded.enableURLScheme == true)
   #expect(decoded.sortMode == .category)
   #expect(decoded.customAppOrder == ["com.a", "com.b"])
+  #expect(decoded.excludedAppIDs == ["com.apple.logic", "com.zoom.xos"])
+  #expect(decoded.autoPauseOnAnyAudio == true)
+}
+
+@Test func userPreferencesDefaultsExclusionsEmptyForLegacyFile() throws {
+  // Older files predate exclusions; they must default to empty, not throw.
+  let decoded = try JSONDecoder().decode(UserPreferences.self, from: Data("{}".utf8))
+  #expect(decoded.excludedAppIDs.isEmpty)
+  #expect(decoded.autoPauseOnAnyAudio == false)
 }
 
 // MARK: - Per-app volume settings

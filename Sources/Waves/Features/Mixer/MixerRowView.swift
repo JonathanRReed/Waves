@@ -25,6 +25,16 @@ struct MixerRowView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Pinned")
             }
+
+            if isExcluded {
+              Text("Excluded")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(.secondary.opacity(0.15), in: Capsule())
+                .accessibilityLabel("Excluded from Waves")
+            }
           }
 
           HStack(spacing: 6) {
@@ -64,6 +74,7 @@ struct MixerRowView: View {
         .accessibilityAdjustableAction { direction in
           adjustVolume(direction)
         }
+        .disabled(isExcluded)
 
         Text("\(Int(app.desiredVolume * 100))%")
           .font(.caption.monospacedDigit().weight(.medium))
@@ -74,6 +85,7 @@ struct MixerRowView: View {
           .accessibilityHidden(true)
 
         BoostMenu(app: app, compact: false)
+          .disabled(isExcluded)
 
         Button {
           store.setMuted(!app.isMuted, for: app)
@@ -86,7 +98,9 @@ struct MixerRowView: View {
         .help(muteHelp)
         .accessibilityLabel(app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)")
         .sensoryFeedback(.selection, trigger: app.isMuted)
+        .disabled(isExcluded)
       }
+      .opacity(isExcluded ? 0.55 : 1)
 
       if app.routingState == .error, let notes = app.notes {
         Text(notes)
@@ -101,11 +115,20 @@ struct MixerRowView: View {
       Button(app.isPinned ? "Unpin" : "Pin") {
         store.togglePinned(app)
       }
+      Divider()
+      Button(isExcluded ? "Manage with Waves" : "Exclude from Waves") {
+        store.setExcluded(!isExcluded, for: app)
+      }
     }
     .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
       store.togglePinned(app)
     }
+    .accessibilityAction(named: isExcluded ? "Manage with Waves" : "Exclude from Waves") {
+      store.setExcluded(!isExcluded, for: app)
+    }
   }
+
+  private var isExcluded: Bool { store.isExcluded(app) }
 
   private var subtitle: String {
     var parts: [String] = []
