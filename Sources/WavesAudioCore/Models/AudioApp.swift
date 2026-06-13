@@ -21,6 +21,10 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public var compatibility: CompatibilityState
   public var notes: String?
   public var volumeBoost: Float
+  /// Whether the current mute was set by the user or applied automatically
+  /// (e.g. auto-pause during a call). Lets auto-resume avoid overriding a mute
+  /// the user set themselves, and survives relaunch.
+  public var muteSource: MuteSource
 
   public init(
     id: String,
@@ -41,7 +45,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     routingState: RoutingState = .recent,
     compatibility: CompatibilityState = .planned,
     notes: String? = nil,
-    volumeBoost: Float = 1.0
+    volumeBoost: Float = 1.0,
+    muteSource: MuteSource = .user
   ) {
     // Validate string lengths to prevent excessive memory usage
     self.id = String(id.prefix(256))
@@ -77,6 +82,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
 
     // Clamp volumeBoost to reasonable range [0.0, 10.0]
     self.volumeBoost = max(0.0, min(10.0, volumeBoost))
+
+    self.muteSource = muteSource
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -99,6 +106,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     case compatibility
     case notes
     case volumeBoost
+    case muteSource
   }
 
   public init(from decoder: Decoder) throws {
@@ -122,6 +130,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     let compatibility = try container.decodeIfPresent(CompatibilityState.self, forKey: .compatibility) ?? .planned
     let notes = try container.decodeIfPresent(String.self, forKey: .notes)
     let volumeBoost = try container.decodeIfPresent(Float.self, forKey: .volumeBoost) ?? 1.0
+    let muteSource = try container.decodeIfPresent(MuteSource.self, forKey: .muteSource) ?? .user
 
     self.init(
       id: id,
@@ -142,7 +151,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
       routingState: routingState,
       compatibility: compatibility,
       notes: notes,
-      volumeBoost: volumeBoost
+      volumeBoost: volumeBoost,
+      muteSource: muteSource
     )
   }
 
@@ -167,7 +177,15 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     try container.encode(compatibility, forKey: .compatibility)
     try container.encodeIfPresent(notes, forKey: .notes)
     try container.encode(volumeBoost, forKey: .volumeBoost)
+    try container.encode(muteSource, forKey: .muteSource)
   }
+}
+
+public enum MuteSource: String, Codable, Hashable, Sendable {
+  /// Muted by the user directly.
+  case user
+  /// Muted automatically by Waves (e.g. auto-pause during a call).
+  case autoConferencing
 }
 
 public enum RoutingState: String, Codable, CaseIterable, Hashable, Sendable {
