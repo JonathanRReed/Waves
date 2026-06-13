@@ -115,6 +115,25 @@ struct MixerRowView: View {
       Button(app.isPinned ? "Unpin" : "Pin") {
         store.togglePinned(app)
       }
+      if !isExcluded {
+        Menu("Output Device") {
+          Button {
+            store.setOutputDevice(nil, for: app)
+          } label: {
+            if app.targetDeviceUID == nil { Label("System Default", systemImage: "checkmark") }
+            else { Text("System Default") }
+          }
+          if !store.availableDevices.isEmpty { Divider() }
+          ForEach(store.availableDevices) { device in
+            Button {
+              store.setOutputDevice(device, for: app)
+            } label: {
+              if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") }
+              else { Text(device.name) }
+            }
+          }
+        }
+      }
       Divider()
       Button(isExcluded ? "Manage with Waves" : "Exclude from Waves") {
         store.setExcluded(!isExcluded, for: app)
@@ -145,6 +164,11 @@ struct MixerRowView: View {
       parts.append(app.category.displayName)
     } else if parts.isEmpty {
       parts.append("Running app")
+    }
+
+    // Show the routed device when the app is pinned to a non-default output.
+    if app.targetDeviceUID != nil {
+      parts.append("→ \(store.targetDevice(for: app)?.name ?? "Custom output")")
     }
 
     return parts.joined(separator: ", ")

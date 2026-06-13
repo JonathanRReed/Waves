@@ -429,7 +429,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func createController(for app: AudioApp, processObjectIDs: [AudioObjectID]) throws -> PerAppTapController {
 
     if #available(macOS 14.2, *) {
-      let defaultOutputDeviceUID = try currentDefaultOutputDeviceUID()
+      // Route to the app's pinned device if it has one; otherwise follow the
+      // system default. If a pinned device is gone, fail honestly (the caller
+      // marks the route .error) rather than silently falling back.
+      let outputDeviceUID: String
+      if let target = app.targetDeviceUID {
+        guard isDeviceAvailable(uid: target) else {
+          throw BackendError.managedRouteUnavailable(
+            "The chosen output device for \(app.displayName) is unavailable. Pick another in the app's Output Device menu."
+          )
+        }
+        outputDeviceUID = target
+      } else {
+        outputDeviceUID = try currentDefaultOutputDeviceUID()
+      }
 
       let tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
       tapDescription.name = "Waves-\(app.displayName)"
@@ -458,14 +471,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       let aggregateDeviceDescription: [String: Any] = [
         kAudioAggregateDeviceNameKey: "Waves-\(app.displayName)",
         kAudioAggregateDeviceUIDKey: "com.waves.aggregate.\(UUID().uuidString)",
-        kAudioAggregateDeviceMainSubDeviceKey: defaultOutputDeviceUID,
-        kAudioAggregateDeviceClockDeviceKey: defaultOutputDeviceUID,
+        kAudioAggregateDeviceMainSubDeviceKey: outputDeviceUID,
+        kAudioAggregateDeviceClockDeviceKey: outputDeviceUID,
         kAudioAggregateDeviceIsPrivateKey: true,
         kAudioAggregateDeviceIsStackedKey: false,
         kAudioAggregateDeviceTapAutoStartKey: true,
         kAudioAggregateDeviceSubDeviceListKey: [
           [
-            kAudioSubDeviceUIDKey: defaultOutputDeviceUID,
+            kAudioSubDeviceUIDKey: outputDeviceUID,
             kAudioSubDeviceDriftCompensationKey: false,
           ],
         ],
@@ -692,6 +705,43 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
     // The default-device listener fires from here, driving auto-restore + a
     // deviceChangeEvents emission that refreshes the UI.
+  }
+
+  func setOutputDevice(uid: String?, forAppID appID: String) async throws {
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
+      throw BackendError.appNotFound(appID)
+    }
+
+    snapshot.apps[index].targetDeviceUID = uid
+
+    // Force a rebuild so the route moves to the new device (process objects are
+    // unchanged, so applyRoute alone would reuse the existing controller).
+    if let existing = controllers.removeValue(forKey: snapshot.apps[index].id) {
+      existing.dispose()
+    }
+
+    // Only (re)establish a managed route if the app already had one; otherwise
+    // just record the preference for the next time it's managed.
+    let app = snapshot.apps[index]
+    let wasManaged = app.routingState == .managed || app.routingState == .live
+    guard wasManaged else { return }
+
+    do {
+      try await applyRoute(for: app, toVolume: app.desiredVolume, muted: app.isMuted)
+      snapshot.apps[index].routingState = .managed
+      snapshot.apps[index].appliedVolume = app.isMuted ? 0 : app.desiredVolume
+      snapshot.apps[index].notes = nil
+      snapshot.backendStatus.lastError = nil
+    } catch {
+      snapshot.apps[index].routingState = .error
+      snapshot.apps[index].notes = error.localizedDescription
+      snapshot.backendStatus.lastError = error.localizedDescription
+      throw error
+    }
+  }
+
+  private func isDeviceAvailable(uid: String) -> Bool {
+    allDeviceIDs().contains { deviceUID($0) == uid }
   }
 
   private func allDeviceIDs() -> [AudioObjectID] {
