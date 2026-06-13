@@ -365,7 +365,9 @@ private struct SourceListView: View {
               .tag(app.id)
           }
           .onMove { source, destination in
-            if filter == .running && store.preferences.sortMode == .manual {
+            // Only reorder against the full unfiltered list; a search shows a
+            // subset whose indices would not map back correctly.
+            if filter == .running && store.preferences.sortMode == .manual && searchText.isEmpty {
               store.reorderApps(from: source, to: destination)
             }
           }

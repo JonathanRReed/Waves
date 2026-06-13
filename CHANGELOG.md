@@ -10,9 +10,8 @@ All notable changes to Waves are documented here. The format follows
 - Real audio-capture (TCC) permission detection, surfaced in onboarding and
   diagnostics, replacing an OS-version proxy.
 - Global output-device switching from the menu-bar panel.
-- Shortcuts / App Intents: Set App Volume, Set App Mute, Apply Preset.
-- Full keyboard operation of the mixer and VoiceOver rotors.
-- Quiet per-row level meter on managed routes; Reduce Motion support.
+- Full keyboard operation of the mixer and VoiceOver rotors; Reduce Motion
+  support.
 - "Copy Diagnostics" route-health export.
 - Versioned persistence envelope; testable realtime DSP (`TapDSP`).
 - Privacy manifest, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTING.md`.
