@@ -33,6 +33,9 @@ final class AppStore {
   var toasts: [AppToast] = []
   var deviceVolumePresets = DeviceVolumePresets()
   var availableDevices: [AudioDevice] = []
+  /// Live per-app output levels for meters, populated only while a UI surface
+  /// is visible (kept out of `session` so updates don't trigger re-sorts).
+  var liveLevels: [String: AudioLevels] = [:]
 
   private let backend: any AudioControlBackend
   private let preferencesStore: PreferencesStore
@@ -50,6 +53,8 @@ final class AppStore {
   private var deviceChangeObserver: Task<Void, Never>?
   private var frontmostAppObserver: NSObjectProtocol?
   private var appTerminationObserver: NSObjectProtocol?
+  private var levelPollTask: Task<Void, Never>?
+  private var liveLevelsRefcount = 0
   private let maxToasts = 3
   private let defaultToastDuration = Duration.seconds(2.0)
   private var cachedVisibleApps: [AudioApp] = []
@@ -608,6 +613,31 @@ final class AppStore {
     }
   }
 
+  // MARK: - Live level metering (visibility-gated)
+
+  /// Call when a mixer surface becomes visible. Reference-counted so multiple
+  /// open surfaces (main window + menu bar) share one poller, and polling stops
+  /// entirely when nothing is on screen (keeps idle CPU near zero).
+  func beginLiveLevels() {
+    liveLevelsRefcount += 1
+    guard levelPollTask == nil else { return }
+    levelPollTask = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .milliseconds(300))
+        guard let self, !Task.isCancelled else { return }
+        self.liveLevels = await self.backend.audioLevels()
+      }
+    }
+  }
+
+  func endLiveLevels() {
+    liveLevelsRefcount = max(0, liveLevelsRefcount - 1)
+    guard liveLevelsRefcount == 0 else { return }
+    levelPollTask?.cancel()
+    levelPollTask = nil
+    liveLevels = [:]
+  }
+
   // MARK: - Per-app output routing
 
   func targetDevice(for app: AudioApp) -> AudioDevice? {
@@ -836,6 +866,8 @@ final class AppStore {
   func shutdown() {
     deviceChangeObserver?.cancel()
     deviceChangeObserver = nil
+    levelPollTask?.cancel()
+    levelPollTask = nil
     if let frontmostAppObserver {
       NSWorkspace.shared.notificationCenter.removeObserver(frontmostAppObserver)
       self.frontmostAppObserver = nil

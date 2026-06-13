@@ -95,6 +95,8 @@ struct MainWindowView: View {
     .task {
       store.start()
     }
+    .onAppear { store.beginLiveLevels() }
+    .onDisappear { store.endLiveLevels() }
   }
 
   private var scopedApps: [AudioApp] {

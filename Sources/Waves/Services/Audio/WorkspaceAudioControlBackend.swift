@@ -1091,6 +1091,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
   }
 
+  func audioLevels() async -> [String: AudioLevels] {
+    var result: [String: AudioLevels] = [:]
+    for app in snapshot.apps where app.routingState == .managed || app.routingState == .live {
+      result[app.logicalID] = AudioLevels(peak: app.peakLevel, rms: app.rmsLevel)
+    }
+    return result
+  }
+
   func releaseControllers(forBundleID bundleID: String?, pid: Int32) async {
     let targetIDs = snapshot.apps.filter { app in
       (bundleID != nil && app.bundleID == bundleID) || (app.pid != nil && app.pid == pid)

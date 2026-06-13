@@ -154,6 +154,12 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     }
   }
 
+  public func audioLevels() async -> [String: AudioLevels] {
+    snapshot.apps.reduce(into: [:]) { result, app in
+      result[app.logicalID] = AudioLevels(peak: app.peakLevel, rms: app.rmsLevel)
+    }
+  }
+
   public func diagnosticsReport() async -> DiagnosticsReport {
     DiagnosticsReport(
       summary:

@@ -35,6 +35,20 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   /// tap and aggregate device are released promptly instead of lingering until
   /// the next manual refresh.
   func releaseControllers(forBundleID bundleID: String?, pid: Int32) async
+
+  /// Current per-app output levels keyed by logical ID, for live meters. Cheap
+  /// to call; intended to be polled only while a UI surface is visible.
+  func audioLevels() async -> [String: AudioLevels]
+}
+
+public struct AudioLevels: Hashable, Sendable {
+  public var peak: Float
+  public var rms: Float
+
+  public init(peak: Float, rms: Float) {
+    self.peak = peak
+    self.rms = rms
+  }
 }
 
 public struct DiagnosticsReport: Codable, Hashable, Sendable {

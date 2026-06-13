@@ -110,6 +110,8 @@ struct MenuBarMixerView: View {
     .task {
       store.start()
     }
+    .onAppear { store.beginLiveLevels() }
+    .onDisappear { store.endLiveLevels() }
   }
 }
 
