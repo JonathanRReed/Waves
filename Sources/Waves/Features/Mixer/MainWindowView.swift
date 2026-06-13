@@ -4,7 +4,8 @@ import WavesAudioCore
 struct MainWindowView: View {
   @Environment(AppStore.self) private var store
   @State private var searchText = ""
-  @State private var selection: SourceFilter = .running
+  // Restored across launches so the user returns to the scope they left.
+  @SceneStorage("waves.selectedScope") private var selection: SourceFilter = .running
   @State private var isPresentingSavePreset = false
   @State private var presetName = ""
 
@@ -117,7 +118,10 @@ struct MainWindowView: View {
     let maxSearchLength = 100
     let boundedQuery = String(query.prefix(maxSearchLength))
 
-    return scopedApps.filter { app in
+    // When searching, look across ALL visible apps rather than just the selected
+    // scope, so a query never silently hides a matching app that happens to live
+    // in another section.
+    return store.visibleApps.filter { app in
       app.displayName.localizedCaseInsensitiveContains(boundedQuery)
         || app.category.displayName.localizedCaseInsensitiveContains(boundedQuery)
     }
@@ -318,6 +322,7 @@ private struct SourceFilterRow: View {
 private struct SourceListView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.openSettings) private var openSettings
+  @State private var selectedAppID: AudioApp.ID?
   let filter: SourceFilter
   let apps: [AudioApp]
   let searchText: String
@@ -352,11 +357,12 @@ private struct SourceListView: View {
         }
         Spacer(minLength: 0)
       } else {
-        List {
+        List(selection: $selectedAppID) {
           ForEach(apps) { app in
             MixerRowView(app: app)
               .listRowInsets(EdgeInsets(top: 2, leading: 18, bottom: 2, trailing: 18))
               .listRowBackground(Color.clear)
+              .tag(app.id)
           }
           .onMove { source, destination in
             if filter == .running && store.preferences.sortMode == .manual {
@@ -365,6 +371,26 @@ private struct SourceListView: View {
           }
         }
         .listStyle(.inset)
+        // Keyboard operation: arrow keys move the selection (List), and these
+        // keys act on the selected row so the mixer is fully drivable without a
+        // mouse — including muting, which the borderless button can't reach.
+        .onKeyPress(.space) { handleKey { store.setMuted(!$0.isMuted, for: $0) } }
+        .onKeyPress("m") { handleKey { store.setMuted(!$0.isMuted, for: $0) } }
+        .onKeyPress("=") { handleKey { nudgeVolume($0, by: 0.05) } }
+        .onKeyPress("-") { handleKey { nudgeVolume($0, by: -0.05) } }
+        .onKeyPress("b") { handleKey { cycleBoost($0) } }
+        .onKeyPress("p") { handleKey { store.togglePinned($0) } }
+        // Jump straight to playing apps or apps needing attention.
+        .accessibilityRotor("Playing apps") {
+          ForEach(apps.filter { store.liveApps.contains($0) }) { app in
+            AccessibilityRotorEntry(app.displayName, id: app.id)
+          }
+        }
+        .accessibilityRotor("Needs attention") {
+          ForEach(apps.filter { $0.routingState == .error }) { app in
+            AccessibilityRotorEntry(app.displayName, id: app.id)
+          }
+        }
       }
 
       DiagnosticsPanel()
@@ -372,6 +398,26 @@ private struct SourceListView: View {
         .padding(.vertical, 10)
     }
     .background(Color(nsColor: .textBackgroundColor))
+  }
+
+  /// Runs `action` on the currently selected row, if any.
+  private func handleKey(_ action: (AudioApp) -> Void) -> KeyPress.Result {
+    guard let id = selectedAppID, let app = apps.first(where: { $0.id == id }) else {
+      return .ignored
+    }
+    action(app)
+    return .handled
+  }
+
+  private func nudgeVolume(_ app: AudioApp, by delta: Float) {
+    let next = max(0, min(1, app.desiredVolume + delta))
+    store.setDesiredVolume(next, for: app)
+    store.commitDesiredVolume(for: app)
+  }
+
+  private func cycleBoost(_ app: AudioApp) {
+    let next = app.volumeBoost >= 4 ? 1 : (app.volumeBoost + 1).rounded()
+    store.setVolumeBoost(next, for: app)
   }
 }
 
