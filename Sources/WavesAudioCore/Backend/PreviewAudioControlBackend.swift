@@ -140,6 +140,14 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     // No real audio routes in the preview backend.
   }
 
+  public func availableOutputDevices() async -> [AudioDevice] {
+    snapshot.currentDevice.map { [$0] } ?? []
+  }
+
+  public func setDefaultOutputDevice(uid: String) async throws {
+    // No real hardware in the preview backend.
+  }
+
   public func diagnosticsReport() async -> DiagnosticsReport {
     DiagnosticsReport(
       summary:

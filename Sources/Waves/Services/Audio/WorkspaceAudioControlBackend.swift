@@ -645,6 +645,101 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return deviceID
   }
 
+  func availableOutputDevices() async -> [AudioDevice] {
+    guard supportsPerAppRouting else { return [] }
+    let currentUID = try? currentDefaultOutputDeviceUID()
+    var devices: [AudioDevice] = []
+    for deviceID in allDeviceIDs() where hasOutputStreams(deviceID) {
+      guard let uid = deviceUID(deviceID) else { continue }
+      // Skip Waves' own private aggregate devices so they never appear as
+      // user-selectable outputs.
+      if uid.hasPrefix("com.waves.aggregate.") { continue }
+      let name = (try? stringProperty(deviceID, selector: kAudioObjectPropertyName, action: "read device name")) ?? "Output Device"
+      let kind = deviceKind(uid: uid, name: name)
+      if kind == .aggregate, name.lowercased().contains("waves") { continue }
+      devices.append(AudioDevice(
+        id: uid,
+        name: name,
+        kind: kind,
+        isCurrent: uid == currentUID,
+        isManagedRouteAvailable: supportsPerAppRouting
+      ))
+    }
+    return devices.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+  }
+
+  func setDefaultOutputDevice(uid: String) async throws {
+    guard let deviceID = allDeviceIDs().first(where: { deviceUID($0) == uid }) else {
+      throw BackendError.managedRouteUnavailable("That output device is no longer available.")
+    }
+
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var mutableID = deviceID
+    try withStatusCheck(
+      AudioObjectSetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject),
+        &address,
+        0,
+        nil,
+        UInt32(MemoryLayout<AudioObjectID>.size),
+        &mutableID
+      ),
+      action: "set default output device"
+    )
+    // The default-device listener fires from here, driving auto-restore + a
+    // deviceChangeEvents emission that refreshes the UI.
+  }
+
+  private func allDeviceIDs() -> [AudioObjectID] {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyDevices,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else {
+      return []
+    }
+    let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    guard count > 0 else { return [] }
+    var ids = [AudioObjectID](repeating: .unknown, count: count)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids) == noErr else {
+      return []
+    }
+    return ids.filter { $0 != .unknown }
+  }
+
+  private func hasOutputStreams(_ deviceID: AudioObjectID) -> Bool {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyStreams,
+      mScope: kAudioObjectPropertyScopeOutput,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return false }
+    return size > 0
+  }
+
+  private func deviceUID(_ deviceID: AudioObjectID) -> String? {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyDeviceUID,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return nil }
+    var rawUID: CFString?
+    let status = withUnsafeMutablePointer(to: &rawUID) {
+      AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, $0)
+    }
+    guard status == noErr, let rawUID else { return nil }
+    return rawUID as String
+  }
+
   private func stringProperty(
     _ objectID: AudioObjectID,
     selector: AudioObjectPropertySelector,
