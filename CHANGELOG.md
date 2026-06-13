@@ -7,14 +7,20 @@ All notable changes to Waves are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Per-app output-device routing** — send each app to a chosen output device.
+- **Per-app exclude/ignore** escape hatch for apps that dislike being tapped.
+- **Live per-app level meters** (visibility-gated; near-zero idle cost).
 - Real audio-capture (TCC) permission detection, surfaced in onboarding and
   diagnostics, replacing an OS-version proxy.
 - Global output-device switching from the menu-bar panel.
-- Full keyboard operation of the mixer and VoiceOver rotors; Reduce Motion
-  support.
+- Full keyboard operation of the mixer and VoiceOver rotors; Reduce Motion,
+  Increase Contrast, and Dynamic Type support.
+- Mute provenance (auto-pause never overrides a user mute, and resumes
+  correctly after relaunch).
 - "Copy Diagnostics" route-health export.
 - Versioned persistence envelope; testable realtime DSP (`TapDSP`).
-- Privacy manifest, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTING.md`.
+- Privacy manifest, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTING.md`,
+  `CHANGELOG.md`, a Homebrew cask, and tag-driven notarized release CI.
 - MIT license.
 
 ### Changed
