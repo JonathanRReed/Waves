@@ -354,6 +354,7 @@ final class AppStore {
   }
 
   func setDesiredVolume(_ value: Float, for app: AudioApp) {
+    guard !isExcluded(app) else { return }
     let appKey = app.logicalID
     guard let index = session.apps.firstIndex(matchingAppKey: appKey) else {
       let message = BackendError.appNotFound(app.id).localizedDescription
@@ -488,6 +489,7 @@ final class AppStore {
   }
 
   func setMuted(_ isMuted: Bool, for app: AudioApp) {
+    guard !isExcluded(app) else { return }
     let appName = app.displayName
     let appKey = app.logicalID
 
@@ -534,6 +536,7 @@ final class AppStore {
   }
 
   func setVolumeBoost(_ boost: Float, for app: AudioApp) {
+    guard !isExcluded(app) else { return }
     let appName = app.displayName
     let appKey = app.logicalID
     let clampedBoost = max(1.0, min(4.0, boost))
@@ -597,6 +600,51 @@ final class AppStore {
         showToast(title: "Pinning failed", detail: error.localizedDescription, kind: .error)
       }
     }
+  }
+
+  // MARK: - Exclusions (don't-tap escape hatch)
+
+  func isExcluded(_ app: AudioApp) -> Bool {
+    preferences.excludedAppIDs.contains(app.logicalID)
+  }
+
+  /// Excludes or re-includes an app from Waves' management. Excluded apps are
+  /// never tapped, so their audio is left completely untouched — the escape
+  /// hatch for DAWs, conferencing/echo-cancellation apps, and other audio tools
+  /// that misbehave when their output is tapped.
+  func setExcluded(_ excluded: Bool, for app: AudioApp) {
+    var ids = Set(preferences.excludedAppIDs)
+    if excluded {
+      ids.insert(app.logicalID)
+    } else {
+      ids.remove(app.logicalID)
+    }
+    preferences.excludedAppIDs = Array(ids).sorted()
+    persistPreferences()
+
+    if excluded {
+      // Tear down any active route so Waves stops touching this app's audio,
+      // and reflect the excluded state in the row.
+      let bundleID = app.bundleID
+      let pid = app.pid ?? -1
+      Task { await backend.releaseControllers(forBundleID: bundleID, pid: pid) }
+      if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
+        session.apps[index].routingState = .monitorOnly
+        session.apps[index].appliedVolume = nil
+        session.apps[index].notes = "Excluded from Waves"
+      }
+      pendingVolumeApplyTasks[app.logicalID]?.cancel()
+      pendingVolumeTargets.removeValue(forKey: app.logicalID)
+    } else if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
+      session.apps[index].notes = nil
+    }
+    invalidateVisibleAppsCache()
+    showToast(
+      title: excluded ? "Excluded from Waves" : "Managed by Waves",
+      detail: app.displayName,
+      kind: .info,
+      duration: .seconds(1.4)
+    )
   }
 
   /// A plain-text snapshot of route health and per-app state, suitable for
@@ -703,6 +751,7 @@ final class AppStore {
     // Re-apply the customized apps so audible output matches the restored UI.
     for index in session.apps.indices {
       let app = session.apps[index]
+      guard !isExcluded(app) else { continue }
       let isCustomized = app.isMuted || app.volumeBoost > 1.0 || abs(app.desiredVolume - 1.0) > 0.001
       guard isCustomized else { continue }
       do {
@@ -830,7 +879,7 @@ final class AppStore {
       var muteChanges: [String: Bool] = [:]
       if isConferencingAppActive {
         // Pause music apps
-        let musicApps = visibleApps.filter { $0.category == .media && !$0.isMuted }
+        let musicApps = visibleApps.filter { $0.category == .media && !$0.isMuted && !isExcluded($0) }
         for app in musicApps where !pausedMusicApps.contains(app.logicalID) {
           do {
             try await backend.setMuted(true, forAppID: app.logicalID)

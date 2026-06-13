@@ -12,6 +12,13 @@ struct UserPreferences: Codable, Sendable {
   var enablePerDeviceVolumePresets = true
   var enableURLScheme = false
   var urlSchemeAutomationAcknowledged = false
+  /// Logical IDs of apps the user has excluded from Waves' management — Waves
+  /// will not tap or alter their audio (the escape hatch for DAWs, VoIP /
+  /// echo-cancellation apps, and other audio tools that dislike being tapped).
+  var excludedAppIDs: [String] = []
+  /// When true, auto-pause music for any other audio source, not just
+  /// conferencing apps coming to the front.
+  var autoPauseOnAnyAudio = false
 
   init() {}
 
@@ -27,6 +34,8 @@ struct UserPreferences: Codable, Sendable {
     case enablePerDeviceVolumePresets
     case enableURLScheme
     case urlSchemeAutomationAcknowledged
+    case excludedAppIDs
+    case autoPauseOnAnyAudio
   }
 
   // Decode each field independently so a preferences file written by an older
@@ -52,6 +61,8 @@ struct UserPreferences: Codable, Sendable {
     enablePerDeviceVolumePresets = value(.enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
     enableURLScheme = value(.enableURLScheme, defaults.enableURLScheme)
     urlSchemeAutomationAcknowledged = value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
+    excludedAppIDs = value(.excludedAppIDs, defaults.excludedAppIDs)
+    autoPauseOnAnyAudio = value(.autoPauseOnAnyAudio, defaults.autoPauseOnAnyAudio)
   }
 }
 
