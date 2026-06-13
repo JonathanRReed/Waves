@@ -79,6 +79,8 @@ struct MixerRowView: View {
         Text("\(Int(app.desiredVolume * 100))%")
           .font(.caption.monospacedDigit().weight(.medium))
           .foregroundStyle(.secondary)
+          .lineLimit(1)
+          .minimumScaleFactor(0.7)
           .frame(width: 40, alignment: .trailing)
           .contentTransition(.numericText())
           .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.7), value: app.desiredVolume)
@@ -358,6 +360,8 @@ private struct BoostMenu: View {
       Text("\(Int(app.volumeBoost))x")
         .font(compact ? .caption.monospacedDigit() : .caption.monospacedDigit().weight(.medium))
         .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
         .frame(width: compact ? 34 : 38)
     }
     .menuStyle(.borderlessButton)
@@ -385,6 +389,7 @@ private extension RoutingState {
 }
 
 private struct RoutingStateIndicator: View {
+  @Environment(\.colorSchemeContrast) private var contrast
   let state: RoutingState
 
   @ViewBuilder
@@ -404,6 +409,13 @@ private struct RoutingStateIndicator: View {
       .padding(.horizontal, 6)
       .padding(.vertical, 2)
       .background(color.opacity(backgroundOpacity), in: Capsule())
+      // Under Increase Contrast, add a solid outline so the chip reads as a
+      // distinct element rather than a faint tint.
+      .overlay {
+        if contrast == .increased {
+          Capsule().strokeBorder(color, lineWidth: 1)
+        }
+      }
       .help(Text(helpText))
       .accessibilityLabel(Text(helpText))
     }
@@ -412,11 +424,12 @@ private struct RoutingStateIndicator: View {
   private var color: Color { state.indicatorColor }
 
   private var backgroundOpacity: Double {
+    if contrast == .increased { return 0.28 }
     switch state {
     case .monitorOnly, .recent:
-      0.08
+      return 0.08
     default:
-      0.12
+      return 0.12
     }
   }
 

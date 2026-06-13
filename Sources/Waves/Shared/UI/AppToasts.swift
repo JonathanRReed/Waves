@@ -17,6 +17,7 @@ struct AppToastStack: View {
 
 private struct AppToastBanner: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.colorSchemeContrast) private var contrast
   let toast: AppToast
 
   var body: some View {
@@ -65,7 +66,7 @@ private struct AppToastBanner: View {
     )
     .overlay(
       RoundedRectangle(cornerRadius: 14, style: .continuous)
-        .strokeBorder(WavesDesign.stroke, lineWidth: 1)
+        .strokeBorder(WavesDesign.hairline(increasedContrast: contrast == .increased), lineWidth: 1)
     )
     .shadow(color: .black.opacity(0.14), radius: 12, y: 6)
     .contentShape(Rectangle())
