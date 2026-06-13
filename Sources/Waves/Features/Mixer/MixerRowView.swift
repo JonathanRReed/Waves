@@ -97,22 +97,6 @@ struct MixerRowView: View {
     }
     .padding(.vertical, 5)
     .contentShape(Rectangle())
-    // A quiet cyan level meter, shown only on rows Waves actually manages —
-    // making the live signal (and honest routing) visible without adding chrome.
-    // Drawn as an overlay so it never shifts row layout.
-    .overlay(alignment: .bottomLeading) {
-      if showsLevelMeter {
-        GeometryReader { proxy in
-          Capsule()
-            .fill(WavesDesign.accent.opacity(0.55))
-            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2)
-            .frame(maxHeight: .infinity, alignment: .bottom)
-            .animation(reduceMotion ? nil : .linear(duration: 0.15), value: meterLevel)
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-      }
-    }
     .contextMenu {
       Button(app.isPinned ? "Unpin" : "Pin") {
         store.togglePinned(app)
@@ -121,14 +105,6 @@ struct MixerRowView: View {
     .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
       store.togglePinned(app)
     }
-  }
-
-  private var showsLevelMeter: Bool {
-    !app.isMuted && (app.routingState == .managed || app.routingState == .live)
-  }
-
-  private var meterLevel: Double {
-    Double(min(1, max(app.rmsLevel, app.peakLevel * 0.7)))
   }
 
   private var subtitle: String {

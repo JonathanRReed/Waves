@@ -23,10 +23,6 @@ struct AppToast: Identifiable, Equatable {
 @Observable
 @MainActor
 final class AppStore {
-  /// The running store instance, used by App Intents (which the system
-  /// instantiates outside the SwiftUI environment) to reach app state.
-  static private(set) weak var shared: AppStore?
-
   var session: AudioSessionSnapshot
   var presets: [Preset]
   var onboarding = OnboardingState()
@@ -99,40 +95,6 @@ final class AppStore {
     )
     persistPreferences()
     syncOnboarding(using: session)
-    Self.shared = self
-  }
-
-  // MARK: - Automation (App Intents)
-
-  /// Snapshot of controllable apps for the Shortcuts entity query.
-  var automationApps: [(logicalID: String, name: String)] {
-    visibleApps.map { ($0.logicalID, $0.displayName) }
-  }
-
-  var automationPresetNames: [String] { presets.map(\.name) }
-
-  @discardableResult
-  func automationSetVolume(_ value: Float, logicalID: String) -> Bool {
-    guard let app = session.apps.first(matchingAppKey: logicalID) else { return false }
-    setDesiredVolume(value, for: app)
-    commitDesiredVolume(for: app)
-    return true
-  }
-
-  @discardableResult
-  func automationSetMuted(_ muted: Bool, logicalID: String) -> Bool {
-    guard let app = session.apps.first(matchingAppKey: logicalID) else { return false }
-    setMuted(muted, for: app)
-    return true
-  }
-
-  @discardableResult
-  func automationApplyPreset(named name: String) -> Bool {
-    guard let preset = presets.first(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) else {
-      return false
-    }
-    applyPreset(preset)
-    return true
   }
 
   var visibleApps: [AudioApp] {

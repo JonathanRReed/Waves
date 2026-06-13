@@ -76,6 +76,10 @@ private struct AppToastBanner: View {
     .animation(.spring(response: 0.24, dampingFraction: 0.8), value: toast.id)
     .accessibilityElement(children: .combine)
     .accessibilityLabel(accessibilityMessage)
+    // .combine absorbs the dismiss button, so expose dismissal as an action.
+    .accessibilityAction(named: "Dismiss") {
+      store.dismissToast(id: toast.id)
+    }
     .onAppear {
       // VoiceOver does not announce transient banners on its own.
       AccessibilityNotification.Announcement(accessibilityMessage).post()
