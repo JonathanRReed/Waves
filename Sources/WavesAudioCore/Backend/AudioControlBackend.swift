@@ -16,6 +16,12 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func autoRestoreDevice() async throws -> AudioSessionSnapshot
   func diagnosticsReport() async -> DiagnosticsReport
 
+  /// All output-capable devices currently available, for output switching.
+  func availableOutputDevices() async -> [AudioDevice]
+
+  /// Sets the system default output device by its persistent UID.
+  func setDefaultOutputDevice(uid: String) async throws
+
   /// Emits once after the default output device changes and the backend has
   /// re-established managed routes, so observers can refresh state and restore
   /// per-device volume presets.

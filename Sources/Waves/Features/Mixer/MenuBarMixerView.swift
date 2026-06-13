@@ -12,13 +12,8 @@ struct MenuBarMixerView: View {
       VStack(alignment: .leading, spacing: 14) {
         HStack {
           WavesBrandLogo(size: 16)
-          VStack(alignment: .leading, spacing: 2) {
-            Text("Waves")
-              .font(.headline)
-            Text(store.currentDeviceName)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
+          Text("Waves")
+            .font(.headline)
           Spacer()
           Button {
             store.refresh()
@@ -29,6 +24,8 @@ struct MenuBarMixerView: View {
           .accessibilityLabel("Refresh app list")
           .keyboardShortcut("r", modifiers: [.command])
         }
+
+        OutputDevicePicker()
 
         if store.isLoading {
           HStack(spacing: 8) {
@@ -113,6 +110,48 @@ struct MenuBarMixerView: View {
     .task {
       store.start()
     }
+  }
+}
+
+/// Compact output-device switcher for the menu-bar panel — the most frequent
+/// action a menu-bar audio utility performs ("Control Center for app audio").
+private struct OutputDevicePicker: View {
+  @Environment(AppStore.self) private var store
+
+  var body: some View {
+    Menu {
+      ForEach(store.availableDevices) { device in
+        Button {
+          store.selectOutputDevice(device)
+        } label: {
+          if device.id == store.currentDeviceID {
+            Label(device.name, systemImage: "checkmark")
+          } else {
+            Text(device.name)
+          }
+        }
+      }
+      if store.availableDevices.isEmpty {
+        Text("No output devices found").foregroundStyle(.secondary)
+      }
+    } label: {
+      HStack(spacing: 6) {
+        Image(systemName: "hifispeaker.fill")
+          .foregroundStyle(.secondary)
+        Text(store.currentDeviceName)
+          .lineLimit(1)
+        Spacer(minLength: 4)
+        Image(systemName: "chevron.up.chevron.down")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+      .font(.caption)
+    }
+    .menuStyle(.borderlessButton)
+    .accessibilityLabel("Output device")
+    .accessibilityValue(store.currentDeviceName)
+    .help("Switch the system output device")
+    .onAppear { store.refreshOutputDevices() }
   }
 }
 
