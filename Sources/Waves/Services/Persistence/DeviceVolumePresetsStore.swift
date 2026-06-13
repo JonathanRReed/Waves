@@ -43,7 +43,7 @@ final class DeviceVolumePresetsStore: @unchecked Sendable {
         }
 
         let data = try Data(contentsOf: url)
-        let presets = try decoder.decode(DeviceVolumePresets.self, from: data)
+        let presets = try PersistedSchema.decode(DeviceVolumePresets.self, from: data, using: decoder)
         return presets
       } catch {
         // Preserve the unreadable file for recovery instead of wiping the
@@ -71,7 +71,7 @@ final class DeviceVolumePresetsStore: @unchecked Sendable {
       guard let self else { return }
       do {
         self.encoder.outputFormatting = .prettyPrinted
-        let data = try self.encoder.encode(presets)
+        let data = try PersistedSchema.encode(presets, using: self.encoder)
         try data.write(to: self.url, options: .atomic)
       } catch {
         self.logger.error("Failed to save volume presets: \(error.localizedDescription)")

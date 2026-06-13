@@ -38,7 +38,7 @@ final class SessionStore: @unchecked Sendable {
         }
 
         let data = try Data(contentsOf: url)
-        let snapshot = try decoder.decode(AudioSessionSnapshot.self, from: data)
+        let snapshot = try PersistedSchema.decode(AudioSessionSnapshot.self, from: data, using: decoder)
         return snapshot
       } catch {
         logger.warning("Failed to load session: \(error.localizedDescription)")
@@ -85,7 +85,7 @@ final class SessionStore: @unchecked Sendable {
       )
 
       do {
-        let data = try self.encoder.encode(payload)
+        let data = try PersistedSchema.encode(payload, using: self.encoder)
         try data.write(to: self.url, options: .atomic)
       } catch {
         self.logger.error("Failed to save session: \(error.localizedDescription)")
