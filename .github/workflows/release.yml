@@ -1,0 +1,81 @@
+name: Release
+
+# Build, notarize, and publish a DMG when a version tag is pushed (e.g. v1.0.0).
+#
+# Requires these repository secrets (the signing assets only the maintainer can
+# provide). Without them the job fails fast with a clear message — by design.
+#   DEVELOPER_ID_CERT_P12       base64 of a Developer ID Application .p12
+#   DEVELOPER_ID_CERT_PASSWORD  password for that .p12
+#   SIGN_IDENTITY               e.g. "Developer ID Application: Name (TEAMID)"
+#   KEYCHAIN_PASSWORD           any throwaway password for the temp keychain
+#   NOTARY_APPLE_ID             Apple ID email for notarytool
+#   NOTARY_TEAM_ID              Apple Developer Team ID
+#   NOTARY_PASSWORD             app-specific password for notarytool
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, notarize, publish
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID certificate
+        env:
+          CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "$CERT_P12" ]; then
+            echo "::error::Signing secrets are not configured. See .github/workflows/release.yml for the required secrets."
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/waves-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+      - name: Store notarytool credentials
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials waves-notary \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --password "$NOTARY_PASSWORD"
+
+      - name: Build, sign, notarize, staple
+        env:
+          SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
+          NOTARY_PROFILE: waves-notary
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          APP_BUILD: ${{ github.run_number }}
+        run: ./script/build_and_run.sh --notarize
+
+      - name: Checksum
+        run: shasum -a 256 dist/Waves.dmg | tee dist/Waves.dmg.sha256
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Waves.dmg
+            dist/Waves.dmg.sha256
+          generate_release_notes: true

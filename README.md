@@ -34,6 +34,31 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 - **Empty State UI**: Helpful guidance when no audio apps are detected
 - **Setup Checklist**: Settings-based setup status for permissions, output device visibility, and route health
 
+## How Waves compares
+
+Waves controls per-app audio with macOS Core Audio **process taps** — so unlike
+**Background Music**, **eqMac**, or **SoundSource**, it installs **no virtual
+audio driver, no system extension, and needs no reboot or admin password**;
+deleting the app leaves nothing behind. A few newer tools (FineTune, Fader) use
+the same driver-free approach, so against those Waves leads on other fronts:
+
+- **Truly free and MIT-licensed** — per-app volume, mute, and up to 4× boost are
+  free; eqMac paywalls its per-app mixer and SoundSource is paid.
+- **Broad reach** — macOS 14.2+ **and Intel**, where comparable driver-free
+  tools require macOS 15+.
+- **Honest routing** — every app shows whether it's visible, monitored, managed,
+  or errored, with an in-app diagnostics export. No other tool surfaces tap
+  health this clearly.
+- **Accessibility** — full keyboard operation and VoiceOver rotors.
+- **Reliability escape hatch** — any app that dislikes being tapped (DAWs,
+  conferencing/echo-cancellation apps, other audio tools) can be excluded in one
+  click.
+- **Private** — audio is processed locally and never recorded or transmitted; no
+  microphone permission, no telemetry.
+
+Waves is intentionally a **mixer, not an EQ suite or recorder** — if you need a
+parametric EQ or audio capture-to-file, eqMac or Audio Hijack are better fits.
+
 ## System Requirements
 
 - macOS 14.2 or later
