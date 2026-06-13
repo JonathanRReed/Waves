@@ -218,13 +218,21 @@ swift test
 swift build
 ```
 
-## License
+## Privacy
 
-Waves is released under the MIT License. See [`LICENSE`](LICENSE).
+Waves processes audio locally and never records or transmits it, has no
+analytics, and makes no network requests. See [`PRIVACY.md`](PRIVACY.md) for
+details, and [`SECURITY.md`](SECURITY.md) to report a vulnerability.
 
 ## Contributing
 
-Use focused pull requests, keep Core Audio changes covered by tests where possible, and verify `swift build`, `swift test`, and `./script/build_and_run.sh --release-check` before proposing release changes.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). In short: keep PRs focused, cover logic
+with tests, and run `swift build`, `swift test`, and
+`./script/build_and_run.sh --release-check` before proposing changes.
+
+## License
+
+Waves is released under the MIT License. See [`LICENSE`](LICENSE).
 
 ## Support
 
