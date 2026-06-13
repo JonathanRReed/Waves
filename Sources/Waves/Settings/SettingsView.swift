@@ -188,32 +188,6 @@ private struct AudioSettingsView: View {
       Text(store.currentDeviceName)
         .foregroundStyle(.secondary)
 
-      if let device = store.session.currentDevice {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("Volume control mode")
-            .font(.headline)
-
-          Picker(
-            "Volume control mode",
-            selection: Binding(
-              get: { device.volumeControlMode },
-              set: { store.setVolumeControlMode($0) }
-            )
-          ) {
-            ForEach(VolumeControlMode.allCases) { mode in
-              VStack(alignment: .leading, spacing: 2) {
-                Text(mode.displayName)
-                Text(mode.description)
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-              }
-              .tag(mode)
-            }
-          }
-          .pickerStyle(.radioGroup)
-        }
-      }
-
       Text("Managed routing")
         .font(.headline)
       Text(
@@ -298,10 +272,21 @@ private struct DiagnosticsSettingsView: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 16) {
-        Text("Running apps")
-          .font(.headline)
-        Text(store.sourceInventorySummary)
-          .foregroundStyle(.secondary)
+        HStack(alignment: .firstTextBaseline) {
+          VStack(alignment: .leading, spacing: 4) {
+            Text("Running apps")
+              .font(.headline)
+            Text(store.sourceInventorySummary)
+              .foregroundStyle(.secondary)
+          }
+          Spacer()
+          Button {
+            store.copyDiagnosticsToPasteboard()
+          } label: {
+            Label("Copy Diagnostics", systemImage: "doc.on.clipboard")
+          }
+          .help("Copy a plain-text route-health report to the clipboard.")
+        }
 
         if let diagnostics = store.diagnostics {
           ForEach(diagnostics.checks) { check in

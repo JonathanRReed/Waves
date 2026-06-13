@@ -600,23 +600,42 @@ final class AppStore {
     }
   }
 
-  func setVolumeControlMode(_ mode: VolumeControlMode) {
-    guard let deviceID = session.currentDevice?.id else { return }
-    Task {
-      do {
-        try await backend.setVolumeControlMode(mode, forDeviceID: deviceID)
-        session = await backend.currentSnapshot()
-        persistSessionSnapshot()
-        showToast(
-          title: "Volume control mode changed",
-          detail: mode.displayName,
-          kind: .info,
-          duration: .seconds(1.2)
-        )
-      } catch {
-        showToast(title: "Failed to change volume mode", detail: error.localizedDescription, kind: .error)
+  /// A plain-text snapshot of route health and per-app state, suitable for
+  /// pasting into a bug report. Contains no audio and no sensitive content
+  /// beyond app names already visible in the mixer.
+  var diagnosticsExportText: String {
+    let os = ProcessInfo.processInfo.operatingSystemVersionString
+    let status = session.backendStatus
+    var lines: [String] = []
+    lines.append("Waves diagnostics")
+    lines.append("macOS: \(os)")
+    lines.append("Output device: \(currentDeviceName)")
+    lines.append("Audio component installed: \(status.isAudioComponentInstalled)")
+    lines.append("Audio capture permission: \(status.hasRequiredPermissions ? "granted" : "not granted")")
+    lines.append("Route recovery healthy: \(status.isRouteRecoveryHealthy)")
+    if let error = status.lastError { lines.append("Last error: \(error)") }
+    lines.append("")
+    lines.append("Apps (\(visibleApps.count)):")
+    for app in visibleApps {
+      let muted = app.isMuted ? ", muted" : ""
+      let boost = app.volumeBoost > 1 ? ", boost \(Int(app.volumeBoost))x" : ""
+      lines.append("  • \(app.displayName) — \(app.routingState.displayName), \(Int(app.desiredVolume * 100))%\(muted)\(boost)")
+    }
+    if let diagnostics {
+      lines.append("")
+      lines.append("Checks:")
+      for check in diagnostics.checks {
+        lines.append("  • [\(check.status.rawValue)] \(check.title): \(check.detail)")
       }
     }
+    return lines.joined(separator: "\n")
+  }
+
+  func copyDiagnosticsToPasteboard() {
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    pasteboard.setString(diagnosticsExportText, forType: .string)
+    showToast(title: "Diagnostics copied", detail: "Paste into a bug report.", kind: .success, duration: .seconds(1.4))
   }
 
   private func observeDeviceChanges() {

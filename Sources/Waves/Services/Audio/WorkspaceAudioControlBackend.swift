@@ -250,6 +250,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
             : "Per-app routing needs macOS 14.2 or newer."
         ),
         DiagnosticsCheck(
+          title: "Audio capture permission",
+          status: captureAuthorizationStatus,
+          detail: captureAuthorizationDetail
+        ),
+        DiagnosticsCheck(
           title: "Accessibility permission",
           status: hasAccessibilityPermission ? .passed : .warning,
           detail: hasAccessibilityPermission
@@ -272,6 +277,27 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
   }
 
+  private var captureAuthorizationStatus: DiagnosticsStatus {
+    switch captureAuthorization {
+    case .authorized: return .passed
+    case .notGranted: return .failed
+    case .undetermined, .unsupported: return .warning
+    }
+  }
+
+  private var captureAuthorizationDetail: String {
+    switch captureAuthorization {
+    case .authorized:
+      return "Audio capture is granted. Waves can apply per-app volume, mute, and boost."
+    case .notGranted:
+      return "Audio capture is not granted, so per-app controls cannot take effect. Allow Waves to record audio in System Settings › Privacy & Security › Microphone, then refresh."
+    case .undetermined:
+      return "Audio capture status is not yet known. Refresh to check."
+    case .unsupported:
+      return "Per-app routing needs macOS 14.2 or newer."
+    }
+  }
+
   private var recoverabilitySummary: String {
     if snapshot.backendStatus.isAudioComponentInstalled {
       let managed = snapshot.apps.filter { $0.routingState == .managed }.count
@@ -291,6 +317,44 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private var hasAccessibilityPermission: Bool {
     AXIsProcessTrusted()
+  }
+
+  /// Whether the system has actually granted Core Audio capture (TCC). This is
+  /// distinct from OS support: a 14.2+ machine supports taps but the user may
+  /// never have granted capture, in which case routing silently does nothing.
+  private(set) var captureAuthorization: CaptureAuthorization = .undetermined
+
+  /// Probes real audio-capture authorization by creating and immediately
+  /// destroying a private global process tap (no IO proc is started, so no
+  /// audio is captured). A successful create means TCC granted; a failure means
+  /// it is not currently granted. The result is cached on `captureAuthorization`.
+  @discardableResult
+  func refreshCaptureAuthorization() -> CaptureAuthorization {
+    guard #available(macOS 14.2, *) else {
+      captureAuthorization = .unsupported
+      return captureAuthorization
+    }
+
+    let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+    description.name = "Waves-CapabilityProbe"
+    description.uuid = UUID()
+    description.isPrivate = true
+    description.muteBehavior = .unmuted
+
+    var tapID: AudioObjectID = .unknown
+    let status = AudioHardwareCreateProcessTap(description, &tapID)
+    if status == noErr {
+      if tapID != .unknown {
+        _ = AudioHardwareDestroyProcessTap(tapID)
+      }
+      captureAuthorization = .authorized
+    } else {
+      // Core Audio does not expose a dedicated "denied" code, so any failure to
+      // create a tap is reported as "not granted" rather than guessed-at detail.
+      logger.warning("Audio-capture permission probe failed (OSStatus: \(status))")
+      captureAuthorization = .notGranted
+    }
+    return captureAuthorization
   }
 
   private func applyRoute(for app: AudioApp, toVolume volume: Float, muted: Bool) async throws {
@@ -777,6 +841,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func buildSnapshot(merging previousSnapshot: AudioSessionSnapshot?) async -> AudioSessionSnapshot {
+    // Re-check real capture authorization so a snapshot honestly reflects whether
+    // Waves can actually take over audio, not merely whether the OS supports it.
+    refreshCaptureAuthorization()
     let audiblePIDs = getAudibleProcessPIDs()
     let runningApps = await Task.detached { [currentBundleID, audiblePIDs] in
       Self.discoverRunningApps(currentBundleID: currentBundleID, audiblePIDs: audiblePIDs)
@@ -871,8 +938,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       ),
       backendStatus: BackendStatus(
         isAudioComponentInstalled: supportsPerAppRouting,
-        hasRequiredPermissions: supportsPerAppRouting,
-        isRouteRecoveryHealthy: supportsPerAppRouting && !hasRouteErrors,
+        hasRequiredPermissions: captureAuthorization == .authorized,
+        isRouteRecoveryHealthy: supportsPerAppRouting && captureAuthorization == .authorized && !hasRouteErrors,
         lastError: backendError
       ),
       updatedAt: now
@@ -1250,6 +1317,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // per-device volume presets, regardless of whether restoration succeeded.
     deviceChangeContinuation.yield()
   }
+}
+
+/// Real Core Audio capture (TCC) authorization, as opposed to mere OS support.
+enum CaptureAuthorization {
+  case authorized
+  case notGranted
+  case undetermined
+  case unsupported
 }
 
 private extension AudioObjectID {

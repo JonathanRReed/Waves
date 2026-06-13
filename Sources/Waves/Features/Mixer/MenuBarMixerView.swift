@@ -49,7 +49,7 @@ struct MenuBarMixerView: View {
         CompactSection(title: "Live", apps: store.liveApps)
 
         if store.preferences.showRecentApps {
-          CompactSection(title: "Recent", apps: Array(store.recentApps.prefix(3)))
+          CompactSection(title: "Recent", apps: store.recentApps, maxVisible: 3)
         }
 
         if store.pinnedApps.isEmpty && store.liveApps.isEmpty && store.recentApps.isEmpty {
@@ -134,8 +134,10 @@ private struct PresetQuickPicker: View {
 }
 
 private struct CompactSection: View {
+  @Environment(\.openWindow) private var openWindow
   let title: String
   let apps: [AudioApp]
+  var maxVisible: Int = 4
 
   var body: some View {
     if !apps.isEmpty {
@@ -144,8 +146,21 @@ private struct CompactSection: View {
           .font(.caption.weight(.semibold))
           .foregroundStyle(.secondary)
 
-        ForEach(apps.prefix(4)) { app in
+        ForEach(apps.prefix(maxVisible)) { app in
           CompactMixerRow(app: app)
+        }
+
+        if apps.count > maxVisible {
+          Button {
+            openWindow(id: AppSceneID.mainWindow)
+            NSApp.activate(ignoringOtherApps: true)
+          } label: {
+            Label("\(apps.count - maxVisible) more in Waves", systemImage: "ellipsis.circle")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+          .buttonStyle(.plain)
+          .accessibilityHint("Opens the main Waves window to show all \(title.lowercased()) apps.")
         }
       }
     }
