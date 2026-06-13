@@ -625,7 +625,11 @@ final class AppStore {
       while !Task.isCancelled {
         try? await Task.sleep(for: .milliseconds(300))
         guard let self, !Task.isCancelled else { return }
-        self.liveLevels = await self.backend.audioLevels()
+        let levels = await self.backend.audioLevels()
+        // Re-check after the await (the poll may have been cancelled while
+        // suspended) and skip no-op assignments to avoid needless redraws.
+        guard !Task.isCancelled, levels != self.liveLevels else { continue }
+        self.liveLevels = levels
       }
     }
   }
@@ -695,20 +699,21 @@ final class AppStore {
     persistPreferences()
 
     if excluded {
-      // Tear down any active route so Waves stops touching this app's audio,
-      // and reflect the excluded state in the row.
+      // Tear down any active route so Waves stops touching this app's audio.
+      // Once untapped, the app plays at its own (unmuted) level again, so the
+      // row should no longer show Waves-applied mute/volume state.
       let bundleID = app.bundleID
       let pid = app.pid ?? -1
       Task { await backend.releaseControllers(forBundleID: bundleID, pid: pid) }
       if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
         session.apps[index].routingState = .monitorOnly
         session.apps[index].appliedVolume = nil
-        session.apps[index].notes = "Excluded from Waves"
+        session.apps[index].isMuted = false
+        session.apps[index].muteSource = .user
       }
       pendingVolumeApplyTasks[app.logicalID]?.cancel()
       pendingVolumeTargets.removeValue(forKey: app.logicalID)
-    } else if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
-      session.apps[index].notes = nil
+      pausedMusicApps.remove(app.logicalID)
     }
     invalidateVisibleAppsCache()
     showToast(
@@ -824,7 +829,10 @@ final class AppStore {
     for index in session.apps.indices {
       let app = session.apps[index]
       guard !isExcluded(app) else { continue }
-      let isCustomized = app.isMuted || app.volumeBoost > 1.0 || abs(app.desiredVolume - 1.0) > 0.001
+      // A pinned output device is also "customized" — re-establish its route so
+      // it plays to the chosen device immediately, even at default volume.
+      let isCustomized = app.isMuted || app.volumeBoost > 1.0
+        || abs(app.desiredVolume - 1.0) > 0.001 || app.targetDeviceUID != nil
       guard isCustomized else { continue }
       do {
         try await backend.setVolumeBoost(app.volumeBoost, forAppID: app.logicalID)
@@ -967,7 +975,7 @@ final class AppStore {
       } else {
         // Resume ONLY apps Waves auto-paused that the user hasn't since touched
         // (muteSource still .autoConferencing). Never override a user's mute.
-        let resumable = visibleApps.filter { $0.isMuted && $0.muteSource == .autoConferencing }
+        let resumable = visibleApps.filter { $0.isMuted && $0.muteSource == .autoConferencing && !isExcluded($0) }
         for app in resumable {
           do {
             try await backend.setMuted(false, forAppID: app.logicalID)
@@ -996,6 +1004,12 @@ final class AppStore {
   }
 
   func applyPreset(_ preset: Preset) {
+    // Never let a preset re-tap an excluded app — strip excluded entries first.
+    var preset = preset
+    let excluded = Set(preferences.excludedAppIDs)
+    if !excluded.isEmpty {
+      preset.entries = preset.entries.filter { !excluded.contains($0.appID) }
+    }
     Task {
       do {
         session = try await backend.applyPreset(preset)
@@ -1022,7 +1036,13 @@ final class AppStore {
   func savePreset(named name: String) {
     Task {
       do {
-        let preset = try await backend.saveCurrentPreset(named: name)
+        var preset = try await backend.saveCurrentPreset(named: name)
+        // Don't bake excluded apps into a saved preset, or applying it later
+        // would re-tap them.
+        let excluded = Set(preferences.excludedAppIDs)
+        if !excluded.isEmpty {
+          preset.entries = preset.entries.filter { !excluded.contains($0.appID) }
+        }
         let trimmedName = preset.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if let existingIndex = presets.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame })
         {
@@ -1385,6 +1405,8 @@ final class AppStore {
       mergedApps[index].isPinned = cachedApp.isPinned
       mergedApps[index].compatibility = cachedApp.compatibility
       mergedApps[index].volumeBoost = cachedApp.volumeBoost
+      mergedApps[index].muteSource = cachedApp.muteSource
+      mergedApps[index].targetDeviceUID = cachedApp.targetDeviceUID
     }
 
     return AudioSessionSnapshot(

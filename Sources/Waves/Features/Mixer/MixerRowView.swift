@@ -43,7 +43,11 @@ struct MixerRowView: View {
               .foregroundStyle(.secondary)
               .lineLimit(1)
 
-            RoutingStateIndicator(state: app.routingState)
+            // Hide the managed/live route chip for excluded apps — Waves isn't
+            // controlling them, so showing a route state would be misleading.
+            if !isExcluded {
+              RoutingStateIndicator(state: app.routingState)
+            }
           }
         }
         .frame(minWidth: 150, idealWidth: 240, maxWidth: .infinity, alignment: .leading)
@@ -266,7 +270,13 @@ struct CompactMixerRow: View {
       Text(app.displayName)
         .lineLimit(1)
 
-      RoutingStateDot(state: app.routingState)
+      if isExcluded {
+        Text("Excluded")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      } else {
+        RoutingStateDot(state: app.routingState)
+      }
 
       Spacer()
 
@@ -295,8 +305,10 @@ struct CompactMixerRow: View {
       .accessibilityAdjustableAction { direction in
         adjustVolume(direction)
       }
+      .disabled(isExcluded)
 
       BoostMenu(app: app, compact: true)
+        .disabled(isExcluded)
 
       Button {
         store.setMuted(!app.isMuted, for: app)
@@ -309,8 +321,12 @@ struct CompactMixerRow: View {
       .help(muteHelp)
       .accessibilityLabel(app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)")
       .accessibilityHint(app.isMuted ? "Restores audio for this app." : "Silences this app.")
+      .disabled(isExcluded)
     }
+    .opacity(isExcluded ? 0.55 : 1)
   }
+
+  private var isExcluded: Bool { store.isExcluded(app) }
 
   private var canControlAudio: Bool {
     MixerRowHelpers.canControlAudio(app)
