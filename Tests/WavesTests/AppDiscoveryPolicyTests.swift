@@ -57,6 +57,21 @@ import Testing
 
 // MARK: - Snapshot
 
+// MARK: - Mute provenance
+
+@Test func audioAppMuteSourceDefaultsToUserForLegacyDecode() throws {
+  // A session file written before muteSource existed must decode as user-muted.
+  let legacy = Data(#"{"id":"x","displayName":"X","isMuted":true}"#.utf8)
+  let app = try JSONDecoder().decode(AudioApp.self, from: legacy)
+  #expect(app.muteSource == .user)
+}
+
+@Test func audioAppMuteSourceRoundTrips() throws {
+  let app = AudioApp(id: "x", displayName: "X", category: .media, isMuted: true, muteSource: .autoConferencing)
+  let decoded = try JSONDecoder().decode(AudioApp.self, from: JSONEncoder().encode(app))
+  #expect(decoded.muteSource == .autoConferencing)
+}
+
 @Test func emptySnapshotHasNoAppsOrFabricatedState() {
   let snapshot = AudioSessionSnapshot.empty
   #expect(snapshot.apps.isEmpty)

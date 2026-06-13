@@ -496,8 +496,14 @@ final class AppStore {
     if let index = session.apps.firstIndex(matchingAppKey: appKey) {
       session.apps[index].isMuted = isMuted
       session.apps[index].appliedVolume = isMuted ? 0 : session.apps[index].desiredVolume
+      // A direct user mute/unmute is always user-sourced, so auto-resume won't
+      // later override it.
+      session.apps[index].muteSource = .user
       invalidateVisibleAppsCache()
     }
+    // If the user unmutes an app Waves auto-paused, forget it so auto-resume
+    // doesn't double-act.
+    if !isMuted { pausedMusicApps.remove(appKey) }
 
     if preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID {
       let settings = AppVolumeSettings(
@@ -876,29 +882,31 @@ final class AppStore {
     let isConferencingAppActive = frontmostCategory == .conferencing
 
     Task {
-      var muteChanges: [String: Bool] = [:]
+      var muteChanges: [String: (muted: Bool, source: MuteSource)] = [:]
       if isConferencingAppActive {
-        // Pause music apps
+        // Pause currently-unmuted music apps and tag the mute as automatic.
         let musicApps = visibleApps.filter { $0.category == .media && !$0.isMuted && !isExcluded($0) }
-        for app in musicApps where !pausedMusicApps.contains(app.logicalID) {
+        for app in musicApps {
           do {
             try await backend.setMuted(true, forAppID: app.logicalID)
             pausedMusicApps.insert(app.logicalID)
-            muteChanges[app.logicalID] = true
+            muteChanges[app.logicalID] = (true, .autoConferencing)
             logger.info("Auto-paused music app: \(app.displayName)")
           } catch {
             logger.error("Failed to pause music app \(app.displayName): \(error)")
           }
         }
       } else {
-        // Resume previously paused music apps
-        for appID in pausedMusicApps {
+        // Resume ONLY apps Waves auto-paused that the user hasn't since touched
+        // (muteSource still .autoConferencing). Never override a user's mute.
+        let resumable = visibleApps.filter { $0.isMuted && $0.muteSource == .autoConferencing }
+        for app in resumable {
           do {
-            try await backend.setMuted(false, forAppID: appID)
-            muteChanges[appID] = false
-            logger.info("Auto-resumed music app: \(appID)")
+            try await backend.setMuted(false, forAppID: app.logicalID)
+            muteChanges[app.logicalID] = (false, .user)
+            logger.info("Auto-resumed music app: \(app.displayName)")
           } catch {
-            logger.error("Failed to resume music app \(appID): \(error)")
+            logger.error("Failed to resume music app \(app.displayName): \(error)")
           }
         }
         pausedMusicApps.removeAll()
@@ -907,10 +915,11 @@ final class AppStore {
       // Apply only the affected apps' mute state in place. Replacing the whole
       // session here would wipe state restored/merged during launch.
       guard !muteChanges.isEmpty else { return }
-      for (appID, muted) in muteChanges {
+      for (appID, change) in muteChanges {
         if let index = session.apps.firstIndex(matchingAppKey: appID) {
-          session.apps[index].isMuted = muted
-          session.apps[index].appliedVolume = muted ? 0 : session.apps[index].desiredVolume
+          session.apps[index].isMuted = change.muted
+          session.apps[index].muteSource = change.source
+          session.apps[index].appliedVolume = change.muted ? 0 : session.apps[index].desiredVolume
         }
       }
       invalidateVisibleAppsCache()

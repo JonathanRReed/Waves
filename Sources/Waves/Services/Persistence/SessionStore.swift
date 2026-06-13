@@ -74,7 +74,8 @@ final class SessionStore: @unchecked Sendable {
             routingState: app.routingState,
             compatibility: app.compatibility,
             notes: app.notes,
-            volumeBoost: app.volumeBoost
+            volumeBoost: app.volumeBoost,
+            muteSource: app.muteSource
           )
         },
         currentDevice: snapshot.currentDevice,
