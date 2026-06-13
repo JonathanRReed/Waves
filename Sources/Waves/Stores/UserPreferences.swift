@@ -16,9 +16,6 @@ struct UserPreferences: Codable, Sendable {
   /// will not tap or alter their audio (the escape hatch for DAWs, VoIP /
   /// echo-cancellation apps, and other audio tools that dislike being tapped).
   var excludedAppIDs: [String] = []
-  /// When true, auto-pause music for any other audio source, not just
-  /// conferencing apps coming to the front.
-  var autoPauseOnAnyAudio = false
 
   init() {}
 
@@ -35,7 +32,6 @@ struct UserPreferences: Codable, Sendable {
     case enableURLScheme
     case urlSchemeAutomationAcknowledged
     case excludedAppIDs
-    case autoPauseOnAnyAudio
   }
 
   // Decode each field independently so a preferences file written by an older
@@ -62,7 +58,6 @@ struct UserPreferences: Codable, Sendable {
     enableURLScheme = value(.enableURLScheme, defaults.enableURLScheme)
     urlSchemeAutomationAcknowledged = value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
     excludedAppIDs = value(.excludedAppIDs, defaults.excludedAppIDs)
-    autoPauseOnAnyAudio = value(.autoPauseOnAnyAudio, defaults.autoPauseOnAnyAudio)
   }
 }
 

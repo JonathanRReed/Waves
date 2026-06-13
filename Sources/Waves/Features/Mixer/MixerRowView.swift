@@ -111,6 +111,21 @@ struct MixerRowView: View {
     }
     .padding(.vertical, 5)
     .contentShape(Rectangle())
+    // Quiet cyan level meter on managed/live rows, fed by the store's
+    // visibility-gated live-level poll. Overlay so it never shifts layout.
+    .overlay(alignment: .bottomLeading) {
+      if showsLevelMeter {
+        GeometryReader { proxy in
+          Capsule()
+            .fill(WavesDesign.accent.opacity(0.55))
+            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .animation(reduceMotion ? nil : .linear(duration: 0.18), value: meterLevel)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+      }
+    }
     .contextMenu {
       Button(app.isPinned ? "Unpin" : "Pin") {
         store.togglePinned(app)
@@ -148,6 +163,15 @@ struct MixerRowView: View {
   }
 
   private var isExcluded: Bool { store.isExcluded(app) }
+
+  private var showsLevelMeter: Bool {
+    !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
+  }
+
+  private var meterLevel: Double {
+    guard let levels = store.liveLevels[app.logicalID] else { return 0 }
+    return Double(min(1, max(levels.rms, levels.peak * 0.7)))
+  }
 
   private var subtitle: String {
     var parts: [String] = []
