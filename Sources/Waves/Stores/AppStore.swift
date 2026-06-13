@@ -179,15 +179,12 @@ final class AppStore {
   }
 
   var menuBarIconName: String {
-    let hasMutedApps = visibleApps.contains(where: \.isMuted)
-    if hasMutedApps {
+    // Reflect what the app is actually doing rather than an average of all
+    // apps' volumes (which carries little meaning).
+    if visibleApps.contains(where: \.isMuted) {
       return "speaker.slash.fill"
     }
-
-    let averageVolume = visibleApps.isEmpty ? 0 : visibleApps.reduce(0) { $0 + $1.desiredVolume } / Float(visibleApps.count)
-    if averageVolume < 0.3 {
-      return "speaker.wave.1.fill"
-    } else if averageVolume > 0.7 {
+    if !liveApps.isEmpty {
       return "speaker.wave.3.fill"
     }
     return "speaker.wave.2.fill"
