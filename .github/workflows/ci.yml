@@ -7,9 +7,11 @@ on:
       - main
 
 jobs:
-  test:
-    name: Swift tests
-    runs-on: macos-latest
+  build-test:
+    name: Build, test, and package
+    # Pin to macos-14 so the macOS 14.2 deployment target is actually exercised
+    # rather than masked by a newer SDK on macos-latest.
+    runs-on: macos-14
 
     steps:
       - name: Check out repository
@@ -20,3 +22,9 @@ jobs:
 
       - name: Run tests
         run: swift test
+
+      - name: Build release
+        run: swift build -c release
+
+      - name: Build and validate signed app bundle + DMG
+        run: ./script/build_and_run.sh --release-check

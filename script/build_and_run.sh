@@ -140,6 +140,13 @@ if ! is_publication_check_mode; then
     fi
   fi
 
+  # Apple privacy manifest (required-reason APIs). Lives at the app bundle's
+  # Resources root.
+  PRIVACY_MANIFEST="$ROOT_DIR/PrivacyInfo.xcprivacy"
+  if [ -f "$PRIVACY_MANIFEST" ]; then
+    cp "$PRIVACY_MANIFEST" "$APP_RESOURCES/PrivacyInfo.xcprivacy" || echo "Warning: Failed to copy privacy manifest" >&2
+  fi
+
   if [ -n "${SOURCE_LOGO-}" ] && [ -f "$SOURCE_LOGO" ]; then
     if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
       generate_icns "$SOURCE_LOGO" "$APP_RESOURCES/$APP_ICON_NAME.icns" || true
