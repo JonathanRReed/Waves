@@ -1340,13 +1340,6 @@ private struct TapRenderState {
   var rmsLevel: Float
 }
 
-private enum TapSampleFormat {
-  case float32
-  case int16
-  case int32
-  case unknown
-}
-
 private struct TapAudioFormat {
   var streamDescription: AudioStreamBasicDescription
   var sampleFormat: TapSampleFormat
@@ -1728,30 +1721,6 @@ private final class PerAppTapController: @unchecked Sendable {
     dispose()
   }
 
-  private static func scaleSigned16(_ sample: Int16, volume: Float) -> Int16 {
-    let scaled = Float(sample) * volume
-    if scaled >= Float(Int16.max) {
-      return Int16.max
-    }
-    if scaled <= Float(Int16.min) {
-      return Int16.min
-    }
-
-    return Int16(scaled.rounded())
-  }
-
-  private static func scaleSigned32(_ sample: Int32, volume: Float) -> Int32 {
-    let scaled = Float(sample) * volume
-    if scaled >= Float(Int32.max) {
-      return Int32.max
-    }
-    if scaled <= Float(Int32.min) {
-      return Int32.min
-    }
-
-    return Int32(scaled.rounded())
-  }
-
   private func renderTappedAudio(
     _ inputData: UnsafePointer<AudioBufferList>?,
     to outputData: UnsafeMutablePointer<AudioBufferList>,
@@ -1797,100 +1766,20 @@ private final class PerAppTapController: @unchecked Sendable {
         memset(outputPointer.advanced(by: copyByteCount), 0, outputByteCount - copyByteCount)
       }
 
-      // Compute peak and RMS before scaling
-      let (bufferPeak, bufferSum, bufferSamples) = computeLevels(
+      // Compute peak and RMS from the original input before scaling.
+      let (bufferPeak, bufferSum, bufferSamples) = TapDSP.levels(
         from: inputPointer,
         byteCount: copyByteCount,
-        sampleFormat: sampleFormat
+        format: sampleFormat
       )
       peak = max(peak, bufferPeak)
       sum += bufferSum
       sampleCount += bufferSamples
 
-      scaleOutput(outputPointer, byteCount: copyByteCount, sampleFormat: sampleFormat, volume: effectiveVolume)
+      TapDSP.scale(outputPointer, byteCount: copyByteCount, format: sampleFormat, gain: effectiveVolume)
     }
 
-    // Update state with computed levels
-    let rms = sampleCount > 0 ? sqrt(sum / Float(sampleCount)) : 0
-    stateBox.writeLevels(peakLevel: peak, rmsLevel: rms)
-  }
-
-  private func scaleOutput(
-    _ data: UnsafeMutableRawPointer,
-    byteCount: Int,
-    sampleFormat: TapSampleFormat,
-    volume: Float
-  ) {
-    guard volume != 1.0 else { return }
-
-    switch sampleFormat {
-    case .float32:
-      let typedPointer = data.assumingMemoryBound(to: Float.self)
-      let sampleTotal = byteCount / MemoryLayout<Float>.size
-      for index in 0..<sampleTotal {
-        // Clamp to the valid [-1, 1] range so boost (up to 4x) saturates
-        // cleanly instead of emitting out-of-range samples that clip harshly.
-        typedPointer[index] = min(1.0, max(-1.0, typedPointer[index] * volume))
-      }
-    case .int16:
-      let typedPointer = data.assumingMemoryBound(to: Int16.self)
-      let sampleTotal = byteCount / MemoryLayout<Int16>.size
-      for index in 0..<sampleTotal {
-        typedPointer[index] = Self.scaleSigned16(typedPointer[index], volume: volume)
-      }
-    case .int32:
-      let typedPointer = data.assumingMemoryBound(to: Int32.self)
-      let sampleTotal = byteCount / MemoryLayout<Int32>.size
-      for index in 0..<sampleTotal {
-        typedPointer[index] = Self.scaleSigned32(typedPointer[index], volume: volume)
-      }
-    case .unknown:
-      break
-    }
-  }
-
-  private func computeLevels(
-    from data: UnsafeRawPointer,
-    byteCount: Int,
-    sampleFormat: TapSampleFormat
-  ) -> (peak: Float, sum: Float, sampleCount: UInt32) {
-    var peak: Float = 0
-    var sum: Float = 0
-    var sampleCount: UInt32 = 0
-
-    switch sampleFormat {
-    case .float32:
-      let typedPointer = data.assumingMemoryBound(to: Float.self)
-      let totalSamples = byteCount / MemoryLayout<Float>.size
-      for index in 0..<totalSamples {
-        let sample = abs(typedPointer[index])
-        peak = max(peak, sample)
-        sum += sample * sample
-        sampleCount += 1
-      }
-    case .int16:
-      let typedPointer = data.assumingMemoryBound(to: Int16.self)
-      let totalSamples = byteCount / MemoryLayout<Int16>.size
-      for index in 0..<totalSamples {
-        let sample = abs(Float(typedPointer[index])) / Float(Int16.max)
-        peak = max(peak, sample)
-        sum += sample * sample
-        sampleCount += 1
-      }
-    case .int32:
-      let typedPointer = data.assumingMemoryBound(to: Int32.self)
-      let totalSamples = byteCount / MemoryLayout<Int32>.size
-      for index in 0..<totalSamples {
-        let sample = abs(Float(typedPointer[index])) / Float(Int32.max)
-        peak = max(peak, sample)
-        sum += sample * sample
-        sampleCount += 1
-      }
-    case .unknown:
-      break
-    }
-
-    return (peak, sum, sampleCount)
+    stateBox.writeLevels(peakLevel: peak, rmsLevel: TapDSP.rms(sum: sum, sampleCount: sampleCount))
   }
 
   private func zeroOutput(_ outOutputData: UnsafeMutablePointer<AudioBufferList>) {

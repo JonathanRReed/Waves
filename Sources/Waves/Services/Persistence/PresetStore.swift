@@ -44,7 +44,7 @@ final class PresetStore: @unchecked Sendable {
         }
 
         let data = try Data(contentsOf: url)
-        let presets = try decoder.decode([Preset].self, from: data)
+        let presets = try PersistedSchema.decode([Preset].self, from: data, using: decoder)
         return presets
       } catch {
         // Preserve the unreadable file for recovery instead of destroying the
@@ -71,7 +71,7 @@ final class PresetStore: @unchecked Sendable {
     queue.async { [weak self] in
       guard let self else { return }
       do {
-        let data = try self.encoder.encode(presets)
+        let data = try PersistedSchema.encode(presets, using: self.encoder)
         try data.write(to: self.url, options: .atomic)
       } catch {
         self.logger.error("Failed to save presets: \(error.localizedDescription)")

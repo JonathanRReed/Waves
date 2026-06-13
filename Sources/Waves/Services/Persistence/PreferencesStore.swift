@@ -43,7 +43,7 @@ final class PreferencesStore: @unchecked Sendable {
         }
 
         let data = try Data(contentsOf: url)
-        let preferences = try decoder.decode(UserPreferences.self, from: data)
+        let preferences = try PersistedSchema.decode(UserPreferences.self, from: data, using: decoder)
         return preferences
       } catch {
         // Preserve the unreadable file for recovery instead of silently
@@ -70,7 +70,7 @@ final class PreferencesStore: @unchecked Sendable {
     queue.async { [weak self] in
       guard let self else { return }
       do {
-        let data = try self.encoder.encode(preferences)
+        let data = try PersistedSchema.encode(preferences, using: self.encoder)
         try data.write(to: self.url, options: .atomic)
       } catch {
         self.logger.error("Failed to save preferences: \(error.localizedDescription)")
