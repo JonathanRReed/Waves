@@ -25,6 +25,9 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   /// (e.g. auto-pause during a call). Lets auto-resume avoid overriding a mute
   /// the user set themselves, and survives relaunch.
   public var muteSource: MuteSource
+  /// Persistent UID of the output device this app should play to, or nil to
+  /// follow the system default output. Enables per-app output routing.
+  public var targetDeviceUID: String?
 
   public init(
     id: String,
@@ -46,7 +49,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     compatibility: CompatibilityState = .planned,
     notes: String? = nil,
     volumeBoost: Float = 1.0,
-    muteSource: MuteSource = .user
+    muteSource: MuteSource = .user,
+    targetDeviceUID: String? = nil
   ) {
     // Validate string lengths to prevent excessive memory usage
     self.id = String(id.prefix(256))
@@ -84,6 +88,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.volumeBoost = max(0.0, min(10.0, volumeBoost))
 
     self.muteSource = muteSource
+    self.targetDeviceUID = targetDeviceUID.map { String($0.prefix(256)) }
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -107,6 +112,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     case notes
     case volumeBoost
     case muteSource
+    case targetDeviceUID
   }
 
   public init(from decoder: Decoder) throws {
@@ -131,6 +137,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     let notes = try container.decodeIfPresent(String.self, forKey: .notes)
     let volumeBoost = try container.decodeIfPresent(Float.self, forKey: .volumeBoost) ?? 1.0
     let muteSource = try container.decodeIfPresent(MuteSource.self, forKey: .muteSource) ?? .user
+    let targetDeviceUID = try container.decodeIfPresent(String.self, forKey: .targetDeviceUID)
 
     self.init(
       id: id,
@@ -152,7 +159,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
       compatibility: compatibility,
       notes: notes,
       volumeBoost: volumeBoost,
-      muteSource: muteSource
+      muteSource: muteSource,
+      targetDeviceUID: targetDeviceUID
     )
   }
 
@@ -178,6 +186,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     try container.encodeIfPresent(notes, forKey: .notes)
     try container.encode(volumeBoost, forKey: .volumeBoost)
     try container.encode(muteSource, forKey: .muteSource)
+    try container.encodeIfPresent(targetDeviceUID, forKey: .targetDeviceUID)
   }
 }
 

@@ -148,6 +148,12 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     // No real hardware in the preview backend.
   }
 
+  public func setOutputDevice(uid: String?, forAppID appID: String) async throws {
+    if let index = snapshot.apps.firstIndex(matchingAppKey: appID) {
+      snapshot.apps[index].targetDeviceUID = uid
+    }
+  }
+
   public func diagnosticsReport() async -> DiagnosticsReport {
     DiagnosticsReport(
       summary:

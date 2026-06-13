@@ -608,6 +608,42 @@ final class AppStore {
     }
   }
 
+  // MARK: - Per-app output routing
+
+  func targetDevice(for app: AudioApp) -> AudioDevice? {
+    guard let uid = app.targetDeviceUID else { return nil }
+    return availableDevices.first { $0.id == uid }
+  }
+
+  /// Routes an app to a specific output device, or nil to follow the system
+  /// default. Persists the choice and rebuilds the route if the app is managed.
+  func setOutputDevice(_ device: AudioDevice?, for app: AudioApp) {
+    guard !isExcluded(app) else { return }
+    let appKey = app.logicalID
+    if let index = session.apps.firstIndex(matchingAppKey: appKey) {
+      session.apps[index].targetDeviceUID = device?.id
+      invalidateVisibleAppsCache()
+    }
+    Task {
+      do {
+        try await backend.setOutputDevice(uid: device?.id, forAppID: appKey)
+        let backendSession = await backend.currentSnapshot()
+        mergeAppState(from: backendSession, appID: appKey)
+        persistSessionSnapshot()
+        showToast(
+          title: "Output set",
+          detail: "\(app.displayName) → \(device?.name ?? "System default")",
+          kind: .success,
+          duration: .seconds(1.4)
+        )
+      } catch {
+        let backendSession = await backend.currentSnapshot()
+        mergeAppState(from: backendSession, appID: appKey)
+        showToast(title: "Couldn't route \(app.displayName)", detail: error.localizedDescription, kind: .error)
+      }
+    }
+  }
+
   // MARK: - Exclusions (don't-tap escape hatch)
 
   func isExcluded(_ app: AudioApp) -> Bool {

@@ -75,7 +75,8 @@ final class SessionStore: @unchecked Sendable {
             compatibility: app.compatibility,
             notes: app.notes,
             volumeBoost: app.volumeBoost,
-            muteSource: app.muteSource
+            muteSource: app.muteSource,
+            targetDeviceUID: app.targetDeviceUID
           )
         },
         currentDevice: snapshot.currentDevice,

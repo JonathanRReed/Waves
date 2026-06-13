@@ -22,6 +22,10 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   /// Sets the system default output device by its persistent UID.
   func setDefaultOutputDevice(uid: String) async throws
 
+  /// Routes a specific app to a chosen output device (by UID), or nil to follow
+  /// the system default. Rebuilds the app's managed route if it has one.
+  func setOutputDevice(uid: String?, forAppID appID: String) async throws
+
   /// Emits once after the default output device changes and the backend has
   /// re-established managed routes, so observers can refresh state and restore
   /// per-device volume presets.
