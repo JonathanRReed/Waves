@@ -39,4 +39,11 @@ enum WavesDesign {
 
   static let cardCornerRadius: CGFloat = 22
   static let compactCardCornerRadius: CGFloat = 14
+
+  /// Hairline/border color that becomes a clearly visible separator when the
+  /// user has macOS "Increase contrast" enabled (the default 9% white is
+  /// invisible to exactly the people who need contrast).
+  static func hairline(increasedContrast: Bool) -> Color {
+    increasedContrast ? Color.white.opacity(0.45) : stroke
+  }
 }
