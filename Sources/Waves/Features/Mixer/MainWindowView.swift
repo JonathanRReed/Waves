@@ -358,7 +358,7 @@ private struct SourceListView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      OutputSummaryView(filter: filter, visibleCount: apps.count)
+      OutputSummaryView(filter: filter, visibleCount: apps.count, isSearching: isSearching)
 
       // Suppress the empty state during the first scan so the window never
       // tells the user it is "Refreshing" (the pill in MainWindowView) and that
@@ -417,6 +417,16 @@ private struct SourceListView: View {
         .onKeyPress("-") { handleKey { nudgeVolume($0, by: -0.05) } }
         .onKeyPress("b") { handleKey { cycleBoost($0) } }
         .onKeyPress("p") { handleKey { store.togglePinned($0) } }
+        // Surface the otherwise-undocumented in-row keys: without this hint a
+        // user can only discover them by reading source. Mirrors the toolbar
+        // controls, which advertise their shortcuts via help/accessibility text.
+        .accessibilityHint(
+          "Use arrow keys to select an app. On the selected app, press Space or M to mute, "
+            + "equals or minus to adjust volume, B to cycle boost, and P to pin."
+        )
+        .help(
+          "Select an app with the arrow keys, then: Space or M mute, = / - volume, B boost, P pin."
+        )
         // Jump straight to playing apps or apps needing attention.
         .accessibilityRotor("Playing apps") {
           ForEach(apps.filter { store.liveApps.contains($0) }) { app in
@@ -439,6 +449,14 @@ private struct SourceListView: View {
         .padding(.vertical, 10)
     }
     .background(Color(nsColor: .textBackgroundColor))
+  }
+
+  /// True when the user has an active (non-whitespace) search query. Search
+  /// looks across ALL visible apps regardless of the selected scope, so any
+  /// scope-specific noun ("pinned apps", "running apps") would mislabel the
+  /// cross-scope result set. Mirrors `filteredApps`' trimmed-query check.
+  private var isSearching: Bool {
+    !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   /// True when the Running scope is empty only because system processes are
@@ -508,6 +526,16 @@ private struct OutputSummaryView: View {
   @Environment(AppStore.self) private var store
   let filter: SourceFilter
   let visibleCount: Int
+  // True when a search is active. Search spans all visible apps regardless of
+  // scope, so the count is labeled with a neutral "result(s)" noun instead of
+  // the scope noun, which would otherwise contradict the rows actually shown.
+  let isSearching: Bool
+
+  private var countDetail: String {
+    guard isSearching else { return filter.detail(count: visibleCount) }
+    let noun = visibleCount == 1 ? "result" : "results"
+    return "\(visibleCount) \(noun)"
+  }
 
   var body: some View {
     HStack(spacing: 12) {
@@ -523,7 +551,7 @@ private struct OutputSummaryView: View {
           .lineLimit(1)
 
         HStack(spacing: 8) {
-          Text(filter.detail(count: visibleCount))
+          Text(countDetail)
             .foregroundStyle(.secondary)
 
           if let liveSummary {

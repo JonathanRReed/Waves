@@ -285,7 +285,7 @@ struct CompactMixerRow: View {
           .foregroundStyle(.secondary)
           .accessibilityLabel("Excluded from Waves")
       } else {
-        RoutingStateDot(state: app.routingState)
+        RoutingStateDot(state: app.routingState, notes: app.notes)
       }
 
       Spacer()
@@ -334,9 +334,45 @@ struct CompactMixerRow: View {
       .disabled(isExcluded)
     }
     .opacity(isExcluded ? 0.55 : 1)
+    // Mirror the main window's quiet cyan level meter so a menu-bar-first user
+    // gets the same per-row "playing" feedback. Reuses the store's live-level
+    // poll (already started by the menu panel) and an overlay so layout never
+    // shifts. Same showsLevelMeter / meterLevel pattern as the full row.
+    .overlay(alignment: .bottomLeading) {
+      if showsLevelMeter {
+        GeometryReader { proxy in
+          Capsule()
+            .fill(WavesDesign.accent.opacity(0.55))
+            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .animation(reduceMotion ? nil : .linear(duration: 0.18), value: meterLevel)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+      }
+    }
+    .contextMenu {
+      // Let menu-bar-first users pin/unpin without opening the main window,
+      // reusing the same store.togglePinned the full row uses.
+      Button(app.isPinned ? "Unpin" : "Pin") {
+        store.togglePinned(app)
+      }
+    }
+    .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
+      store.togglePinned(app)
+    }
   }
 
   private var isExcluded: Bool { store.isExcluded(app) }
+
+  private var showsLevelMeter: Bool {
+    !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
+  }
+
+  private var meterLevel: Double {
+    guard let levels = store.liveLevels[app.logicalID] else { return 0 }
+    return Double(min(1, max(levels.rms, levels.peak * 0.7)))
+  }
 
   private var canControlAudio: Bool {
     MixerRowHelpers.canControlAudio(app)
@@ -498,14 +534,30 @@ private struct RoutingStateIndicator: View {
 
 private struct RoutingStateDot: View {
   let state: RoutingState
+  // When the route errored, the failure reason is otherwise visible only in
+  // the full window's inline note; surface it here so a menu-bar user can see
+  // why volume/mute didn't take effect (hover tooltip + VoiceOver).
+  var notes: String? = nil
 
   var body: some View {
     Image(systemName: symbolName)
       .font(.caption2.weight(.semibold))
       .foregroundStyle(color)
       .frame(width: 12, height: 12)
-      .help(Text(state.displayName))
+      .help(Text(helpText))
       .accessibilityLabel(Text("Route state: \(state.displayName)"))
+      .accessibilityValue(Text(errorNote ?? ""))
+  }
+
+  /// The failure reason, only when the route actually errored.
+  private var errorNote: String? {
+    guard state == .error, let notes, !notes.isEmpty else { return nil }
+    return notes
+  }
+
+  private var helpText: String {
+    if let errorNote { return "\(state.displayName): \(errorNote)" }
+    return state.displayName
   }
 
   private var color: Color { state.indicatorColor }

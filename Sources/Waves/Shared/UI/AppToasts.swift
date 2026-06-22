@@ -81,7 +81,16 @@ private struct AppToastBanner: View {
     }
     .onAppear {
       // VoiceOver does not announce transient banners on its own.
-      AccessibilityNotification.Announcement(accessibilityMessage).post()
+      // Give errors/warnings high priority so they are not interrupted by
+      // lower-severity toasts that appear in the same burst.
+      var message = AttributedString(accessibilityMessage)
+      switch toast.kind {
+      case .error, .warning:
+        message.accessibilitySpeechAnnouncementPriority = .high
+      case .success, .info:
+        break
+      }
+      AccessibilityNotification.Announcement(message).post()
     }
   }
 

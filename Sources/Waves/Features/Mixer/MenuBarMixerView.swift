@@ -106,6 +106,7 @@ struct MenuBarMixerView: View {
           .toggleStyle(.switch)
           .labelsHidden()
           .accessibilityLabel("Launch at login")
+          .help("Launch Waves automatically at login")
         }
       }
       .padding(14)

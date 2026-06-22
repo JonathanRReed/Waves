@@ -46,6 +46,16 @@ struct WavesApp: App {
         }
         .keyboardShortcut("r", modifiers: .command)
       }
+
+      // Replace the empty auto-generated Help menu (search field only) with a
+      // discoverable "Waves Help" entry. The full guide lives in the Help tab of
+      // Settings (SettingsView.swift), so this opens the standard Settings window
+      // — a far more visible entry point than burying Help six tabs deep.
+      CommandGroup(replacing: .help) {
+        SettingsLink {
+          Text("Waves Help")
+        }
+      }
     }
 
     Settings {
