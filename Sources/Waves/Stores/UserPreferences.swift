@@ -6,7 +6,6 @@ struct UserPreferences: Codable, Sendable {
   var showSystemProcesses = false
   var sortMode: SortMode = .name
   var customAppOrder: [String] = []
-  var autoRestoreDevice = true
   var autoPauseMusicForConferencing = true
   var enableKeyboardShortcuts = true
   var enablePerDeviceVolumePresets = true
@@ -25,7 +24,6 @@ struct UserPreferences: Codable, Sendable {
     case showSystemProcesses
     case sortMode
     case customAppOrder
-    case autoRestoreDevice
     case autoPauseMusicForConferencing
     case enableKeyboardShortcuts
     case enablePerDeviceVolumePresets
@@ -51,7 +49,6 @@ struct UserPreferences: Codable, Sendable {
     showSystemProcesses = value(.showSystemProcesses, defaults.showSystemProcesses)
     sortMode = value(.sortMode, defaults.sortMode)
     customAppOrder = value(.customAppOrder, defaults.customAppOrder)
-    autoRestoreDevice = value(.autoRestoreDevice, defaults.autoRestoreDevice)
     autoPauseMusicForConferencing = value(.autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
     enableKeyboardShortcuts = value(.enableKeyboardShortcuts, defaults.enableKeyboardShortcuts)
     enablePerDeviceVolumePresets = value(.enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
@@ -67,7 +64,7 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
   var volumeBoost: Float
 
   init(desiredVolume: Float = 1.0, isMuted: Bool = false, volumeBoost: Float = 1.0) {
-    self.desiredVolume = desiredVolume
+    self.desiredVolume = max(0.0, min(1.0, desiredVolume))
     self.isMuted = isMuted
     self.volumeBoost = max(1.0, min(4.0, volumeBoost))
   }

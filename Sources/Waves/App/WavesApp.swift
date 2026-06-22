@@ -62,8 +62,22 @@ struct WavesApp: App {
       MenuBarMixerView()
         .environment(store)
         .frame(width: 400)
+        .accessibilityLabel(Text(menuBarAccessibilityLabel))
     }
     .menuBarExtraStyle(.window)
+  }
+
+  /// VoiceOver label for the menu-bar item, mirroring the three states that
+  /// drive `store.menuBarIconName` (muted / playing / idle) so the icon-only
+  /// status is perceivable without sight.
+  private var menuBarAccessibilityLabel: String {
+    if store.visibleApps.contains(where: \.isMuted) {
+      return "Waves — muted"
+    }
+    if !store.liveApps.isEmpty {
+      return "Waves — playing"
+    }
+    return "Waves — idle"
   }
 }
 
@@ -188,11 +202,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  func application(_ application: NSApplication, open urls: [URL]) {
-    for url in urls {
-      handleURLScheme(url)
-    }
-  }
+  // URL-scheme delivery is handled authoritatively by the manual kAEGetURL
+  // Apple Event handler installed in `setupURLSchemeHandler()`, which replaces
+  // AppKit's default GetURL dispatch. A separate `application(_:open:)` entry
+  // point would be unreachable for `waves://` invocations, so it is omitted.
 
   private func handleURLScheme(_ url: URL) {
     guard url.scheme == "waves" else { return }

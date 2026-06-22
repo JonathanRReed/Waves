@@ -35,21 +35,29 @@ struct MenuBarMixerView: View {
               .font(.caption)
               .foregroundStyle(.secondary)
           }
+          .accessibilityElement(children: .combine)
+          .accessibilityLabel("Refreshing audio sessions, in progress")
         }
 
         PresetQuickPicker()
+
+        // De-duplicate apps across sections: an app pinned by the user renders
+        // only under "Pinned", never again under "Live" or "Recent".
+        let pinnedIDs = Set(store.pinnedApps.map(\.logicalID))
+        let liveApps = store.liveApps.filter { !pinnedIDs.contains($0.logicalID) }
+        let recentApps = store.recentApps.filter { !pinnedIDs.contains($0.logicalID) }
 
         if !store.pinnedApps.isEmpty {
           CompactSection(title: "Pinned", apps: store.pinnedApps)
         }
 
-        CompactSection(title: "Live", apps: store.liveApps)
+        CompactSection(title: "Live", apps: liveApps)
 
         if store.preferences.showRecentApps {
-          CompactSection(title: "Recent", apps: store.recentApps, maxVisible: 3)
+          CompactSection(title: "Recent", apps: recentApps, maxVisible: 3)
         }
 
-        if store.pinnedApps.isEmpty && store.liveApps.isEmpty && store.recentApps.isEmpty {
+        if !store.isLoading && store.pinnedApps.isEmpty && liveApps.isEmpty && recentApps.isEmpty {
           VStack(spacing: 8) {
             Image(systemName: "speaker.slash")
               .font(.title2)
@@ -166,6 +174,9 @@ private struct PresetQuickPicker: View {
         Button(preset.name) {
           store.applyPreset(preset)
         }
+      }
+      if store.presets.isEmpty {
+        Text("No presets saved").foregroundStyle(.secondary)
       }
     } label: {
       Label("Presets", systemImage: "slider.horizontal.3")
