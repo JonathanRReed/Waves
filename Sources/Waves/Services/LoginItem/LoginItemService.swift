@@ -4,6 +4,10 @@ import ServiceManagement
 struct LoginItemStatus: Sendable {
   var isEnabled: Bool
   var statusDescription: String
+  /// True only when the OS reports the login item is registered but awaiting
+  /// the user's approval in System Settings. Lets callers branch on the
+  /// approval path without matching a localized status string.
+  var requiresApproval: Bool = false
 }
 
 @MainActor
@@ -16,7 +20,7 @@ struct LoginItemService {
     case .enabled:
       return LoginItemStatus(isEnabled: true, statusDescription: "Enabled")
     case .requiresApproval:
-      return LoginItemStatus(isEnabled: false, statusDescription: "Requires approval")
+      return LoginItemStatus(isEnabled: false, statusDescription: "Requires approval", requiresApproval: true)
     case .notRegistered:
       return LoginItemStatus(isEnabled: false, statusDescription: "Disabled")
     case .notFound:

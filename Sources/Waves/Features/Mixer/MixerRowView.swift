@@ -73,14 +73,14 @@ struct MixerRowView: View {
         .frame(minWidth: 150, idealWidth: 210, maxWidth: 250)
         .help(sliderHelp)
         .accessibilityLabel("Volume for \(app.displayName)")
-        .accessibilityValue("\(Int(app.desiredVolume * 100))%")
+        .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
         .accessibilityHint("Adjusts the per-app volume target.")
         .accessibilityAdjustableAction { direction in
           adjustVolume(direction)
         }
         .disabled(isExcluded)
 
-        Text("\(Int(app.desiredVolume * 100))%")
+        Text("\(Int((app.desiredVolume * 100).rounded()))%")
           .font(.caption.monospacedDigit().weight(.medium))
           .foregroundStyle(.secondary)
           .lineLimit(1)
@@ -144,13 +144,22 @@ struct MixerRowView: View {
             if app.targetDeviceUID == nil { Label("System Default", systemImage: "checkmark") }
             else { Text("System Default") }
           }
-          if !store.availableDevices.isEmpty { Divider() }
-          ForEach(store.availableDevices) { device in
-            Button {
-              store.setOutputDevice(device, for: app)
-            } label: {
-              if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") }
-              else { Text(device.name) }
+          if store.availableDevices.isEmpty {
+            Divider()
+            // Mirror the menu-bar OutputDevicePicker's empty state so the
+            // per-app submenu doesn't silently collapse to just "System
+            // Default" when no real output devices are available.
+            Text("No output devices found")
+              .accessibilityLabel("No output devices found")
+          } else {
+            Divider()
+            ForEach(store.availableDevices) { device in
+              Button {
+                store.setOutputDevice(device, for: app)
+              } label: {
+                if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") }
+                else { Text(device.name) }
+              }
             }
           }
         }
@@ -274,8 +283,9 @@ struct CompactMixerRow: View {
         Text("Excluded")
           .font(.caption2)
           .foregroundStyle(.secondary)
+          .accessibilityLabel("Excluded from Waves")
       } else {
-        RoutingStateDot(state: app.routingState)
+        RoutingStateDot(state: app.routingState, notes: app.notes)
       }
 
       Spacer()
@@ -300,7 +310,7 @@ struct CompactMixerRow: View {
       .padding(.trailing, 4)
       .help(sliderHelp)
       .accessibilityLabel("Volume for \(app.displayName)")
-      .accessibilityValue("\(Int(app.desiredVolume * 100))%")
+      .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
       .accessibilityHint("Adjusts the per-app volume target.")
       .accessibilityAdjustableAction { direction in
         adjustVolume(direction)
@@ -324,9 +334,45 @@ struct CompactMixerRow: View {
       .disabled(isExcluded)
     }
     .opacity(isExcluded ? 0.55 : 1)
+    // Mirror the main window's quiet cyan level meter so a menu-bar-first user
+    // gets the same per-row "playing" feedback. Reuses the store's live-level
+    // poll (already started by the menu panel) and an overlay so layout never
+    // shifts. Same showsLevelMeter / meterLevel pattern as the full row.
+    .overlay(alignment: .bottomLeading) {
+      if showsLevelMeter {
+        GeometryReader { proxy in
+          Capsule()
+            .fill(WavesDesign.accent.opacity(0.55))
+            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .animation(reduceMotion ? nil : .linear(duration: 0.18), value: meterLevel)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+      }
+    }
+    .contextMenu {
+      // Let menu-bar-first users pin/unpin without opening the main window,
+      // reusing the same store.togglePinned the full row uses.
+      Button(app.isPinned ? "Unpin" : "Pin") {
+        store.togglePinned(app)
+      }
+    }
+    .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
+      store.togglePinned(app)
+    }
   }
 
   private var isExcluded: Bool { store.isExcluded(app) }
+
+  private var showsLevelMeter: Bool {
+    !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
+  }
+
+  private var meterLevel: Double {
+    guard let levels = store.liveLevels[app.logicalID] else { return 0 }
+    return Double(min(1, max(levels.rms, levels.peak * 0.7)))
+  }
 
   private var canControlAudio: Bool {
     MixerRowHelpers.canControlAudio(app)
@@ -368,8 +414,14 @@ private struct BoostMenu: View {
   var body: some View {
     Menu {
       ForEach(boostOptions, id: \.self) { boost in
-        Button("\(Int(boost))x") {
+        Button {
           store.setVolumeBoost(boost, for: app)
+        } label: {
+          if boost == app.volumeBoost {
+            Label("\(Int(boost))x", systemImage: "checkmark")
+          } else {
+            Text("\(Int(boost))x")
+          }
         }
       }
     } label: {
@@ -482,14 +534,30 @@ private struct RoutingStateIndicator: View {
 
 private struct RoutingStateDot: View {
   let state: RoutingState
+  // When the route errored, the failure reason is otherwise visible only in
+  // the full window's inline note; surface it here so a menu-bar user can see
+  // why volume/mute didn't take effect (hover tooltip + VoiceOver).
+  var notes: String? = nil
 
   var body: some View {
     Image(systemName: symbolName)
       .font(.caption2.weight(.semibold))
       .foregroundStyle(color)
       .frame(width: 12, height: 12)
-      .help(Text(state.displayName))
+      .help(Text(helpText))
       .accessibilityLabel(Text("Route state: \(state.displayName)"))
+      .accessibilityValue(Text(errorNote ?? ""))
+  }
+
+  /// The failure reason, only when the route actually errored.
+  private var errorNote: String? {
+    guard state == .error, let notes, !notes.isEmpty else { return nil }
+    return notes
+  }
+
+  private var helpText: String {
+    if let errorNote { return "\(state.displayName): \(errorNote)" }
+    return state.displayName
   }
 
   private var color: Color { state.indicatorColor }

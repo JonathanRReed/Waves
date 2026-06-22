@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AppToastStack: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     VStack(spacing: 10) {
@@ -11,13 +12,14 @@ struct AppToastStack: View {
     }
     .padding(.horizontal, 14)
     .frame(maxWidth: 420, alignment: .top)
-    .animation(.spring(response: 0.24, dampingFraction: 0.9), value: store.toasts)
+    .animation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.9), value: store.toasts)
   }
 }
 
 private struct AppToastBanner: View {
   @Environment(AppStore.self) private var store
   @Environment(\.colorSchemeContrast) private var contrast
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let toast: AppToast
 
   var body: some View {
@@ -70,11 +72,7 @@ private struct AppToastBanner: View {
     )
     .shadow(color: .black.opacity(0.14), radius: 12, y: 6)
     .contentShape(Rectangle())
-    .transition(.asymmetric(
-      insertion: .move(edge: .top).combined(with: .opacity),
-      removal: .opacity
-    ))
-    .animation(.spring(response: 0.24, dampingFraction: 0.8), value: toast.id)
+    .transition(bannerTransition)
     .accessibilityElement(children: .combine)
     .accessibilityLabel(accessibilityMessage)
     // .combine absorbs the dismiss button, so expose dismissal as an action.
@@ -83,15 +81,40 @@ private struct AppToastBanner: View {
     }
     .onAppear {
       // VoiceOver does not announce transient banners on its own.
-      AccessibilityNotification.Announcement(accessibilityMessage).post()
+      // Give errors/warnings high priority so they are not interrupted by
+      // lower-severity toasts that appear in the same burst.
+      var message = AttributedString(accessibilityMessage)
+      switch toast.kind {
+      case .error, .warning:
+        message.accessibilitySpeechAnnouncementPriority = .high
+      case .success, .info:
+        break
+      }
+      AccessibilityNotification.Announcement(message).post()
     }
   }
 
+  private var bannerTransition: AnyTransition {
+    .asymmetric(
+      insertion: reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity),
+      removal: .opacity
+    )
+  }
+
   private var accessibilityMessage: String {
-    if let detail = toast.detail, !detail.isEmpty {
-      return "\(toast.title). \(detail)"
+    let prefix: String
+    switch toast.kind {
+    case .error:
+      prefix = "Error. "
+    case .warning:
+      prefix = "Warning. "
+    case .success, .info:
+      prefix = ""
     }
-    return toast.title
+    if let detail = toast.detail, !detail.isEmpty {
+      return "\(prefix)\(toast.title). \(detail)"
+    }
+    return "\(prefix)\(toast.title)"
   }
 
   private var iconName: String {

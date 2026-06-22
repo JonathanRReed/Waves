@@ -136,7 +136,7 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     return snapshot
   }
 
-  public func releaseControllers(forBundleID bundleID: String?, pid: Int32) async {
+  public func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {
     // No real audio routes in the preview backend.
   }
 

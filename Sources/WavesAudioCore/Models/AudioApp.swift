@@ -84,8 +84,10 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     // Validate notes length
     self.notes = notes.map { String($0.prefix(1000)) }
 
-    // Clamp volumeBoost to reasonable range [0.0, 10.0]
-    self.volumeBoost = max(0.0, min(10.0, volumeBoost))
+    // Clamp volumeBoost to the supported range [1.0, 4.0], matching
+    // PresetEntry and AppVolumeSettings so a tampered/corrupted session
+    // cannot inject an out-of-range boost into the model.
+    self.volumeBoost = max(1.0, min(4.0, volumeBoost))
 
     self.muteSource = muteSource
     self.targetDeviceUID = targetDeviceUID.map { String($0.prefix(256)) }

@@ -50,6 +50,7 @@ struct MainWindowView: View {
           } label: {
             Image(systemName: "waveform.path")
           }
+          .disabled(store.isRecovering)
           .help("Recover managed routes")
           .accessibilityLabel("Recover managed routes")
           .accessibilityHint("Reattaches active per-app audio routes.")
@@ -57,7 +58,6 @@ struct MainWindowView: View {
       }
 
       AppToastStack()
-        .padding(.horizontal, 14)
         .padding(.top, 12)
         .frame(maxWidth: .infinity, alignment: .topTrailing)
 
@@ -69,6 +69,8 @@ struct MainWindowView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Refreshing, in progress")
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
@@ -95,8 +97,24 @@ struct MainWindowView: View {
     .task {
       store.start()
     }
-    .onAppear { store.beginLiveLevels() }
+    .onAppear {
+      store.beginLiveLevels()
+      validateSelection()
+    }
+    .onChange(of: store.preferences.showRecentApps) { _, _ in
+      validateSelection()
+    }
     .onDisappear { store.endLiveLevels() }
+  }
+
+  /// A persisted `.recent` scope (via @SceneStorage) can be restored after the
+  /// user has turned "Show recent apps" off, stranding the window on a
+  /// permanently-empty, misleadingly-worded Recent view. Fall back to .running
+  /// whenever the restored/current scope is unavailable.
+  private func validateSelection() {
+    if selection == .recent && !store.preferences.showRecentApps {
+      selection = .running
+    }
   }
 
   private var scopedApps: [AudioApp] {
@@ -249,7 +267,7 @@ private struct SidebarView: View {
   var body: some View {
     List(selection: $selection) {
       Section("Sources") {
-        ForEach(SourceFilter.allCases) { filter in
+        ForEach(availableFilters) { filter in
           SourceFilterRow(
             filter: filter,
             countText: filter.detail(count: filter.count(in: store))
@@ -296,6 +314,15 @@ private struct SidebarView: View {
     .listStyle(.sidebar)
     .navigationTitle("Waves")
   }
+
+  /// Mirrors the menu bar: the Recent scope is only offered when the user has
+  /// opted into recent apps, so the sidebar never shows a permanently-empty,
+  /// non-selectable Recent row.
+  private var availableFilters: [SourceFilter] {
+    SourceFilter.allCases.filter { filter in
+      filter != .recent || store.preferences.showRecentApps
+    }
+  }
 }
 
 private struct SourceFilterRow: View {
@@ -331,14 +358,17 @@ private struct SourceListView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      OutputSummaryView(filter: filter, visibleCount: apps.count)
+      OutputSummaryView(filter: filter, visibleCount: apps.count, isSearching: isSearching)
 
-      if apps.isEmpty {
+      // Suppress the empty state during the first scan so the window never
+      // tells the user it is "Refreshing" (the pill in MainWindowView) and that
+      // nothing was found at the same time. Mirrors the menu bar's gating.
+      if apps.isEmpty && !store.isLoading {
         VStack(spacing: 14) {
           ContentUnavailableView(
-            filter.emptyTitle,
+            emptyTitle,
             systemImage: "speaker.slash",
-            description: Text(filter.emptyMessage(searchText: searchText))
+            description: Text(emptyMessage)
           )
 
           HStack(spacing: 10) {
@@ -368,11 +398,14 @@ private struct SourceListView: View {
           }
           .onMove { source, destination in
             // Only reorder against the full unfiltered list; a search shows a
-            // subset whose indices would not map back correctly.
-            if filter == .running && store.preferences.sortMode == .manual && searchText.isEmpty {
+            // subset whose indices would not map back correctly. Shares the same
+            // trimmed condition as `isReorderable` so the guard and the affordance
+            // gating never disagree.
+            if isReorderable {
               store.reorderApps(from: source, to: destination)
             }
           }
+          .moveDisabled(!isReorderable)
         }
         .listStyle(.inset)
         // Keyboard operation: arrow keys move the selection (List), and these
@@ -384,6 +417,16 @@ private struct SourceListView: View {
         .onKeyPress("-") { handleKey { nudgeVolume($0, by: -0.05) } }
         .onKeyPress("b") { handleKey { cycleBoost($0) } }
         .onKeyPress("p") { handleKey { store.togglePinned($0) } }
+        // Surface the otherwise-undocumented in-row keys: without this hint a
+        // user can only discover them by reading source. Mirrors the toolbar
+        // controls, which advertise their shortcuts via help/accessibility text.
+        .accessibilityHint(
+          "Use arrow keys to select an app. On the selected app, press Space or M to mute, "
+            + "equals or minus to adjust volume, B to cycle boost, and P to pin."
+        )
+        .help(
+          "Select an app with the arrow keys, then: Space or M mute, = / - volume, B boost, P pin."
+        )
         // Jump straight to playing apps or apps needing attention.
         .accessibilityRotor("Playing apps") {
           ForEach(apps.filter { store.liveApps.contains($0) }) { app in
@@ -391,6 +434,10 @@ private struct SourceListView: View {
           }
         }
         .accessibilityRotor("Needs attention") {
+          // Stay within the rendered rows (current scope + active search), like
+          // the sibling "Playing apps" rotor. Enumerating cross-scope apps would
+          // yield entries whose ids have no rendered row, so selecting them would
+          // move VoiceOver focus to a nonexistent element (a silent no-op).
           ForEach(apps.filter { $0.routingState == .error }) { app in
             AccessibilityRotorEntry(app.displayName, id: app.id)
           }
@@ -404,7 +451,57 @@ private struct SourceListView: View {
     .background(Color(nsColor: .textBackgroundColor))
   }
 
+  /// True when the user has an active (non-whitespace) search query. Search
+  /// looks across ALL visible apps regardless of the selected scope, so any
+  /// scope-specific noun ("pinned apps", "running apps") would mislabel the
+  /// cross-scope result set. Mirrors `filteredApps`' trimmed-query check.
+  private var isSearching: Bool {
+    !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  /// True when the Running scope is empty only because system processes are
+  /// being filtered out (apps were detected, just hidden by the preference).
+  private var systemProcessesHidden: Bool {
+    filter == .running
+      && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && !store.preferences.showSystemProcesses
+      && store.session.apps.contains { $0.category == .system }
+  }
+
+  private var emptyTitle: String {
+    systemProcessesHidden ? "System Processes Hidden" : filter.emptyTitle
+  }
+
+  private var emptyMessage: String {
+    if systemProcessesHidden {
+      return "System processes are hidden. Enable Show system processes in Settings to see them."
+    }
+    return filter.emptyMessage(searchText: searchText)
+  }
+
+  /// True whenever a drag would map back to the full list correctly, so the OS
+  /// never presents a drag handle that would silently snap back elsewhere.
+  /// Deliberately does NOT require `.manual` sort: a first drag from Name/
+  /// Activity/Category is a documented way to convert the list to manual
+  /// ordering (reorderApps auto-switches sortMode and snapshots the displayed
+  /// order before switching, so the dragged row still lands correctly). Only
+  /// scope and an active search block reorder, because a search shows a subset
+  /// whose indices would not map back to the unfiltered list.
+  /// Uses the trimmed query to match `filteredApps`, so a whitespace-only
+  /// search (which filters nothing) does not block reorder.
+  private var isReorderable: Bool {
+    filter == .running
+      && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
   /// Runs `action` on the currently selected row, if any.
+  ///
+  /// These are focused-window "app shortcuts," which the Help copy promises
+  /// always work while a Waves window is focused. They are intentionally NOT
+  /// gated on `preferences.enableKeyboardShortcuts` — that toggle governs the
+  /// global ⌘⌥ hotkeys (the NSEvent monitor), not in-list keys. Gating here
+  /// would silently strip keyboard control of the mixer (including the only
+  /// keyboard mute path) whenever a user disables global hotkeys.
   private func handleKey(_ action: (AudioApp) -> Void) -> KeyPress.Result {
     guard let id = selectedAppID, let app = apps.first(where: { $0.id == id }) else {
       return .ignored
@@ -429,6 +526,16 @@ private struct OutputSummaryView: View {
   @Environment(AppStore.self) private var store
   let filter: SourceFilter
   let visibleCount: Int
+  // True when a search is active. Search spans all visible apps regardless of
+  // scope, so the count is labeled with a neutral "result(s)" noun instead of
+  // the scope noun, which would otherwise contradict the rows actually shown.
+  let isSearching: Bool
+
+  private var countDetail: String {
+    guard isSearching else { return filter.detail(count: visibleCount) }
+    let noun = visibleCount == 1 ? "result" : "results"
+    return "\(visibleCount) \(noun)"
+  }
 
   var body: some View {
     HStack(spacing: 12) {
@@ -444,7 +551,7 @@ private struct OutputSummaryView: View {
           .lineLimit(1)
 
         HStack(spacing: 8) {
-          Text(filter.detail(count: visibleCount))
+          Text(countDetail)
             .foregroundStyle(.secondary)
 
           if let liveSummary {
@@ -501,7 +608,13 @@ private struct RouteHealthBadge: View {
   }
 
   private var systemImage: String {
-    store.session.backendStatus.isRouteRecoveryHealthy ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+    if store.session.backendStatus.isRouteRecoveryHealthy {
+      return "checkmark.circle.fill"
+    }
+    if store.session.backendStatus.lastError != nil {
+      return "exclamationmark.triangle.fill"
+    }
+    return "exclamationmark.circle"
   }
 
   private var color: Color {
@@ -537,9 +650,13 @@ private struct DiagnosticsPanel: View {
             ForEach(diagnostics.checks) { check in
               VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
-                  Circle()
-                    .fill(color(for: check.status))
-                    .frame(width: 7, height: 7)
+                  // Shape-differentiated glyph per status so color-blind sighted
+                  // users can distinguish pass/warn/fail/info by shape, not hue
+                  // alone. Still hidden from VoiceOver; the combined label below
+                  // carries the status word.
+                  Image(systemName: symbol(for: check.status))
+                    .font(.caption)
+                    .foregroundStyle(color(for: check.status))
                     .accessibilityHidden(true)
                   Text(check.title)
                 }
@@ -554,6 +671,11 @@ private struct DiagnosticsPanel: View {
             }
           }
           .padding(.top, 10)
+        } else {
+          Text("Diagnostics not available yet.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.top, 10)
         }
       } label: {
         Text("Diagnostics")
@@ -575,6 +697,19 @@ private struct DiagnosticsPanel: View {
     }
   }
 
+  private func symbol(for status: DiagnosticsStatus) -> String {
+    switch status {
+    case .passed:
+      "checkmark.circle"
+    case .warning:
+      "exclamationmark.triangle"
+    case .failed:
+      "xmark.octagon"
+    case .informational:
+      "info.circle"
+    }
+  }
+
   private func statusLabel(for status: DiagnosticsStatus) -> String {
     switch status {
     case .passed:
@@ -590,9 +725,22 @@ private struct DiagnosticsPanel: View {
 }
 
 private struct SavePresetSheet: View {
+  // Shared with AppStore.savePreset()'s defensive length guard. Mirrored in the
+  // Save button's .disabled() so an over-length name (easy via paste) disables
+  // the control instead of leaving a silent no-op Save.
+  static let maxNameLength = 100
+
   @Binding var presetName: String
   let onCancel: () -> Void
   let onSave: () -> Void
+
+  private var trimmedName: String {
+    presetName.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private var isTooLong: Bool {
+    trimmedName.count > Self.maxNameLength
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -602,6 +750,12 @@ private struct SavePresetSheet: View {
       TextField("Preset name", text: $presetName)
         .textFieldStyle(.roundedBorder)
 
+      if isTooLong {
+        Text("Name too long (max \(Self.maxNameLength) characters)")
+          .font(.caption)
+          .foregroundStyle(.red)
+      }
+
       HStack {
         Spacer()
 
@@ -609,7 +763,7 @@ private struct SavePresetSheet: View {
 
         Button("Save", action: onSave)
           .keyboardShortcut(.defaultAction)
-          .disabled(presetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+          .disabled(trimmedName.isEmpty || isTooLong)
       }
     }
     .padding(20)

@@ -33,8 +33,11 @@ public protocol AudioControlBackend: AnyObject, Sendable {
 
   /// Tears down managed routes for an application that has quit, so its process
   /// tap and aggregate device are released promptly instead of lingering until
-  /// the next manual refresh.
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32) async
+  /// the next manual refresh. `clearMuteState` must be true ONLY for the
+  /// exclusion path (so a later whole-session rebuild does not resurrect a mute
+  /// the user cleared by excluding the app); plain app termination passes false
+  /// to preserve the user's saved mute.
+  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async
 
   /// Current per-app output levels keyed by logical ID, for live meters. Cheap
   /// to call; intended to be polled only while a UI surface is visible.

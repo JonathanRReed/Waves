@@ -13,7 +13,6 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 ### Device Management
 - **Device Auto-Restore**: Automatically re-establishes audio routes when switching output devices
 - **Per-Device Volume Presets**: Remember volume settings for each app across different audio devices
-- **Smart Volume Backend**: Intelligently switches between hardware and software volume control
 
 ### Automation & Integration
 - **Keyboard Shortcuts**: Global hotkeys for quick volume adjustments (⌘⌥↑/↓ for volume, ⌘⌥M for mute)
@@ -142,7 +141,7 @@ URL scheme automation is disabled by default for security. Enable it in General 
 ### Device Switching
 
 When switching audio devices:
-- Enable "Auto-restore device" in Settings for automatic route recovery
+- Managed routes are re-established automatically when the output device changes
 - Enable "Per-device volume presets" to remember app volumes per device
 
 ## Settings
@@ -151,7 +150,6 @@ When switching audio devices:
 - **Launch at login**: Start Waves automatically when you log in
 - **Show recent apps**: Display background apps in the list
 - **Show system processes**: Include system audio processes
-- **Auto-restore device**: Re-establish routes when device changes
 - **Auto-pause music during calls**: Pause media when conferencing apps are active
 - **Enable keyboard shortcuts**: Use global hotkeys for volume control
 - **Per-device volume presets**: Remember volumes per audio device
@@ -160,7 +158,8 @@ When switching audio devices:
 
 ### Audio Settings
 - View current output device information
-- Choose the preferred route-control mode for Waves-managed sessions
+- Read how managed routing captures and plays back app audio
+- Recover managed routes if needed
 
 ### Presets
 - Create, delete, and manage volume presets
@@ -180,8 +179,8 @@ When switching audio devices:
 - Try refreshing the app list (⌘R)
 
 ### Volume changes not applying
+- Use "Recover Routes" in the toolbar or Audio settings to re-establish audio routing
 - Check the Diagnostics panel in Advanced settings
-- Try "Recover routes now" to re-establish audio routing
 - Ensure macOS 14.2+ is installed for per-app routing
 
 ### Keyboard shortcuts not working
@@ -190,8 +189,7 @@ When switching audio devices:
 - Ensure no other apps are using the same shortcuts
 
 ### Device switching issues
-- Enable "Auto-restore device" in Settings
-- Try manually recovering routes from the Advanced tab
+- Managed routes re-establish automatically; if one didn't, recover routes manually from the Advanced tab
 - Check that your audio device is properly connected
 
 ## Architecture
