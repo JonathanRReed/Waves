@@ -45,6 +45,7 @@ struct SettingsView: View {
 
 private struct GeneralSettingsView: View {
   @Environment(AppStore.self) private var store
+  @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
 
   var body: some View {
     Form {
@@ -54,6 +55,9 @@ private struct GeneralSettingsView: View {
           get: { store.launchAtLoginEnabled },
           set: { store.launchAtLoginEnabled = $0 }
         ))
+
+      Toggle("Show Waves in the menu bar", isOn: $showMenuBarExtra)
+        .help("Shows or hides the Waves icon in the menu bar. The app keeps running either way; reopen this window from the Dock or by relaunching Waves.")
 
       Toggle(
         "Show recent apps",
@@ -76,24 +80,12 @@ private struct GeneralSettingsView: View {
         ))
 
       Toggle(
-        "Auto-restore device",
-        isOn: Binding(
-          get: { store.preferences.autoRestoreDevice },
-          set: {
-            store.preferences.autoRestoreDevice = $0
-            store.persistPreferences()
-          }
-        ))
-
-      Toggle(
-        "Auto-pause music during calls",
+        "Pause media when a video-call app is in front",
         isOn: Binding(
           get: { store.preferences.autoPauseMusicForConferencing },
-          set: {
-            store.preferences.autoPauseMusicForConferencing = $0
-            store.persistPreferences()
-          }
+          set: { store.setAutoPauseMusicEnabled($0) }
         ))
+        .help("Pauses media-playing apps while a known video-call app is the frontmost app. This is a heuristic based on the foreground app, not actual call state, so browser-based calls are not detected.")
 
       Toggle(
         "Enable keyboard shortcuts",
@@ -111,6 +103,7 @@ private struct GeneralSettingsView: View {
             store.persistPreferences()
           }
         ))
+        .help("Remembers a separate volume for each output device. Restoring a remembered level when you switch devices also requires “Auto-restore device” to be on. Turning this off stops recording new levels but leaves any already-stored device settings in place.")
 
       Toggle(
         "URL scheme automation",
@@ -229,9 +222,8 @@ private struct PresetSettingsView: View {
           .font(.callout)
           .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity, alignment: .leading)
-      }
-
-      List {
+      } else {
+        List {
         ForEach(store.presets) { preset in
           HStack {
             VStack(alignment: .leading, spacing: 4) {
@@ -248,6 +240,7 @@ private struct PresetSettingsView: View {
             }
             .buttonStyle(.borderless)
             .controlSize(.small)
+            .accessibilityLabel("Export preset \(preset.name)")
 
             Button("Delete", role: .destructive) {
               if let index = store.presets.firstIndex(where: { $0.id == preset.id }) {
@@ -260,6 +253,7 @@ private struct PresetSettingsView: View {
           }
         }
         .onDelete(perform: store.deletePresets)
+        }
       }
     }
     .padding(20)
@@ -285,14 +279,26 @@ private struct DiagnosticsSettingsView: View {
           } label: {
             Label("Copy Diagnostics", systemImage: "doc.on.clipboard")
           }
+          .disabled(store.diagnostics == nil)
           .help("Copy a plain-text route-health report to the clipboard.")
         }
 
         if let diagnostics = store.diagnostics {
           ForEach(diagnostics.checks) { check in
             VStack(alignment: .leading, spacing: 4) {
-              Text(check.title)
-                .font(.headline)
+              HStack(spacing: 8) {
+                // Shape-differentiated glyph per status so color-blind sighted
+                // users can distinguish pass/warn/fail/info by shape, not hue
+                // alone. Hidden from VoiceOver; the combined label carries the
+                // status word.
+                Image(systemName: symbol(for: check.status))
+                  .foregroundStyle(color(for: check.status))
+                  .accessibilityHidden(true)
+                Text(check.title)
+                  .font(.headline)
+              }
+              .accessibilityElement(children: .combine)
+              .accessibilityLabel("\(statusLabel(for: check.status)): \(check.title)")
               Text(check.detail)
                 .foregroundStyle(.secondary)
             }
@@ -309,6 +315,45 @@ private struct DiagnosticsSettingsView: View {
     }
     .onAppear {
       store.refreshDiagnostics()
+    }
+  }
+
+  private func color(for status: DiagnosticsStatus) -> Color {
+    switch status {
+    case .passed:
+      .green
+    case .warning:
+      .orange
+    case .failed:
+      .red
+    case .informational:
+      .secondary
+    }
+  }
+
+  private func symbol(for status: DiagnosticsStatus) -> String {
+    switch status {
+    case .passed:
+      "checkmark.circle"
+    case .warning:
+      "exclamationmark.triangle"
+    case .failed:
+      "xmark.octagon"
+    case .informational:
+      "info.circle"
+    }
+  }
+
+  private func statusLabel(for status: DiagnosticsStatus) -> String {
+    switch status {
+    case .passed:
+      "Passed"
+    case .warning:
+      "Warning"
+    case .failed:
+      "Failed"
+    case .informational:
+      "Info"
     }
   }
 }

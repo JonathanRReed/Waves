@@ -10,3 +10,12 @@ waves_logo_assets/
 
 *.xcuserstate
 xcuserdata/
+
+# Python tooling cache
+__pycache__/
+*.pyc
+
+# Intermediate feature-audit working data (regenerable; canonical outputs are
+# FEATURE_STATUS.csv + docs/feature-status.json)
+docs/fix-plan.json
+docs/phase4-followups.json
