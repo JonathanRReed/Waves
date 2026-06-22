@@ -98,6 +98,7 @@ private struct GeneralSettingsView: View {
             store.persistPreferences()
           }
         ))
+        .help("Remembers a separate volume for each output device. Restoring a remembered level when you switch devices also requires “Auto-restore device” to be on. Turning this off stops recording new levels but leaves any already-stored device settings in place.")
 
       Toggle(
         "URL scheme automation",

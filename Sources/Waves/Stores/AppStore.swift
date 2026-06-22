@@ -1603,11 +1603,34 @@ final class AppStore {
         diagnostics = await backend.diagnosticsReport()
         persistSessionSnapshot()
         syncOnboarding(using: session)
-        showToast(
-          title: "Routes recovered",
-          detail: "Managed routing paths were reattached.",
-          kind: .success
-        )
+        // backend.recoverRoutes() does not throw when a prerequisite is still
+        // unmet (e.g. capture permission denied or no output device): it rebuilds
+        // the snapshot, which recomputes isRouteRecoveryHealthy. Branch on the
+        // resulting health instead of reporting success on every no-throw return,
+        // so the toast can't claim "Routes recovered" while the Setup step stays
+        // in its "needs action" state.
+        let status = session.backendStatus
+        if status.isRouteRecoveryHealthy {
+          showToast(
+            title: "Routes recovered",
+            detail: "Managed routing paths were reattached.",
+            kind: .success
+          )
+        } else {
+          let reason: String
+          if !status.hasRequiredPermissions {
+            reason = "Audio capture isn't granted — allow audio recording in System Settings, then try again."
+          } else if session.currentDevice == nil {
+            reason = "No output device is available — connect an output device, then try again."
+          } else {
+            reason = status.lastError ?? "Routes are still not healthy. Check the Advanced tab for details."
+          }
+          showToast(
+            title: "Routes still need attention",
+            detail: reason,
+            kind: .warning
+          )
+        }
       } catch {
         session = await backend.currentSnapshot()
         invalidateVisibleAppsCache()
@@ -1856,7 +1879,15 @@ final class AppStore {
     onboarding.routeHealthReady = snapshot.backendStatus.isRouteRecoveryHealthy
     let launchAtLoginEnabled = loginItemService.status.isEnabled
     onboarding.launchAtLoginEnabled = launchAtLoginEnabled
-    preferences.launchAtLoginEnabled = launchAtLoginEnabled
+    // Persist the OS-derived launch-at-login state on every reconcile so a
+    // mid-session change reaches disk, not only when Settings happens to be
+    // open at quit. Guarded by a change check so the frequent refresh/level
+    // callers that invoke syncOnboarding don't rewrite the preferences file
+    // when the value is unchanged.
+    if preferences.launchAtLoginEnabled != launchAtLoginEnabled {
+      preferences.launchAtLoginEnabled = launchAtLoginEnabled
+      persistPreferences()
+    }
   }
 
   private static var emptySession: AudioSessionSnapshot {
@@ -2022,10 +2053,6 @@ struct OnboardingState {
   var outputDeviceVisible = false
   var routeHealthReady = false
   var launchAtLoginEnabled = false
-
-  var isReadyForEverydayUse: Bool {
-    permissionsGranted && outputDeviceVisible && routeHealthReady
-  }
 }
 
 extension Notification.Name {

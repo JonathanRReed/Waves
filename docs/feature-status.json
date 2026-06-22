@@ -1,7 +1,7 @@
 {
   "meta": {
     "app": "Waves",
-    "phase": "complete",
+    "phase": "iter2-deferred-reduced",
     "totalStories": 176,
     "coverageNotes": "Reviewed the entire Sources tree (Waves + WavesAudioCore) and all root docs (README, PRODUCT, DESIGN, CHANGELOG, PRIVACY, SECURITY, CONTRIBUTING). The 171 captured stories are accurate and cover the vast majority of user-facing surface: every public AppStore func, every Settings toggle, the menu-bar panel, URL-scheme commands, global hotkeys, presets, exclusions, onboarding, diagnostics, accessibility, and persistence are represented.\n\nThe five items above are the only genuinely uncaptured user-facing behaviors I found, ordered by confidence:\n\n1. AUDIO-01 (highest-value finding): The volume-control-mode (hardware/software/automatic) capability is a documented-but-dead feature. The UI picker was removed (CHANGELOG line 39 confirms it was a no-op) yet the backend protocol method setVolumeControlMode, the VolumeControlMode enum, AudioDevice.volumeControlMode, and TWO README claims ('Smart Volume Backend' line 16; 'Choose the preferred route-control mode' line 163) all remain. No view calls setVolumeControlMode (verified by grep). This is both a missing story AND a stale-README/dead-code issue worth flagging for cleanup.\n\n2-3. DISC-07 / DISC-08: The 'Show system processes' and 'Show recent apps' toggles each drive a distinct list-population/grouping behavior (system-category inclusion; the Recent computed set used as a sidebar scope + menu-bar section). They are only loosely folded under the catch-all SET-02 'General preferences toggles', so I surfaced them as distinct discovery behaviors.\n\n4. WIN-08: Sidebar scope is persisted via @SceneStorage and restored across launches — a UX-continuity behavior not covered by the existing session/preference persistence stories.\n\n5. WIN-09 (lowest confidence; partial overlap with WIN-07/BOOST-03): in-list onKeyPress handlers include 'b' (cycle boost, wrapping 4x->1x) and 'p' (toggle pin) on the selected row. Pin-via-keyboard and the in-window boost-cycle key are not separately captured. If WIN-07's 'keyboard-driven control' is read broadly this is a duplicate, so treat it as a candidate rather than a certain gap.\n\nThings I explicitly checked and confirmed are NOT gaps (already covered): @AppStorage('showMenuBarExtra') menu-bar visibility = MENU-06; Cmd-S save-preset + sheet = PRE-01/WIN-04; Cmd-R refresh = WIN-04/MENU; preset context-menu delete in sidebar = PRE-03; versioned persistence envelope = PERSIST-06; Homebrew cask (Casks/waves.rb) and notarized release CI are distribution/build, not in-app user features. No EQ, spatial audio, recording, sleep/wake-specific, or notification features exist in the code (consistent with PRODUCT.md positioning as 'a mixer, not an EQ suite or recorder').",
     "implDist": {
@@ -135,7 +135,7 @@
           "suggestedFix": "Cache rendered PNG data keyed by logicalID (or bundleID + icon identity) and reuse it across snapshots, re-rendering only when missing.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:Pure performance optimization of already-off-main-thread work with no correctness impact; a correct cache requires deciding a cache key/invalidation strategy and threading a shared store into a static Task.detached method, which is broader than a localized fix. Low value relative to the correctness units.",
+          "disposition": "deferred:needs-feature:A correct icon cache requires choosing a key (bundleID + icon-identity) and invalidation policy, plus plumbing shared mutable state into Self.discoverRunningApp",
           "uid": "DISC-01#3",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         }
@@ -189,7 +189,7 @@
           "suggestedFix": "Remove the !supportsPerAppRouting branch (and the related compatibility/notes overrides) or gate the property behind the actual minimum so the dead path is dropped.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:Although unreachable at the current 14.2 floor, this is defensive code tied to the deployment-target assumption; removing it couples buildSnapshot's correctness to Package.swift and would silently misbehave if the floor were ever lowered. It is harmless dead code, so removal is a low-value cleanup better made as a deliberate decision rather than bundled into a behavioral fix pass.",
+          "disposition": "deferred:needs-user-decision:Confirmed unreachable (supportsPerAppRouting is true on all >=14.2; Package.swift floor is 14.2), but removing only this branch while leaving the 8 sibling guar",
           "uid": "DISC-02#1",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         }
@@ -242,7 +242,7 @@
           "suggestedFix": "Tighten matching (whole-word/bundle-suffix patterns instead of naked substrings, as already done for 'arc' in inferCategory) and/or add an allowlist or a 'show hidden processes' override so a false-positive app can be recovered.",
           "confidence": "confirmed",
           "primaryFile": "Sources/WavesAudioCore/Backend/AppDiscoveryPolicy.swift",
-          "disposition": "deferred:Behavior-changing heuristic redesign plus a new user-override feature (preferences + Settings UI). The current broad matching is partly intentional (collapsing helper/daemon noise); tightening it risks re-admitting processes the markers deliberately hide. Not localized or guaranteed safe; warrants design + targeted discovery tests.",
+          "disposition": "deferred:needs-user-decision:Behavior-changing heuristic plus new override UX; no single obvious-correct answer.",
           "uid": "DISC-03#1",
           "canonicalFile": "Sources/WavesAudioCore/Backend/AppDiscoveryPolicy.swift"
         }
@@ -294,7 +294,7 @@
           "suggestedFix": "Anchor the risky tokens as whole words via \\b...\\b regex (as done for 'arc'), and consider a per-app category override stored in preferences.",
           "confidence": "confirmed",
           "primaryFile": "Sources/WavesAudioCore/Backend/AppDiscoveryPolicy.swift",
-          "disposition": "deferred:Behavior-changing heuristic redesign plus a new user-override feature (preferences + Settings UI). The current broad matching is partly intentional (collapsing helper/daemon noise); tightening it risks re-admitting processes the markers deliberately hide. Not localized or guaranteed safe; warrants design + targeted discovery tests.",
+          "disposition": "deferred:needs-user-decision:Heuristic redesign affecting auto-pause/sorting plus a new override feature.",
           "uid": "DISC-04#1",
           "canonicalFile": "Sources/WavesAudioCore/Backend/AppDiscoveryPolicy.swift"
         }
@@ -402,7 +402,7 @@
           "suggestedFix": "Base the empty card on store.visibleApps.isEmpty rather than the Live/Recent/Pinned sections, and/or keep a minimal running list visible in the menu bar when Recent is disabled.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:The empty-state predicate change (gate on visibleApps.isEmpty) is a safe localized fix, but the second half — what to surface when 'Show recent apps' is off — is a product/design decision (the toggle currently intentionally suppresses recent/idle apps; deciding to show them anyway, and under what section heading, changes the documented meaning of the user-facing setting). Splitting and shipping only the predicate change risks an empty card with still-hidden apps (card gone but no rows). Needs a product call on the intended menu-bar behavior when recent is disabled before implementing.",
+          "disposition": "deferred:needs-user-decision:Requires a product call on intended menu-bar behavior when recent apps are disabled before any predicate change is safe.",
           "uid": "DISC-06#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         },
@@ -490,7 +490,7 @@
           "suggestedFix": "Either (a) call scheduleVolumeApply(forAppID:appKey, immediate:false) from setDesiredVolume so mid-drag ticks coalesce into 50ms-debounced live applies, or (b) delete the immediate parameter, the sleep branch, and volumeApplyDelay, and correct the spec to state audio changes only on drag end.",
           "confidence": "confirmed",
           "primaryFile": "AppStore.swift",
-          "disposition": "deferred:Requires a product decision: either implement live debounced mid-drag applies (a real behavior change affecting backend load) or delete the mechanism and amend the spec. Not behavior-preserving either way.",
+          "disposition": "deferred:needs-user-decision:Implementing live debounced applies vs deleting the mechanism is a product decision affecting backend load and the spec.",
           "uid": "VOL-01#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -917,7 +917,7 @@
           "suggestedFix": "Propagate the mute source into the backend (have backend.setMuted accept/store a source and have auto-pause push .autoConferencing into the backend snapshot), OR preserve the store's muteSource across every backend re-merge (e.g. carry session muteSource forward in mergeAppState and in the cached/live merge instead of taking the backend's value).",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Cross-cutting fix spanning AppStore and WorkspaceAudioControlBackend (snapshot model/setMuted signature) and every full-session-replace path. Requires a design decision on where provenance lives (store vs backend) and risks regressing mute behavior across refresh/pin/preset/device-change. Coordinate with the backend file, not a localized AppStore edit.",
+          "disposition": "deferred:needs-user-decision:Provenance ownership (store vs backend) is a design decision spanning the backend file and all re-merge paths; out of allowed single-file scope and risks regres",
           "uid": "MUTE-02#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -969,7 +969,7 @@
           "suggestedFix": "Serialize auto-pause handling: cancel the prior in-flight checkAutoPauseMusic task before starting a new one, or funnel pause/resume through a single async sequence, and apply session/pausedMusicApps mutations atomically relative to the backend calls (e.g. mark intent in session before awaiting).",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Fixing the interleave is a concurrency redesign (task serialization/cancellation + atomic session-vs-backend ordering across multiple await points), risky to the auto-pause feature and not a localized safe edit.",
+          "disposition": "deferred:needs-hardware:Reordering pause/resume around backend calls changes auto-pause audio behavior that only validates on real hardware.",
           "uid": "MUTE-03#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -1164,7 +1164,7 @@
           "suggestedFix": "Include muted managed apps in a menu-bar section regardless of showRecentApps (e.g. surface muted apps under Live or a dedicated 'Muted' group) so they can be unmuted from the menu.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:The empty-state predicate change (gate on visibleApps.isEmpty) is a safe localized fix, but the second half — what to surface when 'Show recent apps' is off — is a product/design decision (the toggle currently intentionally suppresses recent/idle apps; deciding to show them anyway, and under what section heading, changes the documented meaning of the user-facing setting). Splitting and shipping only the predicate change risks an empty card with still-hidden apps (card gone but no rows). Needs a product call on the intended menu-bar behavior when recent is disabled before implementing.",
+          "disposition": "deferred:needs-user-decision:Where and under what heading to expose muted apps in the compact panel is a product/design decision.",
           "uid": "MUTE-06#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         },
@@ -1380,7 +1380,7 @@
           "suggestedFix": "In mergedSession, after merging live apps, append any cached apps whose logicalID is not present in liveSession (carrying them as monitorOnly/retained entries) so saved settings survive until the app is rediscovered. Mirror the backend's isStillRunning-style retention, or keep a separate 'remembered customizations' store keyed by logicalID that is reattached on rediscovery rather than living only in the volatile session snapshot.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Touches the core snapshot lifecycle (start/refresh/pin/device-change all feed visibleApps, sorting, persistence, and reapply). Retaining cached-only apps changes what shows in the mixer and what persists, needs a product decision on retention/expiry policy, and interacts with cleanupStaleEntries and the FU-DEVICECHANGE-GATING refresh path. Not a safe localized fix.",
+          "disposition": "deferred:needs-user-decision:Retention/expiry policy for not-running apps is a product decision affecting mixer contents, sorting, and persistence — not a behavior-preserving edit.",
           "uid": "BOOST-04#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -1394,7 +1394,7 @@
           "suggestedFix": "In refresh(), reconcile like bootstrap: session = mergedSession(with: try await backend.refresh(), cached: session) (after fixing mergedSession to retain cached-only apps), and re-run reapplyRestoredAudioState() for newly-appearing customized apps before persistSessionSnapshot(). Apply the same reconciliation in togglePinned and handleDeviceChange.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Touches the core snapshot lifecycle (start/refresh/pin/device-change all feed visibleApps, sorting, persistence, and reapply). Retaining cached-only apps changes what shows in the mixer and what persists, needs a product decision on retention/expiry policy, and interacts with cleanupStaleEntries and the FU-DEVICECHANGE-GATING refresh path. Not a safe localized fix.",
+          "disposition": "deferred:needs-user-decision:Depends on the unresolved cached-app retention policy (BOOST-04#1); reconciling here changes persisted/visible state and needs the same product decision.",
           "uid": "BOOST-04#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -1777,7 +1777,7 @@
           "suggestedFix": "Also register a listener on kAudioHardwarePropertyDevices and, on change, check each managed app whose targetDeviceUID is no longer in availableOutputDevices(): dispose its controller and mark it .error (or attempt reattach on the default) so the UI reflects the broken route immediately.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:Adding a second Core Audio listener plus a device-vanished reconciliation policy (mark .error vs reattach-to-default) is a design decision and broadens the device-change surface; it also interacts with FU-DEVICECHANGE-REENTRANCY and the route-health recompute. Needs product input on the desired UX and careful testing against plug/unplug storms. Not a safe localized one-liner.",
+          "disposition": "deferred:needs-hardware:Adds a new AudioObjectAddPropertyListenerBlock and a device-vanished reconciliation policy that changes audio-routing behavior, interacts with device-change ree",
           "uid": "TAP-06#1",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         },
@@ -1984,7 +1984,7 @@
           "suggestedFix": "Surface the error reason in the compact row (tooltip/secondary line on the dot) and/or always include errored apps in a menu-bar \"Needs attention\" section independent of showRecentApps.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:Adding a new always-on menu-bar section and changing which apps appear there is a UX/information-architecture decision touching MenuBarMixerView, not a localized MixerRowView fix. Needs design agreement on the section and how the reason is shown.",
+          "disposition": "deferred:needs-user-decision:Requires design agreement on a new menu-bar section and how the failure reason is shown.",
           "uid": "ROUTE-02#4",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -2124,7 +2124,7 @@
           "suggestedFix": "Reorder so live takes precedence, or distinguish \"all muted\" from \"some muted\" (e.g. show speaker.wave.3.fill when liveApps is non-empty; fall back to slash only when nothing is live or all live apps are themselves muted).",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Conflicting acceptance criteria: ROUTE-04 wants the live glyph to win, MENU-01's own story states the mute glyph intentionally takes precedence. Resolving requires a product/design decision on icon semantics, not a mechanical fix.",
+          "disposition": "deferred:needs-user-decision:Conflicting acceptance criteria require a product decision on icon precedence.",
           "uid": "ROUTE-04#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -2138,7 +2138,7 @@
           "suggestedFix": "Either suppress the meter for live-unmanaged apps (show only when real levels exist), or source a lightweight level for live-unmanaged apps so the meter reflects actual audio, keeping subtitle and meter consistent.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:Option (b) is a backend audio-acquisition change (out of MixerRowView scope, possible CPU/permission cost). Option (a) is small but is a product decision about whether live-unmanaged rows should show any meter at all, and it interacts with the subtitle wording (\"Playing audio\" with no meter). Needs a design call before a one-line gate is correct.",
+          "disposition": "deferred:needs-user-decision:Option (a) is a product decision on showing no meter; option (b) is a backend audio-acquisition change out of scope.",
           "uid": "ROUTE-04#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         },
@@ -2152,7 +2152,7 @@
           "suggestedFix": "Drive both the subtitle and the meter from a single level source (e.g. compute the \"Playing audio\" predicate from store.liveLevels too), so they cannot diverge.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:Correct fix spans AppStore (liveApps/recentApps/activityRank grouping and sort, plus possibly mutating session from the poll) and changes app ordering/grouping behavior, so it is not a localized MixerRowView-only edit and could reorder rows or change which section an app lands in. Needs coordination with the AppStore grouping unit and regression-testing of sort stability before shipping; the threshold-and-source choice also warrants a deliberate decision.",
+          "disposition": "deferred:needs-user-decision:Threshold/source choice plus AppStore reorder risk need coordination and regression-testing.",
           "uid": "ROUTE-04#3",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -2205,7 +2205,7 @@
           "suggestedFix": "Pass the autoRestoreDevice preference into the backend so it skips reattach when disabled; at minimum always refresh the store's session/device on the device-change event and only skip the route-reattach behavior — never leave the UI stale when auto-restore is off.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:The autoRestoreDevice preference is not visible to the backend actor: it lives in UserPreferences/AppStore, and neither the AudioControlBackend protocol nor WorkspaceAudioControlBackend's init/propert",
+          "disposition": "deferred:needs-hardware:Requires plumbing the preference into the backend actor (cross-file protocol change) and validating real device-change route reattachment on hardware.",
           "uid": "ROUTE-05#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -2219,7 +2219,7 @@
           "suggestedFix": "Define wasManaged strictly by an existing managed route (controllers[id]?.isActive == true || routingState == .managed); for purely .live apps just record targetDeviceUID and defer route creation until the user actually manages the app.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:This is a code-vs-intent question where the current 'enroll on device pick' behavior may be an intentional convenience (picking a device implicitly starts managing the app). Whether selecting an output for a live app should manage it is a product decision; flipping it changes user-visible routing behavior, so it should not be changed unilaterally.",
+          "disposition": "deferred:needs-user-decision:Narrowing wasManaged to exclude .live changes user-visible routing semantics (live->managed side effect) and the documented behavior; flipping it is a product c",
           "uid": "ROUTE-05#2",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         },
@@ -2371,7 +2371,7 @@
           "suggestedFix": "Add a kAudioHardwarePropertyDevices listener that yields a refresh, and/or call store.refreshOutputDevices() when the per-app Output Device menu appears, mirroring the menu-bar picker's onAppear.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:OUT-01#2's correct fix is a new Core Audio property listener in the backend (cross-file, audio-subsystem change with lifecycle/threading concerns), not a localized MixerRowView edit; a contextMenu .onAppear refresh is only a partial mitigation and SwiftUI does not reliably fire onAppear for contextMenu content. OUT-03#3 alone is small but is bundled here by shared root cause (the per-app submenu not mirroring the menu-bar picker) and is cosmetic, so the unit is best handled together after deciding the listener approach.",
+          "disposition": "deferred:needs-hardware:Audio-subsystem device-attach behavior can only be validated on real hardware; cross-file backend change.",
           "uid": "OUT-01#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         },
@@ -2385,7 +2385,7 @@
           "suggestedFix": "When targetDeviceUID is non-nil but absent from availableDevices, surface the saved device as a disabled/checked '<name> (unavailable)' row using store.targetDevice(for:) fallback, so the active-but-missing choice is still indicated.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:Cannot be fixed purely in MixerRowView: surfacing '<name> (unavailable)' requires a persisted/last-known device name because targetDevice(for:) returns nil for a UID not in availableDevices. That is a store/model change (where to store the name) plus a small product decision on the unavailable-row wording, so it is not a safe localized one-file edit.",
+          "disposition": "deferred:needs-feature:Needs persisted device-name storage plus a wording decision for the unavailable row.",
           "uid": "OUT-01#3",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -2473,7 +2473,7 @@
           "suggestedFix": "Register an AudioObjectAddPropertyListenerBlock on kAudioHardwarePropertyDevices that yields a deviceChangeEvents tick (or refreshes), so availableDevices tracks hot-plug events.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:Adding a second Core Audio listener plus a device-vanished reconciliation policy (mark .error vs reattach-to-default) is a design decision and broadens the device-change surface; it also interacts with FU-DEVICECHANGE-REENTRANCY and the route-health recompute. Needs product input on the desired UX and careful testing against plug/unplug storms. Not a safe localized one-liner.",
+          "disposition": "deferred:needs-hardware:Registering a new Core Audio device listener broadens the device-change surface and must be validated against real hot-plug/unplug events; not a localized stati",
           "uid": "OUT-03#1",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         },
@@ -2504,9 +2504,12 @@
           "suggestedFix": "Add a disabled 'No output devices found' (or 'Requires macOS 14.2+') row in the per-app submenu when store.availableDevices.isEmpty, mirroring the menu-bar picker.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:OUT-01#2's correct fix is a new Core Audio property listener in the backend (cross-file, audio-subsystem change with lifecycle/threading concerns), not a localized MixerRowView edit; a contextMenu .onAppear refresh is only a partial mitigation and SwiftUI does not reliably fire onAppear for contextMenu content. OUT-03#3 alone is small but is bundled here by shared root cause (the per-app submenu not mirroring the menu-bar picker) and is cosmetic, so the unit is best handled together after deciding the listener approach.",
+          "disposition": "iter2:fixed",
           "uid": "OUT-03#3",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         }
       ]
     },
@@ -2555,7 +2558,7 @@
           "suggestedFix": "In setOutputDevice, when uid is non-nil, run isDeviceAvailable(uid:) on the monitor-only early-return path and throw managedRouteUnavailable (or return a 'saved but unavailable' status) so the UX is honest before enrollment.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:Choosing between 'reject the pin' vs 'save preference but warn it is unavailable' is a UX decision, and throwing on the monitor-only path changes the documented 'just record the preference' contract and the store's toast handling. Needs product input plus coordinated store-side messaging, so not a safe localized fix.",
+          "disposition": "deferred:needs-user-decision:Throwing on the monitor-only path changes the documented 'just record the preference' contract and the store's success-toast handling; the right behavior is a p",
           "uid": "OUT-04#1",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         }
@@ -2927,7 +2930,7 @@
           "suggestedFix": "Thread the autoRestoreDevice preference into the backend (a setter the store keeps in sync, or have the store own the reattach decision) so that when auto-restore is off, the backend's handleDeviceChange only yields the deviceChangeEvents signal and skips autoRestoreDevice(). Alternatively relabel the toggle to reflect that core restoration always happens.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:Requires a product/design decision on what 'auto-restore off' should mean (leave managed routes torn down vs preserve), and a cross-file contract change (store-owned preference must be pushed into the actor and kept in sync). Not behavior-preserving and not localized.",
+          "disposition": "deferred:needs-user-decision:Requires a product decision (leave routes torn down vs preserve when off) and a cross-file contract: the store-owned preference must be pushed into the actor an",
           "uid": "DEV-04#1",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         },
@@ -2958,7 +2961,7 @@
           "suggestedFix": "Serialize device-change handling (single-flight guard or debounce/coalesce so only the latest change runs to completion), or snapshot the managed-logical-ID set once at the top and protect it so a concurrent invocation cannot observe an empty set or dispose in-flight rebuilds.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:Confidence is 'likely' not 'confirmed', and the fix is a concurrency-control redesign of the device-change path (single-flight/debounce) that is broad and easy to get subtly wrong; it also overlaps the new-listener work in FU-HOTPLUG-DEVICE-LISTENER. Needs careful design and stress testing, not a localized patch.",
+          "disposition": "deferred:needs-hardware:A single-flight/coalesce redesign across autoRestoreDevice/buildSnapshot/reattachRoutes await points is easy to get subtly wrong, overlaps the hotplug-listener ",
           "uid": "DEV-04#3",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         }
@@ -3062,9 +3065,12 @@
           "suggestedFix": "Either wire removeDevice into a 'Clear stored device presets' action in Settings (and/or prune entries for devices not seen recently), or remove the dead removeDevice method if pruning is intentionally out of scope.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/UserPreferences.swift",
-          "disposition": "deferred:Requires a product decision: the suggestedFix is explicitly either-or (delete the dead method vs. build a pruning/management feature). Option B is a feature-request (new Settings UI + device-change pruning touching AppStore) with non-localized behavior change and possible data loss; deleting the method silently endorses unbounded growth. Owner must choose scope; not an unambiguous localized fix.",
+          "disposition": "iter2:fixed",
           "uid": "DEV-05#4",
-          "canonicalFile": "Sources/Waves/Stores/UserPreferences.swift"
+          "canonicalFile": "Sources/Waves/Stores/UserPreferences.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         }
       ]
     },
@@ -3382,7 +3388,7 @@
           "suggestedFix": "Have load() return/expose a recoverable flag (or post a notification) when backupCorruptFile() runs, and show a one-time warning toast from AppStore.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Persistence/DeviceVolumePresetsStore.swift",
-          "disposition": "deferred:UX feature, not a defect with a safe localized fix: surfacing recovery requires changing load()'s contract and adding user-facing toast plumbing/copy in AppStore (a product/design decision on wording and one-time-ness). Broader than this group's other stores and intentionally beyond the current silent-but-safe behavior.",
+          "disposition": "deferred:needs-user-decision:Changes load() contract and adds cross-file toast UX with new copy.",
           "uid": "DVP-04#1",
           "canonicalFile": "Sources/Waves/Services/Persistence/DeviceVolumePresetsStore.swift"
         },
@@ -3451,9 +3457,12 @@
           "suggestedFix": "Add a .help() describing that restoration also requires 'Auto-restore device', and provide a 'Clear stored per-device settings' action wiring removeDevice / a clear-all.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:The help-text half is a safe one-liner, but the substantive fix is a new destructive 'Clear stored per-device settings' action — that needs a product decision (placement, confirmation prompt, whether to also clear when the toggle is turned off) and adds a new AppStore method plus a model mutation, so it is more than a localized behavior-preserving SettingsView edit.",
+          "disposition": "iter2:fixed",
           "uid": "DVP-05#1",
-          "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
+          "canonicalFile": "Sources/Waves/Settings/SettingsView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         }
       ]
     },
@@ -3495,9 +3504,12 @@
           "suggestedFix": "Wire removeDevice into a device-removal handler (prune entries for devices absent from availableOutputDevices) and/or add a Settings affordance to view/delete/reset a device's presets, plus a clear-all.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/UserPreferences.swift",
-          "disposition": "deferred:Requires a product decision: the suggestedFix is explicitly either-or (delete the dead method vs. build a pruning/management feature). Option B is a feature-request (new Settings UI + device-change pruning touching AppStore) with non-localized behavior change and possible data loss; deleting the method silently endorses unbounded growth. Owner must choose scope; not an unambiguous localized fix.",
+          "disposition": "iter2:fixed",
           "uid": "DVP-06#1",
-          "canonicalFile": "Sources/Waves/Stores/UserPreferences.swift"
+          "canonicalFile": "Sources/Waves/Stores/UserPreferences.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         }
       ]
     },
@@ -3852,7 +3864,7 @@
           "suggestedFix": "Route mute/boost per-device persistence through the same deferred/coalesced commit used for volume (or a debounced save), so rapid boost/mute changes do not rewrite the file each time.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Introducing a new debounce path for persistence touches save timing across three setters and risks losing the last write if the app quits inside the debounce window (volume currently flushes on commit; mute/boost have no equivalent commit hook). Getting flush-on-quit / flush-on-device-change right is broader than a one-liner and needs a small design decision, so it should not ride in as a 'safe localized' fix. Boost stepping is also UI-rate-limited to integers, making the thrashing modest.",
+          "disposition": "deferred:needs-user-decision:setMuted (AppStore.swift:602-610) and setVolumeBoost still save the full deviceVolumePresets file on every change with no coalescing, unlike the volume path. Ro",
           "uid": "PRE-06#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -4359,7 +4371,7 @@
           "suggestedFix": "When a search query is active and the result set exceeds the selected scope, show a subtle hint (e.g. set the OutputSummaryView subtitle to 'Searching all apps', or update the sidebar count to reflect the matched set) so the widened scope is discoverable.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:The cross-scope search behavior is intentional (inline comment + PIN-03 AC5), so the fix is a UX/product decision about how to label a search that spans scopes — neutral 'N results' vs threading the query into sidebar counts vs neutralizing the selected scope — touching three coupled surfaces. Not a single unambiguous localized fix; needs a design choice to avoid trading one inconsistency for another.",
+          "disposition": "deferred:needs-user-decision:Labeling a cross-scope search is a UX/product decision, not a single unambiguous fix.",
           "uid": "PIN-03#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         }
@@ -4422,7 +4434,7 @@
           "suggestedFix": "Add a context-menu Pin/Unpin item and a matching accessibilityAction to CompactMixerRow (reusing store.togglePinned), so pins can be created/removed and announced from the menu-bar panel.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:The issue itself notes this is arguably a deliberate scoping decision (the main window is the management surface). Adding pin management to the menu-bar panel is a feature/UX-scope decision for the PIN-04 story, not an unambiguous defect, so it needs a product call before implementing.",
+          "disposition": "deferred:needs-user-decision:Whether the menu-bar panel should manage pins is a product scoping decision.",
           "uid": "PIN-04#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -4829,7 +4841,7 @@
           "suggestedFix": "Prune customAppOrder against the current known app set when the session refreshes (or deliberately document the keep-slot policy). At minimum drop logicalIDs not seen for some retention window so the array does not grow indefinitely.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Switching from full-replace to merge changes the persisted ordering semantics and the relaunched-app placement behavior, which interacts with manualOrderComparator and the visible/hidden filtering. It needs a deliberate decision on how absent IDs are positioned (and whether to prune), so it is more than a behavior-preserving localized fix. ORDER-04#4's pruning is an explicit policy choice. Low user impact (manual sort is opt-in and apps still appear, just at the end).",
+          "disposition": "deferred:needs-user-decision:customAppOrder is still never pruned: the merge path (AppStore.swift:1850-1858) deliberately keeps non-visible IDs, so a relaunched app re-seizes its old slot v",
           "uid": "ORDER-04#4",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -4843,7 +4855,7 @@
           "suggestedFix": "Add keyboard handlers (e.g. Option+Up/Down on the selected row) that call store.reorderApps with the selected row's index, gated on Manual+Running+no-search, and expose an .accessibilityAction so VoiceOver users can move a row.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:Pure feature-request (adds a new keyboard/VoiceOver reorder capability that does not exist) rather than a regression; requires a keybinding-design decision to avoid clashing with List selection and the existing m/b/p/=/- handlers, plus index-translation logic. Out of scope for a minimal behavior-preserving fix and best coordinated with the onMove gating unit.",
+          "disposition": "deferred:needs-feature:New keyboard/VoiceOver reorder feature with keybinding-design choices; not behavior-preserving.",
           "uid": "ORDER-04#5",
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         },
@@ -4857,7 +4869,7 @@
           "suggestedFix": "Either keep Manual selected and render a stable fallback ordering (e.g. name order) when customAppOrder is empty instead of downgrading the mode, or surface a hint in Settings that Manual takes effect only after the first reorder.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Removing the init downgrade is a deliberate behavior change to persisted-sort semantics: the downgrade was added on purpose (the code comment explains 'only manual sort depends on a saved order; fall back to name'). Whether Manual-with-no-order should persist or be downgraded is a product decision, and the alternative (a Settings hint) is pure UI work. Not a clear-cut defect with a single safe fix.",
+          "disposition": "deferred:needs-user-decision:init still downgrades sortMode .manual->.name when customAppOrder is empty (AppStore.swift:107-109), per the intentional comment. Whether Manual-with-no-order s",
           "uid": "ORDER-04#6",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -4958,7 +4970,7 @@
           "suggestedFix": "Either (a) merge poller results into session.apps[].peakLevel/rmsLevel and refresh isActive on NSWorkspace.didActivateApplicationNotification, or (b) have activityRank consult store.liveLevels for the audible-tier test (e.g. max(liveLevels[id].peak, liveLevels[id].rms) > 0.001).",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Requires choosing a single source of truth for liveness and likely a periodic-refresh design, then reconciling sort behavior and the story acceptance. Merging poller data into session.apps re-triggers re-sorts on every poll tick (the very thing liveLevels was split out to avoid), so it needs a product/perf decision rather than a localized safe edit.",
+          "disposition": "deferred:needs-user-decision:Choosing the liveness source of truth and accepting per-tick re-sort cost is a product/perf decision reconciling the story acceptance, not a safe localized edit",
           "uid": "SORT-02#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -5231,7 +5243,7 @@
           "suggestedFix": "Render the same meter overlay (or an equivalent compact level indicator) in CompactMixerRow using store.liveLevels[app.logicalID], so the menu-bar surface honors the per-row meter feature; otherwise gate beginLiveLevels() to surfaces that actually draw meters so the menu-bar-only case does not poll needlessly.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:Requires a product decision (show meters in the compact menu-bar layout vs. stop polling there) that affects the menu-bar UX and the LVL-02 idle-CPU goal. Either direction touches MenuBarMixerView and is not a behavior-preserving one-liner; it should be scoped deliberately.",
+          "disposition": "deferred:needs-user-decision:Direction (render meters vs. stop polling) must be scoped deliberately and affects another file.",
           "uid": "LVL-01#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         },
@@ -5401,7 +5413,7 @@
           "suggestedFix": "Feed store.liveLevels into the label/grouping: compute 'isPlaying' from store.liveLevels[app.logicalID] (falling back to session) in subtitle/liveApps/activityRank, or have the level poll also update session.apps[].peakLevel/rmsLevel (debounced) so both UI signals share one cadence.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:Correct fix spans AppStore (liveApps/recentApps/activityRank grouping and sort, plus possibly mutating session from the poll) and changes app ordering/grouping behavior, so it is not a localized MixerRowView-only edit and could reorder rows or change which section an app lands in. Needs coordination with the AppStore grouping unit and regression-testing of sort stability before shipping; the threshold-and-source choice also warrants a deliberate decision.",
+          "disposition": "deferred:needs-user-decision:Cross-file grouping/sort change with reorder risk and a threshold/source choice needing regression-testing.",
           "uid": "LVL-04#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         },
@@ -5415,7 +5427,7 @@
           "suggestedFix": "Derive the playing state from the live-polled store.liveLevels (which decays toward 0 from the realtime path) instead of the static session snapshot, or refresh session levels on the poll cadence.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Switching the live-classification source from session levels to liveLevels touches sorting (activityRank), section partitioning, the menu-bar icon, and a second file (MixerRowView); it risks re-sort thrash/flicker and needs a design decision on decay threshold and cadence. Broader than a behavior-preserving fix.",
+          "disposition": "deferred:needs-user-decision:Requires a design decision on decay threshold/cadence and spans a second file; risks re-sort thrash.",
           "uid": "LVL-04#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -5429,7 +5441,7 @@
           "suggestedFix": "Have liveApps/menuBarIconName consult store.liveLevels for managed-audible classification (the same cadence as the meter), or refresh session levels on the poll cadence so the icon, the Live section, and the meter share one source of truth.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Switching the live-classification source from session levels to liveLevels touches sorting (activityRank), section partitioning, the menu-bar icon, and a second file (MixerRowView); it risks re-sort thrash/flicker and needs a design decision on decay threshold and cadence. Broader than a behavior-preserving fix.",
+          "disposition": "deferred:needs-user-decision:Unifying live classification across icon/section/meter needs a cadence/threshold design decision and a second file.",
           "uid": "LVL-04#3",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -5514,7 +5526,7 @@
           "suggestedFix": "Drive liveApps from the data that is actually polled (consult store.liveLevels for managed-app liveness) and/or add a lightweight periodic session refresh while a surface is visible so routingState/peak reflect current playback; then align the story's expectedBehavior with the chosen source of truth.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Requires choosing a single source of truth for liveness and likely a periodic-refresh design, then reconciling sort behavior and the story acceptance. Merging poller data into session.apps re-triggers re-sorts on every poll tick (the very thing liveLevels was split out to avoid), so it needs a product/perf decision rather than a localized safe edit.",
+          "disposition": "deferred:needs-user-decision:Requires the same liveness source-of-truth / periodic-refresh design decision as SORT-02; reconciling icon semantics with the chosen source is not behavior-pres",
           "uid": "MENU-01#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -5528,7 +5540,7 @@
           "suggestedFix": "Prefer the 3-wave playing variant when a live app is concurrently playing; reserve the slash variant for when the muted app is the would-be-live one or nothing is playing. Consider a status glyph distinct from the per-row mute control.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Conflicting acceptance criteria: ROUTE-04 wants the live glyph to win, MENU-01's own story states the mute glyph intentionally takes precedence. Resolving requires a product/design decision on icon semantics, not a mechanical fix.",
+          "disposition": "deferred:needs-user-decision:Icon precedence is a product/UX decision with conflicting acceptance criteria.",
           "uid": "MENU-01#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -5600,7 +5612,7 @@
           "suggestedFix": "When showRecentApps is off, still surface non-live/non-pinned apps under a neutral section (or gate the empty state on the true count of visibleApps), so the menu never claims zero apps while apps are running.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:The empty-state predicate change (gate on visibleApps.isEmpty) is a safe localized fix, but the second half — what to surface when 'Show recent apps' is off — is a product/design decision (the toggle currently intentionally suppresses recent/idle apps; deciding to show them anyway, and under what section heading, changes the documented meaning of the user-facing setting). Splitting and shipping only the predicate change risks an empty card with still-hidden apps (card gone but no rows). Needs a product call on the intended menu-bar behavior when recent is disabled before implementing.",
+          "disposition": "deferred:needs-user-decision:Intended menu-bar behavior with recent apps disabled must be decided before changing the predicate.",
           "uid": "MENU-02#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         },
@@ -5614,7 +5626,7 @@
           "suggestedFix": "Either add the meter overlay to CompactMixerRow (reuse meterLevel/showsLevelMeter), or drop beginLiveLevels/endLiveLevels from the menu and feed the icon from a cheaper source.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:Requires a product decision (show meters in the compact menu-bar layout vs. stop polling there) that affects the menu-bar UX and the LVL-02 idle-CPU goal. Either direction touches MenuBarMixerView and is not a behavior-preserving one-liner; it should be scoped deliberately.",
+          "disposition": "deferred:needs-user-decision:Render-meter vs. stop-polling is a deliberate product decision affecting another file.",
           "uid": "MENU-02#3",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -5814,7 +5826,7 @@
           "suggestedFix": "Add a 'Show Waves in the menu bar' toggle in SettingsView bound to @AppStorage(\"showMenuBarExtra\"), or document the icon as always-on and remove the unused isInserted binding.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:Requires a product decision: expose a hide/show control (add UI, cross-file into SettingsView, with the side question of how a user reopens the app if they hide both the dock-less menu bar entry and main window) versus declare the icon always-on and remove the binding. This is a design call dressed as a bug, not an unambiguous localized fix.",
+          "disposition": "deferred:needs-user-decision:Resolving it means choosing between adding a Settings toggle (cross-file into SettingsView, plus how a user reopens a hidden dock-less app) or declaring the ico",
           "uid": "MENU-06#1",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         },
@@ -5934,7 +5946,7 @@
           "suggestedFix": "When a search query is active, show a neutral count label such as '\\(apps.count) result(s)' instead of filter.detail(...), and/or visually neutralize the selected sidebar scope while searching.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:The cross-scope search behavior is intentional (inline comment + PIN-03 AC5), so the fix is a UX/product decision about how to label a search that spans scopes — neutral 'N results' vs threading the query into sidebar counts vs neutralizing the selected scope — touching three coupled surfaces. Not a single unambiguous localized fix; needs a design choice to avoid trading one inconsistency for another.",
+          "disposition": "deferred:needs-user-decision:Resolving the scope-noun vs cross-scope-rows contradiction is a UX labeling decision.",
           "uid": "WIN-02#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         },
@@ -5948,7 +5960,7 @@
           "suggestedFix": "Either keep both counts unfiltered (move the header to the scoped, unfiltered count and show a separate 'N results' label during search), or thread the active query into the sidebar count so both reflect the same set.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:The cross-scope search behavior is intentional (inline comment + PIN-03 AC5), so the fix is a UX/product decision about how to label a search that spans scopes — neutral 'N results' vs threading the query into sidebar counts vs neutralizing the selected scope — touching three coupled surfaces. Not a single unambiguous localized fix; needs a design choice to avoid trading one inconsistency for another.",
+          "disposition": "deferred:needs-user-decision:Reconciling the two divergent counts needs a coupled UX/product decision.",
           "uid": "WIN-02#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         }
@@ -6102,7 +6114,7 @@
           "suggestedFix": "Drive the pill from isRefreshing (or 'isLoading || isRefreshing') rather than isLoading alone, so a user-initiated refresh shows the spinner even when the list is non-empty.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:The defect is real but the actual gating edit is in MainWindowView.swift (the pill's condition), not AppStore.swift; AppStore already exposes the correct isRefreshing flag. Routing to the view owner avoids an AppStore change that wouldn't fix the symptom.",
+          "disposition": "deferred:needs-feature:The actual fix lives in MainWindowView.swift, not AppStore.swift.",
           "uid": "WIN-05#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -6313,7 +6325,7 @@
           "suggestedFix": "Show an OS-level HUD/notification (or a borderless floating overlay) for hotkey-driven changes so feedback is visible while Waves is in the background; the in-window toast is insufficient for global shortcuts.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:The suggested fix (OS-level HUD / UNUserNotificationCenter notification / borderless floating overlay) is a sizable new feature and a product/design decision about how to surface global-hotkey feedbac",
+          "disposition": "deferred:needs-feature:A background-visible HUD/notification surface is a sizable new feature.",
           "uid": "KEY-01#3",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -6327,7 +6339,7 @@
           "suggestedFix": "Detect the focused element in the frontmost app via the Accessibility API (AXUIElement focused-element role) rather than NSApp.keyWindow, or accept the limitation and update the spec/docs.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:Not a safe localized fix: the correct remedy introduces an Accessibility-API call on every global keystroke (latency + a new permission surface) and must coordinate with the AX-permission handling unit (KEY-05). The specs themselves note the ⌘⌥ combos rarely collide with text entry (issues downgraded to low), so this needs a product/design decision on whether to take the AX route or simply document the limitation rather than a behavior-changing inline edit.",
+          "disposition": "deferred:needs-user-decision:The only real remedy is an Accessibility-API focused-element check on every keystroke (new permission + latency, coordinates with KEY-05) versus documenting the",
           "uid": "KEY-01#4",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -6411,7 +6423,7 @@
           "suggestedFix": "Use an OS-level HUD/notification or floating overlay for hotkey-driven changes.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Same as KEY-01#3: surfacing hotkey feedback while Waves is backgrounded needs a new OS-level HUD/notification/overlay (a new UI surface and product/design decision), not implementable as a localized b",
+          "disposition": "deferred:needs-feature:Background-visible hotkey feedback is a new UI feature.",
           "uid": "KEY-02#3",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -6425,7 +6437,7 @@
           "suggestedFix": "Detect the frontmost app's focused element via the Accessibility API instead of NSApp.keyWindow, or document the limitation.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:Not a safe localized fix: the correct remedy introduces an Accessibility-API call on every global keystroke (latency + a new permission surface) and must coordinate with the AX-permission handling unit (KEY-05). The specs themselves note the ⌘⌥ combos rarely collide with text entry (issues downgraded to low), so this needs a product/design decision on whether to take the AX route or simply document the limitation rather than a behavior-changing inline edit.",
+          "disposition": "deferred:needs-user-decision:Requires the AX-route-vs-document-the-limitation decision shared with KEY-01/KEY-05; either path changes behavior or spans permission handling, so no safe local",
           "uid": "KEY-02#4",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -6527,7 +6539,7 @@
           "suggestedFix": "Surface hotkey mute feedback via an OS-level HUD/notification or floating overlay rather than the in-window toast stack.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:The suggested fix is an OS-level HUD/notification or floating overlay. There is no existing notification/HUD infrastructure in the codebase (no UNUserNotificationCenter, NSPanel/HUD, or overlay window",
+          "disposition": "deferred:needs-feature:Requires building a new OS-level HUD/notification/overlay surface.",
           "uid": "KEY-03#4",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -6541,7 +6553,7 @@
           "suggestedFix": "Use the Accessibility API focused-element role of the frontmost app, or document the limitation.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:Not a safe localized fix: the correct remedy introduces an Accessibility-API call on every global keystroke (latency + a new permission surface) and must coordinate with the AX-permission handling unit (KEY-05). The specs themselves note the ⌘⌥ combos rarely collide with text entry (issues downgraded to low), so this needs a product/design decision on whether to take the AX route or simply document the limitation rather than a behavior-changing inline edit.",
+          "disposition": "deferred:needs-user-decision:Same root cause as KEY-01/02; fixing needs the AX-vs-document product decision and would alter behavior or add a permission surface — not a verifiable inline ed",
           "uid": "KEY-03#5",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -6630,7 +6642,7 @@
           "suggestedFix": "When shortcuts are enabled (setKeyboardShortcutsEnabled / updateGlobalHotkeysState), check AXIsProcessTrusted(); if false, call AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt: true]) to prompt, and/or show a warning toast linking to System Settings so the user is told the hotkeys won't fire until permission is granted.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:Requires a product/UX decision on the feedback mechanism (auto-prompt via AXIsProcessTrustedWithOptions vs a non-intrusive toast vs an inline Settings warning), and the fix spans WavesApp.swift and AppStore.swift plus likely the toast/notification surface. Auto-prompting on every enable could be intrusive, and there is existing onboarding/diagnostics AX handling that must not be duplicated or contradicted — so this needs coordinated design rather than a localized inline edit.",
+          "disposition": "deferred:needs-user-decision:The feedback mechanism (auto-prompt vs toast vs inline Settings warning) is an unresolved UX decision, and the fix spans WavesApp.swift, AppStore.swift, and the",
           "uid": "KEY-05#1",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -6990,7 +7002,7 @@
           "suggestedFix": "Restrict the previousFrontmostApp dedupe to the didActivateApplication path only. For refresh/startup/applyPreset, call a variant that skips the dedupe, or replace the guard with a desired-state diff so re-entrant calls with the same frontmost still pause newly-eligible media apps.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Determining 'a call is in progress' independent of frontmost focus needs a product/design decision and likely a mic/input-in-use probe (new capability), not a behavior-preserving edit. The current frontmost heuristic may be intentional given the constraints; changing pause/resume triggers risks broad regressions to the conferencing feature.",
+          "disposition": "deferred:needs-feature:Robust mid-call detection independent of frontmost focus needs a new capability (mic/input-in-use probe) and a design decision on pause/resume triggers.",
           "uid": "PAUSE-01#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -7004,7 +7016,7 @@
           "suggestedFix": "Detect active microphone/CoreAudio input use (or a known meeting URL) rather than equating frontmost-app category with call state. At minimum document the browser-call limitation in the Settings copy.",
           "confidence": "confirmed",
           "primaryFile": "Sources/WavesAudioCore/Backend/AppDiscoveryPolicy.swift",
-          "disposition": "deferred:Acknowledged design limitation of the frontmost+keyword model. A real fix is a new mic/CoreAudio-input detection capability (broad, permission-sensitive, false-positive-prone); the only localized option is a Settings copy caveat, which is a product wording decision. Not a safe localized code fix despite the high severity.",
+          "disposition": "deferred:needs-feature:New permission-sensitive detection capability; not validatable by reading code.",
           "uid": "PAUSE-01#2",
           "canonicalFile": "Sources/WavesAudioCore/Backend/AppDiscoveryPolicy.swift"
         },
@@ -7035,7 +7047,7 @@
           "suggestedFix": "Gate pausing on actual microphone/recording activity in addition to the frontmost-app heuristic.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Gating on real microphone/recording activity is a sizable new feature, not a localized fix. macOS exposes no simple per-app mic-active signal via public API; reliable detection needs Core Audio 'devic",
+          "disposition": "deferred:needs-hardware:Mic-activity gating needs Core Audio detection and on-device validation.",
           "uid": "PAUSE-01#4",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -7097,7 +7109,7 @@
           "suggestedFix": "Decouple resume from frontmost focus: resume only when the call truly ends (conferencing app terminated, or mic/input no longer in use).",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Determining 'a call is in progress' independent of frontmost focus needs a product/design decision and likely a mic/input-in-use probe (new capability), not a behavior-preserving edit. The current frontmost heuristic may be intentional given the constraints; changing pause/resume triggers risks broad regressions to the conferencing feature.",
+          "disposition": "deferred:needs-feature:True call-end detection needs a new mic/input-in-use probe and a UX decision; changing the resume trigger risks broad conferencing regressions.",
           "uid": "PAUSE-02#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -7178,7 +7190,7 @@
           "suggestedFix": "In the toggle's set closure, when turning the preference off, run a one-shot resume of all muteSource == .autoConferencing apps (the resume-branch logic), clear pausedMusicApps, then persist.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:Correct fix is genuinely cross-file and async: it requires a new AppStore resume method (sharing logic with checkAutoPauseMusic's resume branch) and awaiting backend.setMuted for each stranded app. There is a behavioral judgement call about whether toggling off should force-resume apps the user may have intentionally left muted, and edge cases (apps the user re-muted vs. auto-muted). Not a safe, purely-localized SettingsView change.",
+          "disposition": "deferred:needs-hardware:Correct fix needs a new async AppStore resume method awaiting backend.setMuted per stranded app plus a behavioral judgement about force-resuming apps; cross-fil",
           "uid": "PAUSE-03#1",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         },
@@ -7209,7 +7221,7 @@
           "suggestedFix": "Reword to reflect the heuristic, e.g. 'Pause media when a video-call app is in front', with a help note that browser-based calls are unsupported.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:User-facing copy is a wording/product decision (final phrasing, tone, whether to expose the browser-call limitation). Behaviorally safe, but it is a content choice rather than an unambiguous code defect, so it should go through product review rather than be auto-applied.",
+          "disposition": "deferred:needs-user-decision:Final user-facing wording is a product/content decision (phrasing, tone, whether to disclose the browser-call limitation), not an unambiguous code defect.",
           "uid": "PAUSE-03#3",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         }
@@ -7276,7 +7288,7 @@
           "suggestedFix": "Extract a pure helper from checkAutoPauseMusic and test: user-muted app skipped on pause, excluded app skipped, resume restricted to .autoConferencing, manual unmute removing from the paused set, and stale-id pruning.",
           "confidence": "confirmed",
           "primaryFile": "Tests/WavesTests/AppDiscoveryPolicyTests.swift",
-          "disposition": "deferred:Not a defect itself — a test-coverage gap whose remediation requires refactoring live @MainActor/async auto-pause logic in AppStore to extract a testable pure helper. That production change can plausibly alter pause/resume behavior and should be scoped/reviewed deliberately, not bundled as a safe localized fix.",
+          "disposition": "deferred:needs-feature:Test needs a production refactor in AppStore (not allowed) that could change behavior.",
           "uid": "PAUSE-04#2",
           "canonicalFile": "Tests/WavesTests/AppDiscoveryPolicyTests.swift"
         }
@@ -7383,7 +7395,7 @@
           "suggestedFix": "Add unit tests against a spy backend asserting zero backend calls for an excluded app across setDesiredVolume/commitDesiredVolume/setMuted/setVolumeBoost/setOutputDevice, the launch restore, the device-preset restore, and the auto-pause/resume loops.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Pure test-coverage gap, and per scope it is deferred unless trivially addable. Adding the tests requires creating/editing a test target file (e.g. AppStoreTests with a spy backend), which is outside t",
+          "disposition": "deferred:needs-feature:Tests must be added in a test-target file, outside the allowed file.",
           "uid": "EXCL-02#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -7438,7 +7450,7 @@
           "suggestedFix": "Add a .contextMenu (or small toggle) with 'Exclude from Waves' / 'Manage with Waves' to CompactMixerRow mirroring MixerRowView, or document that exclusion is managed from the main window only.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:Documented as a deliberate main-window-only affordance (the issue itself was lowered to low precisely because the escape hatch remains fully reachable from the main window, and feature-status describes exclusion as a main-window control). Adding it to the menu bar is a UX surface-area decision (does the compact menu-bar mixer want a context menu at all, and which actions belong there) rather than a clear-cut defect, so it warrants a product call rather than an inline fix.",
+          "disposition": "deferred:needs-user-decision:Escape hatch is fully reachable from the main window; adding it to the menu bar warrants a product call.",
           "uid": "EXCL-03#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         },
@@ -7615,7 +7627,7 @@
           "suggestedFix": "Keep sortMode == .manual across relaunch even with an empty customAppOrder (the comparator already falls back to name), or disable/annotate the Manual option until the user performs at least one drag.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Removing the init downgrade is a deliberate behavior change to persisted-sort semantics: the downgrade was added on purpose (the code comment explains 'only manual sort depends on a saved order; fall back to name'). Whether Manual-with-no-order should persist or be downgraded is a product decision, and the alternative (a Settings hint) is pure UI work. Not a clear-cut defect with a single safe fix.",
+          "disposition": "deferred:needs-user-decision:Same intentional init downgrade (AppStore.swift:107-109): Manual selected with no saved drag order reverts to Name on relaunch. Persisting Manual vs. annotating",
           "uid": "SET-02#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -7679,7 +7691,7 @@
           "suggestedFix": "Re-read loginItemService.status and update preferences.launchAtLoginEnabled in GeneralSettingsView.onAppear (or SettingsView.onAppear) so the toggle reflects the real registration status each time Settings opens.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:The persist-on-reconcile sub-fix (LOGIN-05#1) is safe and localized, but the staleness sub-fixes require wiring a new lifecycle observer (didBecomeActive/scenePhase) or view onAppear across files — a broader change with its own teardown/duplicate-reconcile considerations — and the issues note impact is limited (init always re-overwrites from OS status, so a stale on-disk value is harmless next launch). The cluster is best handled as one deliberate change rather than a drive-by. If splitting, LOGIN-05#1 alone could be fix-now.",
+          "disposition": "deferred:needs-feature:Login toggle can show stale state if changed externally while Settings stays open. Fixing requires a new lifecycle observer (scenePhase/didBecomeActive) or view",
           "uid": "SET-03#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -7748,7 +7760,7 @@
           "suggestedFix": "Detect typing in the frontmost foreign app via the Accessibility API (AXUIElement focused-element role) rather than NSApp.keyWindow, or explicitly document the guard as only covering Waves' own windows.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:Not a safe localized fix: the correct remedy introduces an Accessibility-API call on every global keystroke (latency + a new permission surface) and must coordinate with the AX-permission handling unit (KEY-05). The specs themselves note the ⌘⌥ combos rarely collide with text entry (issues downgraded to low), so this needs a product/design decision on whether to take the AX route or simply document the limitation rather than a behavior-changing inline edit.",
+          "disposition": "deferred:needs-user-decision:Same defect family as KEY-01/02/03; the correct fix is an AX focused-element query (behavior-changing, new permission) or an explicit spec/doc limitation — a pr",
           "uid": "SET-04#2",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         },
@@ -7779,7 +7791,7 @@
           "suggestedFix": "Define the shortcut set (keyCode, modifiers, label) once in a shared enum/struct and drive both the global-monitor switch and the cheat-sheet rows from it.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:No current user-facing defect — purely a maintainability/anti-drift refactor that introduces a new shared abstraction touching the global key-event handler in WavesApp.swift. Re-routing the live shortcut handler through a new type carries regression risk that outweighs eliminating a latent-only drift, so this is a deliberate refactor decision, not a fix-now.",
+          "disposition": "deferred:needs-feature:No current user-facing defect; the anti-drift fix introduces a new shared shortcut abstraction that re-routes the live key handler in WavesApp.swift (out of sco",
           "uid": "SET-04#4",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         }
@@ -7970,7 +7982,7 @@
           "suggestedFix": "Surface session.backendStatus.lastError within the cards/available view (e.g. a prominent error banner when lastError is non-nil) rather than gating it solely on diagnostics == nil.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:Requires a product/architecture decision about how genuine backend-degraded errors should surface (banner-in-cards vs. nullable report contract) and coordinates changes across AppStore, the backend, and the mixer panel. The DIAG-02#2 sub-part (disable Copy / await fresh report) is a safe localized fix, but it is entangled with the same diagnostics==nil window the other two findings address, so it should land as one coherent decision rather than a piecemeal toggle. Not a safe, isolated SettingsView-only change.",
+          "disposition": "deferred:needs-user-decision:Requires a product/architecture decision on how degraded-backend errors should surface (cards banner vs. nullable report contract), coordinating AppStore, backe",
           "uid": "SET-08#1",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         },
@@ -8053,7 +8065,7 @@
           "suggestedFix": "Do not seed onboarding route/permission flags from the persisted session. Reset routeHealthReady/audioComponentInstalled/permissionsGranted to false until the first live syncOnboarding after backend.start(), or neutralize backendStatus on load (set isRouteRecoveryHealthy/isAudioComponentInstalled/hasRequiredPermissions to false) so the checklist never shows green from cached state.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Mixed unit: the recovery-toast half (ONB-04#1/SETUP-04#1) is a safe localized fix, but ONB-01#1 and ONB-02#1 change the onboarding checklist's definition of 'ready' and its step structure (new capture-permission step/action), which is a product/UX decision and touches backendStatus semantics shared with the backend. Defer as a whole so the checklist-readiness change is designed coherently; the recovery-toast piece can be split out and fixed now if scoped separately.",
+          "disposition": "deferred:needs-user-decision:Redefining checklist 'ready'/seeding semantics and backendStatus persistence is a UX decision tied to ONB-02's step restructuring; not a safe isolated edit.",
           "uid": "ONB-01#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -8067,7 +8079,7 @@
           "suggestedFix": "Either correct the acceptance criterion (step 1 is intentionally orthogonal to OS support), or gate the device step's completion/credit behind audioComponentInstalled so the progress narrative matches 'no managed support => 0%'.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Needs a product decision: the issue itself notes step 1 is intentionally orthogonal to OS support, and its preferred resolution is correcting the acceptance doc (outside AppStore.swift). The alternati",
+          "disposition": "deferred:needs-user-decision:Resolving the orthogonality requires a product decision or a doc change outside the file.",
           "uid": "ONB-01#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -8081,7 +8093,7 @@
           "suggestedFix": "Auto-present the Setup tab (or a dedicated onboarding window/sheet) on first launch using a persisted 'hasSeenOnboarding' flag, and/or add a visible 'Setup' affordance in the main window/menu bar when isFullyComplete is false.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:Fixing it correctly requires editing files outside the allowed scope (AppStore.swift for a persisted first-run flag, WavesApp.swift/MainWindowView/MenuBarMixerView for presentation and the affordance)",
+          "disposition": "deferred:needs-feature:Correct fix needs a persisted first-run flag in AppStore.swift and presentation/affordance wiring in WavesApp/MainWindowView/MenuBarMixerView — all outside the ",
           "uid": "ONB-01#3",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         },
@@ -8181,7 +8193,7 @@
           "suggestedFix": "Add a dedicated capture-permission step driven by onboarding.permissionsGranted with an 'Allow audio recording in System Settings' action, or fold permissionsGranted into step 0 so 'Confirm managed audio support' requires both supportsPerAppRouting AND captureAuthorization == .authorized.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Mixed unit: the recovery-toast half (ONB-04#1/SETUP-04#1) is a safe localized fix, but ONB-01#1 and ONB-02#1 change the onboarding checklist's definition of 'ready' and its step structure (new capture-permission step/action), which is a product/UX decision and touches backendStatus semantics shared with the backend. Defer as a whole so the checklist-readiness change is designed coherently; the recovery-toast piece can be split out and fixed now if scoped separately.",
+          "disposition": "deferred:needs-feature:Adding a capture-permission step/action or redefining step-0 completion is a new onboarding feature and UX decision, not a behavior-preserving edit.",
           "uid": "ONB-02#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -8312,9 +8324,12 @@
           "suggestedFix": "After recoverRoutes() returns, branch on the resulting onboarding.routeHealthReady (or returned backendStatus): show success only if route health is now ready; otherwise show a warning/error toast naming the unmet prerequisite (capture permission denied / no device) and pointing the user to grant capture permission.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Mixed unit: the recovery-toast half (ONB-04#1/SETUP-04#1) is a safe localized fix, but ONB-01#1 and ONB-02#1 change the onboarding checklist's definition of 'ready' and its step structure (new capture-permission step/action), which is a product/UX decision and touches backendStatus semantics shared with the backend. Defer as a whole so the checklist-readiness change is designed coherently; the recovery-toast piece can be split out and fixed now if scoped separately.",
+          "disposition": "iter2:fixed",
           "uid": "ONB-04#1",
-          "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
+          "canonicalFile": "Sources/Waves/Stores/AppStore.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         },
         {
           "severity": "medium",
@@ -8462,7 +8477,7 @@
           "suggestedFix": "Surface session.backendStatus.lastError (or a dedicated 'backend failed to start' banner) within OnboardingView when start() failed, with an explicit retry affordance that re-invokes start().",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:The substantive fix — a persistent 'backend failed to start' banner with an explicit retry affordance inside the Setup tab — must be built in OnboardingView.swift (surfacing session.backendStatus.last",
+          "disposition": "deferred:needs-feature:The retry banner is a new UI surface in OnboardingView.swift, outside the allowed file.",
           "uid": "ONB-06#1",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -8545,7 +8560,7 @@
           "suggestedFix": "Add a standard Help menu command (CommandGroup(replacing: .help)) that calls openSettings() and selects the Help tab, or add a '?' toolbar item in MainWindowView that opens Settings to Help.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:The issue itself records that the story explicitly accepts Settings-only reachability (acceptance: \"There is no other entry point to Help besides the Settings tab\"), so this is a discoverability/UX enhancement request rather than a contract violation. It is intentional per spec, so adding entry points is a product decision, not a defect fix.",
+          "disposition": "deferred:needs-user-decision:The story explicitly accepts Settings-only reachability, so adding a Help-menu command or toolbar '?' is an intentional product enhancement, not a contract viol",
           "uid": "HELP-01#2",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -8933,7 +8948,7 @@
           "suggestedFix": "Disable Copy Diagnostics while store.diagnostics == nil, or have copyDiagnosticsToPasteboard await a fresh diagnosticsReport() before composing the text so Checks is always present.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:Requires a product/architecture decision about how genuine backend-degraded errors should surface (banner-in-cards vs. nullable report contract) and coordinates changes across AppStore, the backend, and the mixer panel. The DIAG-02#2 sub-part (disable Copy / await fresh report) is a safe localized fix, but it is entangled with the same diagnostics==nil window the other two findings address, so it should land as one coherent decision rather than a piecemeal toggle. Not a safe, isolated SettingsView-only change.",
+          "disposition": "deferred:needs-user-decision:Entangled with the same diagnostics==nil window as SET-08/DIAG-03; the safe disable/await fix should land as one coherent decision (Copy gating vs. awaiting a f",
           "uid": "DIAG-02#2",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         },
@@ -9016,7 +9031,7 @@
           "suggestedFix": "Give the mixer DiagnosticsPanel an explicit empty/loading state mirroring DiagnosticsUnavailableView, or let diagnosticsReport()/refreshDiagnostics return nil on real backend failure so the unavailable state is genuinely reachable.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:Requires a product/architecture decision about how genuine backend-degraded errors should surface (banner-in-cards vs. nullable report contract) and coordinates changes across AppStore, the backend, and the mixer panel. The DIAG-02#2 sub-part (disable Copy / await fresh report) is a safe localized fix, but it is entangled with the same diagnostics==nil window the other two findings address, so it should land as one coherent decision rather than a piecemeal toggle. Not a safe, isolated SettingsView-only change.",
+          "disposition": "deferred:needs-user-decision:Fix requires a product/architecture decision on the nullable-report contract and a new mixer-panel empty state in MainWindowView (out of scope); not an isolated",
           "uid": "DIAG-03#2",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         }
@@ -9135,9 +9150,12 @@
           "suggestedFix": "Delete isReadyForEverydayUse, or have OnboardingView.isFullyComplete delegate to store.onboarding.isReadyForEverydayUse so there is a single source of truth for completeness.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Whether to delete the dead property or unify the two gates (which would change the user-facing 'complete' criterion from audioComponentInstalled to permissionsGranted) is a product/design decision about onboarding completeness semantics.",
+          "disposition": "iter2:fixed",
           "uid": "DIAG-05#2",
-          "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
+          "canonicalFile": "Sources/Waves/Stores/AppStore.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         },
         {
           "severity": "low",
@@ -9353,7 +9371,7 @@
           "suggestedFix": "Drive outputDeviceVisible from the presence of a real device (e.g. !availableOutputDevices().isEmpty, or a synthesized-vs-real flag on AudioDevice) and do not let the synthetic 'System Output' fallback satisfy the visibility check.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:The synthetic fallback exists deliberately so downstream code always has a non-nil device; removing/flagging it touches a shared model field (AudioDevice) and the store's onboarding logic, and risks regressing other consumers of currentDevice. Needs a deliberate design decision and cross-file coordination, not a localized patch.",
+          "disposition": "deferred:needs-user-decision:The synthetic fallback is deliberate so downstream consumers always have a non-nil currentDevice; changing the no-device signal needs a model/flag decision and ",
           "uid": "SETUP-03#1",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         },
@@ -9420,9 +9438,12 @@
           "suggestedFix": "After recoverRoutes, branch on session.backendStatus.isRouteRecoveryHealthy: show success only when true; otherwise show a warning toast naming the real blocker (e.g. 'Audio capture not granted — open Microphone settings').",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Mixed unit: the recovery-toast half (ONB-04#1/SETUP-04#1) is a safe localized fix, but ONB-01#1 and ONB-02#1 change the onboarding checklist's definition of 'ready' and its step structure (new capture-permission step/action), which is a product/UX decision and touches backendStatus semantics shared with the backend. Defer as a whole so the checklist-readiness change is designed coherently; the recovery-toast piece can be split out and fixed now if scoped separately.",
+          "disposition": "iter2:fixed",
           "uid": "SETUP-04#1",
-          "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
+          "canonicalFile": "Sources/Waves/Stores/AppStore.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         },
         {
           "severity": "low",
@@ -9673,7 +9694,7 @@
           "suggestedFix": "Remove .labelsHidden() so the inline \"Launch at login\" label renders, or add a small visible caption (e.g. a leading Text or a .help tooltip) next to the switch, keeping the accessibilityLabel for VoiceOver.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:Acceptance criteria (shared binding + VoiceOver label) are already met; this is a cosmetic/clarity improvement where the right remedy is a layout/design choice (inline label vs. caption vs. tooltip) and removing .labelsHidden() could overflow or unbalance the existing footer HStack. Best handled as a small design pass rather than an unambiguous bug fix.",
+          "disposition": "deferred:needs-user-decision:Cosmetic clarity fix whose correct form is a design/layout choice not verifiable by reading code alone.",
           "uid": "LOGIN-02#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         }
@@ -9772,7 +9793,7 @@
           "suggestedFix": "When the status indicates .requiresApproval, add a persistent status row/banner in GeneralSettingsView showing status.statusDescription plus a button that opens the Login Items pane via SMAppService.openSystemSettingsLoginItems() (or the x-apple.systempreferences Login Items URL). Consider a non-auto-dismissing message for this case.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:This is a UX/feature addition (new persistent banner + deep link in SettingsView) requiring a design decision on placement and copy, not a localized defect fix; the core fix file is the Settings view, not AppStore.",
+          "disposition": "deferred:needs-feature:New banner + deep link belongs in the Settings view, outside AppStore.swift, and needs a design decision.",
           "uid": "LOGIN-04#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         },
@@ -9786,7 +9807,7 @@
           "suggestedFix": "Surface the SMAppService.Status (not just a Bool) in the UI: show a persistent \"Requires approval\" caption/row in GeneralSettingsView when status is .requiresApproval, so the resting toggle state is not silently misleading after a reconcile.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Services/LoginItem/LoginItemService.swift",
-          "disposition": "deferred:UX/state-surfacing feature spanning the service, AppStore reconcile, and Settings UI with new user-facing copy — a design decision, not an unambiguous localized fix. The resting behavior is misleading but safe (re-toggling re-triggers the approval toast), so it is beyond a minimal behavior-preserving change.",
+          "disposition": "deferred:needs-user-decision:State-surfacing UX spanning service + reconcile + Settings copy.",
           "uid": "LOGIN-04#3",
           "canonicalFile": "Sources/Waves/Services/LoginItem/LoginItemService.swift"
         }
@@ -9834,9 +9855,12 @@
           "suggestedFix": "Call persistPreferences() at the end of syncOnboarding after writing preferences.launchAtLoginEnabled (guarded by a change check to avoid redundant writes on every refresh), or have the callers persist preferences when the value changed.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:The persist-on-reconcile sub-fix (LOGIN-05#1) is safe and localized, but the staleness sub-fixes require wiring a new lifecycle observer (didBecomeActive/scenePhase) or view onAppear across files — a broader change with its own teardown/duplicate-reconcile considerations — and the issues note impact is limited (init always re-overwrites from OS status, so a stale on-disk value is harmless next launch). The cluster is best handled as one deliberate change rather than a drive-by. If splitting, LOGIN-05#1 alone could be fix-now.",
+          "disposition": "iter2:fixed",
           "uid": "LOGIN-05#1",
-          "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
+          "canonicalFile": "Sources/Waves/Stores/AppStore.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         },
         {
           "severity": "low",
@@ -9848,7 +9872,7 @@
           "suggestedFix": "Re-read loginItemService.status and update preferences/onboarding when the app/window becomes active — observe NSApplication.didBecomeActiveNotification or use SwiftUI .onChange(of: scenePhase) to run a lightweight reconcile of launchAtLoginEnabled.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:The persist-on-reconcile sub-fix (LOGIN-05#1) is safe and localized, but the staleness sub-fixes require wiring a new lifecycle observer (didBecomeActive/scenePhase) or view onAppear across files — a broader change with its own teardown/duplicate-reconcile considerations — and the issues note impact is limited (init always re-overwrites from OS status, so a stale on-disk value is harmless next launch). The cluster is best handled as one deliberate change rather than a drive-by. If splitting, LOGIN-05#1 alone could be fix-now.",
+          "disposition": "deferred:needs-feature:Toggle shows stale state on external mid-session login-item changes. Requires wiring a new app/window-active observer (NSApplication.didBecomeActive or scenePha",
           "uid": "LOGIN-05#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -10034,7 +10058,7 @@
           "suggestedFix": "Add a 'Restore built-in presets' action in SettingsView's preset section that re-adds any missing default-named presets, or re-seed missing defaults on load.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Persistence/PresetStore.swift",
-          "disposition": "deferred:Requires a product/design decision and is a feature-request: auto re-seeding would override an intentional user deletion (behavior change with surprise factor), while the alternative adds new Settings UI. Neither is a safe localized fix; owner must decide the desired semantics.",
+          "disposition": "deferred:needs-user-decision:Either-or fix; both options need a product decision on intended semantics.",
           "uid": "PERSIST-03#1",
           "canonicalFile": "Sources/Waves/Services/Persistence/PresetStore.swift"
         },
@@ -10189,9 +10213,12 @@
           "suggestedFix": "Either remove removeDevice as dead code, or wire periodic pruning (drop device entries not seen in availableDevices and app entries whose logicalID no longer appears) and call it on startup/device-change.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/UserPreferences.swift",
-          "disposition": "deferred:Requires a product decision: the suggestedFix is explicitly either-or (delete the dead method vs. build a pruning/management feature). Option B is a feature-request (new Settings UI + device-change pruning touching AppStore) with non-localized behavior change and possible data loss; deleting the method silently endorses unbounded growth. Owner must choose scope; not an unambiguous localized fix.",
+          "disposition": "iter2:fixed",
           "uid": "PERSIST-05#2",
-          "canonicalFile": "Sources/Waves/Stores/UserPreferences.swift"
+          "canonicalFile": "Sources/Waves/Stores/UserPreferences.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter2-deferred-reduction",
+          "fixTier": "iter2"
         },
         {
           "severity": "low",
@@ -10588,7 +10615,7 @@
           "suggestedFix": "Either remove the orphan .contentShape(Rectangle()), or add .onTapGesture { store.dismissToast(id: toast.id) } to the banner body to make tap-anywhere-to-dismiss real and enlarge the hit target.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Shared/UI/AppToasts.swift",
-          "disposition": "deferred:Requires a product/interaction decision: tap-to-dismiss is a behavior change (a transient banner that vanishes on any tap may conflict with future interactive content or accidental dismissal), while simply deleting the modifier is a no-op cleanup. Because the 'correct' resolution depends on intended UX rather than being an unambiguous bug fix, defer for a design call. (If the owner only wants the dead-modifier cleanup, option A is a safe one-line removal.)",
+          "disposition": "deferred:needs-user-decision:Modifier is not purely dead (interacts with combined a11y element); fix depends on intended UX.",
           "uid": "TOAST-05#1",
           "canonicalFile": "Sources/Waves/Shared/UI/AppToasts.swift"
         }
@@ -10633,7 +10660,7 @@
           "suggestedFix": "Attach an announcement priority for higher-severity kinds (AttributedString with .accessibilitySpeechAnnouncementPriority(.high) for .error/.warning) and/or serialize announcements so they queue rather than interrupt; ensure a toast isn't evicted before its announcement is delivered.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Shared/UI/AppToasts.swift",
-          "disposition": "deferred:Cross-file architectural change moving announcement ownership from the SwiftUI banner into AppStore and coordinating with two mount sites (MainWindowView, MenuBarMixerView). It needs design decisions (which severities get .high priority, whether to serialize/queue announcements, whether to hold off eviction until an announcement is delivered, and OS-availability gating for the priority API), and it could alter announcement timing/behavior broadly. Not a safe, localized fix; warrants its own scoped task. Both issues are confidence 'likely', not 'confirmed'.",
+          "disposition": "deferred:needs-user-decision:Cross-file a11y architecture change with multiple design decisions.",
           "uid": "TOAST-06#1",
           "canonicalFile": "Sources/Waves/Shared/UI/AppToasts.swift"
         },
@@ -10647,7 +10674,7 @@
           "suggestedFix": "Post the VoiceOver announcement from a single owner (e.g. in showToast itself, once, rather than per-banner onAppear), and/or render only one AppToastStack for the key window / gate the menu-bar stack so toasts aren't duplicated across simultaneously-visible surfaces.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:The canonicalFile is MenuBarMixerView but the clean fix spans AppStore.swift (move announcement into showToast) and AppToasts.swift (remove per-banner onAppear post), and the visible-duplicate half needs a design decision about which surface owns toast presentation when both are on screen. This requires coordination with the toast ownership model rather than a localized MenuBarMixerView edit; flag as a cross-file unit for the owner to scope.",
+          "disposition": "deferred:needs-user-decision:Cross-file (AppStore + AppToasts) fix plus a toast-ownership design decision; not a localized MenuBarMixerView edit.",
           "uid": "TOAST-06#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         }
@@ -10864,7 +10891,7 @@
           "suggestedFix": "Add accessibilityAction(s) for output routing, e.g. a 'Use System Default Output' action plus per-device actions, mirroring the context-menu submenu.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:SwiftUI accessibilityAction does not support nested submenus, so exposing a variable device list as a flat set of rotor actions is a non-trivial design/UX decision (enumeration, naming, empty state). The story's enumerated acceptance criteria (pin/exclude/dismiss) are already satisfied, so this is a parity gap against intent rather than a hard criterion failure.",
+          "disposition": "deferred:needs-user-decision:Flat-action enumeration of a dynamic device list needs a deliberate UX design call.",
           "uid": "A11Y-03#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -10942,7 +10969,7 @@
           "suggestedFix": "Drive the announcement once from the store when a toast is appended (post in showToast on the main actor) instead of from each banner's onAppear; or guard so only the key window's stack owns announcements.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Shared/UI/AppToasts.swift",
-          "disposition": "deferred:Cross-file architectural change moving announcement ownership from the SwiftUI banner into AppStore and coordinating with two mount sites (MainWindowView, MenuBarMixerView). It needs design decisions (which severities get .high priority, whether to serialize/queue announcements, whether to hold off eviction until an announcement is delivered, and OS-availability gating for the priority API), and it could alter announcement timing/behavior broadly. Not a safe, localized fix; warrants its own scoped task. Both issues are confidence 'likely', not 'confirmed'.",
+          "disposition": "deferred:needs-user-decision:Needs store-owned announcement coordinated across two mount sites.",
           "uid": "A11Y-05#1",
           "canonicalFile": "Sources/Waves/Shared/UI/AppToasts.swift"
         }
@@ -11045,7 +11072,7 @@
           "suggestedFix": "Optionally add a short visible label/abbreviation beside the compact dot, or document that the distinct glyph shapes carry the meaning and color is supplementary.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:The compact menu-bar layout is space-constrained and the issue itself notes the glyph shapes already differ per state (color is supplementary, not the sole channel). Whether to add text labels in that tight layout is a design decision, and the mitigating factor means it is not an unambiguous failure.",
+          "disposition": "deferred:needs-user-decision:Space-constrained layout; glyph shapes already carry meaning, so adding text is a design call.",
           "uid": "A11Y-07#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -11118,7 +11145,7 @@
           "suggestedFix": "Either fully remove the dead surface (delete setVolumeControlMode from AudioControlBackend and both backends, remove AudioDevice.volumeControlMode and the VolumeControlMode enum, drop the README promises), or re-add a UI control, persist the chosen mode, and make the routing layer actually read volumeControlMode.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
-          "disposition": "deferred:This is a product decision (kill the documented 'Smart Volume Backend' feature vs build it) and a broad, cross-file change touching the AudioControlBackend protocol, both backends, the AudioDevice model, and the README. It is a feature-gap/dead-surface question, not a localized defect with a safe fix.",
+          "disposition": "deferred:needs-feature:setVolumeControlMode is a no-op writing an unread field, but resolving it means either deleting surface across AudioControlBackend.swift, PreviewAudioControlBac",
           "uid": "AUDIO-01#1",
           "canonicalFile": "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift"
         },
@@ -11234,7 +11261,7 @@
           "suggestedFix": "Either implement real recency (track a last-active timestamp per app and sort/limit by it), or rename the scope to 'Inactive' / 'Not Playing', change the clock icon, and adjust the empty/section copy to match.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Stores/AppStore.swift",
-          "disposition": "deferred:Neither suggested option is achievable in AppStore.swift alone. Real recency needs a last-active timestamp field on the AudioApp model (Sources/WavesAudioCore/Models/AudioApp.swift) plus backend popul",
+          "disposition": "deferred:needs-feature:Neither option is achievable in AppStore.swift alone; requires model/backend changes or a UX rename across files.",
           "uid": "DISC-08#2",
           "canonicalFile": "Sources/Waves/Stores/AppStore.swift"
         }
@@ -11312,7 +11339,7 @@
           "suggestedFix": "List the in-row keys (space/m mute, =/- volume, b boost, p pin) in HelpView and/or the Settings keyboard-shortcuts section, or surface them via per-row accessibility hints / a help overlay.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:WIN-09#1 is a documentation task spanning HelpView and SettingsView (deciding placement/wording), and WIN-09#3 is a deliberate UX tradeoff (single-key actions vs type-select) whose fix would alter the existing intended shortcut model. Both need a product decision and coordination across files; neither is an unambiguous localized defect. (Note: gating these keys on the enable-shortcuts preference is handled separately in FU-INLIST-KEYS-RESPECT-PREFERENCE.)",
+          "disposition": "deferred:needs-user-decision:Documentation task spanning other files (Help/Settings) with wording/placement choices.",
           "uid": "WIN-09#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         },
@@ -11343,7 +11370,7 @@
           "suggestedFix": "Require a modifier for the action keys, or scope these handlers so they don't shadow list type-select, or document the tradeoff clearly.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:WIN-09#1 is a documentation task spanning HelpView and SettingsView (deciding placement/wording), and WIN-09#3 is a deliberate UX tradeoff (single-key actions vs type-select) whose fix would alter the existing intended shortcut model. Both need a product decision and coordination across files; neither is an unambiguous localized defect. (Note: gating these keys on the enable-shortcuts preference is handled separately in FU-INLIST-KEYS-RESPECT-PREFERENCE.)",
+          "disposition": "deferred:needs-user-decision:Changing the single-key-vs-type-select tradeoff alters the intended shortcut model; a product decision.",
           "uid": "WIN-09#3",
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         }

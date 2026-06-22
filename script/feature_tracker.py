@@ -352,6 +352,40 @@ def merge_retest(output_file):
     return data["meta"]["phase4"], Counter(f.get("file") for f in followups)
 
 
+def merge_iter2(output_file):
+    """Record the deferred-reduction pass (fixed / still-deferred / skipped)."""
+    wrapper = json.loads(open(output_file, encoding="utf-8").read())
+    res = wrapper.get("result", wrapper)
+    if isinstance(res, str):
+        res = json.loads(res)
+    action, reason, cat = {}, {}, {}
+    for r in res.get("results", []):
+        for it in r.get("items", []):
+            action[it["uid"]] = it["action"]
+            reason[it["uid"]] = it.get("reason", "") or it.get("summary", "")
+            cat[it["uid"]] = it.get("deferCategory", "")
+    data = load()
+    changed = 0
+    for row in data["rows"]:
+        for i in row.get("issues", []):
+            a = action.get(i["uid"])
+            if not a:
+                continue
+            changed += 1
+            if a == "fixed":
+                i["fixStatus"] = "applied"
+                i["fixedBy"] = "iter2-deferred-reduction"
+                i["fixTier"] = "iter2"
+                i["disposition"] = "iter2:fixed"
+            elif a == "still-deferred":
+                c = cat.get(i["uid"]) or "needs-user-decision"
+                i["disposition"] = f"deferred:{c}:" + (reason.get(i["uid"], "")[:160])
+    data["meta"]["phase"] = "iter2-deferred-reduced"
+    save(data)
+    render()
+    return {"changed": changed}
+
+
 def stats():
     data = load()
     rows = data["rows"]
@@ -376,6 +410,9 @@ if __name__ == "__main__":
     elif cmd == "merge_gapfill":
         m = merge_gapfill(sys.argv[2])
         print("Merged gapfill:", m)
+    elif cmd == "merge_iter2":
+        m = merge_iter2(sys.argv[2])
+        print("Merged iter2:", m)
     elif cmd == "render":
         render()
     elif cmd == "stats":
