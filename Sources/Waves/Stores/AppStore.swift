@@ -681,12 +681,18 @@ final class AppStore {
         mergeAppStateAndSyncOnboarding(from: backendSession, appID: appKey)
         diagnostics = await backend.diagnosticsReport()
         persistSessionSnapshot()
-        showToast(
-          title: "Boost updated",
-          detail: "\(appName): \(Int(clampedBoost))x",
-          kind: .success,
-          duration: .seconds(1.1)
-        )
+        // Only confirm success when a managed route actually carries the boost.
+        // On an unsupported OS the app stays monitor-only and the boost cannot
+        // affect audio, so suppress the misleading toast (mirrors volume/mute).
+        if let idx = session.apps.firstIndex(matchingAppKey: appKey),
+          session.apps[idx].routingState == .managed {
+          showToast(
+            title: "Boost updated",
+            detail: "\(appName): \(Int(clampedBoost))x",
+            kind: .success,
+            duration: .seconds(1.1)
+          )
+        }
       } catch {
         let backendSession = await backend.currentSnapshot()
         mergeAppState(from: backendSession, appID: appKey)

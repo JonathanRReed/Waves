@@ -97,14 +97,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let previousMuted = snapshot.apps[index].isMuted
     snapshot.apps[index].isMuted = isMuted
 
-    // Unsupported OS: stay monitor-only instead of attempting a doomed route
-    // that would throw and flash an error chip + toast (see setDesiredVolume).
+    // Unsupported OS: Waves can't mute per-app below macOS 14.2, so don't claim
+    // a mute that isn't real — revert the flag (mirrors the apply-failure path)
+    // and stay monitor-only. Otherwise the row would show the muted glyph while
+    // the app is still audible. The store gates its success toast on .managed,
+    // so no misleading "muted" confirmation is shown.
     guard supportsPerAppRouting else {
+      snapshot.apps[index].isMuted = previousMuted
       snapshot.apps[index].routingState = .monitorOnly
       snapshot.apps[index].notes = "Per-app route requires macOS 14.2+"
-      snapshot.apps[index].peakLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].peakLevel)
-      snapshot.apps[index].rmsLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].rmsLevel)
-      snapshot.apps[index].appliedVolume = isMuted ? 0 : snapshot.apps[index].desiredVolume
       return
     }
 
@@ -430,6 +431,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     controllers[app.id] = controller
     controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
+    // A freshly-created process tap proves capture is currently authorized, so
+    // refresh the cached state. Otherwise refreshGlobalRouteHealth() (called by
+    // the per-app setters right after this) would recompute health from a stale
+    // .notGranted/.undetermined and leave route health/onboarding warning even
+    // though the route just succeeded.
+    captureAuthorization = .authorized
   }
 
   private func createControllerWithRetry(for app: AudioApp, processObjectIDs: [AudioObjectID]) async throws -> PerAppTapController {
