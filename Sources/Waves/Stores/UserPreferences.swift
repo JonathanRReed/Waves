@@ -104,10 +104,6 @@ struct DeviceVolumePresets: Codable, Sendable {
   func getVolumeSettings(for appID: String, deviceID: String) -> AppVolumeSettings? {
     deviceVolumes[deviceID]?[appID]
   }
-
-  mutating func removeDevice(_ deviceID: String) {
-    deviceVolumes.removeValue(forKey: deviceID)
-  }
 }
 
 enum SortMode: String, Codable, CaseIterable, Identifiable, Sendable {

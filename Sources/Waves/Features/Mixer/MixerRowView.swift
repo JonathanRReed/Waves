@@ -144,13 +144,22 @@ struct MixerRowView: View {
             if app.targetDeviceUID == nil { Label("System Default", systemImage: "checkmark") }
             else { Text("System Default") }
           }
-          if !store.availableDevices.isEmpty { Divider() }
-          ForEach(store.availableDevices) { device in
-            Button {
-              store.setOutputDevice(device, for: app)
-            } label: {
-              if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") }
-              else { Text(device.name) }
+          if store.availableDevices.isEmpty {
+            Divider()
+            // Mirror the menu-bar OutputDevicePicker's empty state so the
+            // per-app submenu doesn't silently collapse to just "System
+            // Default" when no real output devices are available.
+            Text("No output devices found")
+              .accessibilityLabel("No output devices found")
+          } else {
+            Divider()
+            ForEach(store.availableDevices) { device in
+              Button {
+                store.setOutputDevice(device, for: app)
+              } label: {
+                if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") }
+                else { Text(device.name) }
+              }
             }
           }
         }
