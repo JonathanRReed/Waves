@@ -1,7 +1,7 @@
 {
   "meta": {
     "app": "Waves",
-    "phase": "iter2-deferred-reduced",
+    "phase": "iter3-ui-parity",
     "totalStories": 176,
     "coverageNotes": "Reviewed the entire Sources tree (Waves + WavesAudioCore) and all root docs (README, PRODUCT, DESIGN, CHANGELOG, PRIVACY, SECURITY, CONTRIBUTING). The 171 captured stories are accurate and cover the vast majority of user-facing surface: every public AppStore func, every Settings toggle, the menu-bar panel, URL-scheme commands, global hotkeys, presets, exclusions, onboarding, diagnostics, accessibility, and persistence are represented.\n\nThe five items above are the only genuinely uncaptured user-facing behaviors I found, ordered by confidence:\n\n1. AUDIO-01 (highest-value finding): The volume-control-mode (hardware/software/automatic) capability is a documented-but-dead feature. The UI picker was removed (CHANGELOG line 39 confirms it was a no-op) yet the backend protocol method setVolumeControlMode, the VolumeControlMode enum, AudioDevice.volumeControlMode, and TWO README claims ('Smart Volume Backend' line 16; 'Choose the preferred route-control mode' line 163) all remain. No view calls setVolumeControlMode (verified by grep). This is both a missing story AND a stale-README/dead-code issue worth flagging for cleanup.\n\n2-3. DISC-07 / DISC-08: The 'Show system processes' and 'Show recent apps' toggles each drive a distinct list-population/grouping behavior (system-category inclusion; the Recent computed set used as a sidebar scope + menu-bar section). They are only loosely folded under the catch-all SET-02 'General preferences toggles', so I surfaced them as distinct discovery behaviors.\n\n4. WIN-08: Sidebar scope is persisted via @SceneStorage and restored across launches — a UX-continuity behavior not covered by the existing session/preference persistence stories.\n\n5. WIN-09 (lowest confidence; partial overlap with WIN-07/BOOST-03): in-list onKeyPress handlers include 'b' (cycle boost, wrapping 4x->1x) and 'p' (toggle pin) on the selected row. Pin-via-keyboard and the in-window boost-cycle key are not separately captured. If WIN-07's 'keyboard-driven control' is read broadly this is a duplicate, so treat it as a candidate rather than a certain gap.\n\nThings I explicitly checked and confirmed are NOT gaps (already covered): @AppStorage('showMenuBarExtra') menu-bar visibility = MENU-06; Cmd-S save-preset + sheet = PRE-01/WIN-04; Cmd-R refresh = WIN-04/MENU; preset context-menu delete in sidebar = PRE-03; versioned persistence envelope = PERSIST-06; Homebrew cask (Casks/waves.rb) and notarized release CI are distribution/build, not in-app user features. No EQ, spatial audio, recording, sleep/wake-specific, or notification features exist in the code (consistent with PRODUCT.md positioning as 'a mixer, not an EQ suite or recorder').",
     "implDist": {
@@ -402,7 +402,7 @@
           "suggestedFix": "Base the empty card on store.visibleApps.isEmpty rather than the Live/Recent/Pinned sections, and/or keep a minimal running list visible in the menu bar when Recent is disabled.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:needs-user-decision:Requires a product call on intended menu-bar behavior when recent apps are disabled before any predicate change is safe.",
+          "disposition": "deferred:needs-user-decision:Fix is a product fork: gating the empty card on visibleApps.isEmpty would show the card correctly but still render zero app rows (apps exist",
           "uid": "DISC-06#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         },
@@ -1164,7 +1164,7 @@
           "suggestedFix": "Include muted managed apps in a menu-bar section regardless of showRecentApps (e.g. surface muted apps under Live or a dedicated 'Muted' group) so they can be unmuted from the menu.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:needs-user-decision:Where and under what heading to expose muted apps in the compact panel is a product/design decision.",
+          "disposition": "deferred:needs-user-decision:Surfacing it needs a new section/heading (where and under what label muted apps appear) — a design choice, not reuse of an existing list (li",
           "uid": "MUTE-06#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         },
@@ -1919,7 +1919,7 @@
       "source": "phase1-story",
       "testStatus": "4 issue(s) [2H 1M 1L]",
       "errorsFound": "• [HIGH/correctness] A failed volume change does not leave a persistent Error chip/note (unlike mute/boost) (Sources/Waves/Stores/AppStore.swift:443-460) — Re-verified. On a failed volume apply the backend's setDesiredVolume sets the app to .error with notes (WorkspaceAudioControlBackend.swift:76-77) before throwing. The store's scheduleVolumeApply catch (AppStore.swift:443-460) shows the \"Volume change failed\" toast, then calls self.session = try await self.backend.refresh() (453). refresh() rebuilds via buildSnapshot whose merge (999-1014) does NOT carry over previous.routingState/notes, and whose per-index loop resets a no-controller, non-.live app back to .monitorOnly with notes=nil (1051-1054), discarding the .error the backend just set. By contrast setMuted/setVolumeBoost catch blocks use backend.currentSnapshot() + mergeAppState (AppStore.swift:535-536,581-582); mergeAppState (1417-1436) copies the single backend app verbatim, preserving .error + notes. Confirmed and the inconsistency with mute/boost is real. | Fix: In the volume-failure path, mirror setMuted/setVolumeBoost: replace backend.refresh() with backend.currentSnapshot() + mergeAppState(from:appID:) so the .error state and notes set by the backend are preserved and rendered.\n• [HIGH/correctness] Any plain refresh silently clears Error chips/notes without a successful re-apply (Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift:1048-1054) — Re-verified. buildSnapshot's merge (WorkspaceAudioControlBackend.swift:999-1014) carries over volume/mute/pin/boost/targetDevice but NOT routingState or notes, and the per-index loop (1051-1054) resets any non-controller, non-.live app to .monitorOnly with notes=nil. buildSnapshot runs on every backend.refresh() (store.refresh() AppStore.swift:242, the Cmd-R toolbar at MainWindowView.swift:39) and on every autoRestoreDevice() (device-change). So after a real route failure has correctly shown an Error chip, the next refresh (which can be user- or system-triggered with no successful apply) clears the chip and inline reason. Note buildSnapshot also recomputes isRouteRecoveryHealthy = !hasRouteErrors (1089), so the global RouteHealthBadge also flips back to green after the same refresh. Confirmed. | Fix: Preserve previous.routingState==.error and previous.notes across buildSnapshot for apps rediscovered with no active controller, OR re-probe/re-apply the route during rebuild so the error clears only when the route actually recovers.\n• [MEDIUM/accessibility] \"Needs attention\" rotor under-reports errored apps in non-Running filters (Sources/Waves/Features/Mixer/MainWindowView.swift:393-397) — Re-verified. The rotor filters the view-local `apps` array for routingState==.error (MainWindowView.swift:393-397). `apps` is bound to filteredApps (line 20), which equals scopedApps when not searching; scopedApps is store.visibleApps only for .running, but store.liveApps for .frontmost, store.pinnedApps for .pinned, and store.recentApps for .recent (MainWindowView.swift:102-113). An errored app is not .live, may not be pinned, and recentApps is empty when showRecentApps is off. So on any tab other than Running the rotor omits errored apps outside that scoped subset, defeating the accessibility affordance for VoiceOver users. Confirmed. | Fix: Build the rotor from store.visibleApps.filter { $0.routingState == .error } (all visible apps) rather than the view-scoped `apps`, so it always enumerates every errored app regardless of the active filter. (Severity raised to medium: this is the only programmatic affordance that groups errored apps, so the gap fully blocks VoiceOver users from reaching them in 3 of 4 tabs.)\n• [LOW/ux] Errored apps have no on-screen failure reason in the menu bar surface (Sources/Waves/Features/Mixer/MixerRowView.swift:483-511) — Re-verified. The inline failure note renders only in the full MixerRowView when routingState==.error (MixerRowView.swift:111-116). CompactMixerRow (menu bar) shows only RoutingStateDot, a red exclamation-triangle for .error with no notes text (483-511). Additionally the menu bar lists only Pinned/Live/Recent CompactSections (MenuBarMixerView.swift:42-50); a non-live errored app falls into recentApps only if showRecentApps is on (recentApps = visibleApps minus live), so with showRecentApps off an errored, unpinned, non-audible app does not appear at all — a menu-bar-only user gets no indication of the failure. Confirmed. | Fix: Surface the error reason in the compact row (tooltip/secondary line on the dot) and/or always include errored apps in a menu-bar \"Needs attention\" section independent of showRecentApps.",
-      "fixStatus": "3 fixed · 1 deferred",
+      "fixStatus": "4 fixed",
       "fixNotes": "tier1: FU-REFRESH-CLEARS-ERRORS; FU-VOLUME-ERROR-CHIP | tier2: FU-NEEDS-ATTENTION-ROTOR-SCOPE",
       "retestStatus": "PASS",
       "issues": [
@@ -1984,9 +1984,12 @@
           "suggestedFix": "Surface the error reason in the compact row (tooltip/secondary line on the dot) and/or always include errored apps in a menu-bar \"Needs attention\" section independent of showRecentApps.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-user-decision:Requires design agreement on a new menu-bar section and how the failure reason is shown.",
+          "disposition": "iter3:implemented",
           "uid": "ROUTE-02#4",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         }
       ]
     },
@@ -2138,7 +2141,7 @@
           "suggestedFix": "Either suppress the meter for live-unmanaged apps (show only when real levels exist), or source a lightweight level for live-unmanaged apps so the meter reflects actual audio, keeping subtitle and meter consistent.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-user-decision:Option (a) is a product decision on showing no meter; option (b) is a backend audio-acquisition change out of scope.",
+          "disposition": "deferred:needs-user-decision:Suppress-meter vs source-a-level is an explicit product fork; the new compact meter simply mirrors the main window's existing behavior, intr",
           "uid": "ROUTE-04#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         },
@@ -2152,7 +2155,7 @@
           "suggestedFix": "Drive both the subtitle and the meter from a single level source (e.g. compute the \"Playing audio\" predicate from store.liveLevels too), so they cannot diverge.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-user-decision:Threshold/source choice plus AppStore reorder risk need coordination and regression-testing.",
+          "disposition": "deferred:needs-user-decision:Requires threshold/source choice plus AppStore poll-reorder coordination across files (outside the allowed file) with regression risk.",
           "uid": "ROUTE-04#3",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -2371,7 +2374,7 @@
           "suggestedFix": "Add a kAudioHardwarePropertyDevices listener that yields a refresh, and/or call store.refreshOutputDevices() when the per-app Output Device menu appears, mirroring the menu-bar picker's onAppear.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-hardware:Audio-subsystem device-attach behavior can only be validated on real hardware; cross-file backend change.",
+          "disposition": "deferred:needs-hardware:Needs a new kAudioHardwarePropertyDevices listener and on-device hardware validation; cross-file backend change.",
           "uid": "OUT-01#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         },
@@ -2385,7 +2388,7 @@
           "suggestedFix": "When targetDeviceUID is non-nil but absent from availableDevices, surface the saved device as a disabled/checked '<name> (unavailable)' row using store.targetDevice(for:) fallback, so the active-but-missing choice is still indicated.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-feature:Needs persisted device-name storage plus a wording decision for the unavailable row.",
+          "disposition": "deferred:needs-feature:targetDevice(for:) returns nil when the device is absent, so the saved device name is not cheaply derivable without new persisted device-nam",
           "uid": "OUT-01#3",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -4357,7 +4360,7 @@
       "source": "phase1-story",
       "testStatus": "1 issue(s) [1L]",
       "errorsFound": "• [LOW/ux] Active search in the Pinned scope shows unpinned apps while the sidebar still reads \"Pinned\" with a pinned-only count (Sources/Waves/Features/Mixer/MainWindowView.swift:177) — filteredApps (MainWindowView.swift:115-130) searches store.visibleApps regardless of the selected scope, so when the Pinned filter is selected and the user types a query, the list can show apps that are not pinned. The sidebar selection still highlights 'Pinned' and its subtitle still reads e.g. '2 pinned apps' because the sidebar count comes from filter.count(in:) -> store.pinnedApps.count (MainWindowView.swift:177), which ignores the search query. (Note: the in-pane OutputSummaryView header at MainWindowView.swift:334/447 DOES reflect the widened filtered count, so the contradiction is specifically between the sidebar label/count and the list, not the pane header — the first tester slightly conflated the two counts.) This is intentional per the inline comment and is encoded as PIN-03 acceptance criterion 5, but there is no on-screen cue that search has widened the scope beyond pinned apps. | Fix: When a search query is active and the result set exceeds the selected scope, show a subtle hint (e.g. set the OutputSummaryView subtitle to 'Searching all apps', or update the sidebar count to reflect the matched set) so the widened scope is discoverable.",
-      "fixStatus": "1 deferred",
+      "fixStatus": "1 fixed",
       "fixNotes": "",
       "retestStatus": "PASS",
       "issues": [
@@ -4371,9 +4374,12 @@
           "suggestedFix": "When a search query is active and the result set exceeds the selected scope, show a subtle hint (e.g. set the OutputSummaryView subtitle to 'Searching all apps', or update the sidebar count to reflect the matched set) so the widened scope is discoverable.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:needs-user-decision:Labeling a cross-scope search is a UX/product decision, not a single unambiguous fix.",
+          "disposition": "iter3:implemented",
           "uid": "PIN-03#1",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         }
       ]
     },
@@ -4403,7 +4409,7 @@
       "source": "phase1-story",
       "testStatus": "2 issue(s) [1M 1L]",
       "errorsFound": "• [MEDIUM/inconsistency] Pinned apps are duplicated in the menu-bar panel — they also render under Live and/or Recent (Sources/Waves/Features/Mixer/MenuBarMixerView.swift:46) — MenuBarMixerView renders Pinned (MenuBarMixerView.swift:42-44), Live (46), and Recent (48-50) from store.pinnedApps, store.liveApps, and store.recentApps with no cross-section de-duplication. These collections are NOT mutually exclusive: liveApps (AppStore.swift:117-122) filters only on routingState/level and never excludes pinned apps; recentApps = visibleApps minus liveApps (AppStore.swift:124-128), again ignoring isPinned. So a pinned app that is playing renders in BOTH Pinned and Live; a pinned app that is not playing renders in BOTH Pinned and Recent (showRecentApps defaults to true, UserPreferences.swift:5). With default settings every pinned app appears twice, duplicating its CompactMixerRow controls. Confirmed against the source. | Fix: Exclude pinned logicalIDs from liveApps and recentApps when building the menu-bar sections (compute a partition: pinned first, then live-not-pinned, then recent-not-pinned-not-live), e.g. add a pinnedIDs Set and filter both.\n• [LOW/accessibility] No way to pin or unpin an app from the menu-bar panel (CompactMixerRow has no pin affordance) (Sources/Waves/Features/Mixer/MixerRowView.swift:259) — The pin/unpin entry points all live in the full MixerRowView: the context-menu Button (MixerRowView.swift:135-138), the VoiceOver accessibilityAction (MixerRowView.swift:163-165), and the 'p' key handler in the main-window list (MainWindowView.swift:386). CompactMixerRow (MixerRowView.swift:259-327), which is the row used by every menu-bar section including the Pinned section, has NO context menu, NO accessibility action, and NO pin glyph (verified: grep shows contextMenu/accessibilityAction/togglePinned only in the MixerRowView range). A user who works primarily from the menu-bar panel therefore cannot pin a new favorite or unpin an existing one without opening the main window, and a VoiceOver user navigating the menu-bar panel has no Pin/Unpin action and no 'Pinned' indicator there. Arguably a deliberate scoping decision (main window is the management surface), hence low severity, but it is an undocumented discoverability/accessibility gap for the menu-bar-first user the PIN-04 story targets. | Fix: Add a context-menu Pin/Unpin item and a matching accessibilityAction to CompactMixerRow (reusing store.togglePinned), so pins can be created/removed and announced from the menu-bar panel.",
-      "fixStatus": "1 fixed · 1 deferred",
+      "fixStatus": "2 fixed",
       "fixNotes": "tier1: FU-MENU-SECTION-DEDUP | tier2: FU-MENU-SECTION-DEDUP",
       "retestStatus": "PASS",
       "issues": [
@@ -4434,9 +4440,12 @@
           "suggestedFix": "Add a context-menu Pin/Unpin item and a matching accessibilityAction to CompactMixerRow (reusing store.togglePinned), so pins can be created/removed and announced from the menu-bar panel.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-user-decision:Whether the menu-bar panel should manage pins is a product scoping decision.",
+          "disposition": "iter3:implemented",
           "uid": "PIN-04#2",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         }
       ]
     },
@@ -4855,7 +4864,7 @@
           "suggestedFix": "Add keyboard handlers (e.g. Option+Up/Down on the selected row) that call store.reorderApps with the selected row's index, gated on Manual+Running+no-search, and expose an .accessibilityAction so VoiceOver users can move a row.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:needs-feature:New keyboard/VoiceOver reorder feature with keybinding-design choices; not behavior-preserving.",
+          "disposition": "deferred:needs-feature:New feature with keybinding-design choices, not an additive low-risk change reusing existing patterns; explicitly flagged to defer.",
           "uid": "ORDER-04#5",
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         },
@@ -5229,7 +5238,7 @@
       "source": "phase1-story",
       "testStatus": "2 issue(s) [1M 1L]",
       "errorsFound": "• [MEDIUM/inconsistency] Menu-bar mixer rows show no per-app level meter at all (only the main window does) (Sources/Waves/Features/Mixer/MixerRowView.swift:259-327) — The story's core promise is that 'each managed app's row shows a live cyan meter' and the AC says 'When a managed app is actively playing audio, its row shows a non-zero cyan meter.' The main-window MixerRowView renders the Capsule meter overlay reading store.liveLevels (MixerRowView.swift:122-134, 177-180), but the menu-bar surface uses CompactMixerRow (MenuBarMixerView.swift:191 -> MixerRowView.swift:259-327), which has NO meter overlay, no meterLevel, no showsLevelMeter, and no liveLevels read anywhere in MenuBarMixerView. A user living in the menu bar gets only a RoutingStateDot, never the moving cyan meter. Worse, MenuBarMixerView.onAppear calls beginLiveLevels() (MenuBarMixerView.swift:113), so when only the menu bar is open the 300ms poll runs and populates store.liveLevels with nothing on screen consuming it -- pure overhead that also undercuts LVL-02's near-zero-idle-CPU goal. This is a state desync between the menu-bar and main-window surfaces the first tester missed. | Fix: Render the same meter overlay (or an equivalent compact level indicator) in CompactMixerRow using store.liveLevels[app.logicalID], so the menu-bar surface honors the per-row meter feature; otherwise gate beginLiveLevels() to surfaces that actually draw meters so the menu-bar-only case does not poll needlessly.\n• [LOW/inconsistency] Worst-case meter latency (~550ms) exceeds the story's ~0.3-0.5s tracking window (Sources/Waves/Stores/AppStore.swift:621) — End-to-end refresh is the sum of two un-phase-aligned timers: the backend levelUpdateTask sleeps 250ms (WorkspaceAudioControlBackend.swift:1375) before copying controller levels into the snapshot, and the store poll sleeps 300ms (AppStore.swift:621) before reading audioLevels(). When a store poll fires just before a backend update lands, the displayed level is one full backend cycle stale, so worst-case visible lag is ~250+300 = ~550ms, beyond the ~0.3-0.5s acceptance bound. The bar also refreshes at only ~3fps (steps rather than glides) and there is no peak-hold/decay. Re-read of both timers confirms the math; the feature-status implNotes already acknowledge the ~550ms figure. | Fix: Drive the store poll from the backend's update cadence (e.g. an AsyncStream yielded on each updateAudioLevels), or shorten/align the two intervals (backend 100-150ms, store 100ms) so combined latency stays under 500ms. Add light peak-hold/decay so the bar reads smoothly between samples.",
-      "fixStatus": "1 deferred · 1 n/a",
+      "fixStatus": "1 fixed · 1 n/a",
       "fixNotes": "",
       "retestStatus": "PASS",
       "issues": [
@@ -5243,9 +5252,12 @@
           "suggestedFix": "Render the same meter overlay (or an equivalent compact level indicator) in CompactMixerRow using store.liveLevels[app.logicalID], so the menu-bar surface honors the per-row meter feature; otherwise gate beginLiveLevels() to surfaces that actually draw meters so the menu-bar-only case does not poll needlessly.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-user-decision:Direction (render meters vs. stop polling) must be scoped deliberately and affects another file.",
+          "disposition": "iter3:implemented",
           "uid": "LVL-01#1",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         },
         {
           "severity": "low",
@@ -5581,7 +5593,7 @@
       "source": "phase1-story",
       "testStatus": "3 issue(s) [1H 1M 1L]",
       "errorsFound": "• [HIGH/logic] Pinned apps are duplicated into the Live and/or Recent section of the menu panel (Sources/Waves/Stores/AppStore.swift:124-128) — MenuBarMixerView renders Pinned (store.pinnedApps), Live (store.liveApps), and Recent (store.recentApps) at once (lines 42-50). recentApps subtracts only liveApps IDs, not pinned IDs (AppStore.swift:124-128); pinnedApps and liveApps are also not mutually exclusive (both filter visibleApps independently, AppStore.swift:109-122). So a pinned-not-live app appears in BOTH Pinned and Recent, and a pinned-and-live app appears in BOTH Pinned and Live. Each occurrence is a separate CompactMixerRow with its own controls. (Verified not a crash: separate ForEach scopes, so it is visual/UX duplication, not an id collision.) The main window uses mutually-exclusive tabs, so duplication is specific to the menu panel. | Fix: Exclude pinned (and live) IDs from recentApps, and exclude pinned IDs from the Live section so each app appears in exactly one section of the menu panel.\n• [MEDIUM/edge-case] Menu panel shows 'No audio apps detected' empty state when Show-recent-apps is off, even with running apps (Sources/Waves/Features/Mixer/MenuBarMixerView.swift:48-52) — recentApps returns [] whenever preferences.showRecentApps is false (AppStore.swift:125), and that toggle is user-facing in Settings (SettingsView.swift:58-66, default true). The menu's only app sections are Pinned, Live, and Recent (MenuBarMixerView.swift:42-50), and the empty-state condition is pinnedApps.isEmpty && liveApps.isEmpty && recentApps.isEmpty (line 52). With Show-recent-apps disabled and nothing pinned or currently live, every running-but-idle app is suppressed, so the panel renders 'No audio apps detected' with Refresh/Settings buttons despite many apps running. The main window still lists them, producing a menu-vs-window state desync. The first tester missed this because they treated recentApps as always populated. | Fix: When showRecentApps is off, still surface non-live/non-pinned apps under a neutral section (or gate the empty state on the true count of visibleApps), so the menu never claims zero apps while apps are running.\n• [LOW/inconsistency] Menu panel starts the live-level poll but compact rows render no meter (wasted wakeups) (Sources/Waves/Features/Mixer/MixerRowView.swift:259-327) — Opening the panel calls store.beginLiveLevels() (MenuBarMixerView.swift:113), starting the 300ms poll that populates store.liveLevels (AppStore.swift:616-629). CompactMixerRow (MixerRowView.swift:259-327) has no level-meter overlay — the cyan meter (overlay MixerRowView.swift:122-134, meterLevel:177-180) exists only in the full MixerRowView used by the main window. So in the menu the poll draws no meter; and per MENU-01 it does not drive the icon's live state either, making it largely wasted work while the panel is open. | Fix: Either add the meter overlay to CompactMixerRow (reuse meterLevel/showsLevelMeter), or drop beginLiveLevels/endLiveLevels from the menu and feed the icon from a cheaper source.",
-      "fixStatus": "1 fixed · 2 deferred",
+      "fixStatus": "2 fixed · 1 deferred",
       "fixNotes": "",
       "retestStatus": "PASS",
       "issues": [
@@ -5612,7 +5624,7 @@
           "suggestedFix": "When showRecentApps is off, still surface non-live/non-pinned apps under a neutral section (or gate the empty state on the true count of visibleApps), so the menu never claims zero apps while apps are running.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:needs-user-decision:Intended menu-bar behavior with recent apps disabled must be decided before changing the predicate.",
+          "disposition": "deferred:needs-user-decision:Requires a product decision on intended menu-bar behavior when recent apps are disabled (neutral section vs. predicate change); not an obvio",
           "uid": "MENU-02#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         },
@@ -5626,9 +5638,12 @@
           "suggestedFix": "Either add the meter overlay to CompactMixerRow (reuse meterLevel/showsLevelMeter), or drop beginLiveLevels/endLiveLevels from the menu and feed the icon from a cheaper source.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-user-decision:Render-meter vs. stop-polling is a deliberate product decision affecting another file.",
+          "disposition": "iter3:implemented",
           "uid": "MENU-02#3",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         }
       ]
     },
@@ -5812,7 +5827,7 @@
       "source": "phase1-story",
       "testStatus": "2 issue(s) [1M 1L]",
       "errorsFound": "• [MEDIUM/dead-code] No user-facing control exists to toggle showMenuBarExtra; the preference is unreachable (Sources/Waves/App/WavesApp.swift:11) — MenuBarExtra isInserted binds to @AppStorage(\"showMenuBarExtra\") defaulting to true (WavesApp.swift:11,57-60). Verified by grep: the key appears ONLY in WavesApp.swift across all of Sources — there is no toggle in SettingsView or anywhere else (SettingsView exposes Show-recent-apps, Show-system-processes, Auto-restore device, etc., but no 'Show menu bar icon'). So the icon is effectively always shown and the user has no supported way to hide it; the AppStorage plumbing is half-wired. | Fix: Add a 'Show Waves in the menu bar' toggle in SettingsView bound to @AppStorage(\"showMenuBarExtra\"), or document the icon as always-on and remove the unused isInserted binding.\n• [LOW/accessibility] Menu bar icon conveys no mute/playing status to VoiceOver (Sources/Waves/App/WavesApp.swift:57-60) — The MenuBarExtra is created with a fixed title 'Waves' and only the systemImage changes with state (WavesApp.swift:57-60). The whole point of MENU-01's story is at-a-glance status (muted vs playing vs idle), but a VoiceOver user hears only 'Waves' regardless of which of the three SF Symbols is showing, because the accessible label is the static title and SF Symbol name changes are not surfaced as state. This is a real gap for the at-a-glance-status story; severity is low because the full per-app state is reachable inside the panel. | Fix: Expose the status to assistive tech, e.g. give the MenuBarExtra label a state-dependent accessibility value/label (Muted / Playing / Idle) derived from menuBarIconName, so the at-a-glance status is also available non-visually.",
-      "fixStatus": "1 fixed · 1 deferred",
+      "fixStatus": "2 fixed",
       "fixNotes": "tier3: FU-MENUBAR-A11Y-LABEL",
       "retestStatus": "PASS",
       "issues": [
@@ -5826,9 +5841,12 @@
           "suggestedFix": "Add a 'Show Waves in the menu bar' toggle in SettingsView bound to @AppStorage(\"showMenuBarExtra\"), or document the icon as always-on and remove the unused isInserted binding.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:needs-user-decision:Resolving it means choosing between adding a Settings toggle (cross-file into SettingsView, plus how a user reopens a hidden dock-less app) or declaring the ico",
+          "disposition": "iter3:implemented",
           "uid": "MENU-06#1",
-          "canonicalFile": "Sources/Waves/App/WavesApp.swift"
+          "canonicalFile": "Sources/Waves/App/WavesApp.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         },
         {
           "severity": "low",
@@ -5932,7 +5950,7 @@
       "source": "phase1-story",
       "testStatus": "2 issue(s) [1M 1L]",
       "errorsFound": "• [MEDIUM/inconsistency] Search ignores selected scope but header keeps scope-specific noun, producing contradictory counts (Sources/Waves/Features/Mixer/MainWindowView.swift:447) — Re-verified: filteredApps filters store.visibleApps (ALL apps) regardless of the selected scope (MainWindowView.swift:126-129). The detail header renders filter.detail(count: apps.count) where filter is still the selected scope (MainWindowView.swift:334, 447, 185-199). So on the Pinned scope, typing a query that matches a non-pinned app lists that app while the header reads e.g. '1 pinned app' and the sidebar still highlights 'Pinned'. The noun (pinned/live/recent) does not describe the rows shown. | Fix: When a search query is active, show a neutral count label such as '\\(apps.count) result(s)' instead of filter.detail(...), and/or visually neutralize the selected sidebar scope while searching.\n• [LOW/inconsistency] Sidebar scope count and detail header count diverge during an active search (Sources/Waves/Features/Mixer/MainWindowView.swift:255) — Added in completeness pass. The sidebar row count is filter.detail(count: filter.count(in: store)) (MainWindowView.swift:255, 171-183), which reads from the full scope collection and is NOT affected by searchText. The detail header is filter.detail(count: apps.count) where apps == filteredApps (MainWindowView.swift:334, 447). So with a search active on the Running scope, the sidebar can show '8 running apps' while the detail header and list show '2 running apps' for the same scope at the same time — two count displays in one window disagreeing. This is a state-desync the first tester did not separately flag. | Fix: Either keep both counts unfiltered (move the header to the scoped, unfiltered count and show a separate 'N results' label during search), or thread the active query into the sidebar count so both reflect the same set.",
-      "fixStatus": "2 deferred",
+      "fixStatus": "2 fixed",
       "fixNotes": "",
       "retestStatus": "PASS",
       "issues": [
@@ -5946,9 +5964,12 @@
           "suggestedFix": "When a search query is active, show a neutral count label such as '\\(apps.count) result(s)' instead of filter.detail(...), and/or visually neutralize the selected sidebar scope while searching.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:needs-user-decision:Resolving the scope-noun vs cross-scope-rows contradiction is a UX labeling decision.",
+          "disposition": "iter3:implemented",
           "uid": "WIN-02#1",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         },
         {
           "severity": "low",
@@ -5960,9 +5981,12 @@
           "suggestedFix": "Either keep both counts unfiltered (move the header to the scoped, unfiltered count and show a separate 'N results' label during search), or thread the active query into the sidebar count so both reflect the same set.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:needs-user-decision:Reconciling the two divergent counts needs a coupled UX/product decision.",
+          "disposition": "iter3:implemented",
           "uid": "WIN-02#2",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         }
       ]
     },
@@ -6339,7 +6363,7 @@
           "suggestedFix": "Detect the focused element in the frontmost app via the Accessibility API (AXUIElement focused-element role) rather than NSApp.keyWindow, or accept the limitation and update the spec/docs.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:needs-user-decision:The only real remedy is an Accessibility-API focused-element check on every keystroke (new permission + latency, coordinates with KEY-05) versus documenting the",
+          "disposition": "deferred:needs-user-decision:Platform limitation: cannot intercept/inspect another app's text-field focus.",
           "uid": "KEY-01#4",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -6437,7 +6461,7 @@
           "suggestedFix": "Detect the frontmost app's focused element via the Accessibility API instead of NSApp.keyWindow, or document the limitation.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:needs-user-decision:Requires the AX-route-vs-document-the-limitation decision shared with KEY-01/KEY-05; either path changes behavior or spans permission handling, so no safe local",
+          "disposition": "deferred:needs-user-decision:Platform limitation: cannot intercept/inspect another app's text-field focus.",
           "uid": "KEY-02#4",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -6553,7 +6577,7 @@
           "suggestedFix": "Use the Accessibility API focused-element role of the frontmost app, or document the limitation.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:needs-user-decision:Same root cause as KEY-01/02; fixing needs the AX-vs-document product decision and would alter behavior or add a permission surface — not a verifiable inline ed",
+          "disposition": "deferred:needs-user-decision:Platform limitation: cannot intercept/inspect another app's text-field focus.",
           "uid": "KEY-03#5",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -6642,7 +6666,7 @@
           "suggestedFix": "When shortcuts are enabled (setKeyboardShortcutsEnabled / updateGlobalHotkeysState), check AXIsProcessTrusted(); if false, call AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt: true]) to prompt, and/or show a warning toast linking to System Settings so the user is told the hotkeys won't fire until permission is granted.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:needs-user-decision:The feedback mechanism (auto-prompt vs toast vs inline Settings warning) is an unresolved UX decision, and the fix spans WavesApp.swift, AppStore.swift, and the",
+          "disposition": "deferred:needs-user-decision:Requires a new feedback surface, not an existing view/preference reuse.",
           "uid": "KEY-05#1",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         }
@@ -7176,7 +7200,7 @@
       "source": "phase1-story",
       "testStatus": "3 issue(s) [2M 1L]",
       "errorsFound": "• [MEDIUM/ux] Turning the toggle OFF mid-call leaves auto-paused apps muted indefinitely with no resume path (Sources/Waves/Settings/SettingsView.swift:92-95) — The Settings toggle setter only writes preferences.autoPauseMusicForConferencing and calls persistPreferences() (SettingsView.swift:92-95); it never triggers a resume pass. Worse than 'lingers until you leave the call app': once the preference is off, checkAutoPauseMusic returns at its first guard (AppStore.swift:941) on EVERY subsequent frontmost change, so the resume branch (970-984) is never reached. The .autoConferencing-muted apps therefore stay silent indefinitely — the user must manually unmute each one. A user toggling the option off to 'bring my music back now' sees nothing happen and has no automatic way to recover. Verified the early guard precedes the resume branch. | Fix: In the toggle's set closure, when turning the preference off, run a one-shot resume of all muteSource == .autoConferencing apps (the resume-branch logic), clear pausedMusicApps, then persist.\n• [MEDIUM/edge-case] Auto-paused mute persists across relaunch and can re-mute (and stick) after the call is long over (Sources/Waves/Stores/AppStore.swift:820-844) — The session snapshot persists muteSource == .autoConferencing with isMuted == true (persistSessionSnapshot writes the full session). On relaunch, reapplyRestoredAudioState (AppStore.swift:824-844) re-applies isMuted=true for those apps, audibly re-muting them. The only resume path on launch is checkAutoPauseMusic() at line 219, which (a) requires the toggle on — if it is off, line 941 bails and the app stays muted forever; and (b) requires a non-conferencing app to be frontmost at that instant. If Waves restarts (update/crash/logout) hours after a call, a previously auto-paused media app comes back muted and, with the toggle off, never auto-resumes. This persistence/restore desync was missed by the first tester. | Fix: Do not persist .autoConferencing mutes as durable state (treat them as session-only and clear them on shutdown), or on launch always resume .autoConferencing-tagged apps that no conferencing app currently justifies, independent of the toggle state.\n• [LOW/inconsistency] Toggle copy 'Auto-pause music during calls' overstates capability (Sources/Waves/Settings/SettingsView.swift:88-89) — The label promises behavior keyed to actual calls (SettingsView.swift:88-89), but detection is frontmost-app + keyword only with no notion of an active call (see PAUSE-01). It misses browser calls and fires on mere window focus, so 'during calls' is misleading. Verified label text and detection model. | Fix: Reword to reflect the heuristic, e.g. 'Pause media when a video-call app is in front', with a help note that browser-based calls are unsupported.",
-      "fixStatus": "1 fixed · 2 deferred",
+      "fixStatus": "2 fixed · 1 deferred",
       "fixNotes": "",
       "retestStatus": "PASS",
       "issues": [
@@ -7221,9 +7245,12 @@
           "suggestedFix": "Reword to reflect the heuristic, e.g. 'Pause media when a video-call app is in front', with a help note that browser-based calls are unsupported.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:needs-user-decision:Final user-facing wording is a product/content decision (phrasing, tone, whether to disclose the browser-call limitation), not an unambiguous code defect.",
+          "disposition": "iter3:implemented",
           "uid": "PAUSE-03#3",
-          "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
+          "canonicalFile": "Sources/Waves/Settings/SettingsView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         }
       ]
     },
@@ -7450,7 +7477,7 @@
           "suggestedFix": "Add a .contextMenu (or small toggle) with 'Exclude from Waves' / 'Manage with Waves' to CompactMixerRow mirroring MixerRowView, or document that exclusion is managed from the main window only.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:needs-user-decision:Escape hatch is fully reachable from the main window; adding it to the menu bar warrants a product call.",
+          "disposition": "deferred:needs-user-decision:CompactMixerRow has no such affordance; adding one is new view/store wiring and a product call, since the toggle is fully reachable from the",
           "uid": "EXCL-03#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         },
@@ -7760,7 +7787,7 @@
           "suggestedFix": "Detect typing in the frontmost foreign app via the Accessibility API (AXUIElement focused-element role) rather than NSApp.keyWindow, or explicitly document the guard as only covering Waves' own windows.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:needs-user-decision:Same defect family as KEY-01/02/03; the correct fix is an AX focused-element query (behavior-changing, new permission) or an explicit spec/doc limitation — a pr",
+          "disposition": "deferred:needs-user-decision:Platform limitation: an app cannot inspect another app's text-field focus.",
           "uid": "SET-04#2",
           "canonicalFile": "Sources/Waves/App/WavesApp.swift"
         },
@@ -7982,7 +8009,7 @@
           "suggestedFix": "Surface session.backendStatus.lastError within the cards/available view (e.g. a prominent error banner when lastError is non-nil) rather than gating it solely on diagnostics == nil.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:needs-user-decision:Requires a product/architecture decision on how degraded-backend errors should surface (cards banner vs. nullable report contract), coordinating AppStore, backe",
+          "disposition": "deferred:needs-user-decision:Real state-reachability/design fork per instructions.",
           "uid": "SET-08#1",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         },
@@ -8093,7 +8120,7 @@
           "suggestedFix": "Auto-present the Setup tab (or a dedicated onboarding window/sheet) on first launch using a persisted 'hasSeenOnboarding' flag, and/or add a visible 'Setup' affordance in the main window/menu bar when isFullyComplete is false.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:needs-feature:Correct fix needs a persisted first-run flag in AppStore.swift and presentation/affordance wiring in WavesApp/MainWindowView/MenuBarMixerView — all outside the ",
+          "disposition": "deferred:needs-feature:New feature requiring new store state and cross-file wiring.",
           "uid": "ONB-01#3",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         },
@@ -8529,7 +8556,7 @@
       "source": "phase1-story",
       "testStatus": "2 issue(s) [2L]",
       "errorsFound": "• [LOW/dead-code] Unused @Environment(\\.dismiss) in HelpView (dead code, no close affordance) (Sources/Waves/Features/Help/HelpView.swift:5) — HelpView declares `@Environment(\\.dismiss) private var dismiss` at line 5 but never references `dismiss` anywhere in the file (verified by reading all 250 lines). HelpView is embedded as a Settings TabView tab (SettingsView.swift:33-36); there is no dismiss/close button, so the environment value is meaningless here and the declaration is dead. | Fix: Delete line 5 (`@Environment(\\.dismiss) private var dismiss`). The Help tab is dismissed by closing the Settings window, so no dismiss handling is needed.\n• [LOW/ux] Help is buried as the last Settings tab with no Help-menu / toolbar entry point (Sources/Waves/App/WavesApp.swift:43-48) — The only path to Help is Settings (⌘,) → last of six tabs (SettingsView.swift:33-36). WavesApp.swift only registers a CommandGroup(after: .toolbar) for 'Refresh' (lines 43-48); the default .help command group is never replaced, so macOS shows only an auto-generated empty Help menu (search field) with no 'Waves Help' entry. There is no toolbar '?' button and no standalone Help window/sheet. For a surface titled 'Your comprehensive guide to Waves audio control', discoverability is low. (Note: README.md:264 points users to the in-app diagnostics panel / its own troubleshooting section, not explicitly to in-app Help, so the README dependency the first tester implied is weaker than stated — but the discoverability gap itself is real.) | Fix: Add a standard Help menu command (CommandGroup(replacing: .help)) that calls openSettings() and selects the Help tab, or add a '?' toolbar item in MainWindowView that opens Settings to Help.",
-      "fixStatus": "1 fixed · 1 deferred",
+      "fixStatus": "2 fixed",
       "fixNotes": "tier3: FU-HELP-DEAD-DISMISS",
       "retestStatus": "PASS",
       "issues": [
@@ -8560,9 +8587,12 @@
           "suggestedFix": "Add a standard Help menu command (CommandGroup(replacing: .help)) that calls openSettings() and selects the Help tab, or add a '?' toolbar item in MainWindowView that opens Settings to Help.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/App/WavesApp.swift",
-          "disposition": "deferred:needs-user-decision:The story explicitly accepts Settings-only reachability, so adding a Help-menu command or toolbar '?' is an intentional product enhancement, not a contract viol",
+          "disposition": "iter3:implemented",
           "uid": "HELP-01#2",
-          "canonicalFile": "Sources/Waves/App/WavesApp.swift"
+          "canonicalFile": "Sources/Waves/App/WavesApp.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         }
       ]
     },
@@ -8917,7 +8947,7 @@
       "source": "phase1-story",
       "testStatus": "3 issue(s) [3L]",
       "errorsFound": "• [LOW/correctness] Boost in diagnostics export is truncated by Int(), dropping fractional boosts (Sources/Waves/Stores/AppStore.swift:740) — Re-read AppStore.swift:740: ', boost \\(Int(app.volumeBoost))x'. volumeBoost is a Float clamped to [0.0, 10.0] in AudioApp.init (AudioApp.swift:88) and decoded from persistence (AudioApp.swift:138) / imported presets (Preset.swift:41 clamps to [1.0,4.0] but allows fractions). The mixer UI only offers integers and setVolumeBoost clamps to [1.0,4.0] (AppStore.swift:548), but a persisted or imported preset can carry a fractional value (e.g. 2.5). Int(2.5) prints '2x', misreporting the actual boost in a bug-report snapshot. Confirmed; correctly low severity (narrow input path). | Fix: Use String(format: \"%g\", app.volumeBoost) so 2.0 shows '2x' and 2.5 shows '2.5x'.\n• [LOW/ux] Copy Diagnostics button is always enabled, so an early click copies a report with no Checks section (Sources/Waves/Settings/SettingsView.swift:283-288) — Re-read SettingsView.swift:283-289 (the Button has no .disabled) and AppStore.swift:743-749 (the 'Checks:' section is only appended when store.diagnostics != nil). DiagnosticsSettingsView triggers refreshDiagnostics() in onAppear (SettingsView.swift:310-312) but that is async; a click in the brief window before the first report resolves yields a report missing the Checks section, while copyDiagnosticsToPasteboard still shows the 'Diagnostics copied' success toast (AppStore.swift:774-779). Silent partial export. Confirmed. | Fix: Disable Copy Diagnostics while store.diagnostics == nil, or have copyDiagnosticsToPasteboard await a fresh diagnosticsReport() before composing the text so Checks is always present.\n• [LOW/inconsistency] Export header capture-permission line can contradict the appended Checks section (Sources/Waves/Stores/AppStore.swift:733) — Re-read AppStore.swift:733: header line 'Audio capture permission: granted/not granted' derives from status.hasRequiredPermissions, which is captureAuthorization == .authorized (WorkspaceAudioControlBackend.swift:1088). On .undetermined or .unsupported this collapses to 'not granted'. The same export's Checks section prints the 'Audio capture permission' check as [warning] with detail 'status is not yet known' (.undetermined) or 'needs macOS 14.2 or newer' (.unsupported) (WorkspaceAudioControlBackend.swift:284-298). So the header says flatly 'not granted' while the check says 'not yet known' / unsupported — confusing in a bug report. Confirmed. | Fix: Report capture permission in the header using the same vocabulary as the check (granted / not granted / not yet determined / unsupported) rather than a boolean.",
-      "fixStatus": "2 fixed · 1 deferred",
+      "fixStatus": "3 fixed",
       "fixNotes": "tier3: FU-DIAGNOSTICS-EXPORT",
       "retestStatus": "PASS",
       "issues": [
@@ -8948,9 +8978,12 @@
           "suggestedFix": "Disable Copy Diagnostics while store.diagnostics == nil, or have copyDiagnosticsToPasteboard await a fresh diagnosticsReport() before composing the text so Checks is always present.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:needs-user-decision:Entangled with the same diagnostics==nil window as SET-08/DIAG-03; the safe disable/await fix should land as one coherent decision (Copy gating vs. awaiting a f",
+          "disposition": "iter3:implemented",
           "uid": "DIAG-02#2",
-          "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
+          "canonicalFile": "Sources/Waves/Settings/SettingsView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         },
         {
           "severity": "low",
@@ -9031,7 +9064,7 @@
           "suggestedFix": "Give the mixer DiagnosticsPanel an explicit empty/loading state mirroring DiagnosticsUnavailableView, or let diagnosticsReport()/refreshDiagnostics return nil on real backend failure so the unavailable state is genuinely reachable.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Settings/SettingsView.swift",
-          "disposition": "deferred:needs-user-decision:Fix requires a product/architecture decision on the nullable-report contract and a new mixer-panel empty state in MainWindowView (out of scope); not an isolated",
+          "disposition": "deferred:needs-user-decision:Not truly dead code; removal needs a new empty/loading state design decision, and fix spans MainWindowView.",
           "uid": "DIAG-03#2",
           "canonicalFile": "Sources/Waves/Settings/SettingsView.swift"
         }
@@ -9680,7 +9713,7 @@
       "source": "phase1-story",
       "testStatus": "1 issue(s) [1L]",
       "errorsFound": "• [LOW/ux] Menu-bar Launch-at-login switch has no visible label for sighted users (Sources/Waves/Features/Mixer/MenuBarMixerView.swift:99) — Confirmed by re-reading MenuBarMixerView.swift:90-101. The Toggle wraps Text(\"Launch at login\") but applies .labelsHidden(), and the footer HStack contains only the \"Open Waves\" and \"Settings\" buttons, a Spacer, and then the bare switch. There is no adjacent visible caption. Sighted users see an unlabeled switch in the popover's bottom-right corner; only VoiceOver users get meaning via accessibilityLabel(\"Launch at login\"). Acceptance criteria (shared binding + VO label) are technically met, but the on-screen affordance is ambiguous. | Fix: Remove .labelsHidden() so the inline \"Launch at login\" label renders, or add a small visible caption (e.g. a leading Text or a .help tooltip) next to the switch, keeping the accessibilityLabel for VoiceOver.",
-      "fixStatus": "1 deferred",
+      "fixStatus": "1 fixed",
       "fixNotes": "",
       "retestStatus": "PASS",
       "issues": [
@@ -9694,9 +9727,12 @@
           "suggestedFix": "Remove .labelsHidden() so the inline \"Launch at login\" label renders, or add a small visible caption (e.g. a leading Text or a .help tooltip) next to the switch, keeping the accessibilityLabel for VoiceOver.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:needs-user-decision:Cosmetic clarity fix whose correct form is a design/layout choice not verifiable by reading code alone.",
+          "disposition": "iter3:implemented",
           "uid": "LOGIN-02#1",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         }
       ]
     },
@@ -10615,7 +10651,7 @@
           "suggestedFix": "Either remove the orphan .contentShape(Rectangle()), or add .onTapGesture { store.dismissToast(id: toast.id) } to the banner body to make tap-anywhere-to-dismiss real and enlarge the hit target.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Shared/UI/AppToasts.swift",
-          "disposition": "deferred:needs-user-decision:Modifier is not purely dead (interacts with combined a11y element); fix depends on intended UX.",
+          "disposition": "deferred:needs-user-decision:Genuine UX fork (remove contentShape vs. add tap-anywhere-to-dismiss); contentShape also interacts with the combined a11y element, so remova",
           "uid": "TOAST-05#1",
           "canonicalFile": "Sources/Waves/Shared/UI/AppToasts.swift"
         }
@@ -10646,7 +10682,7 @@
       "source": "phase1-story",
       "testStatus": "2 issue(s) [2M]",
       "errorsFound": "• [MEDIUM/accessibility] Simultaneous toast announcements have no priority and can interrupt/replace each other (Sources/Waves/Shared/UI/AppToasts.swift:86) — Re-read confirms each banner onAppear fires AccessibilityNotification.Announcement(accessibilityMessage).post() (AppToasts.swift:84-87) with no priority attribute. When multiple toasts insert near-simultaneously, each posts its own unprioritized announcement and VoiceOver coalesces/interrupts them, so earlier ones (which may be an error) can be cut off. Combined with TOAST-04 eviction, a toast can be removed before its announcement completes. CORRECTION to the first tester: the cited 'auto-pause muting several music apps' is NOT a real burst source — checkAutoPauseMusic (AppStore.swift:940-998) mutes/unmutes silently and emits NO toast. Likewise applyPreset emits only one toast. The genuine near-simultaneous sources are per-app volume commits ('Managed route active', 433) and rapid keyboard nudges (1221/1240). The criterion 'each appearing toast is announced' is not reliably met under those bursts. | Fix: Attach an announcement priority for higher-severity kinds (AttributedString with .accessibilitySpeechAnnouncementPriority(.high) for .error/.warning) and/or serialize announcements so they queue rather than interrupt; ensure a toast isn't evicted before its announcement is delivered.\n• [MEDIUM/accessibility] Each toast is announced (and rendered) twice when the main window and menu-bar panel are both open (Sources/Waves/Features/Mixer/MenuBarMixerView.swift:105) — AppToastStack is mounted in BOTH MainWindowView (line 59) and MenuBarMixerView (line 105), and both read the same shared store.toasts via @Environment(AppStore.self). When both surfaces are on screen at once (the menu-bar popover can be open while the main window is visible), a single showToast appends one AppToast that renders in TWO stacks. Each stack's AppToastBanner.onAppear independently posts AccessibilityNotification.Announcement (AppToasts.swift:84-87), so a VoiceOver user hears the same message announced twice; sighted users see the banner duplicated in both surfaces. This is a menu-bar/main-window state-desync the first tester missed. (Auto-dismiss/eviction stay consistent because there is a single source-of-truth array, so it is purely a duplicate-presentation/double-speak issue, not a crash.) | Fix: Post the VoiceOver announcement from a single owner (e.g. in showToast itself, once, rather than per-banner onAppear), and/or render only one AppToastStack for the key window / gate the menu-bar stack so toasts aren't duplicated across simultaneously-visible surfaces.",
-      "fixStatus": "2 deferred",
+      "fixStatus": "1 fixed · 1 deferred",
       "fixNotes": "",
       "retestStatus": "PASS",
       "issues": [
@@ -10660,9 +10696,12 @@
           "suggestedFix": "Attach an announcement priority for higher-severity kinds (AttributedString with .accessibilitySpeechAnnouncementPriority(.high) for .error/.warning) and/or serialize announcements so they queue rather than interrupt; ensure a toast isn't evicted before its announcement is delivered.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Shared/UI/AppToasts.swift",
-          "disposition": "deferred:needs-user-decision:Cross-file a11y architecture change with multiple design decisions.",
+          "disposition": "iter3:implemented",
           "uid": "TOAST-06#1",
-          "canonicalFile": "Sources/Waves/Shared/UI/AppToasts.swift"
+          "canonicalFile": "Sources/Waves/Shared/UI/AppToasts.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         },
         {
           "severity": "medium",
@@ -10674,7 +10713,7 @@
           "suggestedFix": "Post the VoiceOver announcement from a single owner (e.g. in showToast itself, once, rather than per-banner onAppear), and/or render only one AppToastStack for the key window / gate the menu-bar stack so toasts aren't duplicated across simultaneously-visible surfaces.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift",
-          "disposition": "deferred:needs-user-decision:Cross-file (AppStore + AppToasts) fix plus a toast-ownership design decision; not a localized MenuBarMixerView edit.",
+          "disposition": "deferred:needs-user-decision:Fix spans AppStore + AppToasts (out of allowed file) and requires a toast-ownership design decision; not a localized MenuBarMixerView edit.",
           "uid": "TOAST-06#2",
           "canonicalFile": "Sources/Waves/Features/Mixer/MenuBarMixerView.swift"
         }
@@ -10891,7 +10930,7 @@
           "suggestedFix": "Add accessibilityAction(s) for output routing, e.g. a 'Use System Default Output' action plus per-device actions, mirroring the context-menu submenu.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-user-decision:Flat-action enumeration of a dynamic device list needs a deliberate UX design call.",
+          "disposition": "deferred:needs-user-decision:Flat-action enumeration of a dynamic device list needs a deliberate UX design decision, not an obvious one-liner.",
           "uid": "A11Y-03#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -10969,7 +11008,7 @@
           "suggestedFix": "Drive the announcement once from the store when a toast is appended (post in showToast on the main actor) instead of from each banner's onAppear; or guard so only the key window's stack owns announcements.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Shared/UI/AppToasts.swift",
-          "disposition": "deferred:needs-user-decision:Needs store-owned announcement coordinated across two mount sites.",
+          "disposition": "deferred:needs-user-decision:Fix requires either a store-owned announcement (showToast change, outside the allowed file) or a key-window guard (no existing API in AppToa",
           "uid": "A11Y-05#1",
           "canonicalFile": "Sources/Waves/Shared/UI/AppToasts.swift"
         }
@@ -11072,7 +11111,7 @@
           "suggestedFix": "Optionally add a short visible label/abbreviation beside the compact dot, or document that the distinct glyph shapes carry the meaning and color is supplementary.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MixerRowView.swift",
-          "disposition": "deferred:needs-user-decision:Space-constrained layout; glyph shapes already carry meaning, so adding text is a design call.",
+          "disposition": "deferred:needs-user-decision:Adding a visible text label is a space-constrained design call (two reasonable answers); the JSON itself notes glyph shapes already carry th",
           "uid": "A11Y-07#1",
           "canonicalFile": "Sources/Waves/Features/Mixer/MixerRowView.swift"
         }
@@ -11325,7 +11364,7 @@
       "source": "phase1-critic-gap",
       "testStatus": "3 issue(s) [2M 1L]",
       "errorsFound": "• [MEDIUM/ux] In-list 'b' (cycle boost) and 'p' (pin) shortcuts are completely undocumented (Sources/Waves/Features/Mixer/MainWindowView.swift:385) — Verified MainWindowView.swift:381-386 attaches bare-character onKeyPress handlers to the source list: space/m (mute), =/- (nudge volume by 0.05), b (cycleBoost, MainWindowView.swift:422-425), p (togglePinned). Confirmed none appear in the Settings 'Keyboard shortcuts' section (SettingsView.swift:127-160, lists only ⌘⌥↑/↓/M) nor in HelpView's Keyboard Shortcuts list (HelpView.swift:64-103, lists only ⌘⌥↑/↓/M, ⌘R, ⌘S, ⌘,). No accessibility hint advertises them either. A user cannot discover that 'b' cycles boost or 'p' pins the selected row. | Fix: List the in-row keys (space/m mute, =/- volume, b boost, p pin) in HelpView and/or the Settings keyboard-shortcuts section, or surface them via per-row accessibility hints / a help overlay.\n• [MEDIUM/inconsistency] In-list keys ignore the 'Enable keyboard shortcuts' preference that gates the global hotkeys (Sources/Waves/Features/Mixer/MainWindowView.swift:408) — Verified the global hotkey handlers all guard on preferences.enableKeyboardShortcuts (increaseVolumeForFrontmostApp AppStore.swift:1211, decreaseVolumeForFrontmostApp AppStore.swift:1230, toggleMuteForFrontmostApp AppStore.swift:1249). The in-list handleKey helper (MainWindowView.swift:408-414) and its onKeyPress callers (MainWindowView.swift:381-386) call store.setMuted / nudgeVolume / cycleBoost / store.togglePinned with NO enableKeyboardShortcuts guard. So disabling 'Enable keyboard shortcuts' in Settings does not disable space/m/=/-/b/p on the selected row, contradicting the toggle's implied meaning. | Fix: Gate handleKey on store.preferences.enableKeyboardShortcuts (return .ignored when disabled), or clarify in copy that the toggle only governs the global ⌘⌥ hotkeys while in-list keys are always on.\n• [LOW/ux] onKeyPress intercepts b/p/m/-/=, defeating List type-select for the selected-row case (Sources/Waves/Features/Mixer/MainWindowView.swift:386) — Verified MainWindowView.swift:381-386 consume 'm', 'b', 'p', '-', '=' as command keys, returning .handled whenever a row is selected (handleKey, MainWindowView.swift:408-414). AppKit/SwiftUI lists support type-select (typing a letter jumps to the next matching row). Because these letters are swallowed when a row is selected, a user cannot type m/b/p to jump to apps starting with M/B/P; the keystroke mutes/cycles-boosts/pins the selected row instead. Note handleKey returns .ignored when no row is selected, so type-select still works before any selection — limiting the impact, hence low severity and 'likely'. | Fix: Require a modifier for the action keys, or scope these handlers so they don't shadow list type-select, or document the tradeoff clearly.",
-      "fixStatus": "1 fixed · 2 deferred",
+      "fixStatus": "2 fixed · 1 deferred",
       "fixNotes": "tier2: FU-INLIST-KEYS-RESPECT-PREFERENCE",
       "retestStatus": "PASS",
       "issues": [
@@ -11339,9 +11378,12 @@
           "suggestedFix": "List the in-row keys (space/m mute, =/- volume, b boost, p pin) in HelpView and/or the Settings keyboard-shortcuts section, or surface them via per-row accessibility hints / a help overlay.",
           "confidence": "confirmed",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:needs-user-decision:Documentation task spanning other files (Help/Settings) with wording/placement choices.",
+          "disposition": "iter3:implemented",
           "uid": "WIN-09#1",
-          "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
+          "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
+          "fixStatus": "applied",
+          "fixedBy": "iter3-ui-parity",
+          "fixTier": "iter3"
         },
         {
           "severity": "medium",
@@ -11370,7 +11412,7 @@
           "suggestedFix": "Require a modifier for the action keys, or scope these handlers so they don't shadow list type-select, or document the tradeoff clearly.",
           "confidence": "likely",
           "primaryFile": "Sources/Waves/Features/Mixer/MainWindowView.swift",
-          "disposition": "deferred:needs-user-decision:Changing the single-key-vs-type-select tradeoff alters the intended shortcut model; a product decision.",
+          "disposition": "deferred:needs-user-decision:Behavioral product fork (single-key vs type-select tradeoff), not a behavior-preserving safe tweak; explicitly flagged to defer.",
           "uid": "WIN-09#3",
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         }

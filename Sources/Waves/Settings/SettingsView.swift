@@ -45,6 +45,7 @@ struct SettingsView: View {
 
 private struct GeneralSettingsView: View {
   @Environment(AppStore.self) private var store
+  @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
 
   var body: some View {
     Form {
@@ -54,6 +55,9 @@ private struct GeneralSettingsView: View {
           get: { store.launchAtLoginEnabled },
           set: { store.launchAtLoginEnabled = $0 }
         ))
+
+      Toggle("Show Waves in the menu bar", isOn: $showMenuBarExtra)
+        .help("Shows or hides the Waves icon in the menu bar. The app keeps running either way; reopen this window from the Dock or by relaunching Waves.")
 
       Toggle(
         "Show recent apps",
@@ -76,11 +80,12 @@ private struct GeneralSettingsView: View {
         ))
 
       Toggle(
-        "Auto-pause music during calls",
+        "Pause media when a video-call app is in front",
         isOn: Binding(
           get: { store.preferences.autoPauseMusicForConferencing },
           set: { store.setAutoPauseMusicEnabled($0) }
         ))
+        .help("Pauses media-playing apps while a known video-call app is the frontmost app. This is a heuristic based on the foreground app, not actual call state, so browser-based calls are not detected.")
 
       Toggle(
         "Enable keyboard shortcuts",
@@ -274,6 +279,7 @@ private struct DiagnosticsSettingsView: View {
           } label: {
             Label("Copy Diagnostics", systemImage: "doc.on.clipboard")
           }
+          .disabled(store.diagnostics == nil)
           .help("Copy a plain-text route-health report to the clipboard.")
         }
 
