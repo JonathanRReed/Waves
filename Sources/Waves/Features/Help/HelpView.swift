@@ -2,8 +2,6 @@ import SwiftUI
 import WavesAudioCore
 
 struct HelpView: View {
-  @Environment(\.dismiss) private var dismiss
-
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
@@ -66,6 +64,9 @@ struct HelpView: View {
       Text("Keyboard Shortcuts")
         .font(.headline)
 
+      Text("Global shortcuts")
+        .font(.subheadline.weight(.semibold))
+
       VStack(alignment: .leading, spacing: 8) {
         shortcutRow(
           action: "Increase volume",
@@ -79,6 +80,17 @@ struct HelpView: View {
           action: "Toggle mute",
           keys: "⌘⌥M"
         )
+      }
+      .font(.system(.body, design: .monospaced))
+
+      Text("Enable keyboard shortcuts in General Settings to use these globally.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+
+      Text("App shortcuts")
+        .font(.subheadline.weight(.semibold))
+
+      VStack(alignment: .leading, spacing: 8) {
         shortcutRow(
           action: "Refresh app list",
           keys: "⌘R"
@@ -94,7 +106,7 @@ struct HelpView: View {
       }
       .font(.system(.body, design: .monospaced))
 
-      Text("Enable keyboard shortcuts in General Settings to use these globally.")
+      Text("App shortcuts always work while a Waves window is focused.")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
@@ -172,7 +184,7 @@ struct HelpView: View {
         )
         troubleshootingItem(
           issue: "Volume changes not applying",
-          solution: "Check Diagnostics in Advanced settings, try 'Recover routes now'"
+          solution: "Use 'Recover Routes' in the toolbar or Audio settings, then check Diagnostics in Advanced settings"
         )
         troubleshootingItem(
           issue: "Keyboard shortcuts not working",
@@ -180,7 +192,7 @@ struct HelpView: View {
         )
         troubleshootingItem(
           issue: "Device switching issues",
-          solution: "Enable 'Auto-restore device', manually recover routes, check device connection"
+          solution: "Routes restore automatically; if needed, manually recover routes and check device connection"
         )
       }
     }

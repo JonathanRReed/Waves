@@ -73,14 +73,14 @@ struct MixerRowView: View {
         .frame(minWidth: 150, idealWidth: 210, maxWidth: 250)
         .help(sliderHelp)
         .accessibilityLabel("Volume for \(app.displayName)")
-        .accessibilityValue("\(Int(app.desiredVolume * 100))%")
+        .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
         .accessibilityHint("Adjusts the per-app volume target.")
         .accessibilityAdjustableAction { direction in
           adjustVolume(direction)
         }
         .disabled(isExcluded)
 
-        Text("\(Int(app.desiredVolume * 100))%")
+        Text("\(Int((app.desiredVolume * 100).rounded()))%")
           .font(.caption.monospacedDigit().weight(.medium))
           .foregroundStyle(.secondary)
           .lineLimit(1)
@@ -274,6 +274,7 @@ struct CompactMixerRow: View {
         Text("Excluded")
           .font(.caption2)
           .foregroundStyle(.secondary)
+          .accessibilityLabel("Excluded from Waves")
       } else {
         RoutingStateDot(state: app.routingState)
       }
@@ -300,7 +301,7 @@ struct CompactMixerRow: View {
       .padding(.trailing, 4)
       .help(sliderHelp)
       .accessibilityLabel("Volume for \(app.displayName)")
-      .accessibilityValue("\(Int(app.desiredVolume * 100))%")
+      .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
       .accessibilityHint("Adjusts the per-app volume target.")
       .accessibilityAdjustableAction { direction in
         adjustVolume(direction)
@@ -368,8 +369,14 @@ private struct BoostMenu: View {
   var body: some View {
     Menu {
       ForEach(boostOptions, id: \.self) { boost in
-        Button("\(Int(boost))x") {
+        Button {
           store.setVolumeBoost(boost, for: app)
+        } label: {
+          if boost == app.volumeBoost {
+            Label("\(Int(boost))x", systemImage: "checkmark")
+          } else {
+            Text("\(Int(boost))x")
+          }
         }
       }
     } label: {

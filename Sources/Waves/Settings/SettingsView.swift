@@ -76,23 +76,10 @@ private struct GeneralSettingsView: View {
         ))
 
       Toggle(
-        "Auto-restore device",
-        isOn: Binding(
-          get: { store.preferences.autoRestoreDevice },
-          set: {
-            store.preferences.autoRestoreDevice = $0
-            store.persistPreferences()
-          }
-        ))
-
-      Toggle(
         "Auto-pause music during calls",
         isOn: Binding(
           get: { store.preferences.autoPauseMusicForConferencing },
-          set: {
-            store.preferences.autoPauseMusicForConferencing = $0
-            store.persistPreferences()
-          }
+          set: { store.setAutoPauseMusicEnabled($0) }
         ))
 
       Toggle(
@@ -229,9 +216,8 @@ private struct PresetSettingsView: View {
           .font(.callout)
           .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity, alignment: .leading)
-      }
-
-      List {
+      } else {
+        List {
         ForEach(store.presets) { preset in
           HStack {
             VStack(alignment: .leading, spacing: 4) {
@@ -248,6 +234,7 @@ private struct PresetSettingsView: View {
             }
             .buttonStyle(.borderless)
             .controlSize(.small)
+            .accessibilityLabel("Export preset \(preset.name)")
 
             Button("Delete", role: .destructive) {
               if let index = store.presets.firstIndex(where: { $0.id == preset.id }) {
@@ -260,6 +247,7 @@ private struct PresetSettingsView: View {
           }
         }
         .onDelete(perform: store.deletePresets)
+        }
       }
     }
     .padding(20)
@@ -291,8 +279,19 @@ private struct DiagnosticsSettingsView: View {
         if let diagnostics = store.diagnostics {
           ForEach(diagnostics.checks) { check in
             VStack(alignment: .leading, spacing: 4) {
-              Text(check.title)
-                .font(.headline)
+              HStack(spacing: 8) {
+                // Shape-differentiated glyph per status so color-blind sighted
+                // users can distinguish pass/warn/fail/info by shape, not hue
+                // alone. Hidden from VoiceOver; the combined label carries the
+                // status word.
+                Image(systemName: symbol(for: check.status))
+                  .foregroundStyle(color(for: check.status))
+                  .accessibilityHidden(true)
+                Text(check.title)
+                  .font(.headline)
+              }
+              .accessibilityElement(children: .combine)
+              .accessibilityLabel("\(statusLabel(for: check.status)): \(check.title)")
               Text(check.detail)
                 .foregroundStyle(.secondary)
             }
@@ -309,6 +308,45 @@ private struct DiagnosticsSettingsView: View {
     }
     .onAppear {
       store.refreshDiagnostics()
+    }
+  }
+
+  private func color(for status: DiagnosticsStatus) -> Color {
+    switch status {
+    case .passed:
+      .green
+    case .warning:
+      .orange
+    case .failed:
+      .red
+    case .informational:
+      .secondary
+    }
+  }
+
+  private func symbol(for status: DiagnosticsStatus) -> String {
+    switch status {
+    case .passed:
+      "checkmark.circle"
+    case .warning:
+      "exclamationmark.triangle"
+    case .failed:
+      "xmark.octagon"
+    case .informational:
+      "info.circle"
+    }
+  }
+
+  private func statusLabel(for status: DiagnosticsStatus) -> String {
+    switch status {
+    case .passed:
+      "Passed"
+    case .warning:
+      "Warning"
+    case .failed:
+      "Failed"
+    case .informational:
+      "Info"
     }
   }
 }

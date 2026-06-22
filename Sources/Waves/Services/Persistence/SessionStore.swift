@@ -34,6 +34,7 @@ final class SessionStore: @unchecked Sendable {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
           logger.error("Session file exceeds size limit: \(fileSize) bytes")
+          backupCorruptFile()
           return nil
         }
 
@@ -41,9 +42,23 @@ final class SessionStore: @unchecked Sendable {
         let snapshot = try PersistedSchema.decode(AudioSessionSnapshot.self, from: data, using: decoder)
         return snapshot
       } catch {
-        logger.warning("Failed to load session: \(error.localizedDescription)")
+        // Preserve the unreadable file for recovery instead of letting the next
+        // save overwrite it (e.g. a session.json from a newer schema version).
+        logger.warning("Failed to load session: \(error.localizedDescription). Preserving file and using defaults.")
+        backupCorruptFile()
         return nil
       }
+    }
+  }
+
+  private func backupCorruptFile() {
+    let backupURL = url.appendingPathExtension("corrupt")
+    try? FileManager.default.removeItem(at: backupURL)
+    do {
+      try FileManager.default.moveItem(at: url, to: backupURL)
+      logger.warning("Moved unreadable session file to \(backupURL.lastPathComponent)")
+    } catch {
+      logger.error("Failed to back up unreadable session file: \(error.localizedDescription)")
     }
   }
 

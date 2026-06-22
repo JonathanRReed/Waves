@@ -2,13 +2,13 @@ import SwiftUI
 
 struct OnboardingView: View {
   @Environment(AppStore.self) private var store
-  @State private var selectedStep = 0
+  @Environment(\.scenePhase) private var scenePhase
 
   private let steps: [(title: String, detail: String, action: String)] = [
     (
       "Confirm managed audio support",
       "Waves uses local Core Audio process taps on macOS 14.2 or newer. Audio stays on this Mac and is only replayed to your selected output device.",
-      "Refresh Status"
+      "Re-check support"
     ),
     (
       "Validate output device visibility",
@@ -42,6 +42,27 @@ struct OnboardingView: View {
     store.onboarding.routeHealthReady
   }
 
+  /// True when the running OS is older than the per-app routing requirement.
+  /// On such systems `audioComponentInstalled` can never flip true, so step 0's
+  /// Refresh action is futile and must be replaced with an explanation instead.
+  private var isUnsupportedOS: Bool {
+    if #available(macOS 14.2, *) {
+      return false
+    }
+    return true
+  }
+
+  /// True when the decisive Core Audio capture (Microphone/TCC) permission is
+  /// the specific blocker for route health: routing is supported and a device
+  /// is visible, but capture has not been authorized. In this state route
+  /// recovery cannot help — only granting Microphone permission can.
+  private var captureDeniesRouteHealth: Bool {
+    store.onboarding.audioComponentInstalled &&
+    store.onboarding.outputDeviceVisible &&
+    !store.onboarding.routeHealthReady &&
+    !store.onboarding.permissionsGranted
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 24) {
       VStack(alignment: .leading, spacing: 8) {
@@ -56,15 +77,20 @@ struct OnboardingView: View {
 
       ProgressView(value: completionProgress)
         .tint(isFullyComplete ? .green : WavesDesign.accent)
+        .accessibilityLabel("Setup progress")
+        .accessibilityValue("\(Int((completionProgress * 3).rounded())) of 3 steps complete")
 
       VStack(alignment: .leading, spacing: 16) {
         ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
           EnhancedSetupStepRow(
             title: step.title,
-            detail: step.detail,
+            detail: detail(for: index, fallback: step.detail),
             isComplete: isStepComplete(at: index),
-            action: step.action,
-            canPerformAction: canPerformAction(for: index)
+            action: actionLabel(for: index, fallback: step.action),
+            canPerformAction: canPerformAction(for: index),
+            badge: badge(for: index),
+            secondaryAction: secondaryAction(for: index),
+            onSecondaryAction: { handleSecondaryAction(for: index) }
           ) {
             handleAction(for: index)
           }
@@ -134,6 +160,24 @@ struct OnboardingView: View {
       }
     }
     .padding(28)
+    .onAppear {
+      // Probe live route-health/diagnostics state when the flow is shown so the
+      // route-health step reflects a fresh check rather than the last sync.
+      // refresh(announce: false) already rebuilds the snapshot, re-runs
+      // diagnosticsReport(), and re-syncs onboarding, so a separate
+      // refreshDiagnostics() would only duplicate that work — and announce:false
+      // keeps this automatic re-sync from emitting a "Library refreshed" toast.
+      store.refresh(announce: false)
+    }
+    .onChange(of: scenePhase) { _, newPhase in
+      // Re-evaluate permissions (e.g. AXIsProcessTrusted for Accessibility) when
+      // the user returns to Waves after granting them in System Settings, so the
+      // relevant step updates without requiring a manual Refresh. Silent so
+      // returning focus to Waves doesn't spam a toast on every reactivation.
+      if newPhase == .active {
+        store.refresh(announce: false)
+      }
+    }
   }
 
   private func isStepComplete(at index: Int) -> Bool {
@@ -148,11 +192,71 @@ struct OnboardingView: View {
 
   private func canPerformAction(for index: Int) -> Bool {
     switch index {
-    case 0: return !store.onboarding.audioComponentInstalled
+    case 0:
+      // On an unsupported OS the flag can never flip, so a Refresh action is
+      // futile; surface an informational message instead (see `detail`).
+      return !store.onboarding.audioComponentInstalled && !isUnsupportedOS
     case 1: return !store.onboarding.outputDeviceVisible
     case 2: return store.onboarding.outputDeviceVisible && !store.onboarding.routeHealthReady
     case 3: return !store.onboarding.accessibilityPermissionGranted
     default: return false
+    }
+  }
+
+  /// Per-step body copy, overridden when the live state warrants more specific
+  /// guidance than the static default (unsupported OS, capture permission, or
+  /// the keyboard-shortcuts dependency).
+  private func detail(for index: Int, fallback: String) -> String {
+    switch index {
+    case 0 where isUnsupportedOS:
+      return "Per-app audio routing requires macOS 14.2 or newer. Waves can't manage audio on this version of macOS — update macOS to continue."
+    case 2 where captureDeniesRouteHealth:
+      return "Waves needs permission to capture audio so it can route it to your selected device. Without it, per-app volume, mute, and boost silently do nothing. Allow audio recording for Waves in System Settings, then refresh."
+    case 3:
+      var copy = fallback
+      if !store.preferences.enableKeyboardShortcuts {
+        copy += " Global keyboard shortcuts are currently turned off in General settings — turn them on there for this grant to take effect."
+      }
+      return copy
+    default:
+      return fallback
+    }
+  }
+
+  /// Per-step action-button label, overridden when the live state changes what
+  /// the button should do.
+  private func actionLabel(for index: Int, fallback: String) -> String {
+    switch index {
+    case 2 where captureDeniesRouteHealth:
+      return "Open System Settings"
+    default:
+      return fallback
+    }
+  }
+
+  /// A short, non-warning chip shown beside a step. Used to mark the
+  /// Accessibility step as intentionally optional so granting (or skipping) it
+  /// reads as expected rather than as a stuck requirement.
+  private func badge(for index: Int) -> String? {
+    index == 3 ? "Optional" : nil
+  }
+
+  /// A secondary affordance shown on an already-complete step. Currently used to
+  /// let the user re-run the route-recovery check after it has passed, since the
+  /// primary action vanishes once the step is complete.
+  private func secondaryAction(for index: Int) -> String? {
+    if index == 2, store.onboarding.routeHealthReady {
+      return "Re-test"
+    }
+    return nil
+  }
+
+  private func handleSecondaryAction(for index: Int) {
+    switch index {
+    case 2:
+      store.recoverRoutes()
+    default:
+      break
     }
   }
 
@@ -163,13 +267,23 @@ struct OnboardingView: View {
     case 1:
       store.refresh()
     case 2:
-      store.recoverRoutes()
-    case 3:
-      if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-        NSWorkspace.shared.open(url)
+      // When capture permission is the blocker, route recovery cannot create a
+      // TCC grant, so direct the user to the Microphone privacy pane instead.
+      if captureDeniesRouteHealth {
+        openSystemSettings(privacyPane: "Privacy_Microphone")
+      } else {
+        store.recoverRoutes()
       }
+    case 3:
+      openSystemSettings(privacyPane: "Privacy_Accessibility")
     default:
       break
+    }
+  }
+
+  private func openSystemSettings(privacyPane: String) {
+    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(privacyPane)") {
+      NSWorkspace.shared.open(url)
     }
   }
 }
@@ -180,6 +294,12 @@ private struct EnhancedSetupStepRow: View {
   let isComplete: Bool
   let action: String
   let canPerformAction: Bool
+  /// Optional non-warning chip (e.g. "Optional") shown beside the title.
+  var badge: String? = nil
+  /// Optional secondary action label shown even when the step is complete
+  /// (e.g. a "Re-test" control). Rendered only when non-nil.
+  var secondaryAction: String? = nil
+  var onSecondaryAction: () -> Void = {}
   let onAction: () -> Void
 
   var body: some View {
@@ -191,8 +311,19 @@ private struct EnhancedSetupStepRow: View {
           .accessibilityLabel(isComplete ? "Completed" : canPerformAction ? "Needs action" : "Pending")
 
         VStack(alignment: .leading, spacing: 4) {
-          Text(title)
-            .font(.headline)
+          HStack(spacing: 8) {
+            Text(title)
+              .font(.headline)
+            if let badge {
+              Text(badge)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.15), in: Capsule())
+                .accessibilityLabel("Optional step")
+            }
+          }
           Text(detail)
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -204,6 +335,12 @@ private struct EnhancedSetupStepRow: View {
         if canPerformAction {
           Button(action) {
             onAction()
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+        } else if let secondaryAction {
+          Button(secondaryAction) {
+            onSecondaryAction()
           }
           .buttonStyle(.bordered)
           .controlSize(.small)
