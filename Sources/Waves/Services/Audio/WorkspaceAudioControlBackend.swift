@@ -724,11 +724,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       if uid.hasPrefix("com.waves.aggregate.") { continue }
       let name = (try? stringProperty(deviceID, selector: kAudioObjectPropertyName, action: "read device name")) ?? "Output Device"
       let kind = deviceKind(uid: uid, name: name)
-      // Belt-and-suspenders: also exclude any device whose name identifies it as
-      // a Waves device, independent of how deviceKind classifies it. (A
-      // "Waves-<app>" name is classified .virtual, not .aggregate, so gating on
-      // kind == .aggregate here never matched.)
-      if name.lowercased().contains("waves") { continue }
+      // Note: do NOT also filter on a "waves" name substring. This app's own
+      // aggregates are reliably identified by the com.waves.aggregate. UID prefix
+      // above; a name-based test would wrongly hide legitimate third-party
+      // hardware from Waves Audio (a real vendor) whose names contain "waves".
       devices.append(AudioDevice(
         id: uid,
         name: name,
@@ -1073,7 +1072,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // successful re-apply must not erase the Error chip / inline reason. The
       // error clears only on a later successful apply or reattach (those paths
       // set .managed and notes=nil) or once the controller is live again.
-      if previous.routingState == .error {
+      // But if the fresh candidate shows the app currently audible (.live), the
+      // app is plainly playing again — let that clear a stale, transient error
+      // rather than pinning the row/global health to error indefinitely.
+      if previous.routingState == .error && candidate.routingState != .live {
         app.routingState = .error
         app.notes = previous.notes
       }
@@ -1176,7 +1178,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return result
   }
 
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32) async {
+  // Satisfies the AudioControlBackend protocol requirement
+  // releaseControllers(forBundleID:pid:). The defaulted clearMuteState parameter
+  // means this also fulfils the shorter protocol signature, and plain callers
+  // (e.g. app TERMINATION via handleAppTermination) get the safe default of
+  // NOT clearing mute — so a user's saved manual mute survives the app quitting
+  // and is not later propagated as "unmuted" by a snapshot merge.
+  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool = false) async {
     let targetIDs = snapshot.apps.filter { app in
       (bundleID != nil && app.bundleID == bundleID) || (app.pid != nil && app.pid == pid)
     }.map(\.id)
@@ -1195,12 +1203,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       snapshot.apps[index].appliedVolume = nil
       snapshot.apps[index].peakLevel = 0
       snapshot.apps[index].rmsLevel = 0
-      // Clear mute too, so a later whole-session pull (buildSnapshot carries
-      // previous.isMuted forward) does not resurrect a mute the user cleared by
-      // excluding the app. This keeps the backend snapshot in agreement with the
-      // store, which also clears mute and sets muteSource = .user on exclusion.
-      snapshot.apps[index].isMuted = false
-      snapshot.apps[index].muteSource = .user
+      // Only the EXCLUSION path clears mute, so a later whole-session pull
+      // (buildSnapshot carries previous.isMuted forward) does not resurrect a
+      // mute the user cleared by excluding the app, keeping the backend snapshot
+      // in agreement with the store (which clears mute + sets muteSource = .user
+      // on exclusion). Plain termination must NOT clear it.
+      if clearMuteState {
+        snapshot.apps[index].isMuted = false
+        snapshot.apps[index].muteSource = .user
+      }
     }
   }
 
@@ -1498,7 +1509,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         // A muted or volume-0 app emits silence, so its meters must read zero even
         // if the controller's last render cycle left a stale non-zero level (e.g.
         // the controller is gone, or a short-circuit branch raced the poll).
-        if snapshot.apps[index].isMuted || (snapshot.apps[index].appliedVolume ?? 0) == 0 {
+        // Only an EXPLICIT zero applied volume forces silence: a nil appliedVolume
+        // means "unknown", not "muted" (e.g. an app first enrolled via the Boost
+        // menu has a managed route but no assigned appliedVolume), and must not
+        // zero its meters.
+        let isVolumeZero = snapshot.apps[index].appliedVolume.map { $0 == 0 } ?? false
+        if snapshot.apps[index].isMuted || isVolumeZero {
           snapshot.apps[index].peakLevel = 0
           snapshot.apps[index].rmsLevel = 0
         } else {

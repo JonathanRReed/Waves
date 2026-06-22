@@ -57,6 +57,10 @@ final class AppStore {
   // mid-flight (an overlapping snapshot could shrink session.apps under an
   // in-loop index in restoreDeviceVolumePresets and trap).
   private var isHandlingDeviceChange = false
+  // Set when a device-change event arrives while a handler is already in flight.
+  // The in-flight handler clears it and runs exactly one more pass, so a coalesced
+  // event (rapid dock/undock, Bluetooth reconnect) is never dropped.
+  private var pendingDeviceChangeRerun = false
   // Set briefly by selectOutputDevice so the Core Audio default-device listener's
   // ensuing handleDeviceChange suppresses its "Output device changed" info toast:
   // a manual switch already shows an "Output switched" success toast, so a second
@@ -829,7 +833,9 @@ final class AppStore {
       // row should no longer show Waves-applied mute/volume state.
       let bundleID = app.bundleID
       let pid = app.pid ?? -1
-      Task { await backend.releaseControllers(forBundleID: bundleID, pid: pid) }
+      // Exclusion: clear the backend's mute state too, so a later whole-session
+      // rebuild doesn't resurrect a mute the user dropped by excluding the app.
+      Task { await backend.releaseControllers(forBundleID: bundleID, pid: pid, clearMuteState: true) }
       if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
         session.apps[index].routingState = .monitorOnly
         session.apps[index].appliedVolume = nil
@@ -946,14 +952,31 @@ final class AppStore {
   }
 
   func handleDeviceChange() {
-    // Drop overlapping events: a device-change in flight already reassigns
-    // `session` and (optionally) walks restoreDeviceVolumePresets indexing
-    // session.apps across awaits; a second concurrent pass could shrink that
-    // array mid-loop. Mirrors the isRefreshing/isRecovering in-flight guards.
-    guard !isHandlingDeviceChange else { return }
+    // Coalesce overlapping events instead of dropping them: a device-change in
+    // flight already reassigns `session` and (optionally) walks
+    // restoreDeviceVolumePresets indexing session.apps across awaits; a second
+    // concurrent pass could shrink that array mid-loop. So we never run two passes
+    // at once. But dropping the second event outright could leave the UI on the
+    // earlier snapshot/device-list/onboarding (rapid dock/undock, Bluetooth
+    // reconnect) until some unrelated refresh. Instead, record a pending rerun and
+    // let the in-flight handler run exactly one more pass once it finishes.
+    guard !isHandlingDeviceChange else {
+      pendingDeviceChangeRerun = true
+      return
+    }
     isHandlingDeviceChange = true
     Task {
       defer { isHandlingDeviceChange = false }
+      repeat {
+        // Clear the pending flag before each pass; any event arriving during this
+        // pass re-sets it and earns exactly one more iteration.
+        pendingDeviceChangeRerun = false
+        await performDeviceChangePass()
+      } while pendingDeviceChangeRerun
+    }
+  }
+
+  private func performDeviceChangePass() async {
       // The lightweight refresh below must run on EVERY device-change event:
       // session.currentDevice, the device list, diagnostics, and onboarding would
       // otherwise go stale (picker label / checkmark stuck on the old device)
@@ -991,7 +1014,6 @@ final class AppStore {
           duration: .seconds(1.5)
         )
       }
-    }
   }
 
   private func reapplyRestoredAudioState() async {
@@ -1181,8 +1203,8 @@ final class AppStore {
 
   private func handleAppTermination(bundleID: String?, pid: Int32) {
     // Release the quit app's tap/aggregate device promptly instead of waiting
-    // for the next refresh.
-    Task { await backend.releaseControllers(forBundleID: bundleID, pid: pid) }
+    // for the next refresh. Termination must NOT clear the user's saved mute.
+    Task { await backend.releaseControllers(forBundleID: bundleID, pid: pid, clearMuteState: false) }
 
     // Reflect the termination in the UI immediately.
     var changed = false
@@ -1482,11 +1504,21 @@ final class AppStore {
       let response = await openPanel.beginSheetModal(for: window)
       if response == .OK, let url = openPanel.url {
         do {
-          // Read the bytes once and enforce the 10MB cap on the data actually
-          // loaded, avoiding a stat/read TOCTOU where a symlink could be swapped
-          // between an attributesOfItem size check and the subsequent read.
+          let sizeCap = 10 * 1024 * 1024
+          // Reject over-cap files BEFORE reading so a huge selection can't exhaust
+          // memory in the Data(contentsOf:) allocation. resourceValues is a cheap
+          // stat that doesn't load the file.
+          if let reportedSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+             reportedSize > sizeCap {
+            showToast(title: "Import failed", detail: "File exceeds 10MB limit", kind: .error)
+            return
+          }
+
+          // Re-enforce the cap on the data actually loaded. The pre-read stat above
+          // bounds the allocation; this post-read check still rejects a file whose
+          // size grew (or a symlink swapped) between the stat and the read.
           let data = try Data(contentsOf: url)
-          if data.count > 10 * 1024 * 1024 {
+          if data.count > sizeCap {
             showToast(title: "Import failed", detail: "File exceeds 10MB limit", kind: .error)
             return
           }
@@ -1643,20 +1675,23 @@ final class AppStore {
 
   func refreshDiagnostics() {
     Task {
-      diagnostics = await backend.diagnosticsReport()
-      // diagnosticsReport() re-probes capture authorization, but currentSnapshot()
-      // only returns the cached snapshot whose backendStatus.hasRequiredPermissions /
-      // isRouteRecoveryHealthy predate that probe. Rebuild the snapshot via refresh()
-      // so the checklist's capture/route-health flags share the freshly-probed source
-      // the "Audio capture permission" diagnostic uses (otherwise they diverge when
-      // only the Advanced tab refreshes). Fall back to the cached snapshot if the
-      // rebuild throws, so a transient failure still re-syncs from something current.
+      // Rebuild the backend snapshot FIRST so diagnostics are computed from the
+      // same freshly-probed state the checklist/session read. diagnosticsReport()
+      // re-probes capture authorization, but currentSnapshot() only returns the
+      // cached snapshot whose backendStatus.hasRequiredPermissions /
+      // isRouteRecoveryHealthy predate that probe. Computing diagnostics before the
+      // refresh let the Advanced checks reflect stale backendStatus (e.g. a stale
+      // Route-recovery warning) while session/onboarding updated from the fresh
+      // snapshot. Refresh, then read diagnostics, then assign — so both share the
+      // freshly-probed source. Fall back to the cached snapshot if the rebuild
+      // throws, so a transient failure still re-syncs from something current.
       let snapshot: AudioSessionSnapshot
       if let rebuilt = try? await backend.refresh() {
         snapshot = rebuilt
       } else {
         snapshot = await backend.currentSnapshot()
       }
+      diagnostics = await backend.diagnosticsReport()
       // A diagnostics surface (Settings/Onboarding) can appear while a mixer
       // slider drag is still debouncing, so the snapshot's per-app values are the
       // backend's not-yet-applied ones. Wholesale-reassigning `session` there would
