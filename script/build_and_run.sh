@@ -116,9 +116,14 @@ if ! is_publication_check_mode; then
     BUILD_ARGS=(-c release)
   fi
 
-  # Build once and capture the binary path
-  BUILD_OUTPUT_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
-  swift build "${BUILD_ARGS[@]}"
+  # Build once and capture the binary path.
+  if ((${#BUILD_ARGS[@]} > 0)); then
+    BUILD_OUTPUT_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
+    swift build "${BUILD_ARGS[@]}"
+  else
+    BUILD_OUTPUT_DIR="$(swift build --show-bin-path)"
+    swift build
+  fi
   BUILD_BINARY="$BUILD_OUTPUT_DIR/$APP_NAME"
 
   rm -rf "$APP_BUNDLE"
