@@ -54,78 +54,54 @@ struct WavesBackground: View {
   }
 }
 
-// MARK: - Liquid Glass surface (macOS 26+) with a faux-glass fallback
+// MARK: - Modern glass affordances (macOS 26+) with backward-compatible fallbacks
+//
+// Liquid Glass lives on the navigation/floating layer only: the system-provided
+// menu-bar popover, sheets, and toolbar; the window/sheet backdrop (WavesBackground,
+// above); and primary actions via the glass button style below. Content cards use
+// a tonal fill (see `wavesCard` in DesignSystem). There is intentionally no custom
+// glass *surface* modifier — a glass card over the blurred backdrop reads as muddy
+// glass-on-glass, which Apple's guidance warns against.
 
 extension View {
-  /// A Liquid-Glass surface. On macOS 26 (Tahoe) this is genuine
-  /// `.glassEffect(.regular)`; on macOS 14.2–15 it's a layered faux-glass
-  /// (real blur + frosted material + specular bevel). Honors Reduce Transparency
-  /// (opaque) and Increase Contrast (stronger border). This is the one place
-  /// panel/card chrome is defined so every custom surface matches.
-  func wavesGlass(cornerRadius: CGFloat = WavesDesign.compactCardCornerRadius, tint: Color? = nil) -> some View {
-    modifier(WavesGlassModifier(cornerRadius: cornerRadius, tint: tint))
-  }
-}
-
-private struct WavesGlassModifier: ViewModifier {
-  let cornerRadius: CGFloat
-  let tint: Color?
-  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-  @Environment(\.colorSchemeContrast) private var contrast
-
-  func body(content: Content) -> some View {
-    let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-    if reduceTransparency {
-      // Opaque, no blur — accessibility requirement.
-      content
-        .background(Color(red: 0.08, green: 0.10, blue: 0.14), in: shape)
-        .overlay(shape.strokeBorder(.white.opacity(contrast == .increased ? 0.5 : 0.22), lineWidth: 1))
-    } else if #available(macOS 26.0, *) {
-      content
-        .glassEffect(glassValue, in: shape)
-        .overlay(shape.strokeBorder(.white.opacity(contrast == .increased ? 0.4 : 0.1), lineWidth: 0.5))
+  /// Soft scroll-edge dissolve so list content melts under the floating header /
+  /// toolbar instead of meeting a hard clip — the modern Tahoe treatment. macOS
+  /// 26+ only; a no-op (current hard edge) below, so 14.2–15 is unaffected.
+  @ViewBuilder
+  func wavesSoftScrollEdge() -> some View {
+    if #available(macOS 26.0, *) {
+      self.scrollEdgeEffectStyle(.soft, for: .top)
     } else {
-      content.modifier(FauxGlass(shape: shape, tint: tint, increasedContrast: contrast == .increased))
+      self
     }
   }
 
-  @available(macOS 26.0, *)
-  private var glassValue: Glass {
-    guard let tint else { return .regular }
-    return .regular.tint(tint)
+  /// Shows the link/pointing-hand cursor over a borderless, link-like control so
+  /// it reads as clickable (macOS 15+); harmless arrow-cursor fallback below.
+  @ViewBuilder
+  func wavesLinkPointer() -> some View {
+    if #available(macOS 15.0, *) {
+      self.pointerStyle(.link)
+    } else {
+      self
+    }
   }
+
+  /// The single primary action on a surface: prominent (cyan-tinted) glass on
+  /// macOS 26, `.borderedProminent` below. One per surface keeps the accent rare.
+  func wavesGlassProminentButton() -> some View { modifier(WavesGlassButtonStyle()) }
 }
 
-/// Dark faux-glass for macOS 14.2–15: a real blur base, a frosted material, a
-/// top→bottom specular bevel, and a soft inner highlight — the recipe that reads
-/// as glass before the system API existed.
-private struct FauxGlass: ViewModifier {
-  let shape: RoundedRectangle
-  let tint: Color?
-  let increasedContrast: Bool
-
+/// Swaps in the genuine macOS 26 prominent glass button style where available,
+/// falling back to `.borderedProminent` on macOS 14.2–15 so the primary action
+/// looks native on every supported OS. The system style owns its own edge and
+/// legibility adaptations (Reduce Transparency / Increase Contrast).
+private struct WavesGlassButtonStyle: ViewModifier {
   func body(content: Content) -> some View {
-    content
-      .background {
-        ZStack {
-          VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-          shape.fill(.ultraThinMaterial)
-          if let tint {
-            shape.fill(tint.opacity(0.16)).blendMode(.overlay)
-          }
-          LinearGradient(colors: [.white.opacity(0.07), .clear], startPoint: .top, endPoint: .center)
-        }
-        .clipShape(shape)
-      }
-      .overlay(
-        shape.strokeBorder(
-          LinearGradient(
-            colors: [.white.opacity(increasedContrast ? 0.55 : 0.34), .white.opacity(0.05), .clear],
-            startPoint: .top,
-            endPoint: .bottom
-          ),
-          lineWidth: 1
-        )
-      )
+    if #available(macOS 26.0, *) {
+      content.buttonStyle(.glassProminent).tint(WavesDesign.accent)
+    } else {
+      content.buttonStyle(.borderedProminent).tint(WavesDesign.accent)
+    }
   }
 }
