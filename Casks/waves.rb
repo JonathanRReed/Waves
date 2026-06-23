@@ -19,7 +19,9 @@ cask "waves" do
     strategy :github_latest
   end
 
-  depends_on macos: ">= :sonoma"
+  # Per-app routing requires Core Audio process taps — macOS 14.2 is the floor
+  # (matches LSMinimumSystemVersion). 14.0/14.1 would hit the unsupported-OS path.
+  depends_on macos: ">= 14.2"
 
   app "Waves.app"
 

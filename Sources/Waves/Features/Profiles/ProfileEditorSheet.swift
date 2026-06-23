@@ -15,6 +15,7 @@ struct ProfileEditorContext: Identifiable {
 struct ProfileEditorSheet: View {
   @Environment(AppStore.self) private var store
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.colorSchemeContrast) private var contrast
 
   let context: ProfileEditorContext
 
@@ -79,8 +80,16 @@ struct ProfileEditorSheet: View {
       Text("Name")
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
+      // A tonal field that matches the app-picker card below, instead of the
+      // light AppKit rounded-border bezel that fights the near-black palette.
       TextField("e.g. Work, Gaming, Focus", text: $name)
-        .textFieldStyle(.roundedBorder)
+        .textFieldStyle(.plain)
+        .padding(8)
+        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(WavesDesign.hairline(increasedContrast: contrast == .increased))
+        )
       if isTooLong {
         Text("Name too long (max \(Self.maxNameLength) characters)")
           .font(.caption)
@@ -178,8 +187,17 @@ struct ProfileEditorSheet: View {
         .keyboardShortcut(.defaultAction)
         .wavesGlassProminentButton()
         .disabled(!canSave)
+        .help(saveDisabledReason)
     }
     .padding(20)
+  }
+
+  /// Tells the user why Save is disabled instead of leaving a silent dead button.
+  private var saveDisabledReason: String {
+    if canSave { return "Save profile" }
+    if trimmedName.isEmpty { return "Enter a profile name" }
+    if isTooLong { return "Name too long (max \(Self.maxNameLength) characters)" }
+    return "Select at least one app"
   }
 
   // MARK: - Data

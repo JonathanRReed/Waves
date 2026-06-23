@@ -5,6 +5,7 @@ import WavesAudioCore
 struct MixerRowView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.colorSchemeContrast) private var contrast
   let app: AudioApp
   @State private var animateMuteChange = false
   @State private var isHovering = false
@@ -104,6 +105,9 @@ struct MixerRowView: View {
             // Motion (the button's accessibilityLabel still announces the change).
             .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace.downUp))
             .symbolEffect(.bounce, value: animateMuteChange)
+            // A comfortable, stable tap target around the small glyph.
+            .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
         .help(muteHelp)
@@ -111,7 +115,9 @@ struct MixerRowView: View {
         .sensoryFeedback(.selection, trigger: app.isMuted)
         .disabled(isExcluded)
       }
-      .opacity(isExcluded ? 0.55 : 1)
+      // Dim excluded rows, but lift the floor under Increase Contrast so the
+      // already-secondary text doesn't fall below a legible ratio.
+      .opacity(isExcluded ? (contrast == .increased ? 0.85 : 0.55) : 1)
 
       if app.routingState == .error, let notes = app.notes {
         Text(notes)
@@ -272,6 +278,7 @@ private struct MixerRowHelpers {
 struct CompactMixerRow: View {
   @Environment(AppStore.self) private var store
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.colorSchemeContrast) private var contrast
   let app: AudioApp
   @State private var animateMuteChange = false
 
@@ -283,7 +290,8 @@ struct CompactMixerRow: View {
         Image(systemName: app.isPinned ? "pin.fill" : "pin")
           .font(.caption)
           .foregroundStyle(app.isPinned ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.tertiary))
-          .frame(width: 14)
+          .frame(width: 22, height: 22)
+          .contentShape(Rectangle())
       }
       .buttonStyle(.borderless)
       .help(app.isPinned ? "Unpin from the top" : "Pin to the top")
@@ -333,6 +341,16 @@ struct CompactMixerRow: View {
       }
       .disabled(isExcluded)
 
+      // Numeric parity with the full row, so a menu-bar-first user dragging the
+      // short slider can read the target they're setting.
+      Text("\(Int((app.desiredVolume * 100).rounded()))%")
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .frame(width: 30, alignment: .trailing)
+        .contentTransition(.numericText())
+        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: app.desiredVolume)
+        .accessibilityHidden(true)
+
       BoostMenu(app: app, compact: true)
         .disabled(isExcluded)
 
@@ -344,6 +362,8 @@ struct CompactMixerRow: View {
           // Match the full row: morph the speaker ⇄ slash glyph instead of cutting.
           .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace.downUp))
           .symbolEffect(.bounce, value: animateMuteChange)
+          .frame(width: 22, height: 22)
+          .contentShape(Rectangle())
       }
       .buttonStyle(.borderless)
       .help(muteHelp)
@@ -351,7 +371,7 @@ struct CompactMixerRow: View {
       .accessibilityHint(app.isMuted ? "Restores audio for this app." : "Silences this app.")
       .disabled(isExcluded)
     }
-    .opacity(isExcluded ? 0.55 : 1)
+    .opacity(isExcluded ? (contrast == .increased ? 0.85 : 0.55) : 1)
     // Mirror the main window's quiet cyan level meter so a menu-bar-first user
     // gets the same per-row "playing" feedback. Reuses the store's live-level
     // poll (already started by the menu panel) and an overlay so layout never
@@ -433,9 +453,11 @@ private struct BoostMenu: View {
         }
       }
     } label: {
+      // Boost reads as a status signal: quiet at the 1× default, cyan + bold once
+      // the app is actually boosted, so a glance finds the boosted rows.
       Text("\(Int(app.volumeBoost))x")
-        .font(compact ? .caption.monospacedDigit() : .caption.monospacedDigit().weight(.medium))
-        .foregroundStyle(.secondary)
+        .font(.caption.monospacedDigit().weight(isBoosted ? .semibold : (compact ? .regular : .medium)))
+        .foregroundStyle(isBoosted ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.tertiary))
         .lineLimit(1)
         .minimumScaleFactor(0.7)
         .frame(width: compact ? 34 : 38)
@@ -445,6 +467,8 @@ private struct BoostMenu: View {
     .accessibilityLabel("Boost for \(app.displayName)")
     .accessibilityValue("\(Int(app.volumeBoost))x")
   }
+
+  private var isBoosted: Bool { app.volumeBoost > 1 }
 }
 
 private extension RoutingState {

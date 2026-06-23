@@ -1712,7 +1712,7 @@ final class AppStore {
         // is frontmost), not the mixer window. Settings can be opened from the
         // menu bar with the mixer window closed, leaving NSApp.mainWindow nil.
         guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
-          showToast(title: "Export failed", detail: "No window available", kind: .error)
+          showToast(title: "Export failed", detail: "No window available.", kind: .error)
           return
         }
 
@@ -1744,7 +1744,7 @@ final class AppStore {
       // frontmost). Settings can be opened from the menu bar with the mixer
       // window closed, leaving NSApp.mainWindow nil.
       guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
-        showToast(title: "Import failed", detail: "No window available", kind: .error)
+        showToast(title: "Import failed", detail: "No window available.", kind: .error)
         return
       }
 
@@ -1757,7 +1757,7 @@ final class AppStore {
           // stat that doesn't load the file.
           if let reportedSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
              reportedSize > sizeCap {
-            showToast(title: "Import failed", detail: "File exceeds 10MB limit", kind: .error)
+            showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
             return
           }
 
@@ -1766,7 +1766,7 @@ final class AppStore {
           // size grew (or a symlink swapped) between the stat and the read.
           let data = try Data(contentsOf: url)
           if data.count > sizeCap {
-            showToast(title: "Import failed", detail: "File exceeds 10MB limit", kind: .error)
+            showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
             return
           }
 
@@ -1795,17 +1795,17 @@ final class AppStore {
             // the editor's 100-character cap.
             let trimmedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedName.isEmpty {
-              showToast(title: "Import failed", detail: "Profile name cannot be empty", kind: .error)
+              showToast(title: "Import failed", detail: "Profile name cannot be empty.", kind: .error)
               return
             }
 
             if trimmedName.count > 100 {
-              showToast(title: "Import failed", detail: "Profile name exceeds 100 characters", kind: .error)
+              showToast(title: "Import failed", detail: "Profile name exceeds 100 characters.", kind: .error)
               return
             }
 
             if profile.entries.count > 1000 {
-              showToast(title: "Import failed", detail: "Profile has too many entries (max 1000)", kind: .error)
+              showToast(title: "Import failed", detail: "Profile has too many entries (max 1000).", kind: .error)
               return
             }
 
@@ -2290,14 +2290,19 @@ final class AppStore {
     toasts.append(toast)
     trimToasts()
 
-    // No pre-cancel needed: each toast carries a freshly generated UUID, so
-    // toastDismissals never already holds a task for this id.
-    toastDismissals[toast.id] = Task { @MainActor [weak self] in
+    scheduleDismissal(id: toast.id, after: toast.duration)
+  }
+
+  /// (Re)schedules a toast's auto-dismiss after `delay`, replacing any existing
+  /// timer. Guards on the toast still existing so a just-removed toast is never
+  /// re-armed. The single source of truth for every dismissal timer.
+  private func scheduleDismissal(id: UUID, after delay: Duration) {
+    guard toasts.contains(where: { $0.id == id }) else { return }
+    toastDismissals[id]?.cancel()
+    toastDismissals[id] = Task { @MainActor [weak self] in
       do {
-        try await Task.sleep(for: toast.duration)
-        self?.dismissToast(id: toast.id)
-      } catch is CancellationError {
-        return
+        try await Task.sleep(for: delay)
+        self?.dismissToast(id: id)
       } catch {
         return
       }
@@ -2308,6 +2313,22 @@ final class AppStore {
     toastDismissals[id]?.cancel()
     toastDismissals.removeValue(forKey: id)
     toasts.removeAll { $0.id == id }
+  }
+
+  /// Hold a toast open while the pointer is over it. Extends (rather than cancels)
+  /// the auto-dismiss to a generous window, so the toast lingers long enough to
+  /// read but can NEVER be orphaned if it's displaced out from under a stationary
+  /// cursor — a trimToasts eviction shifting it up, or the popover closing —
+  /// without a matching onHover(false). The cap still leaves the manual dismiss
+  /// button and the full-text tooltip as escape hatches.
+  func pauseToastDismissal(id: UUID) {
+    scheduleDismissal(id: id, after: .seconds(8))
+  }
+
+  /// Re-arm a toast's auto-dismiss with a short grace once the pointer leaves, so
+  /// it doesn't vanish the instant the cursor moves away.
+  func resumeToastDismissal(id: UUID) {
+    scheduleDismissal(id: id, after: .seconds(1.5))
   }
 
   private func trimToasts() {
