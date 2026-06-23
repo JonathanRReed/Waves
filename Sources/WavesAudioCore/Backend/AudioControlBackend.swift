@@ -10,8 +10,8 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws
   func setVolumeControlMode(_ mode: VolumeControlMode, forDeviceID deviceID: String) async throws
   func pinApp(_ isPinned: Bool, appID: String) async throws
-  func applyPreset(_ preset: Preset) async throws -> AudioSessionSnapshot
-  func saveCurrentPreset(named name: String) async throws -> Preset
+  func applyProfile(_ profile: Profile) async throws -> AudioSessionSnapshot
+  func saveCurrentProfile(named name: String) async throws -> Profile
   func recoverRoutes() async throws -> AudioSessionSnapshot
   func autoRestoreDevice() async throws -> AudioSessionSnapshot
   func diagnosticsReport() async -> DiagnosticsReport

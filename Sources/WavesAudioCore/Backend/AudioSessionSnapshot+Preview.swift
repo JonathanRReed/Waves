@@ -118,25 +118,39 @@ extension AudioSessionSnapshot {
   }
 }
 
-extension Preset {
-  public static var defaults: [Preset] {
+extension Profile {
+  /// Starter profiles that show the two ends of the feature: "Work" and
+  /// "Gaming" are app *groups* (membership-only — they don't fight the user's
+  /// own levels), while "Focus" carries a concrete mix. Members are referenced
+  /// by bundle ID; any that aren't installed are simply skipped when applied.
+  public static var defaults: [Profile] {
     [
-      Preset(
-        name: "Focus",
+      Profile(
+        name: "Work",
         entries: [
-          PresetEntry(appID: "com.apple.Safari", desiredVolume: 0.25, isMuted: true),
-          PresetEntry(appID: "us.zoom.xos", desiredVolume: 1, isMuted: false),
-          PresetEntry(appID: "com.spotify.client", desiredVolume: 0.2, isMuted: false),
-          PresetEntry(appID: "com.hnc.Discord", desiredVolume: 0.65, isMuted: false),
+          ProfileEntry(appID: "com.tinyspeck.slackmacgap"),
+          ProfileEntry(appID: "com.microsoft.teams2"),
+          ProfileEntry(appID: "com.microsoft.teams"),
+          ProfileEntry(appID: "us.zoom.xos"),
+          ProfileEntry(appID: "com.apple.Safari"),
+          ProfileEntry(appID: "com.google.Chrome"),
         ]
       ),
-      Preset(
-        name: "Meeting",
+      Profile(
+        name: "Gaming",
         entries: [
-          PresetEntry(appID: "com.apple.Safari", desiredVolume: 0.1, isMuted: true),
-          PresetEntry(appID: "us.zoom.xos", desiredVolume: 1, isMuted: false),
-          PresetEntry(appID: "com.spotify.client", desiredVolume: 0.15, isMuted: false),
-          PresetEntry(appID: "com.hnc.Discord", desiredVolume: 0.75, isMuted: false),
+          ProfileEntry(appID: "com.hnc.Discord"),
+          ProfileEntry(appID: "com.valvesoftware.steam"),
+          ProfileEntry(appID: "com.spotify.client"),
+        ]
+      ),
+      Profile(
+        name: "Focus",
+        entries: [
+          ProfileEntry(appID: "com.apple.Safari", desiredVolume: 0.25, isMuted: true),
+          ProfileEntry(appID: "us.zoom.xos", desiredVolume: 1, isMuted: false),
+          ProfileEntry(appID: "com.spotify.client", desiredVolume: 0.2, isMuted: false),
+          ProfileEntry(appID: "com.hnc.Discord", desiredVolume: 0.65, isMuted: false),
         ]
       ),
     ]

@@ -2,7 +2,7 @@ import Foundation
 
 public actor PreviewAudioControlBackend: AudioControlBackend {
   private var snapshot: AudioSessionSnapshot
-  private var presets: [Preset]
+  private var profiles: [Profile]
 
   // The preview backend has no real audio hardware, so it never reports device
   // changes. An immediately-finishing stream lets observers attach harmlessly.
@@ -12,10 +12,10 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
 
   public init(
     snapshot: AudioSessionSnapshot = .preview,
-    presets: [Preset] = Preset.defaults
+    profiles: [Profile] = Profile.defaults
   ) {
     self.snapshot = snapshot
-    self.presets = presets
+    self.profiles = profiles
   }
 
   public func start() async throws {}
@@ -89,28 +89,35 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].isPinned = isPinned
   }
 
-  public func applyPreset(_ preset: Preset) async throws -> AudioSessionSnapshot {
-    for entry in preset.entries {
+  public func applyProfile(_ profile: Profile) async throws -> AudioSessionSnapshot {
+    for entry in profile.entries {
+      // Membership-only entries are pure grouping — leave the app's audio alone.
+      guard entry.hasLevels else { continue }
       guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) else {
         continue
       }
 
-      snapshot.apps[index].desiredVolume = entry.desiredVolume
-      snapshot.apps[index].isMuted = entry.isMuted
-      snapshot.apps[index].volumeBoost = entry.volumeBoost
+      // Apply only the fields the entry actually sets; fall back to the app's
+      // current value for the rest so a volume-only entry doesn't reset mute.
+      let targetVolume = entry.desiredVolume ?? snapshot.apps[index].desiredVolume
+      let targetMuted = entry.isMuted ?? snapshot.apps[index].isMuted
+      let targetBoost = entry.volumeBoost ?? snapshot.apps[index].volumeBoost
+      snapshot.apps[index].desiredVolume = targetVolume
+      snapshot.apps[index].isMuted = targetMuted
+      snapshot.apps[index].volumeBoost = targetBoost
       snapshot.apps[index].appliedVolume =
-        snapshot.apps[index].compatibility == .supported ? entry.desiredVolume : nil
+        snapshot.apps[index].compatibility == .supported ? (targetMuted ? 0 : targetVolume) : nil
     }
 
     snapshot.updatedAt = .now
     return snapshot
   }
 
-  public func saveCurrentPreset(named name: String) async throws -> Preset {
-    let preset = Preset(
+  public func saveCurrentProfile(named name: String) async throws -> Profile {
+    let profile = Profile(
       name: name,
       entries: snapshot.apps.map {
-        PresetEntry(
+        ProfileEntry(
           appID: $0.logicalID,
           desiredVolume: $0.desiredVolume,
           isMuted: $0.isMuted,
@@ -118,8 +125,8 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
         )
       }
     )
-    presets.append(preset)
-    return preset
+    profiles.append(profile)
+    return profile
   }
 
   public func recoverRoutes() async throws -> AudioSessionSnapshot {

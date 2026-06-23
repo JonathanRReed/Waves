@@ -35,8 +35,8 @@ import WavesAudioCore
 }
 
 @Test func decodeAcceptsLegacyUnversionedArray() throws {
-  // Presets were historically stored as a bare JSON array.
+  // Profiles (formerly presets) were historically stored as a bare JSON array.
   let legacy = Data("[]".utf8)
-  let decoded = try PersistedSchema.decode([Preset].self, from: legacy, using: JSONDecoder())
+  let decoded = try PersistedSchema.decode([Profile].self, from: legacy, using: JSONDecoder())
   #expect(decoded.isEmpty)
 }

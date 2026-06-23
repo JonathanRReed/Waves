@@ -5,20 +5,20 @@ struct MainWindowView: View {
   @Environment(AppStore.self) private var store
   @State private var searchText = ""
   // Restored across launches so the user returns to the scope they left.
-  @SceneStorage("waves.selectedScope") private var selection: SourceFilter = .running
-  @State private var isPresentingSavePreset = false
-  @State private var presetName = ""
+  @SceneStorage("waves.selectedScope") private var selection: MixerScope = .source(.running)
+  @State private var editorContext: ProfileEditorContext?
 
   var body: some View {
     ZStack(alignment: .top) {
       NavigationSplitView {
-        SidebarView(selection: $selection)
-          .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)
+        SidebarView(selection: $selection, onNewProfile: presentNewProfile, onEditProfile: presentEditProfile)
+          .navigationSplitViewColumnWidth(min: 220, ideal: 248, max: 300)
       } detail: {
         SourceListView(
-          filter: selection,
+          scope: selection,
           apps: filteredApps,
-          searchText: searchText
+          searchText: searchText,
+          onEditProfile: presentEditProfile
         )
       }
       .navigationSplitViewStyle(.balanced)
@@ -26,14 +26,14 @@ struct MainWindowView: View {
       .toolbar {
         ToolbarItemGroup {
           Button {
-            isPresentingSavePreset = true
+            presentNewProfile()
           } label: {
-            Image(systemName: "plus")
+            Image(systemName: "rectangle.stack.badge.plus")
           }
-          .help("Save preset")
-          .accessibilityLabel("Save preset")
-          .accessibilityHint("Opens a sheet to save the current mixer settings as a preset.")
-          .keyboardShortcut("s", modifiers: [.command])
+          .help("New profile")
+          .accessibilityLabel("New profile")
+          .accessibilityHint("Opens a sheet to group apps into a profile, optionally with saved levels.")
+          .keyboardShortcut("n", modifiers: [.command])
 
           Button {
             store.refresh()
@@ -73,23 +73,17 @@ struct MainWindowView: View {
         .accessibilityLabel("Refreshing, in progress")
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-          RoundedRectangle(cornerRadius: 12)
-            .strokeBorder(WavesDesign.accent.opacity(0.22))
-        )
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(WavesDesign.accent.opacity(0.22)))
         .padding(.top, 12)
         .padding(.leading, 14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
       }
     }
     .background(Color(nsColor: .windowBackgroundColor))
-    .sheet(isPresented: $isPresentingSavePreset) {
-      SavePresetSheet(
-        presetName: $presetName,
-        onCancel: dismissPresetSheet,
-        onSave: savePreset
-      )
+    .sheet(item: $editorContext) { context in
+      ProfileEditorSheet(context: context)
+        .environment(store)
     }
     .onOpenURL { url in
       store.handleURLScheme(url)
@@ -104,29 +98,62 @@ struct MainWindowView: View {
     .onChange(of: store.preferences.showRecentApps) { _, _ in
       validateSelection()
     }
+    .onChange(of: store.profiles.map(\.id)) { _, _ in
+      // The profile currently shown in the detail pane may have just been
+      // deleted or renamed; fall back to Running if the selection no longer
+      // resolves rather than stranding an empty, mislabeled pane.
+      validateSelection()
+    }
+    .onChange(of: store.profileFocusToken) { _, _ in
+      // Applying or selecting a profile (including re-applying the already-active
+      // one from the menu bar) brings that group into focus in the main window.
+      if let id = store.activeProfileID, store.profiles.contains(where: { $0.id == id }) {
+        selection = .profile(id)
+      }
+    }
     .onDisappear { store.endLiveLevels() }
   }
 
-  /// A persisted `.recent` scope (via @SceneStorage) can be restored after the
-  /// user has turned "Show recent apps" off, stranding the window on a
-  /// permanently-empty, misleadingly-worded Recent view. Fall back to .running
-  /// whenever the restored/current scope is unavailable.
+  /// A persisted scope can become invalid: a `.recent` source after the user
+  /// turned recent apps off, or a profile that was since deleted. Fall back to
+  /// Running whenever the restored/current scope no longer resolves.
   private func validateSelection() {
-    if selection == .recent && !store.preferences.showRecentApps {
-      selection = .running
+    switch selection {
+    case .source(.recent) where !store.preferences.showRecentApps:
+      selection = .source(.running)
+    case .profile(let id) where !store.profiles.contains(where: { $0.id == id }):
+      selection = .source(.running)
+    default:
+      break
     }
+  }
+
+  private func presentNewProfile() {
+    // Seed a new profile with whatever is currently playing — the most common
+    // starting set — and default to capturing the current mix.
+    editorContext = ProfileEditorContext(
+      profile: nil,
+      preselectedAppIDs: store.liveApps.map(\.logicalID)
+    )
+  }
+
+  private func presentEditProfile(_ profile: Profile) {
+    editorContext = ProfileEditorContext(profile: profile, preselectedAppIDs: profile.appIDs)
   }
 
   private var scopedApps: [AudioApp] {
     switch selection {
-    case .running:
-      store.visibleApps
-    case .pinned:
-      store.pinnedApps
-    case .frontmost:
-      store.liveApps
-    case .recent:
-      store.recentApps
+    case .source(.running):
+      return store.visibleApps
+    case .source(.pinned):
+      return store.pinnedApps
+    case .source(.frontmost):
+      return store.liveApps
+    case .source(.recent):
+      return store.recentApps
+    case .profile(let id):
+      guard let profile = store.profiles.first(where: { $0.id == id }) else { return [] }
+      return store.apps(in: profile)
     }
   }
 
@@ -146,26 +173,39 @@ struct MainWindowView: View {
         || app.category.displayName.localizedCaseInsensitiveContains(boundedQuery)
     }
   }
+}
 
-  private func dismissPresetSheet() {
-    presetName = ""
-    isPresentingSavePreset = false
+// MARK: - Scope
+
+/// What the main window is currently showing: one of the built-in sources, or a
+/// user profile (an app group). Persisted via `@SceneStorage` as a string.
+enum MixerScope: Hashable, RawRepresentable {
+  case source(SourceFilter)
+  case profile(UUID)
+
+  var rawValue: String {
+    switch self {
+    case .source(let filter):
+      return "source:\(filter.rawValue)"
+    case .profile(let id):
+      return "profile:\(id.uuidString)"
+    }
   }
 
-  private func savePreset() {
-    let trimmed = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return }
-
-    // Validate preset name length
-    let maxLength = 100
-    guard trimmed.count <= maxLength else { return }
-
-    store.savePreset(named: trimmed)
-    dismissPresetSheet()
+  init?(rawValue: String) {
+    if rawValue.hasPrefix("source:"),
+       let filter = SourceFilter(rawValue: String(rawValue.dropFirst("source:".count))) {
+      self = .source(filter)
+    } else if rawValue.hasPrefix("profile:"),
+              let id = UUID(uuidString: String(rawValue.dropFirst("profile:".count))) {
+      self = .profile(id)
+    } else {
+      return nil
+    }
   }
 }
 
-private enum SourceFilter: String, CaseIterable, Identifiable {
+enum SourceFilter: String, CaseIterable, Identifiable {
   case running
   case pinned
   case frontmost
@@ -175,70 +215,49 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
 
   var title: String {
     switch self {
-    case .running:
-      "Running"
-    case .pinned:
-      "Pinned"
-    case .frontmost:
-      "Live"
-    case .recent:
-      "Recent"
+    case .running: "Running"
+    case .pinned: "Pinned"
+    case .frontmost: "Live"
+    case .recent: "Recent"
     }
   }
 
   @MainActor
   func count(in store: AppStore) -> Int {
     switch self {
-    case .running:
-      store.visibleApps.count
-    case .pinned:
-      store.pinnedApps.count
-    case .frontmost:
-      store.liveApps.count
-    case .recent:
-      store.recentApps.count
+    case .running: store.visibleApps.count
+    case .pinned: store.pinnedApps.count
+    case .frontmost: store.liveApps.count
+    case .recent: store.recentApps.count
     }
   }
 
   func detail(count: Int) -> String {
     let label: String
     switch self {
-    case .running:
-      label = count == 1 ? "running app" : "running apps"
-    case .pinned:
-      label = count == 1 ? "pinned app" : "pinned apps"
-    case .frontmost:
-      label = count == 1 ? "live app" : "live apps"
-    case .recent:
-      label = count == 1 ? "recent app" : "recent apps"
+    case .running: label = count == 1 ? "running app" : "running apps"
+    case .pinned: label = count == 1 ? "pinned app" : "pinned apps"
+    case .frontmost: label = count == 1 ? "live app" : "live apps"
+    case .recent: label = count == 1 ? "recent app" : "recent apps"
     }
-
     return "\(count) \(label)"
   }
 
   var systemImage: String {
     switch self {
-    case .running:
-      "square.stack.3d.up.fill"
-    case .pinned:
-      "pin.fill"
-    case .frontmost:
-      "waveform"
-    case .recent:
-      "clock.fill"
+    case .running: "square.stack.3d.up.fill"
+    case .pinned: "pin.fill"
+    case .frontmost: "waveform"
+    case .recent: "clock.fill"
     }
   }
 
   var emptyTitle: String {
     switch self {
-    case .running:
-      "No Running Apps"
-    case .pinned:
-      "No Pinned Apps"
-    case .frontmost:
-      "No Live Apps"
-    case .recent:
-      "No Recent Apps"
+    case .running: "No Running Apps"
+    case .pinned: "No Pinned Apps"
+    case .frontmost: "No Live Apps"
+    case .recent: "No Recent Apps"
     }
   }
 
@@ -246,12 +265,11 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
     if !searchText.isEmpty {
       return "Try a different search term."
     }
-
     switch self {
     case .running:
       return "Waves hasn't found any running apps yet."
     case .pinned:
-      return "Pin apps from the source list to keep them here."
+      return "Pin apps from the list to keep them here and at the top of the menu bar."
     case .frontmost:
       return "Start playback in an app, then refresh if it does not appear here."
     case .recent:
@@ -262,7 +280,9 @@ private enum SourceFilter: String, CaseIterable, Identifiable {
 
 private struct SidebarView: View {
   @Environment(AppStore.self) private var store
-  @Binding var selection: SourceFilter
+  @Binding var selection: MixerScope
+  let onNewProfile: () -> Void
+  let onEditProfile: (Profile) -> Void
 
   var body: some View {
     List(selection: $selection) {
@@ -272,42 +292,40 @@ private struct SidebarView: View {
             filter: filter,
             countText: filter.detail(count: filter.count(in: store))
           )
-          .tag(filter)
+          .tag(MixerScope.source(filter))
         }
       }
 
-      if !store.presets.isEmpty {
-        Section("Presets") {
-          ForEach(store.presets) { preset in
-            Button {
-              store.applyPreset(preset)
-            } label: {
-              HStack(spacing: 9) {
-                Image(systemName: "slider.horizontal.3")
-                  .font(.callout)
-                  .foregroundStyle(.secondary)
-                  .frame(width: 18)
-
-                VStack(alignment: .leading, spacing: 1) {
-                  Text(preset.name)
-                    .lineLimit(1)
-                  Text("\(preset.entries.count) \(preset.entries.count == 1 ? "app" : "apps")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                }
-              }
-              .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.plain)
+      Section {
+        ForEach(store.profiles) { profile in
+          ProfileSidebarRow(profile: profile)
+            .tag(MixerScope.profile(profile.id))
             .contextMenu {
-              Button("Delete Preset", role: .destructive) {
-                if let index = store.presets.firstIndex(where: { $0.id == preset.id }) {
-                  store.deletePresets(at: IndexSet(integer: index))
+              if profile.carriesLevels {
+                Button("Apply Levels") { store.applyProfile(profile) }
+              }
+              Button("Edit Profile…") { onEditProfile(profile) }
+              Button("Export…") { store.exportProfile(profile) }
+              Divider()
+              Button("Delete Profile", role: .destructive) {
+                if let index = store.profiles.firstIndex(where: { $0.id == profile.id }) {
+                  store.deleteProfiles(at: IndexSet(integer: index))
                 }
               }
             }
+        }
+      } header: {
+        HStack {
+          Text("Profiles")
+          Spacer()
+          Button(action: onNewProfile) {
+            Image(systemName: "plus")
+              .font(.caption.weight(.semibold))
           }
+          .buttonStyle(.plain)
+          .foregroundStyle(.secondary)
+          .help("New profile")
+          .accessibilityLabel("New profile")
         }
       }
     }
@@ -330,12 +348,7 @@ private struct SourceFilterRow: View {
   let countText: String
 
   var body: some View {
-    HStack(spacing: 9) {
-      Image(systemName: filter.systemImage)
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .frame(width: 18)
-
+    Label {
       VStack(alignment: .leading, spacing: 1) {
         Text(filter.title)
           .lineLimit(1)
@@ -344,7 +357,37 @@ private struct SourceFilterRow: View {
           .foregroundStyle(.secondary)
           .lineLimit(1)
       }
+    } icon: {
+      Image(systemName: filter.systemImage)
+        .foregroundStyle(filter == .frontmost ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.secondary))
     }
+  }
+}
+
+private struct ProfileSidebarRow: View {
+  @Environment(AppStore.self) private var store
+  let profile: Profile
+
+  var body: some View {
+    Label {
+      VStack(alignment: .leading, spacing: 1) {
+        Text(profile.name)
+          .lineLimit(1)
+        Text(subtitle)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
+    } icon: {
+      Image(systemName: profile.carriesLevels ? "slider.horizontal.below.square.filled.and.square" : "square.grid.2x2")
+        .foregroundStyle(.secondary)
+    }
+  }
+
+  private var subtitle: String {
+    let count = profile.entries.count
+    let noun = count == 1 ? "app" : "apps"
+    return profile.carriesLevels ? "\(count) \(noun) · levels" : "\(count) \(noun)"
   }
 }
 
@@ -352,13 +395,32 @@ private struct SourceListView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.openSettings) private var openSettings
   @State private var selectedAppID: AudioApp.ID?
-  let filter: SourceFilter
+  let scope: MixerScope
   let apps: [AudioApp]
   let searchText: String
+  let onEditProfile: (Profile) -> Void
+
+  private var profile: Profile? {
+    guard case .profile(let id) = scope else { return nil }
+    return store.profiles.first { $0.id == id }
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      OutputSummaryView(filter: filter, visibleCount: apps.count, isSearching: isSearching)
+      if let profile {
+        ProfileHeaderView(profile: profile, visibleCount: apps.count, onEdit: { onEditProfile(profile) })
+      } else {
+        OutputSummaryView(scope: scope, visibleCount: apps.count, isSearching: isSearching)
+      }
+
+      // The live "mixed waves" band: the combined audio energy of everything
+      // playing, on a solid content surface beneath the header.
+      HeaderWaveform(height: 26)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
+        .overlay(Divider(), alignment: .bottom)
 
       // Suppress the empty state during the first scan so the window never
       // tells the user it is "Refreshing" (the pill in MainWindowView) and that
@@ -367,7 +429,7 @@ private struct SourceListView: View {
         VStack(spacing: 14) {
           ContentUnavailableView(
             emptyTitle,
-            systemImage: "speaker.slash",
+            systemImage: profile == nil ? "speaker.slash" : "square.grid.2x2",
             description: Text(emptyMessage)
           )
 
@@ -462,35 +524,38 @@ private struct SourceListView: View {
   /// True when the Running scope is empty only because system processes are
   /// being filtered out (apps were detected, just hidden by the preference).
   private var systemProcessesHidden: Bool {
-    filter == .running
+    scope == .source(.running)
       && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && !store.preferences.showSystemProcesses
       && store.session.apps.contains { $0.category == .system }
   }
 
   private var emptyTitle: String {
-    systemProcessesHidden ? "System Processes Hidden" : filter.emptyTitle
+    if systemProcessesHidden { return "System Processes Hidden" }
+    if let profile { return "No \(profile.name) Apps Running" }
+    if case .source(let filter) = scope { return filter.emptyTitle }
+    return "Nothing Here"
   }
 
   private var emptyMessage: String {
     if systemProcessesHidden {
       return "System processes are hidden. Enable Show system processes in Settings to see them."
     }
-    return filter.emptyMessage(searchText: searchText)
+    if let profile {
+      return "None of \(profile.name)'s \(profile.entries.count) \(profile.entries.count == 1 ? "app" : "apps") are running right now. Launch one to control it here."
+    }
+    if case .source(let filter) = scope {
+      return filter.emptyMessage(searchText: searchText)
+    }
+    return ""
   }
 
   /// True whenever a drag would map back to the full list correctly, so the OS
   /// never presents a drag handle that would silently snap back elsewhere.
-  /// Deliberately does NOT require `.manual` sort: a first drag from Name/
-  /// Activity/Category is a documented way to convert the list to manual
-  /// ordering (reorderApps auto-switches sortMode and snapshots the displayed
-  /// order before switching, so the dragged row still lands correctly). Only
-  /// scope and an active search block reorder, because a search shows a subset
-  /// whose indices would not map back to the unfiltered list.
-  /// Uses the trimmed query to match `filteredApps`, so a whitespace-only
-  /// search (which filters nothing) does not block reorder.
+  /// Only the Running scope (no active search) is reorderable; profile and other
+  /// scopes show a subset whose indices would not map back to the stored order.
   private var isReorderable: Bool {
-    filter == .running
+    scope == .source(.running)
       && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
@@ -522,9 +587,66 @@ private struct SourceListView: View {
   }
 }
 
+private struct ProfileHeaderView: View {
+  @Environment(AppStore.self) private var store
+  let profile: Profile
+  let visibleCount: Int
+  let onEdit: () -> Void
+
+  var body: some View {
+    HStack(spacing: 12) {
+      Image(systemName: profile.carriesLevels ? "slider.horizontal.below.square.filled.and.square" : "square.grid.2x2")
+        .font(.system(size: 16, weight: .semibold))
+        .foregroundStyle(WavesDesign.accent)
+        .frame(width: 30, height: 30)
+        .background(WavesDesign.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+      VStack(alignment: .leading, spacing: 1) {
+        Text(profile.name)
+          .font(.headline.weight(.semibold))
+          .lineLimit(1)
+        Text(subtitle)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
+
+      Spacer(minLength: 12)
+
+      if profile.carriesLevels {
+        Button {
+          store.applyProfile(profile)
+        } label: {
+          Label("Apply Levels", systemImage: "checkmark.circle")
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .help("Set every app in this profile to its saved volume, mute, and boost.")
+      }
+
+      Button {
+        onEdit()
+      } label: {
+        Label("Edit", systemImage: "slider.horizontal.3")
+      }
+      .buttonStyle(.bordered)
+      .controlSize(.small)
+    }
+    .padding(.horizontal, 18)
+    .padding(.vertical, 12)
+    .background(.bar)
+    .overlay(Divider(), alignment: .bottom)
+  }
+
+  private var subtitle: String {
+    let running = "\(visibleCount) of \(profile.entries.count) running"
+    return profile.carriesLevels ? "\(running) · carries saved levels" : "\(running) · group"
+  }
+}
+
 private struct OutputSummaryView: View {
   @Environment(AppStore.self) private var store
-  let filter: SourceFilter
+  let scope: MixerScope
   let visibleCount: Int
   // True when a search is active. Search spans all visible apps regardless of
   // scope, so the count is labeled with a neutral "result(s)" noun instead of
@@ -532,14 +654,19 @@ private struct OutputSummaryView: View {
   let isSearching: Bool
 
   private var countDetail: String {
-    guard isSearching else { return filter.detail(count: visibleCount) }
-    let noun = visibleCount == 1 ? "result" : "results"
-    return "\(visibleCount) \(noun)"
+    if isSearching {
+      let noun = visibleCount == 1 ? "result" : "results"
+      return "\(visibleCount) \(noun)"
+    }
+    if case .source(let filter) = scope {
+      return filter.detail(count: visibleCount)
+    }
+    return "\(visibleCount) apps"
   }
 
   var body: some View {
     HStack(spacing: 12) {
-      Image(systemName: "speaker.wave.2.fill")
+      Image(systemName: "hifispeaker.2.fill")
         .font(.system(size: 16, weight: .semibold))
         .foregroundStyle(.secondary)
         .frame(width: 30, height: 30)
@@ -686,87 +813,28 @@ private struct DiagnosticsPanel: View {
 
   private func color(for status: DiagnosticsStatus) -> Color {
     switch status {
-    case .passed:
-      .green
-    case .warning:
-      .orange
-    case .failed:
-      .red
-    case .informational:
-      .secondary
+    case .passed: .green
+    case .warning: .orange
+    case .failed: .red
+    case .informational: .secondary
     }
   }
 
   private func symbol(for status: DiagnosticsStatus) -> String {
     switch status {
-    case .passed:
-      "checkmark.circle"
-    case .warning:
-      "exclamationmark.triangle"
-    case .failed:
-      "xmark.octagon"
-    case .informational:
-      "info.circle"
+    case .passed: "checkmark.circle"
+    case .warning: "exclamationmark.triangle"
+    case .failed: "xmark.octagon"
+    case .informational: "info.circle"
     }
   }
 
   private func statusLabel(for status: DiagnosticsStatus) -> String {
     switch status {
-    case .passed:
-      "Passed"
-    case .warning:
-      "Warning"
-    case .failed:
-      "Failed"
-    case .informational:
-      "Info"
+    case .passed: "Passed"
+    case .warning: "Warning"
+    case .failed: "Failed"
+    case .informational: "Info"
     }
-  }
-}
-
-private struct SavePresetSheet: View {
-  // Shared with AppStore.savePreset()'s defensive length guard. Mirrored in the
-  // Save button's .disabled() so an over-length name (easy via paste) disables
-  // the control instead of leaving a silent no-op Save.
-  static let maxNameLength = 100
-
-  @Binding var presetName: String
-  let onCancel: () -> Void
-  let onSave: () -> Void
-
-  private var trimmedName: String {
-    presetName.trimmingCharacters(in: .whitespacesAndNewlines)
-  }
-
-  private var isTooLong: Bool {
-    trimmedName.count > Self.maxNameLength
-  }
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      Text("Save Preset")
-        .font(.title3.weight(.semibold))
-
-      TextField("Preset name", text: $presetName)
-        .textFieldStyle(.roundedBorder)
-
-      if isTooLong {
-        Text("Name too long (max \(Self.maxNameLength) characters)")
-          .font(.caption)
-          .foregroundStyle(.red)
-      }
-
-      HStack {
-        Spacer()
-
-        Button("Cancel", action: onCancel)
-
-        Button("Save", action: onSave)
-          .keyboardShortcut(.defaultAction)
-          .disabled(trimmedName.isEmpty || isTooLong)
-      }
-    }
-    .padding(20)
-    .frame(width: 320)
   }
 }

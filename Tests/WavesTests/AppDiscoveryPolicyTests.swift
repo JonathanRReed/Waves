@@ -55,7 +55,40 @@ import Testing
   #expect(!AppDiscoveryPolicy.isManageableApp(named: "Google Chrome Helper (Renderer)", bundleID: "com.google.Chrome.helper.renderer"))
 }
 
-// MARK: - Snapshot
+// MARK: - Helper-process audio attribution (Chromium / Electron)
+
+@Test func topLevelAppBundlePathResolvesChromiumHelperToParentApp() {
+  // A Chromium "Audio Service" helper executable lives inside the parent .app;
+  // attribution must resolve back to "Google Chrome.app", not the nested helper.
+  let path =
+    "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/"
+    + "Versions/120.0.0/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)"
+  #expect(AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: path) == "/Applications/Google Chrome.app")
+}
+
+@Test func topLevelAppBundlePathResolvesElectronHelperToParentApp() {
+  let path =
+    "/Applications/Slack.app/Contents/Frameworks/Slack Helper (Renderer).app/Contents/MacOS/Slack Helper (Renderer)"
+  #expect(AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: path) == "/Applications/Slack.app")
+}
+
+@Test func topLevelAppBundlePathReturnsSelfForOrdinaryApp() {
+  let path = "/Applications/Spotify.app/Contents/MacOS/Spotify"
+  #expect(AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: path) == "/Applications/Spotify.app")
+}
+
+@Test func topLevelAppBundlePathReturnsNilForNonBundledExecutable() {
+  #expect(AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: "/usr/bin/some-daemon") == nil)
+  #expect(AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: "") == nil)
+}
+
+@Test func bundleFamilyMatchesChromiumHelperToParent() {
+  // The attribution path resolves a helper to the parent .app, whose bundle id
+  // must family-match the discovered app so the audio is credited to it.
+  #expect(AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: "com.google.Chrome", candidateBundleID: "com.google.Chrome"))
+  #expect(AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: "com.google.Chrome", candidateBundleID: "com.google.Chrome.helper"))
+  #expect(!AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: "com.google.Chrome", candidateBundleID: "com.apple.Safari"))
+}
 
 // MARK: - Mute provenance
 

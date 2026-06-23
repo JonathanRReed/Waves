@@ -1,7 +1,27 @@
 import Foundation
 import Testing
+import WavesAudioCore
 
 @testable import Waves
+
+// MARK: - Profile import decoding
+
+@Test func decodeImportedProfilesAcceptsEmptyBackup() throws {
+  // An empty-but-valid profiles backup must decode to [] (importable), not nil
+  // (rejected) — and must not be misread as a single-Profile file.
+  let data = try PersistedSchema.encode([Profile](), using: JSONEncoder())
+  let decoded = AppStore.decodeImportedProfiles(from: data)
+  #expect(decoded != nil)
+  #expect(decoded?.isEmpty == true)
+}
+
+@Test func decodeImportedProfilesAcceptsSingleExportedProfile() throws {
+  let profile = Profile(name: "Solo", entries: [ProfileEntry(appID: "com.example.app")])
+  let data = try JSONEncoder().encode(profile)
+  let decoded = AppStore.decodeImportedProfiles(from: data)
+  #expect(decoded?.count == 1)
+  #expect(decoded?.first?.name == "Solo")
+}
 
 // MARK: - Forward/backward-compatible decoding
 
@@ -33,6 +53,7 @@ import Testing
   prefs.sortMode = .category
   prefs.customAppOrder = ["com.a", "com.b"]
   prefs.excludedAppIDs = ["com.apple.logic", "com.zoom.xos"]
+  prefs.pinnedAppIDs = ["com.spotify.client", "com.hnc.Discord"]
 
   let data = try JSONEncoder().encode(prefs)
   let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
@@ -41,6 +62,13 @@ import Testing
   #expect(decoded.sortMode == .category)
   #expect(decoded.customAppOrder == ["com.a", "com.b"])
   #expect(decoded.excludedAppIDs == ["com.apple.logic", "com.zoom.xos"])
+  #expect(decoded.pinnedAppIDs == ["com.spotify.client", "com.hnc.Discord"])
+}
+
+@Test func userPreferencesDefaultsPinsEmptyForLegacyFile() throws {
+  // Older files predate pinnedAppIDs; they must default to empty, not throw.
+  let decoded = try JSONDecoder().decode(UserPreferences.self, from: Data("{}".utf8))
+  #expect(decoded.pinnedAppIDs.isEmpty)
 }
 
 @Test func userPreferencesDefaultsExclusionsEmptyForLegacyFile() throws {
