@@ -7,11 +7,11 @@ volume, mute, and boost from the menu bar.
 
 Waves is for Mac users who keep several sound-producing apps open at once and need fast control without breaking focus. The primary user is a remote worker, student, gamer, or everyday power user who moves between calls, browsers, music, games, and system sounds on the same machine.
 
-Their context is immediate and interruption-sensitive: a browser tab starts playing audio, music is too loud under a meeting, a game overpowers Discord, or a focus preset needs to restore a known mix. The app should make the right action available from the menu bar in seconds.
+Their context is immediate and interruption-sensitive: a browser tab starts playing audio, music is too loud under a meeting, a game overpowers Discord, or a focus profile needs to restore a known mix. The app should make the right action available from the menu bar in seconds.
 
 ## Product Purpose
 
-Waves gives macOS the per-app mixer it should already have: native menu-bar access to app discovery, per-app mute, per-app gain, route health, presets, and output-device awareness. Success means the user can trust the list, move a slider, hear the result, and understand when an app is monitored versus fully managed.
+Waves gives macOS the per-app mixer it should already have: native menu-bar access to app discovery, per-app mute, per-app gain, route health, profiles, and output-device awareness. Success means the user can trust the list, move a slider, hear the result, and understand when an app is monitored versus fully managed.
 
 The product must be honest about macOS audio constraints. If Waves can see an app but cannot fully control it yet, the interface should say that clearly instead of pretending every row has identical capability.
 

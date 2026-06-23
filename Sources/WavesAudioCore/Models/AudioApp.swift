@@ -85,7 +85,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.notes = notes.map { String($0.prefix(1000)) }
 
     // Clamp volumeBoost to the supported range [1.0, 4.0], matching
-    // PresetEntry and AppVolumeSettings so a tampered/corrupted session
+    // ProfileEntry and AppVolumeSettings so a tampered/corrupted session
     // cannot inject an out-of-range boost into the model.
     self.volumeBoost = max(1.0, min(4.0, volumeBoost))
 

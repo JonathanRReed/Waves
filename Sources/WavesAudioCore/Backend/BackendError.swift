@@ -3,7 +3,6 @@ import Foundation
 public enum BackendError: LocalizedError, Sendable {
   case appNotFound(String)
   case managedRouteUnavailable(String)
-  case presetPartiallyApplied(String)
   case unsupportedOperation(String)
 
   public var errorDescription: String? {
@@ -11,8 +10,6 @@ public enum BackendError: LocalizedError, Sendable {
     case .appNotFound(let appID):
       "App not found: \(appID)"
     case .managedRouteUnavailable(let message):
-      message
-    case .presetPartiallyApplied(let message):
       message
     case .unsupportedOperation(let message):
       message
