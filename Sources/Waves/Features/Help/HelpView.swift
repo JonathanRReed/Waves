@@ -56,7 +56,7 @@ struct HelpView: View {
       }
     }
     .padding(16)
-    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    .wavesCard(cornerRadius: 12)
   }
 
   private var keyboardShortcutsSection: some View {
@@ -111,7 +111,7 @@ struct HelpView: View {
         .foregroundStyle(.secondary)
     }
     .padding(16)
-    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    .wavesCard(cornerRadius: 12)
   }
 
   private var urlSchemeSection: some View {
@@ -147,7 +147,7 @@ struct HelpView: View {
         .foregroundStyle(.secondary)
     }
     .padding(16)
-    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    .wavesCard(cornerRadius: 12)
   }
 
   private var profilesSection: some View {
@@ -170,7 +170,7 @@ struct HelpView: View {
         .foregroundStyle(.secondary)
     }
     .padding(16)
-    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    .wavesCard(cornerRadius: 12)
   }
 
   private var troubleshootingSection: some View {
@@ -198,7 +198,7 @@ struct HelpView: View {
       }
     }
     .padding(16)
-    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    .wavesCard(cornerRadius: 12)
   }
 
   private func helpStep(number: Int, title: String, description: String) -> some View {

@@ -155,7 +155,7 @@ struct OnboardingView: View {
           store.refresh()
           store.refreshDiagnostics()
         }
-        .buttonStyle(.borderedProminent)
+        .wavesGlassProminentButton()
 
         if !store.onboarding.launchAtLoginEnabled {
           Button("Enable Launch at Login") {

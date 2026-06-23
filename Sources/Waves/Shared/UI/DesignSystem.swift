@@ -164,12 +164,30 @@ struct WavesMark: View {
 // MARK: - Reusable surfaces
 
 extension View {
-  /// A card surface, routed through the shared Liquid-Glass treatment
-  /// (`wavesGlass`): genuine `.glassEffect` on macOS 26, a layered faux-glass
-  /// fallback below, and an opaque variant under Reduce Transparency. The one
-  /// place card chrome is defined so every panel matches.
+  /// A *content* card — grouped settings, list panels, reading surfaces. Per
+  /// Apple's Liquid Glass guidance, glass belongs to the floating/navigation
+  /// layer, not to content, and a glass card sitting on the already-blurred
+  /// window background reads as muddy glass-on-glass. So content cards use a
+  /// quiet tonal fill + hairline (which also drops the layered blur cost on the
+  /// 14.2 fallback). Glass lives only on the floating layer now — the system
+  /// popover/sheet/toolbar chrome, the WavesBackground backdrop, and primary
+  /// actions via `wavesGlassProminentButton`.
   func wavesCard(cornerRadius: CGFloat = WavesDesign.compactCardCornerRadius) -> some View {
-    wavesGlass(cornerRadius: cornerRadius)
+    modifier(WavesContentCardModifier(cornerRadius: cornerRadius))
+  }
+}
+
+private struct WavesContentCardModifier: ViewModifier {
+  let cornerRadius: CGFloat
+  @Environment(\.colorSchemeContrast) private var contrast
+
+  func body(content: Content) -> some View {
+    let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    content
+      .background(Color.white.opacity(0.04), in: shape)
+      .overlay(
+        shape.strokeBorder(WavesDesign.hairline(increasedContrast: contrast == .increased), lineWidth: 1)
+      )
   }
 }
 

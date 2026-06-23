@@ -159,7 +159,7 @@ struct ProfileEditorSheet: View {
             }
           }
         }
-        .wavesGlass(cornerRadius: 12)
+        .wavesCard(cornerRadius: 12)
       }
     }
   }
@@ -176,7 +176,7 @@ struct ProfileEditorSheet: View {
         .keyboardShortcut(.cancelAction)
       Button("Save") { save() }
         .keyboardShortcut(.defaultAction)
-        .buttonStyle(.borderedProminent)
+        .wavesGlassProminentButton()
         .disabled(!canSave)
     }
     .padding(20)

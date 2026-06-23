@@ -137,17 +137,24 @@ struct MenuBarMixerView: View {
 /// is live), a live-state status line, and a refresh control.
 private struct MenuBarHeader: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.colorSchemeContrast) private var contrast
 
   var body: some View {
     HStack(spacing: 10) {
-      WavesMark(size: 26, live: !store.liveApps.isEmpty)
+      WavesMark(size: 26, live: store.hasLiveAudio)
 
       VStack(alignment: .leading, spacing: 1) {
         Text("Waves")
           .font(.headline)
         Text(statusLine)
           .font(.caption2)
-          .foregroundStyle(store.liveApps.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(WavesDesign.accent))
+          // Under Increase Contrast, raw cyan on the popover can fail contrast;
+          // fall back to primary text there (mirrors RoutingStateIndicator).
+          .foregroundStyle(
+            store.hasLiveAudio
+              ? AnyShapeStyle(contrast == .increased ? Color.primary : WavesDesign.accent)
+              : AnyShapeStyle(.secondary)
+          )
           .lineLimit(1)
           .contentTransition(.numericText())
       }
@@ -168,7 +175,9 @@ private struct MenuBarHeader: View {
   }
 
   private var statusLine: String {
-    let live = store.liveApps.count
+    // Real playing count (no linger), so the header text follows the live signal
+    // like the ribbon — it never keeps claiming "1 app playing" after silence.
+    let live = store.actuallyLiveApps.count
     if store.visibleApps.contains(where: \.isMuted) && live == 0 {
       return "Muted"
     }
@@ -271,6 +280,7 @@ private struct ProfileQuickPicker: View {
 
 private struct CompactSection: View {
   @Environment(\.openWindow) private var openWindow
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let title: String
   var systemImage: String?
   let apps: [AudioApp]
@@ -298,8 +308,19 @@ private struct CompactSection: View {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                   .fill(Color.white.opacity(0.04))
               )
+              // Rows ease in/out as apps enter or leave the section (e.g. when a
+              // just-silenced app finishes lingering in Live), so membership
+              // changes glide instead of popping. Under Reduce Motion this
+              // degrades to a plain fade with no slide/scale (mirrors AppToasts).
+              .transition(reduceMotion
+                ? .opacity
+                : .asymmetric(
+                    insertion: .opacity.combined(with: .move(edge: .top)),
+                    removal: .opacity.combined(with: .scale(scale: 0.96))
+                  ))
           }
         }
+        .animation(reduceMotion ? nil : .smooth(duration: 0.28), value: apps.map(\.id))
 
         if apps.count > maxVisible {
           Button {
@@ -311,6 +332,7 @@ private struct CompactSection: View {
               .foregroundStyle(.secondary)
           }
           .buttonStyle(.plain)
+          .wavesLinkPointer()
           .accessibilityHint("Opens the main Waves window to show all \(title.lowercased()) apps.")
         }
       }
