@@ -6,10 +6,17 @@ struct MenuBarMixerView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.openWindow) private var openWindow
   @Environment(\.openSettings) private var openSettings
+  // Seed at the cap so the scroller measures DOWN to fit on the first preference
+  // update, rather than growing up from a 1pt collapse (a visible first-frame
+  // flash). Content at/above the cap is already correct.
+  @State private var sectionsHeight: CGFloat = 440
+  private static let maxSectionsHeight: CGFloat = 440
 
   var body: some View {
     ZStack(alignment: .topTrailing) {
       VStack(alignment: .leading, spacing: 14) {
+        // Pinned chrome — header, the live waves band, and the output/profile
+        // pickers stay put while only the app sections below scroll.
         MenuBarHeader()
 
         // The "mixed waves" band — a live visualization of the combined audio
@@ -45,12 +52,41 @@ struct MenuBarMixerView: View {
 
         ProfileQuickPicker()
 
-        // De-duplicate apps across sections: an app pinned by the user renders
-        // only under "Pinned", never again under "Live" or "Recent".
-        let pinnedIDs = Set(store.pinnedApps.map(\.logicalID))
-        let liveApps = store.liveApps.filter { !pinnedIDs.contains($0.logicalID) }
-        let recentApps = store.recentApps.filter { !pinnedIDs.contains($0.logicalID) }
+        sectionsScroller
 
+        Divider()
+
+        footer
+      }
+      .padding(14)
+
+      AppToastStack()
+        .padding(.top, 10)
+        .padding(.trailing, 10)
+        .frame(maxWidth: WavesDesign.menuBarPanelWidth - 40)
+    }
+    .task {
+      store.start()
+    }
+    .onAppear { store.beginLiveLevels() }
+    .onDisappear { store.endLiveLevels() }
+  }
+
+  /// The Pinned / Live / Recent sections in a height-capped scroller, so a long
+  /// list never pushes the footer (Settings / Launch-at-login / Open Waves) off
+  /// the bottom of the screen. The scroller fits its content up to
+  /// `maxSectionsHeight`, then scrolls — chrome and footer stay pinned, the way
+  /// Control Center caps its list rather than its chrome.
+  private var sectionsScroller: some View {
+    // De-duplicate apps across sections: an app pinned by the user renders only
+    // under "Pinned", never again under "Live" or "Recent".
+    let pinnedIDs = Set(store.pinnedApps.map(\.logicalID))
+    let liveApps = store.liveApps.filter { !pinnedIDs.contains($0.logicalID) }
+    let recentApps = store.recentApps.filter { !pinnedIDs.contains($0.logicalID) }
+    let isEmpty = store.pinnedApps.isEmpty && liveApps.isEmpty && recentApps.isEmpty
+
+    return ScrollView {
+      VStack(alignment: .leading, spacing: 14) {
         if !store.pinnedApps.isEmpty {
           CompactSection(title: "Pinned", systemImage: "pin.fill", apps: store.pinnedApps)
         }
@@ -61,75 +97,86 @@ struct MenuBarMixerView: View {
           CompactSection(title: "Recent", systemImage: "clock", apps: recentApps, maxVisible: 3)
         }
 
-        if !store.isLoading && store.pinnedApps.isEmpty && liveApps.isEmpty && recentApps.isEmpty {
-          VStack(spacing: 10) {
-            WavesMark(size: 34)
-              .opacity(0.85)
-            Text("All quiet")
-              .font(.callout.weight(.semibold))
-            Text("Play audio in an app and it shows up here, ready to mix.")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-              .multilineTextAlignment(.center)
-              .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-              Button("Refresh") {
-                store.refresh()
-              }
-              Button("Settings") {
-                openSettings()
-              }
-            }
-            .controlSize(.small)
-            .padding(.top, 2)
-          }
-          .frame(maxWidth: .infinity)
-          .padding(.vertical, 22)
-          .padding(.horizontal, 12)
-        }
-
-        Divider()
-
-        HStack {
-          Button("Open Waves") {
-            openWindow(id: AppSceneID.mainWindow)
-            NSApp.activate(ignoringOtherApps: true)
-          }
-          .accessibilityLabel("Open Waves main window")
-
-          Button("Settings") {
-            openSettings()
-            NSApp.activate(ignoringOtherApps: true)
-          }
-          .accessibilityLabel("Open Settings")
-
-          Spacer()
-          Toggle(
-            isOn: Binding(
-              get: { store.launchAtLoginEnabled },
-              set: { store.launchAtLoginEnabled = $0 }
-            )
-          ) {
-            Text("Launch at login")
-          }
-          .toggleStyle(.switch)
-          .labelsHidden()
-          .accessibilityLabel("Launch at login")
-          .help("Launch Waves automatically at login")
+        if !store.isLoading && isEmpty {
+          allQuietState
         }
       }
-      .padding(14)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(
+        GeometryReader { proxy in
+          Color.clear.preference(key: SectionsHeightKey.self, value: proxy.size.height)
+        }
+      )
+    }
+    .frame(height: min(max(sectionsHeight, 1), Self.maxSectionsHeight))
+    .scrollBounceBehavior(.basedOnSize)
+    .onPreferenceChange(SectionsHeightKey.self) { sectionsHeight = $0 }
+  }
 
-      AppToastStack()
-        .padding(.top, 10)
-        .padding(.trailing, 10)
-        .frame(maxWidth: 360)
+  private var allQuietState: some View {
+    VStack(spacing: 10) {
+      WavesMark(size: 34)
+        .opacity(0.85)
+      Text("All quiet")
+        .font(.callout.weight(.semibold))
+      Text("Play audio in an app and it shows up here, ready to mix.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+      // Settings lives in the footer; a single Refresh keeps this state focused.
+      Button("Refresh") {
+        store.refresh()
+      }
+      .controlSize(.small)
+      .accessibilityLabel("Refresh app list")
+      .padding(.top, 2)
     }
-    .task {
-      store.start()
+    .frame(maxWidth: .infinity)
+    .padding(.vertical, 22)
+    .padding(.horizontal, 12)
+  }
+
+  private var footer: some View {
+    HStack {
+      Button("Open Waves") {
+        openWindow(id: AppSceneID.mainWindow)
+        NSApp.activate(ignoringOtherApps: true)
+      }
+      .accessibilityLabel("Open Waves main window")
+
+      Button("Settings") {
+        openSettings()
+        NSApp.activate(ignoringOtherApps: true)
+      }
+      .accessibilityLabel("Open Settings")
+
+      Spacer()
+
+      // Show the label, not just a bare switch — a lone toggle reads as
+      // meaningless without hovering for the tooltip.
+      Toggle(
+        isOn: Binding(
+          get: { store.launchAtLoginEnabled },
+          set: { store.launchAtLoginEnabled = $0 }
+        )
+      ) {
+        Text("Launch at login")
+      }
+      .toggleStyle(.switch)
+      .help("Launch Waves automatically at login")
     }
-    .onAppear { store.beginLiveLevels() }
-    .onDisappear { store.endLiveLevels() }
+    .controlSize(.small)
+  }
+}
+
+/// Measures the menu-bar sections' natural height so the scroller can fit content
+/// up to a cap, then scroll — instead of a fixed-height frame that reserves empty
+/// space when only one app is playing.
+private struct SectionsHeightKey: PreferenceKey {
+  static let defaultValue: CGFloat = 0
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+    value = max(value, nextValue())
   }
 }
 
@@ -217,7 +264,7 @@ private struct OutputDevicePicker: View {
         Text(store.currentDeviceName)
           .lineLimit(1)
         Spacer(minLength: 4)
-        Image(systemName: "chevron.up.chevron.down")
+        Image(systemName: "chevron.down")
           .font(.caption2)
           .foregroundStyle(.secondary)
       }
@@ -257,7 +304,7 @@ private struct ProfileQuickPicker: View {
         Text(activeProfileName)
           .lineLimit(1)
         Spacer(minLength: 4)
-        Image(systemName: "chevron.up.chevron.down")
+        Image(systemName: "chevron.down")
           .font(.caption2)
           .foregroundStyle(.secondary)
       }

@@ -18,10 +18,10 @@ struct HelpView: View {
   }
 
   private var headerSection: some View {
-    VStack(alignment: .leading, spacing: 8) {
+    VStack(alignment: .leading, spacing: 6) {
       Text("Waves Help")
-        .font(.title.weight(.bold))
-      Text("Your comprehensive guide to Waves audio control")
+        .font(.title2.weight(.semibold))
+      Text("How to control per-app audio with Waves.")
         .font(.body)
         .foregroundStyle(.secondary)
     }
@@ -156,14 +156,13 @@ struct HelpView: View {
         .font(.headline)
 
       VStack(alignment: .leading, spacing: 8) {
-        Text("• A profile is a group of apps you use together — like Work or Gaming")
-        Text("• Use the + in the sidebar’s Profiles section to create one")
-        Text("• Pick which apps belong, and optionally capture their current levels")
-        Text("• Select a profile in the sidebar to focus just those apps")
-        Text("• Profiles that carry levels show an “Apply Levels” button")
-        Text("• Switch profiles from the menu bar, and export/import them as JSON")
+        bullet("A profile is a group of apps you use together — like Work or Gaming")
+        bullet("Use the + in the sidebar’s Profiles section to create one")
+        bullet("Pick which apps belong, and optionally capture their current levels")
+        bullet("Select a profile in the sidebar to focus just those apps")
+        bullet("Profiles that carry levels show an “Apply Levels” button")
+        bullet("Switch profiles from the menu bar, and export/import them as JSON")
       }
-      .font(.body)
 
       Text("Membership-only profiles just group apps; capture levels to also save each app’s volume, mute, and boost.")
         .font(.caption)
@@ -231,12 +230,23 @@ struct HelpView: View {
     }
   }
 
+  /// A hang-indented bullet so wrapped lines align under the text, not the dot,
+  /// and VoiceOver reads the sentence rather than a literal "bullet" prefix.
+  private func bullet(_ text: String) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 8) {
+      Text("•").foregroundStyle(.secondary)
+      Text(text)
+    }
+    .font(.body)
+  }
+
   private func urlSchemeRow(scheme: String, params: String, description: String) -> some View {
     VStack(alignment: .leading, spacing: 4) {
+      // Reference code, not live audio state — keep it neutral (the monospaced
+      // font already sets it apart) so cyan stays reserved for "live/active".
       HStack {
         Text(scheme)
           .font(.system(.body, design: .monospaced))
-          .foregroundStyle(WavesDesign.accent)
         if !params.isEmpty {
           Text("?")
             .foregroundStyle(.secondary)
@@ -245,6 +255,7 @@ struct HelpView: View {
             .foregroundStyle(.secondary)
         }
       }
+      .textSelection(.enabled)
       Text(description)
         .font(.caption)
         .foregroundStyle(.secondary)
