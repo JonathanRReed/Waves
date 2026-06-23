@@ -15,6 +15,10 @@ struct UserPreferences: Codable, Sendable {
   /// will not tap or alter their audio (the escape hatch for DAWs, VoIP /
   /// echo-cancellation apps, and other audio tools that dislike being tapped).
   var excludedAppIDs: [String] = []
+  /// Logical IDs of apps the user has pinned to the top of the menu bar. Stored
+  /// here (rather than only on the per-app session row) so a pin survives the
+  /// app quitting and relaunching, and a full relaunch of Waves.
+  var pinnedAppIDs: [String] = []
 
   init() {}
 
@@ -30,6 +34,7 @@ struct UserPreferences: Codable, Sendable {
     case enableURLScheme
     case urlSchemeAutomationAcknowledged
     case excludedAppIDs
+    case pinnedAppIDs
   }
 
   // Decode each field independently so a preferences file written by an older
@@ -55,6 +60,7 @@ struct UserPreferences: Codable, Sendable {
     enableURLScheme = value(.enableURLScheme, defaults.enableURLScheme)
     urlSchemeAutomationAcknowledged = value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
     excludedAppIDs = value(.excludedAppIDs, defaults.excludedAppIDs)
+    pinnedAppIDs = value(.pinnedAppIDs, defaults.pinnedAppIDs)
   }
 }
 

@@ -123,8 +123,9 @@ struct MixerRowView: View {
       if showsLevelMeter {
         GeometryReader { proxy in
           Capsule()
-            .fill(WavesDesign.accent.opacity(0.55))
-            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2)
+            .fill(WavesDesign.accentGradient)
+            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2.5)
+            .shadow(color: WavesDesign.accent.opacity(0.45), radius: 2.5, y: 0)
             .frame(maxHeight: .infinity, alignment: .bottom)
             .animation(reduceMotion ? nil : .linear(duration: 0.18), value: meterLevel)
         }
@@ -191,9 +192,7 @@ struct MixerRowView: View {
   private var subtitle: String {
     var parts: [String] = []
 
-    if app.routingState == .live {
-      parts.append("Playing audio")
-    } else if app.routingState == .managed && !app.isMuted && max(app.peakLevel, app.rmsLevel) > 0.001 {
+    if store.isLive(app) {
       parts.append("Playing audio")
     } else if app.isActive {
       parts.append("Frontmost app")
@@ -273,6 +272,18 @@ struct CompactMixerRow: View {
 
   var body: some View {
     HStack(spacing: 8) {
+      Button {
+        store.togglePinned(app)
+      } label: {
+        Image(systemName: app.isPinned ? "pin.fill" : "pin")
+          .font(.caption)
+          .foregroundStyle(app.isPinned ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.tertiary))
+          .frame(width: 14)
+      }
+      .buttonStyle(.borderless)
+      .help(app.isPinned ? "Unpin from the top" : "Pin to the top")
+      .accessibilityLabel(app.isPinned ? "Unpin \(app.displayName)" : "Pin \(app.displayName) to top")
+
       AppIconView(app: app)
         .frame(width: 18, height: 18)
 
@@ -306,8 +317,8 @@ struct CompactMixerRow: View {
       )
       .controlSize(.small)
       .tint(WavesDesign.accent)
-      .frame(width: 110)
-      .padding(.trailing, 4)
+      .frame(width: 104)
+      .padding(.trailing, 2)
       .help(sliderHelp)
       .accessibilityLabel("Volume for \(app.displayName)")
       .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
@@ -342,8 +353,9 @@ struct CompactMixerRow: View {
       if showsLevelMeter {
         GeometryReader { proxy in
           Capsule()
-            .fill(WavesDesign.accent.opacity(0.55))
-            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2)
+            .fill(WavesDesign.accentGradient)
+            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2.5)
+            .shadow(color: WavesDesign.accent.opacity(0.45), radius: 2.5, y: 0)
             .frame(maxHeight: .infinity, alignment: .bottom)
             .animation(reduceMotion ? nil : .linear(duration: 0.18), value: meterLevel)
         }

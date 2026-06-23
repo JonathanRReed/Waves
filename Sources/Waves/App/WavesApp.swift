@@ -15,7 +15,7 @@ struct WavesApp: App {
     let store = AppStore(
       backend: WorkspaceAudioControlBackend(),
       preferencesStore: PreferencesStore(),
-      presetStore: PresetStore(),
+      profileStore: ProfileStore(),
       sessionStore: SessionStore(),
       loginItemService: LoginItemService(),
       deviceVolumePresetsStore: DeviceVolumePresetsStore()

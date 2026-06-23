@@ -20,9 +20,9 @@ struct SettingsView: View {
           Label("Audio", systemImage: "speaker.wave.3")
         }
 
-      PresetSettingsView()
+      ProfileSettingsView()
         .tabItem {
-          Label("Presets", systemImage: "slider.horizontal.3")
+          Label("Profiles", systemImage: "rectangle.stack")
         }
 
       DiagnosticsSettingsView()
@@ -36,7 +36,7 @@ struct SettingsView: View {
         }
     }
     .padding(20)
-    .background(WavesDesign.windowGradient)
+    .background(WavesBackground())
     .onDisappear {
       store.persistPreferences()
     }
@@ -115,7 +115,7 @@ private struct GeneralSettingsView: View {
             store.persistPreferences()
           }
         ))
-        .help("Lets other apps and links control Waves through waves:// URLs (set volume, mute, apply presets). Off by default — enable only if you rely on automation.")
+        .help("Lets other apps and links control Waves through waves:// URLs (set volume, mute, apply profiles). Off by default — enable only if you rely on automation.")
 
       if store.preferences.enableKeyboardShortcuts {
         VStack(alignment: .leading, spacing: 8) {
@@ -175,88 +175,122 @@ private struct AudioSettingsView: View {
   @Environment(AppStore.self) private var store
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      Text("Current output device")
-        .font(.headline)
-      Text(store.currentDeviceName)
-        .foregroundStyle(.secondary)
+    ScrollView {
+      VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 8) {
+          Label("Current output device", systemImage: "hifispeaker.2.fill")
+            .font(.headline)
+          Text(store.currentDeviceName)
+            .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .wavesCard()
 
-      Text("Managed routing")
-        .font(.headline)
-      Text(
-        "Managed routes use Core Audio process taps to capture selected app audio, apply volume, mute, and boost, then play it back to the current output device. Audio is processed locally on this Mac."
-      )
-      .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+          Label("Managed routing", systemImage: "waveform.path")
+            .font(.headline)
+          Text(
+            "Managed routes use Core Audio process taps to capture selected app audio, apply volume, mute, and boost, then play it back to the current output device. Audio is processed locally on this Mac."
+          )
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
 
-      Button("Recover Routes") {
-        store.recoverRoutes()
+          Button {
+            store.recoverRoutes()
+          } label: {
+            Label("Recover Routes", systemImage: "arrow.clockwise")
+          }
+          .disabled(store.isRecovering)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .wavesCard()
+
+        Text("Boost controls are available in each mixer row. Use 1× for transparent playback, and reserve 2× to 4× for quiet apps to avoid clipping.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .padding(.horizontal, 2)
       }
-
-      Text("Boost controls are available in each mixer row. Use 1x for transparent playback, and reserve 2x to 4x for quiet apps to avoid clipping.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      .frame(maxWidth: .infinity, alignment: .topLeading)
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 }
 
-private struct PresetSettingsView: View {
+private struct ProfileSettingsView: View {
   @Environment(AppStore.self) private var store
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      HStack {
-        Text("Presets")
-          .font(.headline)
+      HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Profiles")
+            .font(.headline)
+          Text("Groups of apps you switch between — optionally with saved levels.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
 
         Spacer()
 
-        Button("Import") {
-          store.importPreset()
+        Button {
+          store.importProfiles()
+        } label: {
+          Label("Import", systemImage: "square.and.arrow.down")
         }
         .buttonStyle(.bordered)
       }
 
-      if store.presets.isEmpty {
-        Text("No presets yet. Save a mix from the main window, or import one.")
+      if store.profiles.isEmpty {
+        Text("No profiles yet. Create one with the + button in the main window’s sidebar, or import one.")
           .font(.callout)
           .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity, alignment: .leading)
       } else {
         List {
-        ForEach(store.presets) { preset in
-          HStack {
-            VStack(alignment: .leading, spacing: 4) {
-              Text(preset.name)
-              Text("\(preset.entries.count) \(preset.entries.count == 1 ? "app" : "apps")")
-                .font(.caption)
+          ForEach(store.profiles) { profile in
+            HStack(spacing: 10) {
+              Image(systemName: profile.carriesLevels ? "slider.horizontal.below.square.filled.and.square" : "square.grid.2x2")
                 .foregroundStyle(.secondary)
-            }
+                .frame(width: 20)
 
-            Spacer()
-
-            Button("Export") {
-              store.exportPreset(preset)
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .accessibilityLabel("Export preset \(preset.name)")
-
-            Button("Delete", role: .destructive) {
-              if let index = store.presets.firstIndex(where: { $0.id == preset.id }) {
-                store.deletePresets(at: IndexSet(integer: index))
+              VStack(alignment: .leading, spacing: 2) {
+                Text(profile.name)
+                Text(detail(for: profile))
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
               }
+
+              Spacer()
+
+              Button("Export") {
+                store.exportProfile(profile)
+              }
+              .buttonStyle(.borderless)
+              .controlSize(.small)
+              .accessibilityLabel("Export profile \(profile.name)")
+
+              Button("Delete", role: .destructive) {
+                if let index = store.profiles.firstIndex(where: { $0.id == profile.id }) {
+                  store.deleteProfiles(at: IndexSet(integer: index))
+                }
+              }
+              .buttonStyle(.borderless)
+              .controlSize(.small)
+              .accessibilityLabel("Delete profile \(profile.name)")
             }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .accessibilityLabel("Delete preset \(preset.name)")
           }
-        }
-        .onDelete(perform: store.deletePresets)
+          .onDelete(perform: store.deleteProfiles)
         }
       }
     }
     .padding(20)
+  }
+
+  private func detail(for profile: Profile) -> String {
+    let count = profile.entries.count
+    let noun = count == 1 ? "app" : "apps"
+    return profile.carriesLevels ? "\(count) \(noun) · saved levels" : "\(count) \(noun) · group"
   }
 }
 
@@ -304,8 +338,7 @@ private struct DiagnosticsSettingsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
-            .background(
-              .ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .wavesCard(cornerRadius: 14)
           }
         } else {
           DiagnosticsUnavailableView()
@@ -387,6 +420,6 @@ private struct DiagnosticsUnavailableView: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(14)
-    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .wavesCard(cornerRadius: 14)
   }
 }

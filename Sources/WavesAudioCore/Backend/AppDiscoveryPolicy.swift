@@ -104,6 +104,32 @@ public enum AppDiscoveryPolicy {
     }
   }
 
+  /// Given the absolute executable path of an audio-producing process, returns
+  /// the path of the **outermost** `.app` bundle that contains it, or nil when
+  /// the executable doesn't live inside an app bundle.
+  ///
+  /// Chromium-based browsers (Chrome, Helium, Brave, Edge, Arc) and Electron
+  /// apps emit audio from a sandboxed helper/"Audio Service" subprocess whose
+  /// executable lives **inside** the parent app — e.g.
+  /// `/Applications/Google Chrome.app/Contents/Frameworks/…/Google Chrome Helper
+  /// (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)`. Those
+  /// helpers are absent from `NSWorkspace.runningApplications`, so the only way
+  /// to attribute their audio to the user-facing app is to walk the executable
+  /// path back to the enclosing top-level `.app`. Returning the *outermost*
+  /// bundle (`Google Chrome.app`, not the nested `… Helper.app`) yields the
+  /// parent the user actually recognizes.
+  public static func topLevelAppBundlePath(forExecutablePath path: String) -> String? {
+    guard !path.isEmpty else { return nil }
+    var rebuilt = ""
+    for component in path.split(separator: "/", omittingEmptySubsequences: true) {
+      rebuilt += "/" + component
+      if component.hasSuffix(".app") {
+        return rebuilt
+      }
+    }
+    return nil
+  }
+
   public static func bundleFamilyMatches(appBundleID: String, candidateBundleID: String?) -> Bool {
     guard let candidateBundleID, !candidateBundleID.isEmpty else { return false }
     if candidateBundleID == appBundleID {
