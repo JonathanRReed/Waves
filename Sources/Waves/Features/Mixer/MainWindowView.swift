@@ -290,7 +290,9 @@ private struct SidebarView: View {
         ForEach(availableFilters) { filter in
           SourceFilterRow(
             filter: filter,
-            countText: filter.detail(count: filter.count(in: store))
+            countText: filter.detail(count: filter.count(in: store)),
+            // The Live row's waveform comes alive whenever something is playing.
+            isLive: filter == .frontmost && !store.liveApps.isEmpty
           )
           .tag(MixerScope.source(filter))
         }
@@ -344,8 +346,10 @@ private struct SidebarView: View {
 }
 
 private struct SourceFilterRow: View {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let filter: SourceFilter
   let countText: String
+  var isLive: Bool = false
 
   var body: some View {
     Label {
@@ -360,6 +364,7 @@ private struct SourceFilterRow: View {
     } icon: {
       Image(systemName: filter.systemImage)
         .foregroundStyle(filter == .frontmost ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.secondary))
+        .symbolEffect(.variableColor.iterative, isActive: isLive && !reduceMotion)
     }
   }
 }
@@ -439,7 +444,7 @@ private struct SourceListView: View {
             } label: {
               Label("Refresh", systemImage: "arrow.clockwise")
             }
-            .buttonStyle(.borderedProminent)
+            .wavesGlassProminentButton()
 
             Button {
               openSettings()
@@ -470,6 +475,7 @@ private struct SourceListView: View {
           .moveDisabled(!isReorderable)
         }
         .listStyle(.inset)
+        .wavesSoftScrollEdge()
         // Keyboard operation: arrow keys move the selection (List), and these
         // keys act on the selected row so the mixer is fully drivable without a
         // mouse — including muting, which the borderless button can't reach.
@@ -619,7 +625,7 @@ private struct ProfileHeaderView: View {
         } label: {
           Label("Apply Levels", systemImage: "checkmark.circle")
         }
-        .buttonStyle(.borderedProminent)
+        .wavesGlassProminentButton()
         .controlSize(.small)
         .help("Set every app in this profile to its saved volume, mute, and boost.")
       }
@@ -646,6 +652,7 @@ private struct ProfileHeaderView: View {
 
 private struct OutputSummaryView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.colorSchemeContrast) private var contrast
   let scope: MixerScope
   let visibleCount: Int
   // True when a search is active. Search spans all visible apps regardless of
@@ -683,7 +690,9 @@ private struct OutputSummaryView: View {
 
           if let liveSummary {
             Label(liveSummary, systemImage: "waveform")
-              .foregroundStyle(WavesDesign.accent)
+              // Drop to primary text under Increase Contrast so the cyan never
+              // fails contrast on the .bar header.
+              .foregroundStyle(contrast == .increased ? AnyShapeStyle(Color.primary) : AnyShapeStyle(WavesDesign.accent))
           }
         }
         .font(.caption)
@@ -701,12 +710,16 @@ private struct OutputSummaryView: View {
   }
 
   private var liveSummary: String? {
-    let liveApps = store.liveApps.prefix(3).map(\.displayName)
-    guard !liveApps.isEmpty else { return nil }
+    // "…playing" is a present-tense claim, so use the real signal (no linger) —
+    // it disappears the moment audio stops, matching the fading ribbon, rather
+    // than naming a silent app for the linger window.
+    let live = store.actuallyLiveApps
+    let names = live.prefix(3).map(\.displayName)
+    guard !names.isEmpty else { return nil }
 
-    let names = liveApps.joined(separator: ", ")
-    let overflow = store.liveApps.count - liveApps.count
-    return overflow > 0 ? "\(names) +\(overflow) playing" : "\(names) playing"
+    let joined = names.joined(separator: ", ")
+    let overflow = live.count - names.count
+    return overflow > 0 ? "\(joined) +\(overflow) playing" : "\(joined) playing"
   }
 }
 

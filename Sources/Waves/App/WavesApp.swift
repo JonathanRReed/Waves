@@ -84,7 +84,9 @@ struct WavesApp: App {
     if store.visibleApps.contains(where: \.isMuted) {
       return "Waves — muted"
     }
-    if !store.liveApps.isEmpty {
+    // Mirror menuBarIconName: "playing" tracks the real signal, not the lingering
+    // Live list, so the icon and its label never disagree.
+    if store.hasLiveAudio {
       return "Waves — playing"
     }
     return "Waves — idle"

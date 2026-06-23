@@ -7,6 +7,7 @@ struct MixerRowView: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let app: AudioApp
   @State private var animateMuteChange = false
+  @State private var isHovering = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 5) {
@@ -87,7 +88,7 @@ struct MixerRowView: View {
           .minimumScaleFactor(0.7)
           .frame(width: 40, alignment: .trailing)
           .contentTransition(.numericText())
-          .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.7), value: app.desiredVolume)
+          .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: app.desiredVolume)
           .accessibilityHidden(true)
 
         BoostMenu(app: app, compact: false)
@@ -98,6 +99,10 @@ struct MixerRowView: View {
           if !reduceMotion { animateMuteChange.toggle() }
         } label: {
           Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+            // Morph the speaker ⇄ slash glyph instead of hard-cutting; the bounce
+            // below is the trigger accent. Falls back to a plain swap under Reduce
+            // Motion (the button's accessibilityLabel still announces the change).
+            .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace.downUp))
             .symbolEffect(.bounce, value: animateMuteChange)
         }
         .buttonStyle(.borderless)
@@ -117,20 +122,19 @@ struct MixerRowView: View {
     }
     .padding(.vertical, 5)
     .contentShape(Rectangle())
+    // A quiet hover highlight so pointing at a row reads as interactive — the
+    // native list feel — without shifting layout (background, not scale).
+    .background(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .fill(Color.white.opacity(isHovering ? 0.05 : 0))
+    )
+    .onHover { isHovering = $0 }
+    .animation(reduceMotion ? nil : .smooth(duration: 0.15), value: isHovering)
     // Quiet cyan level meter on managed/live rows, fed by the store's
     // visibility-gated live-level poll. Overlay so it never shifts layout.
     .overlay(alignment: .bottomLeading) {
       if showsLevelMeter {
-        GeometryReader { proxy in
-          Capsule()
-            .fill(WavesDesign.accentGradient)
-            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2.5)
-            .shadow(color: WavesDesign.accent.opacity(0.45), radius: 2.5, y: 0)
-            .frame(maxHeight: .infinity, alignment: .bottom)
-            .animation(reduceMotion ? nil : .linear(duration: 0.18), value: meterLevel)
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+        RowLevelMeter(rms: meterRMS, peak: meterPeak)
       }
     }
     .contextMenu {
@@ -184,15 +188,16 @@ struct MixerRowView: View {
     !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
   }
 
-  private var meterLevel: Double {
-    guard let levels = store.liveLevels[app.logicalID] else { return 0 }
-    return Double(min(1, max(levels.rms, levels.peak * 0.7)))
-  }
+  private var meterRMS: Float { store.liveLevels[app.logicalID]?.rms ?? 0 }
+  private var meterPeak: Float { store.liveLevels[app.logicalID]?.peak ?? 0 }
 
   private var subtitle: String {
     var parts: [String] = []
 
-    if store.isLive(app) {
+    // Use isRecentlyLive (not isLive) so a row that just went quiet keeps reading
+    // "Playing audio" for the linger window instead of flickering to "Frontmost
+    // app" / "Running app" while it's still sitting in the Live list.
+    if store.isRecentlyLive(app) {
       parts.append("Playing audio")
     } else if app.isActive {
       parts.append("Frontmost app")
@@ -336,6 +341,8 @@ struct CompactMixerRow: View {
         if !reduceMotion { animateMuteChange.toggle() }
       } label: {
         Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+          // Match the full row: morph the speaker ⇄ slash glyph instead of cutting.
+          .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace.downUp))
           .symbolEffect(.bounce, value: animateMuteChange)
       }
       .buttonStyle(.borderless)
@@ -348,19 +355,10 @@ struct CompactMixerRow: View {
     // Mirror the main window's quiet cyan level meter so a menu-bar-first user
     // gets the same per-row "playing" feedback. Reuses the store's live-level
     // poll (already started by the menu panel) and an overlay so layout never
-    // shifts. Same showsLevelMeter / meterLevel pattern as the full row.
+    // shifts. Same RowLevelMeter as the full row.
     .overlay(alignment: .bottomLeading) {
       if showsLevelMeter {
-        GeometryReader { proxy in
-          Capsule()
-            .fill(WavesDesign.accentGradient)
-            .frame(width: proxy.size.width * CGFloat(meterLevel), height: 2.5)
-            .shadow(color: WavesDesign.accent.opacity(0.45), radius: 2.5, y: 0)
-            .frame(maxHeight: .infinity, alignment: .bottom)
-            .animation(reduceMotion ? nil : .linear(duration: 0.18), value: meterLevel)
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+        RowLevelMeter(rms: meterRMS, peak: meterPeak)
       }
     }
     .contextMenu {
@@ -381,10 +379,8 @@ struct CompactMixerRow: View {
     !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
   }
 
-  private var meterLevel: Double {
-    guard let levels = store.liveLevels[app.logicalID] else { return 0 }
-    return Double(min(1, max(levels.rms, levels.peak * 0.7)))
-  }
+  private var meterRMS: Float { store.liveLevels[app.logicalID]?.rms ?? 0 }
+  private var meterPeak: Float { store.liveLevels[app.logicalID]?.peak ?? 0 }
 
   private var canControlAudio: Bool {
     MixerRowHelpers.canControlAudio(app)
@@ -470,6 +466,7 @@ private extension RoutingState {
 
 private struct RoutingStateIndicator: View {
   @Environment(\.colorSchemeContrast) private var contrast
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let state: RoutingState
 
   @ViewBuilder
@@ -480,6 +477,10 @@ private struct RoutingStateIndicator: View {
           .font(.system(size: 9, weight: .semibold))
           .foregroundStyle(color)
           .frame(width: 10)
+          // The Live badge's waveform gently cycles its bars while audio is
+          // playing — a quiet "this is alive" pulse — and holds still otherwise
+          // and under Reduce Motion.
+          .symbolEffect(.variableColor.iterative, isActive: state == .live && !reduceMotion)
 
         Text(state.displayName)
           .font(.caption2.weight(.medium))
@@ -545,6 +546,7 @@ private struct RoutingStateIndicator: View {
 }
 
 private struct RoutingStateDot: View {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let state: RoutingState
   // When the route errored, the failure reason is otherwise visible only in
   // the full window's inline note; surface it here so a menu-bar user can see
@@ -556,6 +558,8 @@ private struct RoutingStateDot: View {
       .font(.caption2.weight(.semibold))
       .foregroundStyle(color)
       .frame(width: 12, height: 12)
+      // Match the main window: a live source's waveform shimmers while playing.
+      .symbolEffect(.variableColor.iterative, isActive: state == .live && !reduceMotion)
       .help(Text(helpText))
       .accessibilityLabel(Text("Route state: \(state.displayName)"))
       .accessibilityValue(Text(errorNote ?? ""))
