@@ -24,7 +24,15 @@ struct AppToast: Identifiable, Equatable {
 @MainActor
 final class AppStore {
   var session: AudioSessionSnapshot
-  var presets: [Preset]
+  var profiles: [Profile]
+  /// The profile the user last selected, used to highlight it in the UI and —
+  /// for membership-only grouping profiles — to scope the main window. Not
+  /// persisted; a fresh launch starts with no active profile.
+  var activeProfileID: UUID?
+  /// Bumped every time a profile is applied/selected, so the main window can
+  /// re-focus that profile even when `activeProfileID` is unchanged (e.g.
+  /// re-applying the already-active profile from the menu bar).
+  private(set) var profileFocusToken = 0
   var onboarding = OnboardingState()
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
@@ -40,7 +48,7 @@ final class AppStore {
 
   private let backend: any AudioControlBackend
   private let preferencesStore: PreferencesStore
-  private let presetStore: PresetStore
+  private let profileStore: ProfileStore
   private let sessionStore: SessionStore
   private let loginItemService: LoginItemService
   private let deviceVolumePresetsStore: DeviceVolumePresetsStore
@@ -90,21 +98,29 @@ final class AppStore {
   init(
     backend: any AudioControlBackend,
     preferencesStore: PreferencesStore,
-    presetStore: PresetStore,
+    profileStore: ProfileStore,
     sessionStore: SessionStore,
     loginItemService: LoginItemService,
     deviceVolumePresetsStore: DeviceVolumePresetsStore = DeviceVolumePresetsStore()
   ) {
     self.backend = backend
     self.preferencesStore = preferencesStore
-    self.presetStore = presetStore
+    self.profileStore = profileStore
     self.sessionStore = sessionStore
     self.loginItemService = loginItemService
     self.deviceVolumePresetsStore = deviceVolumePresetsStore
     self.preferences = preferencesStore.load()
-    self.presets = presetStore.load(defaults: Preset.defaults)
+    self.profiles = profileStore.load(defaults: Profile.defaults)
     self.session = sessionStore.load() ?? Self.emptySession
     self.deviceVolumePresets = deviceVolumePresetsStore.load()
+    // Migrate pins recorded only on the persisted session (builds before pin
+    // state moved into preferences) into the authoritative set, just once.
+    if preferences.pinnedAppIDs.isEmpty {
+      let sessionPins = session.apps.filter(\.isPinned).map(\.logicalID)
+      if !sessionPins.isEmpty {
+        preferences.pinnedAppIDs = Array(Set(sessionPins))
+      }
+    }
     // Only manual sort depends on a saved order; fall back to name if it is
     // missing. Activity sort needs no stored order and must be preserved across
     // launches.
@@ -124,8 +140,19 @@ final class AppStore {
   }
 
   var visibleApps: [AudioApp] {
+    // Pin state is authoritative in preferences (so it survives an app quitting
+    // and relaunching). Reconcile every app's isPinned here — the single source
+    // feeding pinnedApps, liveApps, recentApps, and every view — so the rest of
+    // the app can keep reading the familiar `app.isPinned`.
+    let pinned = Set(preferences.pinnedAppIDs)
     let filtered = session.apps
       .filter { preferences.showSystemProcesses || $0.category != .system }
+      .map { app -> AudioApp in
+        guard app.isPinned != pinned.contains(app.logicalID) else { return app }
+        var reconciled = app
+        reconciled.isPinned = pinned.contains(app.logicalID)
+        return reconciled
+      }
     return sortedApps(filtered)
   }
 
@@ -137,22 +164,59 @@ final class AppStore {
     visibleApps.filter(\.isActive)
   }
 
-  var liveApps: [AudioApp] {
-    visibleApps.filter { app in
-      app.routingState == .live
-        || (app.routingState == .managed && !app.isMuted && max(app.peakLevel, app.rmsLevel) > 0.001)
+  private static let liveLevelThreshold: Float = 0.0015
+
+  /// Whether an app is actively producing audio right now.
+  ///
+  /// A `.live` app is audible but not yet managed. A `.managed` app (Waves owns
+  /// its route) must keep counting as live while it's *still producing output* —
+  /// otherwise the moment you nudge a playing app's volume it flips to `.managed`
+  /// and vanishes from the Live list even though sound is still coming out. The
+  /// authoritative "is it making sound now" signal is the live-level poll
+  /// (`liveLevels`, refreshed a few times a second while a surface is visible);
+  /// fall back to the last snapshot levels when the poll isn't running.
+  func isLive(_ app: AudioApp) -> Bool {
+    if app.routingState == .live { return true }
+    guard app.routingState == .managed, !app.isMuted else { return false }
+    if let levels = liveLevels[app.logicalID] {
+      return max(levels.rms, levels.peak) > Self.liveLevelThreshold
     }
+    return max(app.peakLevel, app.rmsLevel) > Self.liveLevelThreshold
+  }
+
+  var liveApps: [AudioApp] {
+    visibleApps.filter(isLive)
+  }
+
+  /// Combined live audio energy (0...1) across every currently-playing app, for
+  /// the header visualizer. Independent app streams have random relative phase,
+  /// so their *powers* add — root-sum-of-squares is the physically correct mix
+  /// (a plain average would fall when a quiet app joins a loud one). A managed
+  /// app contributes its measured RMS/peak; an audible-but-unmanaged `.live` app,
+  /// which Waves can't meter without tapping it, contributes a small nominal
+  /// floor so it still registers. A perceptual power curve + soft `tanh` clamp
+  /// keeps quiet mixes visible and loud mixes from slamming the ceiling.
+  var mixedAudioLevel: Float {
+    var energy = 0.0
+    for app in visibleApps where !app.isMuted && isLive(app) {
+      let measured = liveLevels[app.logicalID].map { Double(max($0.rms, $0.peak * 0.8)) } ?? 0
+      let contribution = measured > 0.001 ? measured : 0.12 // floor for unmetered live apps
+      energy += contribution * contribution
+    }
+    guard energy > 0 else { return 0 }
+    let perceptual = pow(energy.squareRoot(), 0.6)
+    return Float(tanh(1.6 * perceptual))
   }
 
   var recentApps: [AudioApp] {
     guard preferences.showRecentApps else { return [] }
     // Recent = visible apps that are neither live nor pinned, so an app never
     // renders in more than one menu-panel section (Pinned / Live / Recent).
-    // recentApps is only consumed by the Recent section/tab, so excluding
-    // pinned apps here keeps the main-window Pinned/Live tabs untouched.
-    let liveIDs = Set(liveApps.map(\.logicalID))
-    let pinnedIDs = Set(pinnedApps.map(\.logicalID))
-    return visibleApps.filter { !liveIDs.contains($0.logicalID) && !pinnedIDs.contains($0.logicalID) }
+    // Evaluate visibleApps once and derive both sets locally rather than calling
+    // the liveApps/pinnedApps computed props (which would each re-sort visibleApps).
+    let visible = visibleApps
+    let liveIDs = Set(visible.filter(isLive).map(\.logicalID))
+    return visible.filter { !$0.isPinned && !liveIDs.contains($0.logicalID) }
   }
 
   var currentDeviceID: String? {
@@ -344,8 +408,9 @@ final class AppStore {
       handleURLSetVolume(components)
     case "mute":
       handleURLMute(components)
-    case "apply-preset":
-      handleURLApplyPreset(components)
+    case "apply-profile", "apply-preset":
+      // "apply-preset" kept as a deprecated alias from before the rename.
+      handleURLApplyProfile(components)
     case "refresh":
       refresh()
     default:
@@ -407,19 +472,19 @@ final class AppStore {
     setMuted(shouldMute, for: app)
   }
 
-  private func handleURLApplyPreset(_ components: URLComponents) {
-    guard let presetName = components.queryItems?.first(where: { $0.name == "name" })?.value,
-          presetName.count <= 256 else {
-      showToast(title: "URL command blocked", detail: "Preset command was invalid.", kind: .warning)
+  private func handleURLApplyProfile(_ components: URLComponents) {
+    guard let profileName = components.queryItems?.first(where: { $0.name == "name" })?.value,
+          profileName.count <= 256 else {
+      showToast(title: "URL command blocked", detail: "Profile command was invalid.", kind: .warning)
       return
     }
 
-    guard let preset = presets.first(where: { $0.name.localizedCaseInsensitiveCompare(presetName) == .orderedSame }) else {
-      showToast(title: "Preset not found", detail: "No preset named: \(String(presetName.prefix(64)))", kind: .warning)
+    guard let profile = profiles.first(where: { $0.name.localizedCaseInsensitiveCompare(profileName) == .orderedSame }) else {
+      showToast(title: "Profile not found", detail: "No profile named: \(String(profileName.prefix(64)))", kind: .warning)
       return
     }
 
-    applyPreset(preset)
+    applyProfile(profile)
   }
 
   private func checkURLSchemeRateLimit() -> Bool {
@@ -706,32 +771,37 @@ final class AppStore {
   func togglePinned(_ app: AudioApp) {
     let appName = app.displayName
     let appKey = app.logicalID
-    let willPin = !app.isPinned
-    // Optimistically flip just this app's pin state and merge back only this app
-    // on success (mirroring setMuted/setVolumeBoost). Replacing the whole session
-    // would transiently revert another app's in-flight optimistic volume/mute.
+    let willPin = !preferences.pinnedAppIDs.contains(appKey)
+
+    // Pin state lives in preferences (authoritative + persisted), so it survives
+    // the app quitting/relaunching and a full relaunch of Waves.
+    if willPin {
+      preferences.pinnedAppIDs.append(appKey)
+    } else {
+      preferences.pinnedAppIDs.removeAll { $0 == appKey }
+    }
+    persistPreferences()
+
+    // Optimistically mirror onto the session row for immediate feedback (and so
+    // any code reading session.apps directly agrees); visibleApps reconciles too.
     if let index = session.apps.firstIndex(matchingAppKey: appKey) {
       session.apps[index].isPinned = willPin
       invalidateVisibleAppsCache()
     }
+
+    // Keep the backend snapshot in step on a best-effort basis; preferences
+    // remains the source of truth, so a backend failure can't lose the pin.
     Task {
-      do {
-        try await backend.pinApp(willPin, appID: appKey)
-        mergeAppState(from: await backend.currentSnapshot(), appID: appKey)
-        persistSessionSnapshot()
-        showToast(
-          title: willPin ? "Pinned" : "Unpinned",
-          detail: appName,
-          kind: .info,
-          duration: .seconds(1.2)
-        )
-      } catch {
-        // Reconcile the optimistic flip with the backend's real state (merging
-        // only this app, so other apps' in-flight optimistic values survive).
-        mergeAppState(from: await backend.currentSnapshot(), appID: appKey)
-        showToast(title: "Pinning failed", detail: error.localizedDescription, kind: .error)
-      }
+      try? await backend.pinApp(willPin, appID: appKey)
+      persistSessionSnapshot()
     }
+
+    showToast(
+      title: willPin ? "Pinned to top" : "Unpinned",
+      detail: appName,
+      kind: .info,
+      duration: .seconds(1.2)
+    )
   }
 
   // MARK: - Live level metering (visibility-gated)
@@ -1343,27 +1413,41 @@ final class AppStore {
     }
   }
 
-  func applyPreset(_ preset: Preset) {
-    // Never let a preset re-tap an excluded app — strip excluded entries first.
-    var preset = preset
+  func applyProfile(_ profile: Profile) {
+    // Never let a profile re-tap an excluded app — strip excluded entries first.
+    var profile = profile
     let excluded = Set(preferences.excludedAppIDs)
     if !excluded.isEmpty {
-      preset.entries = preset.entries.filter { !excluded.contains($0.appID) }
+      profile.entries = profile.entries.filter { !excluded.contains($0.appID) }
+    }
+    // A membership-only profile (a pure grouping) carries no levels to apply.
+    // Switch the main window to that group instead of running an audio no-op,
+    // so "switch to Work" still does something visible.
+    guard profile.carriesLevels else {
+      focusProfile(profile.id)
+      showToast(
+        title: "Profile selected",
+        detail: "\(profile.name) — \(profile.entries.count) \(profile.entries.count == 1 ? "app" : "apps")",
+        kind: .info,
+        duration: .seconds(1.4)
+      )
+      return
     }
     Task {
       do {
-        session = try await backend.applyPreset(preset)
+        session = try await backend.applyProfile(profile)
+        focusProfile(profile.id)
         invalidateVisibleAppsCache()
         diagnostics = await backend.diagnosticsReport()
         // Keep onboarding route health / checklist in step with the session this
-        // preset just installed (mirrors the per-app mute/boost/volume paths).
+        // profile just installed (mirrors the per-app mute/boost/volume paths).
         syncOnboarding(using: session)
-        mirrorAppliedPresetIntoDevicePresets()
+        mirrorAppliedProfileIntoDevicePresets()
         persistSessionSnapshot()
         checkAutoPauseMusic()
         showToast(
-          title: "Preset applied",
-          detail: preset.name,
+          title: "Profile applied",
+          detail: profile.name,
           kind: .success,
           duration: .seconds(1.4)
         )
@@ -1376,16 +1460,16 @@ final class AppStore {
         // degraded, so routeHealthReady must track this session, not go stale.
         syncOnboarding(using: session)
         persistSessionSnapshot()
-        showToast(title: "Preset apply failed", detail: error.localizedDescription, kind: .error)
+        showToast(title: "Profile apply failed", detail: error.localizedDescription, kind: .error)
       }
     }
   }
 
-  /// After a named preset lands, mirror each app's resulting volume/mute/boost
-  /// into the per-device preset store for the current device. Without this the
-  /// per-device store keeps the pre-preset values and the next device switch
-  /// (restoreDeviceVolumePresets) silently reverts the just-applied preset.
-  private func mirrorAppliedPresetIntoDevicePresets() {
+  /// After a profile's levels land, mirror each app's resulting volume/mute/boost
+  /// into the per-device volume store for the current device. Without this the
+  /// per-device store keeps the pre-profile values and the next device switch
+  /// (restoreDeviceVolumePresets) silently reverts the just-applied profile.
+  private func mirrorAppliedProfileIntoDevicePresets() {
     guard preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID else { return }
     for app in session.apps {
       // Never record per-device entries for excluded apps — mirrors the
@@ -1403,68 +1487,122 @@ final class AppStore {
     deviceVolumePresetsStore.save(deviceVolumePresets)
   }
 
-  func savePreset(named name: String) {
-    Task {
-      do {
-        var preset = try await backend.saveCurrentPreset(named: name)
-        // Don't bake excluded apps into a saved preset, or applying it later
-        // would re-tap them.
-        let excluded = Set(preferences.excludedAppIDs)
-        if !excluded.isEmpty {
-          preset.entries = preset.entries.filter { !excluded.contains($0.appID) }
-        }
-        let trimmedName = preset.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let existingIndex = presets.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame })
-        {
-          var replacement = preset
-          replacement.id = presets[existingIndex].id
-          replacement.name = presets[existingIndex].name
-          replacement.createdAt = presets[existingIndex].createdAt
-          replacement.updatedAt = .now
-          presets[existingIndex] = replacement
-        } else {
-          presets.append(preset)
-        }
-        presetStore.save(presets)
-        showToast(
-          title: "Preset saved",
-          detail: name,
-          kind: .success,
-          duration: .seconds(1.6)
-        )
-      } catch {
-        showToast(title: "Save failed", detail: error.localizedDescription, kind: .error)
-      }
-    }
+  // MARK: - Profiles
+
+  /// Visible apps that belong to `profile`, in the current sort order.
+  func apps(in profile: Profile) -> [AudioApp] {
+    let ids = Set(profile.appIDs)
+    return visibleApps.filter { ids.contains($0.logicalID) }
   }
 
-  func deletePresets(at offsets: IndexSet) {
-    presets.remove(atOffsets: offsets)
-    presetStore.save(presets)
+  /// Marks a profile as the active one and signals the main window to focus it.
+  private func focusProfile(_ id: UUID) {
+    activeProfileID = id
+    profileFocusToken &+= 1
+  }
+
+  /// Creates or updates a profile from a chosen set of apps. When `captureLevels`
+  /// is true, each app's current volume/mute/boost is baked into its entry;
+  /// otherwise the entries are membership-only (a pure grouping). Pass an `id`
+  /// to edit an existing profile in place (so a rename keeps its identity);
+  /// otherwise a same-named profile is replaced, or a new one is appended.
+  func saveProfile(id: UUID? = nil, named name: String, appIDs: [String], captureLevels: Bool) {
+    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedName.isEmpty, trimmedName.count <= 100 else { return }
+
+    // Resolve which existing profile (if any) this save targets: an explicit id
+    // wins (an edit, even across a rename), otherwise fall back to a name match.
+    let targetIndex = id.flatMap { id in profiles.firstIndex(where: { $0.id == id }) }
+      ?? profiles.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame })
+
+    // Reject a rename that would collide with a *different* existing profile, so
+    // an edit can't silently produce two profiles with the same name.
+    if let collision = profiles.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame }),
+       collision != targetIndex {
+      showToast(title: "Name already used", detail: "A profile named “\(trimmedName)” already exists.", kind: .warning)
+      return
+    }
+
+    // Never bake an excluded app into a profile — applying it later would re-tap
+    // an app the user explicitly told Waves to leave alone. Preserve the chosen
+    // order while removing duplicates.
+    let excluded = Set(preferences.excludedAppIDs)
+    let appByID = Dictionary(session.apps.map { ($0.logicalID, $0) }, uniquingKeysWith: { first, _ in first })
+    // When editing without re-capturing, keep each existing member's stored
+    // levels rather than discarding them — so adding one app to "Focus" doesn't
+    // wipe the saved mix. Only an explicit "Capture current levels" re-snapshots.
+    let existingEntries: [String: ProfileEntry] = targetIndex.map {
+      Dictionary(profiles[$0].entries.map { ($0.appID, $0) }, uniquingKeysWith: { first, _ in first })
+    } ?? [:]
+    var seen = Set<String>()
+    let entries: [ProfileEntry] = appIDs
+      .filter { !excluded.contains($0) && seen.insert($0).inserted }
+      .map { appID in
+        if captureLevels, let app = appByID[appID] {
+          return ProfileEntry(
+            appID: appID,
+            desiredVolume: app.desiredVolume,
+            isMuted: app.isMuted,
+            volumeBoost: app.volumeBoost
+          )
+        }
+        // Preserve a previously-saved level for an existing member; otherwise the
+        // entry is membership-only.
+        return existingEntries[appID] ?? ProfileEntry(appID: appID)
+      }
+
+    if let targetIndex {
+      var replacement = profiles[targetIndex]
+      replacement.name = trimmedName
+      replacement.entries = entries
+      replacement.updatedAt = .now
+      profiles[targetIndex] = replacement
+      focusProfile(replacement.id)
+    } else {
+      let profile = Profile(name: trimmedName, entries: entries)
+      profiles.append(profile)
+      focusProfile(profile.id)
+    }
+    profileStore.save(profiles)
+    showToast(
+      title: "Profile saved",
+      detail: trimmedName,
+      kind: .success,
+      duration: .seconds(1.6)
+    )
+  }
+
+  func deleteProfiles(at offsets: IndexSet) {
+    let removedIDs = offsets.map { profiles[$0].id }
+    profiles.remove(atOffsets: offsets)
+    if let active = activeProfileID, removedIDs.contains(active) {
+      activeProfileID = nil
+    }
+    profileStore.save(profiles)
     if !offsets.isEmpty {
       showToast(
-        title: "Preset removed",
-        detail: "Removed from library.",
+        title: "Profile removed",
+        detail: "Removed from your profiles.",
         kind: .info,
         duration: .seconds(1.1)
       )
     }
   }
 
-  func exportPreset(_ preset: Preset) {
+  func exportProfile(_ profile: Profile) {
     Task {
       do {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
-        // Write the same versioned, array-shaped envelope as presets.json
-        // (VersionedPayload<[Preset]>) so the share file is self-describing
+        // Write the same versioned, array-shaped envelope as profiles.json
+        // (VersionedPayload<[Profile]>) so the share file is self-describing
         // (carries schemaVersion for forward-compat) and interchangeable with
-        // the persisted format. decodeImportedPresets accepts this shape.
-        let data = try PersistedSchema.encode([preset], using: encoder)
+        // the persisted format. decodeImportedProfiles accepts this shape.
+        let data = try PersistedSchema.encode([profile], using: encoder)
 
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [.json]
-        savePanel.nameFieldStringValue = "\(preset.name).json"
+        savePanel.nameFieldStringValue = "\(profile.name).json"
         savePanel.canCreateDirectories = true
 
         // Anchor to the window hosting the control (the Settings window when it
@@ -1479,7 +1617,7 @@ final class AppStore {
         if response == .OK, let url = savePanel.url {
           try data.write(to: url, options: .atomic)
           showToast(
-            title: "Preset exported",
+            title: "Profile exported",
             detail: "Saved to \(url.lastPathComponent)",
             kind: .success,
             duration: .seconds(2.0)
@@ -1491,7 +1629,7 @@ final class AppStore {
     }
   }
 
-  func importPreset() {
+  func importProfiles() {
     Task {
       let openPanel = NSOpenPanel()
       openPanel.allowedContentTypes = [.json]
@@ -1529,47 +1667,47 @@ final class AppStore {
             return
           }
 
-          // Accept the app's own presets.json backup (a VersionedPayload<[Preset]>
-          // envelope or a bare [Preset]) as well as a single exported Preset, so
+          // Accept the app's own profiles.json backup (a VersionedPayload<[Profile]>
+          // envelope or a bare [Profile]) as well as a single exported Profile, so
           // restoring a backup doesn't fail with a cryptic generic decode error.
-          guard let decoded = Self.decodeImportedPresets(from: data) else {
+          guard let decoded = Self.decodeImportedProfiles(from: data) else {
             showToast(
               title: "Import failed",
-              detail: "Unsupported file — expected a Waves preset or presets backup.",
+              detail: "Unsupported file — expected a Waves profile or profiles backup.",
               kind: .error
             )
             return
           }
 
           // Validate and build the entire batch into a local working copy BEFORE
-          // touching the observed `presets` array. Any validation failure returns
-          // without having mutated `presets`, so a multi-preset backup with a
+          // touching the observed `profiles` array. Any validation failure returns
+          // without having mutated `profiles`, so a multi-profile backup with a
           // single bad entry leaves the live library (and the UI) unchanged —
-          // restoring the original atomic behavior for the multi-preset case.
-          var working = presets
+          // restoring the original atomic behavior for the multi-profile case.
+          var working = profiles
           var importedNames: [String] = []
-          for preset in decoded {
-            // Validate preset structure. Trim first so a whitespace-only name is
+          for profile in decoded {
+            // Validate profile structure. Trim first so a whitespace-only name is
             // rejected (isEmpty alone passes "   ") and bound the length to match
-            // the save sheet's 100-character cap.
-            let trimmedName = preset.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            // the editor's 100-character cap.
+            let trimmedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedName.isEmpty {
-              showToast(title: "Import failed", detail: "Preset name cannot be empty", kind: .error)
+              showToast(title: "Import failed", detail: "Profile name cannot be empty", kind: .error)
               return
             }
 
             if trimmedName.count > 100 {
-              showToast(title: "Import failed", detail: "Preset name exceeds 100 characters", kind: .error)
+              showToast(title: "Import failed", detail: "Profile name exceeds 100 characters", kind: .error)
               return
             }
 
-            if preset.entries.count > 1000 {
-              showToast(title: "Import failed", detail: "Preset has too many entries (max 1000)", kind: .error)
+            if profile.entries.count > 1000 {
+              showToast(title: "Import failed", detail: "Profile has too many entries (max 1000)", kind: .error)
               return
             }
 
             if let existingIndex = working.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame }) {
-              var imported = preset
+              var imported = profile
               imported.id = working[existingIndex].id
               imported.name = working[existingIndex].name
               imported.createdAt = working[existingIndex].createdAt
@@ -1579,9 +1717,9 @@ final class AppStore {
               // the imported file's name, which may differ only in case.
               importedNames.append(working[existingIndex].name)
             } else {
-              // Assign a fresh identity so importing a preset never collides with
+              // Assign a fresh identity so importing a profile never collides with
               // an existing one's UUID (which breaks SwiftUI list identity).
-              var imported = preset
+              var imported = profile
               imported.id = UUID()
               imported.name = trimmedName
               imported.createdAt = .now
@@ -1591,12 +1729,12 @@ final class AppStore {
             }
           }
 
-          // Every preset passed — commit the batch atomically and persist once.
-          presets = working
-          presetStore.save(presets)
+          // Every profile passed — commit the batch atomically and persist once.
+          profiles = working
+          profileStore.save(profiles)
           showToast(
-            title: importedNames.count == 1 ? "Preset imported" : "Presets imported",
-            detail: importedNames.count == 1 ? importedNames.first : "\(importedNames.count) presets restored",
+            title: importedNames.count == 1 ? "Profile imported" : "Profiles imported",
+            detail: importedNames.count == 1 ? importedNames.first : "\(importedNames.count) profiles restored",
             kind: .success,
             duration: .seconds(2.0)
           )
@@ -1607,22 +1745,25 @@ final class AppStore {
     }
   }
 
-  /// Decodes presets from any shape Waves itself writes: the versioned
-  /// `presets.json` backup envelope (`VersionedPayload<[Preset]>`), a bare
-  /// `[Preset]` array, or a single exported `Preset`. Returns nil when the data
-  /// matches none of these, so the caller can surface an actionable message.
-  static func decodeImportedPresets(from data: Data) -> [Preset]? {
+  /// Decodes profiles from any shape Waves itself writes: the versioned
+  /// `profiles.json` backup envelope (`VersionedPayload<[Profile]>`), a bare
+  /// `[Profile]` array, or a single exported `Profile`. Also reads legacy
+  /// `presets.json` backups, whose entries decode straight into level-bearing
+  /// profiles. Returns nil when the data matches none of these.
+  nonisolated static func decodeImportedProfiles(from data: Data) -> [Profile]? {
     let decoder = JSONDecoder()
     // PersistedSchema.decode handles both the versioned envelope and a legacy
-    // bare [Preset] array written before envelopes existed.
-    if let presets = try? PersistedSchema.decode([Preset].self, from: data, using: decoder),
-       !presets.isEmpty {
-      return presets
+    // bare [Profile] array written before envelopes existed. Distinguish a valid
+    // (possibly empty) array from a decode failure so an empty backup is accepted
+    // rather than mistaken for a single-Profile file.
+    do {
+      return try PersistedSchema.decode([Profile].self, from: data, using: decoder)
+    } catch {
+      if let profile = try? decoder.decode(Profile.self, from: data) {
+        return [profile]
+      }
+      return nil
     }
-    if let preset = try? decoder.decode(Preset.self, from: data) {
-      return [preset]
-    }
-    return nil
   }
 
   func recoverRoutes() {
@@ -1828,7 +1969,11 @@ final class AppStore {
       return 0
     }
 
-    if app.routingState == .managed && !app.isMuted && max(app.peakLevel, app.rmsLevel) > 0.001 {
+    // Route through the shared isLive (which consults the live-level poll), so
+    // the Activity sort agrees with the Live/Recent membership on one source of
+    // truth — otherwise a managed app playing right now would show in Live but
+    // sink to the idle tier here.
+    if isLive(app) {
       return 1
     }
 

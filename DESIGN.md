@@ -137,11 +137,15 @@ Depth is primarily material-based, not shadow-based. Use system window, sidebar,
 
 ### Navigation
 - **Style:** `NavigationSplitView` for the main window, native `MenuBarExtra` for the compact mixer, and a dedicated `Settings` scene for preferences.
-- **Behavior:** Search applies across the current app list. Presets and source filters should stay close to the mixer, not buried in a dashboard.
+- **Behavior:** Search applies across the current app list. Profiles and source filters should stay close to the mixer, not buried in a dashboard.
 
 ### Signature Component
 
 The mixer row is the signature component. It needs app icon, app name, route state, live level, mute, gain slider, boost, pin, and enough diagnostics to explain why control is limited without crowding the primary slider.
+
+### Mixed-Waveform Visualizer
+
+The header carries a live "mixed waves" ribbon (`MixedWaveformView`, fed by `AppStore.mixedAudioLevel`) that visualizes the combined audio energy of every playing app — the namesake motif made functional. It is purely decorative and always rendered on a **solid (non-glass) content surface**, never over Liquid Glass, per Apple's guidance for real-time graphics. It eases between the sparse level samples for smooth motion, stays calm when silent, **freezes to a static level bar under Reduce Motion**, and pauses its render loop when idle so it costs nothing. Cyan/teal gradient only — it is a signal element, never decoration for its own sake.
 
 ## 6. Do's and Don'ts
 

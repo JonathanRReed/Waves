@@ -30,12 +30,19 @@ import Testing
   #expect(matrix.coverageSummary == "2/3 validated")
 }
 
-@Test func presetDefaultsContainDailyUseProfiles() {
-  let presets = Preset.defaults
+@Test func profileDefaultsContainDailyUseGroups() {
+  let profiles = Profile.defaults
 
-  #expect(presets.count >= 2)
-  #expect(presets.contains(where: { $0.name == "Focus" }))
-  #expect(presets.contains(where: { $0.name == "Meeting" }))
+  #expect(profiles.count >= 2)
+  #expect(profiles.contains(where: { $0.name == "Work" }))
+  #expect(profiles.contains(where: { $0.name == "Gaming" }))
+  #expect(profiles.contains(where: { $0.name == "Focus" }))
+
+  // "Work" and "Gaming" are pure groupings (membership-only); "Focus" carries a mix.
+  let work = profiles.first { $0.name == "Work" }
+  #expect(work?.carriesLevels == false)
+  let focus = profiles.first { $0.name == "Focus" }
+  #expect(focus?.carriesLevels == true)
 }
 
 @Test func previewSnapshotIncludesCurrentDeviceAndApps() {
@@ -146,7 +153,51 @@ import Testing
   #expect(updatedApp.volumeBoost == 3.0)
 }
 
-@Test func presetSavesAndAppliesVolumeBoost() async throws {
+@Test func applyProfileLeavesMembershipOnlyAppsUntouched() async throws {
+  let app = AudioApp(
+    id: "test.app", logicalID: "test.app", displayName: "Test App",
+    category: .media, desiredVolume: 0.4, isMuted: false, volumeBoost: 2.0
+  )
+  let backend = PreviewAudioControlBackend(
+    snapshot: AudioSessionSnapshot(
+      apps: [app], currentDevice: nil, recentDeviceIDs: [],
+      supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(isAudioComponentInstalled: true, hasRequiredPermissions: true, isRouteRecoveryHealthy: true)
+    )
+  )
+
+  // A membership-only entry must not change the app's audio at all.
+  let group = Profile(name: "Group", entries: [ProfileEntry(appID: "test.app")])
+  _ = try await backend.applyProfile(group)
+  let after = await backend.currentSnapshot().apps[0]
+  #expect(after.desiredVolume == 0.4)
+  #expect(after.isMuted == false)
+  #expect(after.volumeBoost == 2.0)
+}
+
+@Test func applyProfilePartialEntryOnlyChangesSetFields() async throws {
+  let app = AudioApp(
+    id: "test.app", logicalID: "test.app", displayName: "Test App",
+    category: .media, desiredVolume: 0.4, isMuted: false, volumeBoost: 2.0
+  )
+  let backend = PreviewAudioControlBackend(
+    snapshot: AudioSessionSnapshot(
+      apps: [app], currentDevice: nil, recentDeviceIDs: [],
+      supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(isAudioComponentInstalled: true, hasRequiredPermissions: true, isRouteRecoveryHealthy: true)
+    )
+  )
+
+  // A mute-only entry must mute without disturbing volume or boost.
+  let muteOnly = Profile(name: "Mute", entries: [ProfileEntry(appID: "test.app", isMuted: true)])
+  _ = try await backend.applyProfile(muteOnly)
+  let after = await backend.currentSnapshot().apps[0]
+  #expect(after.isMuted == true)
+  #expect(after.desiredVolume == 0.4)
+  #expect(after.volumeBoost == 2.0)
+}
+
+@Test func profileSavesAndAppliesVolumeBoost() async throws {
   let app = AudioApp(
     id: "test.app",
     logicalID: "test.app",
@@ -172,11 +223,11 @@ import Testing
     )
   )
 
-  let saved = try await backend.saveCurrentPreset(named: "Boosted")
+  let saved = try await backend.saveCurrentProfile(named: "Boosted")
   #expect(saved.entries[0].volumeBoost == 3.0)
 
   try await backend.setVolumeBoost(1.0, forAppID: "test.app")
-  _ = try await backend.applyPreset(saved)
+  _ = try await backend.applyProfile(saved)
 
   let restoredApp = await backend.currentSnapshot().apps[0]
   #expect(restoredApp.volumeBoost == 3.0)
@@ -260,41 +311,58 @@ import Testing
   #expect(decoded.backendStatus.isAudioComponentInstalled == true)
 }
 
-@Test func presetEncodesAndDecodesCorrectly() throws {
-  let preset = Preset(
+@Test func profileEncodesAndDecodesCorrectly() throws {
+  let profile = Profile(
     id: UUID(),
-    name: "Test Preset",
+    name: "Test Profile",
     entries: [
-      PresetEntry(appID: "app1", desiredVolume: 0.5, isMuted: false),
-      PresetEntry(appID: "app2", desiredVolume: 0.75, isMuted: true, volumeBoost: 2.0)
+      ProfileEntry(appID: "app1", desiredVolume: 0.5, isMuted: false),
+      ProfileEntry(appID: "app2", desiredVolume: 0.75, isMuted: true, volumeBoost: 2.0)
     ],
     createdAt: .now,
     updatedAt: .now
   )
 
   let encoder = JSONEncoder()
-  let data = try encoder.encode(preset)
+  let data = try encoder.encode(profile)
   let decoder = JSONDecoder()
-  let decoded = try decoder.decode(Preset.self, from: data)
+  let decoded = try decoder.decode(Profile.self, from: data)
 
-  #expect(decoded.name == "Test Preset")
+  #expect(decoded.name == "Test Profile")
   #expect(decoded.entries.count == 2)
   #expect(decoded.entries[0].desiredVolume == 0.5)
   #expect(decoded.entries[1].isMuted == true)
   #expect(decoded.entries[1].volumeBoost == 2.0)
 }
 
-@Test func presetEntryDecodesLegacyBoostAsDefaultAndClampsImportedValues() throws {
+@Test func profileEntryDecodesLegacyEntryAndClampsImportedValues() throws {
+  // A legacy preset entry carried concrete levels: it must decode into a
+  // level-bearing profile entry (clamped), not a membership-only one.
   let legacyJSON = #"{"appID":"legacy.app","desiredVolume":1.5,"isMuted":false}"#.data(using: .utf8)!
-  let legacyEntry = try JSONDecoder().decode(PresetEntry.self, from: legacyJSON)
+  let legacyEntry = try JSONDecoder().decode(ProfileEntry.self, from: legacyJSON)
 
   #expect(legacyEntry.appID == "legacy.app")
+  #expect(legacyEntry.hasLevels)
   #expect(legacyEntry.desiredVolume == 1.0)
-  #expect(legacyEntry.volumeBoost == 1.0)
+  #expect(legacyEntry.isMuted == false)
+  // Boost was absent in the legacy entry, so it stays unset (membership for boost).
+  #expect(legacyEntry.volumeBoost == nil)
 
   let boostedJSON = #"{"appID":"boosted.app","desiredVolume":0.5,"isMuted":true,"volumeBoost":12}"#.data(using: .utf8)!
-  let boostedEntry = try JSONDecoder().decode(PresetEntry.self, from: boostedJSON)
+  let boostedEntry = try JSONDecoder().decode(ProfileEntry.self, from: boostedJSON)
   #expect(boostedEntry.volumeBoost == 4.0)
+}
+
+@Test func profileEntryMembershipOnlyHasNoLevels() throws {
+  let entry = ProfileEntry(appID: "group.member")
+  #expect(!entry.hasLevels)
+
+  // Round-trips without fabricating level keys.
+  let data = try JSONEncoder().encode(entry)
+  let json = String(decoding: data, as: UTF8.self)
+  #expect(!json.contains("desiredVolume"))
+  let decoded = try JSONDecoder().decode(ProfileEntry.self, from: data)
+  #expect(!decoded.hasLevels)
 }
 
 @Test func routingStateHasAllExpectedCases() {

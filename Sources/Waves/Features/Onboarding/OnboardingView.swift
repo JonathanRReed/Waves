@@ -65,14 +65,20 @@ struct OnboardingView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 24) {
-      VStack(alignment: .leading, spacing: 8) {
-        Text("Welcome to Waves")
-          .font(.title2.weight(.semibold))
+      HStack(spacing: 14) {
+        WavesMark(size: 48, live: isFullyComplete)
 
-        Text(isFullyComplete
-          ? "You're all set! Waves is ready to manage your per-app audio."
-          : "Let's get Waves set up to manage your per-app audio. Follow the steps below.")
-          .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Welcome to Waves")
+            .font(.title2.weight(.semibold))
+
+          Text(isFullyComplete
+            ? "You're all set! Waves is ready to manage your per-app audio."
+            : "Let's get Waves set up to manage your per-app audio. Follow the steps below.")
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        Spacer(minLength: 0)
       }
 
       ProgressView(value: completionProgress)
@@ -125,7 +131,7 @@ struct OnboardingView: View {
             HStack(spacing: 8) {
               Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
-              Text("Save and load volume presets")
+              Text("Group apps into profiles, with optional saved levels")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }

@@ -7,29 +7,32 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 ### Core Audio Control
 - **Per-App Volume Control**: Adjust volume levels individually for each running application
 - **Mute/Unmute Apps**: Quickly mute or unmute specific applications
-- **Volume Boost**: Enhance audio output with 2x, 3x, or 4x boost presets
+- **Volume Boost**: Enhance audio output with 2×, 3×, or 4× boost
 - **Audio-Aware Discovery**: Uses Core Audio process output state when available, with a manageable running-app fallback
+- **Browser & Electron support**: Attributes audio from helper subprocesses (Chrome, Helium, Brave, Edge, Arc, and Electron apps play through a sandboxed "Audio Service" helper) back to the parent app, so they show as **Live** and are fully controllable — including picture-in-picture / popout video
 
 ### Device Management
 - **Device Auto-Restore**: Automatically re-establishes audio routes when switching output devices
-- **Per-Device Volume Presets**: Remember volume settings for each app across different audio devices
+- **Per-Device Volume Memory**: Remember volume settings for each app across different audio devices
 
 ### Automation & Integration
 - **Keyboard Shortcuts**: Global hotkeys for quick volume adjustments (⌘⌥↑/↓ for volume, ⌘⌥M for mute)
 - **URL Scheme Automation**: Opt-in custom URL schemes for integration with other tools
 - **Auto-Pause Music**: Automatically pause music apps when conferencing apps become active
 
-### Presets & Organization
-- **Volume Presets**: Save and restore custom volume configurations
-- **Preset Sharing**: Export and import presets as JSON files
-- **App Pinning**: Pin important apps to keep them visible
+### Profiles & Organization
+- **Profiles**: Group the apps you use together — like **Work** (Slack, Teams, browsers) or **Gaming** (Discord, Steam) — and switch between them from the sidebar or menu bar
+- **Optional saved levels**: A profile can be a pure grouping, or capture each app's volume, mute, and boost so applying it restores the mix
+- **Profile Sharing**: Export and import profiles as JSON files
+- **Quick Pin**: One-click pin any app to the top of the menu bar; pins survive the app (and Waves) quitting and relaunching
 - **Drag-to-Reorder**: Customize the order of your app list
 - **Smart Sorting**: Sort apps by activity, name, category, or manual order
 
 ### User Interface
 - **Dynamic Menu Bar Icon**: Menu bar icon changes based on volume and mute state
-- **Real-time Audio Levels**: Visual feedback for audio activity levels
-- **Smooth Animations**: Polished UI with spring animations and transitions
+- **Live Mixed-Waveform Visualizer**: A flowing header ribbon showing the combined audio energy of every playing app — alive when sound flows, calm when silent
+- **Real-time Audio Levels**: Per-app level meters for audio activity
+- **Liquid Glass**: Genuine `glassEffect` on macOS 26 (Tahoe), with a real-blur faux-glass fallback on macOS 14.2–15; honors Reduce Transparency, Reduce Motion, and Increase Contrast
 - **Empty State UI**: Helpful guidance when no audio apps are detected
 - **Setup Checklist**: Settings-based setup status for permissions, output device visibility, and route health
 
@@ -128,21 +131,21 @@ URL scheme automation is disabled by default for security. Enable it in General 
 
 - `waves://set-volume?app=APP_ID&volume=0.5` - Set volume for an app (0.0 to 1.0)
 - `waves://mute?app=APP_ID&muted=true` - Mute or unmute an app
-- `waves://apply-preset?name=Focus` - Apply a named preset
+- `waves://apply-profile?name=Focus` - Apply a named profile (`apply-preset` still works as a deprecated alias)
 - `waves://refresh` - Refresh the audio session
 
-### Presets
+### Profiles
 
-1. Adjust volumes for your apps
-2. Click the "+" button in the toolbar
-3. Enter a preset name
-4. Your configuration is saved and can be applied anytime
+1. In the main window's sidebar, click the **+** next to "Profiles"
+2. Name it (e.g. Work, Gaming) and choose which apps belong
+3. Optionally turn on **Capture current levels** to also save each app's volume, mute, and boost
+4. Select the profile in the sidebar to focus its apps, or switch to it from the menu bar; profiles that carry levels show an **Apply Levels** button
 
 ### Device Switching
 
 When switching audio devices:
 - Managed routes are re-established automatically when the output device changes
-- Enable "Per-device volume presets" to remember app volumes per device
+- Enable "Per-device volume memory" to remember app volumes per device
 
 ## Settings
 
@@ -152,7 +155,7 @@ When switching audio devices:
 - **Show system processes**: Include system audio processes
 - **Auto-pause music during calls**: Pause media when conferencing apps are active
 - **Enable keyboard shortcuts**: Use global hotkeys for volume control
-- **Per-device volume presets**: Remember volumes per audio device
+- **Per-device volume memory**: Remember volumes per audio device
 - **URL scheme automation**: Allow local `waves://` automation commands after explicit opt-in
 - **Sort apps by**: Choose sorting method (Activity, Name, Category, Manual)
 
@@ -161,10 +164,10 @@ When switching audio devices:
 - Read how managed routing captures and plays back app audio
 - Recover managed routes if needed
 
-### Presets
-- Create, delete, and manage volume presets
-- Export presets to JSON files
-- Import presets from JSON files
+### Profiles
+- Create, edit, delete, and manage profiles
+- Export profiles to JSON files
+- Import profiles from JSON files
 
 ### Advanced
 - View running app inventory
@@ -207,7 +210,7 @@ When switching audio devices:
 - **AudioControlBackend**: Protocol for audio operations
 - **PerAppTapController**: Manages per-app audio routing taps
 - **PreferencesStore**: Persists user preferences
-- **PresetStore**: Manages volume presets
+- **ProfileStore**: Manages profiles (with one-time migration from legacy `presets.json`)
 - **SessionStore**: Caches audio session state
 
 ## Development

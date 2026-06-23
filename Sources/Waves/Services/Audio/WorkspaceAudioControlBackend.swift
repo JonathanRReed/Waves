@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import AudioToolbox
+import Darwin
 import Foundation
 import OSLog
 import WavesAudioCore
@@ -180,30 +181,39 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].isPinned = isPinned
   }
 
-  func applyPreset(_ preset: Preset) async throws -> AudioSessionSnapshot {
-    for entry in preset.entries {
+  func applyProfile(_ profile: Profile) async throws -> AudioSessionSnapshot {
+    for entry in profile.entries {
+      // Membership-only entries are pure grouping — they must never tap or alter
+      // the app's audio. Only entries that set a level establish a route.
+      guard entry.hasLevels else { continue }
       guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) else {
         continue
       }
 
-      snapshot.apps[index].desiredVolume = entry.desiredVolume
-      snapshot.apps[index].isMuted = entry.isMuted
-      snapshot.apps[index].volumeBoost = entry.volumeBoost
+      // Apply only the fields the entry sets; keep the app's current value for
+      // the rest so e.g. a mute-only entry doesn't also slam the volume to a
+      // fabricated default.
+      let targetVolume = entry.desiredVolume ?? snapshot.apps[index].desiredVolume
+      let targetMuted = entry.isMuted ?? snapshot.apps[index].isMuted
+      let targetBoost = entry.volumeBoost ?? snapshot.apps[index].volumeBoost
+      snapshot.apps[index].desiredVolume = targetVolume
+      snapshot.apps[index].isMuted = targetMuted
+      snapshot.apps[index].volumeBoost = targetBoost
 
       do {
         try await applyRoute(
           for: snapshot.apps[index],
-          toVolume: entry.desiredVolume,
-          muted: entry.isMuted
+          toVolume: targetVolume,
+          muted: targetMuted
         )
-        snapshot.apps[index].appliedVolume = entry.isMuted ? 0 : entry.desiredVolume
+        snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
         snapshot.apps[index].routingState = .managed
         snapshot.apps[index].notes = nil
         refreshGlobalRouteHealth()
       } catch {
         snapshot.apps[index].routingState = .error
         snapshot.apps[index].notes = error.localizedDescription
-        snapshot.apps[index].appliedVolume = entry.isMuted ? 0 : entry.desiredVolume
+        snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
         refreshGlobalRouteHealth(latestError: error.localizedDescription)
       }
     }
@@ -212,11 +222,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return snapshot
   }
 
-  func saveCurrentPreset(named name: String) async throws -> Preset {
-    let preset = Preset(
+  func saveCurrentProfile(named name: String) async throws -> Profile {
+    Profile(
       name: name,
       entries: snapshot.apps.map {
-        PresetEntry(
+        ProfileEntry(
           appID: $0.logicalID,
           desiredVolume: $0.desiredVolume,
           isMuted: $0.isMuted,
@@ -224,7 +234,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         )
       }
     )
-    return preset
   }
 
   func recoverRoutes() async throws -> AudioSessionSnapshot {
@@ -411,7 +420,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     let processObjectIDs = try resolveProcessObjectIDs(for: app)
 
-    if let controller = controllers[app.id], controller.isActive, controller.matches(processObjectIDs) {
+    // Reuse the live tap for parameter-only changes as long as it already covers
+    // every process we'd tap now. For browsers/Electron the audible-helper PID
+    // set churns (renderer/"Audio Service" PIDs spawn and die), so an exact-match
+    // guard would tear down and rebuild the whole process tap + aggregate device
+    // on every volume nudge — an audible glitch and heavy Core Audio churn. A
+    // subset check rebuilds only when a genuinely new audio-producing process
+    // appears that the current tap doesn't yet capture.
+    if let controller = controllers[app.id], controller.isActive, controller.covers(processObjectIDs) {
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       return
     }
@@ -594,6 +610,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         }
         .map(\.processIdentifier)
       candidatePIDs.formUnion(runningFamilyPIDs)
+
+      // Include any currently-audible helper/utility process whose enclosing
+      // top-level app is this app — e.g. a Chromium/Electron "Audio Service" or
+      // renderer process that owns the real output stream. Without this the tap
+      // would capture only the main process, which for browsers and Electron
+      // apps emits no audio, so volume/mute/boost would silently do nothing.
+      for pid in cachedAudibleProcesses().pids {
+        guard let parentBundleID = enclosingAppBundleID(forPID: pid),
+              AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: parentBundleID)
+        else { continue }
+        candidatePIDs.insert(pid)
+      }
     }
 
     if let pid = app.pid {
@@ -931,7 +959,74 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return processObjectID == .unknown ? nil : processObjectID
   }
 
-  private func getAudibleProcessPIDs() -> Set<pid_t> {
+  /// The set of processes currently producing audio output, indexed both by raw
+  /// PID and by the bundle identifier of the enclosing top-level `.app`. The
+  /// bundle index is what lets a Chromium/Electron helper's audio be attributed
+  /// to the parent app (see `enclosingAppBundleID`).
+  struct AudibleProcessIndex: Sendable {
+    var pids: Set<pid_t> = []
+    /// Bundle IDs of the top-level apps that own the audible processes. For a
+    /// browser this is `com.google.Chrome` even though the audible PID is a
+    /// nested "… Helper (Renderer)" process.
+    var parentBundleIDs: Set<String> = []
+  }
+
+  /// Caches the resolved top-level-app bundle ID per app-bundle path so repeated
+  /// `Bundle` loads (which read Info.plist from disk) are avoided. Keyed by the
+  /// stable bundle path rather than PID, so PID reuse can't poison it.
+  private var appBundleIDByPath: [String: String] = [:]
+
+  /// Short-lived cache of the audible-process scan. A volume drag fires many
+  /// throttled applies in quick succession; without this each one would re-walk
+  /// the full Core Audio process-object list. 300ms is well under human notice
+  /// for "a new app just started playing", and stale data only ever delays
+  /// folding a brand-new helper into a tap by one tick.
+  private var audibleCache: (index: AudibleProcessIndex, at: Date)?
+  private let audibleCacheTTL: TimeInterval = 0.3
+
+  /// The audible-process index, reused from the cache when fresh enough. Pass a
+  /// smaller `maxAge` (or 0) to force a fresh scan.
+  private func cachedAudibleProcesses(maxAge: TimeInterval? = nil) -> AudibleProcessIndex {
+    let ttl = maxAge ?? audibleCacheTTL
+    if let cached = audibleCache, Date().timeIntervalSince(cached.at) < ttl {
+      return cached.index
+    }
+    let index = getAudibleProcesses()
+    audibleCache = (index, Date())
+    return index
+  }
+
+  /// Resolves the bundle identifier of the outermost `.app` that contains the
+  /// given PID's executable. This is the public, App-Store-safe way (used by
+  /// AudioCap) to map a sandboxed audio helper back to its user-facing app —
+  /// browsers and Electron apps render audio in helper subprocesses that aren't
+  /// in `NSWorkspace.runningApplications`, so their executable path is the only
+  /// reliable link back to the parent.
+  private func enclosingAppBundleID(forPID pid: pid_t) -> String? {
+    // PROC_PIDPATHINFO_MAXSIZE (4 * MAXPATHLEN) isn't surfaced to Swift, so the
+    // value is inlined. proc_pidpath never writes more than this.
+    let maxPathSize = 4 * 1024
+    var pathBuffer = [CChar](repeating: 0, count: maxPathSize)
+    let length = proc_pidpath(pid, &pathBuffer, UInt32(maxPathSize))
+    guard length > 0 else { return nil }
+    let executablePath = pathBuffer.withUnsafeBufferPointer { buffer in
+      buffer.baseAddress.map { String(cString: $0) } ?? ""
+    }
+    guard let appPath = AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: executablePath) else {
+      return nil
+    }
+    if let cached = appBundleIDByPath[appPath] {
+      return cached
+    }
+    guard let bundle = Bundle(url: URL(fileURLWithPath: appPath)),
+          let identifier = bundle.bundleIdentifier else {
+      return nil
+    }
+    appBundleIDByPath[appPath] = identifier
+    return identifier
+  }
+
+  private func getAudibleProcesses() -> AudibleProcessIndex {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyProcessObjectList,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -949,12 +1044,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     guard status == noErr else {
       logger.warning("Failed to get process object list size (OSStatus: \(status))")
-      return Set<pid_t>()
+      return AudibleProcessIndex()
     }
 
     let processObjectCount = Int(size) / MemoryLayout<AudioObjectID>.size
     guard processObjectCount > 0 else {
-      return Set<pid_t>()
+      return AudibleProcessIndex()
     }
 
     var processObjectIDs = [AudioObjectID](repeating: .unknown, count: processObjectCount)
@@ -969,18 +1064,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     guard listStatus == noErr else {
       logger.warning("Failed to get process object list (OSStatus: \(listStatus))")
-      return Set<pid_t>()
+      return AudibleProcessIndex()
     }
 
-    var audiblePIDs = Set<pid_t>()
+    var index = AudibleProcessIndex()
     for processObjectID in processObjectIDs where processObjectID != .unknown {
       guard isProcessRunningOutput(processObjectID) else { continue }
-      if let pid = readProcessPID(processObjectID) {
-        audiblePIDs.insert(pid)
+      guard let pid = readProcessPID(processObjectID) else { continue }
+      index.pids.insert(pid)
+      // Attribute helper/utility audio (browsers, Electron) to the parent app.
+      if let parentBundleID = enclosingAppBundleID(forPID: pid) {
+        index.parentBundleIDs.insert(parentBundleID)
       }
     }
 
-    return audiblePIDs
+    return index
   }
 
   private func readProcessPID(_ processObjectID: AudioObjectID) -> pid_t? {
@@ -1054,9 +1152,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // Re-check real capture authorization so a snapshot honestly reflects whether
     // Waves can actually take over audio, not merely whether the OS supports it.
     refreshCaptureAuthorization()
-    let audiblePIDs = getAudibleProcessPIDs()
-    let runningApps = await Task.detached { [currentBundleID, audiblePIDs] in
-      Self.discoverRunningApps(currentBundleID: currentBundleID, audiblePIDs: audiblePIDs)
+    let audible = getAudibleProcesses()
+    let runningApps = await Task.detached { [currentBundleID, audible] in
+      Self.discoverRunningApps(
+        currentBundleID: currentBundleID,
+        audiblePIDs: audible.pids,
+        audibleParentBundleIDs: audible.parentBundleIDs
+      )
     }.value
     let previousByLogicalID = dictionaryByLogicalID(previousSnapshot?.apps ?? [])
     let now = Date()
@@ -1230,7 +1332,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private static func discoverRunningApps(currentBundleID: String?, audiblePIDs: Set<pid_t>) -> [AudioApp] {
+  private static func discoverRunningApps(
+    currentBundleID: String?,
+    audiblePIDs: Set<pid_t>,
+    audibleParentBundleIDs: Set<String>
+  ) -> [AudioApp] {
     let runningApps = NSWorkspace.shared.runningApplications
       .filter { app in
         guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
@@ -1272,7 +1378,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         let pid = app.processIdentifier
         let familyApps = Self.processFamily(for: app, in: runningApps)
         let familyPIDs = Set(familyApps.map(\.processIdentifier))
-        let isAudible = !audiblePIDs.isEmpty && !familyPIDs.isDisjoint(with: audiblePIDs)
+        // An app is audible if a process in its NSWorkspace family is producing
+        // output, OR — crucially for Chromium/Electron apps — if a helper whose
+        // enclosing top-level app is this app is producing output. The latter is
+        // the only signal that lights up browsers, whose audio is emitted by a
+        // sandboxed "Audio Service" helper that never appears in the family set.
+        let isAudibleByPID = !audiblePIDs.isEmpty && !familyPIDs.isDisjoint(with: audiblePIDs)
+        let isAudibleByBundle = bundleID.map { bid in
+          audibleParentBundleIDs.contains { candidate in
+            AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bid, candidateBundleID: candidate)
+          }
+        } ?? false
+        let isAudible = isAudibleByPID || isAudibleByBundle
         let isFrontmost = familyApps.contains(where: \.isActive)
         let routeState: RoutingState = isAudible ? .live : .monitorOnly
 
@@ -1775,6 +1892,15 @@ private final class PerAppTapController: @unchecked Sendable {
 
   func matches(_ processObjectIDs: [AudioObjectID]) -> Bool {
     targetProcessObjectIDs == processObjectIDs
+  }
+
+  /// Whether this controller's existing tap already captures every process in
+  /// `processObjectIDs`. Used so a parameter-only change (volume/mute/boost) on a
+  /// browser/Electron app — whose audible helper PIDs churn between calls — reuses
+  /// the live tap instead of tearing it down, while still rebuilding when a *new*
+  /// audio-producing process appears that the current tap doesn't cover.
+  func covers(_ processObjectIDs: [AudioObjectID]) -> Bool {
+    Set(processObjectIDs).isSubset(of: Set(targetProcessObjectIDs))
   }
 
   func apply(volume: Float, volumeBoost: Float, muted: Bool) {

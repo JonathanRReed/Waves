@@ -9,7 +9,7 @@ struct HelpView: View {
         quickStartSection
         keyboardShortcutsSection
         urlSchemeSection
-        presetsSection
+        profilesSection
         troubleshootingSection
       }
       .padding(20)
@@ -96,8 +96,8 @@ struct HelpView: View {
           keys: "⌘R"
         )
         shortcutRow(
-          action: "Save preset",
-          keys: "⌘S"
+          action: "New profile",
+          keys: "⌘N"
         )
         shortcutRow(
           action: "Open Settings",
@@ -131,9 +131,9 @@ struct HelpView: View {
           description: "Mute or unmute"
         )
         urlSchemeRow(
-          scheme: "waves://apply-preset",
+          scheme: "waves://apply-profile",
           params: "name=Focus",
-          description: "Apply named preset"
+          description: "Apply a named profile"
         )
         urlSchemeRow(
           scheme: "waves://refresh",
@@ -150,21 +150,22 @@ struct HelpView: View {
     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
   }
 
-  private var presetsSection: some View {
+  private var profilesSection: some View {
     VStack(alignment: .leading, spacing: 12) {
-      Text("Presets")
+      Text("Profiles")
         .font(.headline)
 
       VStack(alignment: .leading, spacing: 8) {
-        Text("• Click the + button in the toolbar to save a new preset")
-        Text("• Enter a name to save your current volume configuration")
-        Text("• Click on presets in the sidebar to apply them")
-        Text("• Export presets to share with others")
-        Text("• Import presets from JSON files")
+        Text("• A profile is a group of apps you use together — like Work or Gaming")
+        Text("• Use the + in the sidebar’s Profiles section to create one")
+        Text("• Pick which apps belong, and optionally capture their current levels")
+        Text("• Select a profile in the sidebar to focus just those apps")
+        Text("• Profiles that carry levels show an “Apply Levels” button")
+        Text("• Switch profiles from the menu bar, and export/import them as JSON")
       }
       .font(.body)
 
-      Text("Presets remember volume and mute states for all running apps.")
+      Text("Membership-only profiles just group apps; capture levels to also save each app’s volume, mute, and boost.")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
@@ -202,11 +203,13 @@ struct HelpView: View {
 
   private func helpStep(number: Int, title: String, description: String) -> some View {
     HStack(alignment: .top, spacing: 12) {
+      // Instructional chrome stays neutral — cyan is reserved for live/selected
+      // audio state (the Signal Rarity Rule in DESIGN.md).
       Text("\(number)")
         .font(.headline.weight(.bold))
-        .foregroundStyle(WavesDesign.accent)
+        .foregroundStyle(.secondary)
         .frame(width: 24, height: 24)
-        .background(WavesDesign.accent.opacity(0.15), in: Circle())
+        .background(Color.secondary.opacity(0.15), in: Circle())
 
       VStack(alignment: .leading, spacing: 4) {
         Text(title)
