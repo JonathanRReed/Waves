@@ -169,6 +169,10 @@ if ! is_publication_check_mode; then
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
+  <key>CFBundleDisplayName</key>
+  <string>$APP_NAME</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>© 2026 Jonathan Reed. All rights reserved.</string>
   <key>CFBundleShortVersionString</key>
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>

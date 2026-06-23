@@ -32,7 +32,7 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 - **Dynamic Menu Bar Icon**: Menu bar icon changes based on volume and mute state
 - **Live Mixed-Waveform Visualizer**: A flowing header ribbon showing the combined audio energy of every playing app — alive when sound flows, calm when silent
 - **Real-time Audio Levels**: Per-app level meters for audio activity
-- **Liquid Glass**: Genuine `glassEffect` on macOS 26 (Tahoe), with a real-blur faux-glass fallback on macOS 14.2–15; honors Reduce Transparency, Reduce Motion, and Increase Contrast
+- **Liquid Glass**: Genuine `glassEffect` / `.glassProminent` on the floating layer on macOS 26 (Tahoe), with native button styling and a real `NSVisualEffectView` window backdrop on macOS 14.2–15; content cards stay tonal (not glass); honors Reduce Transparency, Reduce Motion, and Increase Contrast
 - **Empty State UI**: Helpful guidance when no audio apps are detected
 - **Setup Checklist**: Settings-based setup status for permissions, output device visibility, and route health
 

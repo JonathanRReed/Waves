@@ -24,13 +24,15 @@ struct MainWindowView: View {
       .navigationSplitViewStyle(.balanced)
       .searchable(text: $searchText, placement: .sidebar, prompt: "Filter apps")
       .toolbar {
-        ToolbarItemGroup {
+        // Document-scoped controls belong trailing (.primaryAction) where macOS
+        // users expect them; the two maintenance actions show in-flight spinners.
+        ToolbarItemGroup(placement: .primaryAction) {
           Button {
             presentNewProfile()
           } label: {
             Image(systemName: "rectangle.stack.badge.plus")
           }
-          .help("New profile")
+          .help("New Profile (⌘N)")
           .accessibilityLabel("New profile")
           .accessibilityHint("Opens a sheet to group apps into a profile, optionally with saved levels.")
           .keyboardShortcut("n", modifiers: [.command])
@@ -38,21 +40,32 @@ struct MainWindowView: View {
           Button {
             store.refresh()
           } label: {
-            Image(systemName: "arrow.clockwise")
+            if store.isRefreshing {
+              ProgressView().controlSize(.small)
+            } else {
+              Image(systemName: "arrow.clockwise")
+            }
           }
-          .help("Refresh app list")
-          .accessibilityLabel("Refresh app list")
+          .disabled(store.isRefreshing)
+          .help("Refresh App List (⌘R)")
+          // Reflect the spinner state for VoiceOver — the visual progress cue
+          // should not be sighted-only.
+          .accessibilityLabel(store.isRefreshing ? "Refreshing app list, in progress" : "Refresh app list")
           .accessibilityHint("Refreshes running apps and audio session state.")
           .keyboardShortcut("r", modifiers: [.command])
 
           Button {
             store.recoverRoutes()
           } label: {
-            Image(systemName: "waveform.path")
+            if store.isRecovering {
+              ProgressView().controlSize(.small)
+            } else {
+              Image(systemName: "waveform.path")
+            }
           }
           .disabled(store.isRecovering)
-          .help("Recover managed routes")
-          .accessibilityLabel("Recover managed routes")
+          .help("Recover Managed Routes")
+          .accessibilityLabel(store.isRecovering ? "Recovering managed routes, in progress" : "Recover managed routes")
           .accessibilityHint("Reattaches active per-app audio routes.")
         }
       }
@@ -299,6 +312,11 @@ private struct SidebarView: View {
       }
 
       Section {
+        if store.profiles.isEmpty {
+          Text("No profiles yet — group apps with +")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+        }
         ForEach(store.profiles) { profile in
           ProfileSidebarRow(profile: profile)
             .tag(MixerScope.profile(profile.id))
@@ -326,7 +344,7 @@ private struct SidebarView: View {
           }
           .buttonStyle(.plain)
           .foregroundStyle(.secondary)
-          .help("New profile")
+          .help("New Profile (⌘N)")
           .accessibilityLabel("New profile")
         }
       }
@@ -438,20 +456,31 @@ private struct SourceListView: View {
             description: Text(emptyMessage)
           )
 
-          HStack(spacing: 10) {
-            Button {
-              store.refresh()
-            } label: {
-              Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .wavesGlassProminentButton()
-
+          // When apps are hidden by the system-processes filter, a Refresh is a
+          // no-op — the remedy is the Settings toggle, so make that the primary.
+          if systemProcessesHidden {
             Button {
               openSettings()
             } label: {
-              Label("Settings", systemImage: "gearshape")
+              Label("Open Settings", systemImage: "gearshape")
             }
-            .buttonStyle(.bordered)
+            .wavesGlassProminentButton()
+          } else {
+            HStack(spacing: 10) {
+              Button {
+                store.refresh()
+              } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+              }
+              .wavesGlassProminentButton()
+
+              Button {
+                openSettings()
+              } label: {
+                Label("Settings", systemImage: "gearshape")
+              }
+              .buttonStyle(.bordered)
+            }
           }
         }
         Spacer(minLength: 0)
@@ -482,6 +511,9 @@ private struct SourceListView: View {
         .onKeyPress(.space) { handleKey { store.setMuted(!$0.isMuted, for: $0) } }
         .onKeyPress("m") { handleKey { store.setMuted(!$0.isMuted, for: $0) } }
         .onKeyPress("=") { handleKey { nudgeVolume($0, by: 0.05) } }
+        // Also accept the shifted "+" so a user reaching for the obvious "louder"
+        // key isn't met with silence (the hint still reads "equals or minus").
+        .onKeyPress("+") { handleKey { nudgeVolume($0, by: 0.05) } }
         .onKeyPress("-") { handleKey { nudgeVolume($0, by: -0.05) } }
         .onKeyPress("b") { handleKey { cycleBoost($0) } }
         .onKeyPress("p") { handleKey { store.togglePinned($0) } }
@@ -616,6 +648,8 @@ private struct ProfileHeaderView: View {
           .foregroundStyle(.secondary)
           .lineLimit(1)
       }
+      // The title wins truncation before the trailing buttons compress.
+      .layoutPriority(1)
 
       Spacer(minLength: 12)
 
@@ -693,6 +727,8 @@ private struct OutputSummaryView: View {
               // Drop to primary text under Increase Contrast so the cyan never
               // fails contrast on the .bar header.
               .foregroundStyle(contrast == .increased ? AnyShapeStyle(Color.primary) : AnyShapeStyle(WavesDesign.accent))
+              // The accent "playing" signal survives truncation over the static count.
+              .layoutPriority(1)
           }
         }
         .font(.caption)
@@ -727,48 +763,54 @@ private struct RouteHealthBadge: View {
   @Environment(AppStore.self) private var store
 
   var body: some View {
+    // Healthy: a quiet status chip. Degraded: a button that runs recovery right
+    // from where the problem is reported, instead of dead-ending in a tooltip and
+    // hiding the remedy behind an obscure toolbar glyph.
+    if isHealthy {
+      badge
+        .help(Text("Routing status: \(title)"))
+        .accessibilityLabel(Text("Routing status: \(title)"))
+    } else {
+      Button {
+        store.recoverRoutes()
+      } label: {
+        badge
+      }
+      .buttonStyle(.plain)
+      .disabled(store.isRecovering)
+      .help(Text("\(title) — click to recover managed routes"))
+      .accessibilityLabel(Text("Routing status: \(title)"))
+      .accessibilityHint("Reattaches active per-app audio routes.")
+    }
+  }
+
+  private var badge: some View {
     Label(title, systemImage: systemImage)
       .font(.caption.weight(.medium))
       .foregroundStyle(color)
       .padding(.horizontal, 8)
       .padding(.vertical, 4)
       .background(color.opacity(0.12), in: Capsule())
-      .help(helpText)
-      .accessibilityLabel(helpText)
   }
 
+  private var isHealthy: Bool { store.session.backendStatus.isRouteRecoveryHealthy }
+
   private var title: String {
-    if store.session.backendStatus.isRouteRecoveryHealthy {
-      return "Ready"
-    }
-    if store.session.backendStatus.lastError != nil {
-      return "Needs attention"
-    }
+    if isHealthy { return "Ready" }
+    if store.session.backendStatus.lastError != nil { return "Needs attention" }
     return "Limited"
   }
 
   private var systemImage: String {
-    if store.session.backendStatus.isRouteRecoveryHealthy {
-      return "checkmark.circle.fill"
-    }
-    if store.session.backendStatus.lastError != nil {
-      return "exclamationmark.triangle.fill"
-    }
+    if isHealthy { return "checkmark.circle.fill" }
+    if store.session.backendStatus.lastError != nil { return "exclamationmark.triangle.fill" }
     return "exclamationmark.circle"
   }
 
   private var color: Color {
-    if store.session.backendStatus.isRouteRecoveryHealthy {
-      return .green
-    }
-    if store.session.backendStatus.lastError != nil {
-      return .red
-    }
+    if isHealthy { return WavesDesign.success }
+    if store.session.backendStatus.lastError != nil { return WavesDesign.error }
     return .secondary
-  }
-
-  private var helpText: Text {
-    Text("Routing status: \(title)")
   }
 }
 
@@ -778,8 +820,6 @@ private struct DiagnosticsPanel: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      Divider()
-
       DisclosureGroup(isExpanded: $expanded) {
         if let diagnostics = store.diagnostics {
           VStack(alignment: .leading, spacing: 10) {
@@ -818,10 +858,35 @@ private struct DiagnosticsPanel: View {
             .padding(.top, 10)
         }
       } label: {
-        Text("Diagnostics")
-          .font(.callout.weight(.semibold))
+        HStack(spacing: 8) {
+          Text("Diagnostics")
+            .font(.callout.weight(.semibold))
+          // A collapsed panel gives no reason to open it; surface a colored count
+          // when a check needs attention so a problem is discoverable at a glance.
+          if let attention = attentionSummary {
+            Text(attention.text)
+              .font(.caption2.weight(.semibold))
+              .foregroundStyle(attention.color)
+              .padding(.horizontal, 6)
+              .padding(.vertical, 1)
+              .background(attention.color.opacity(0.14), in: Capsule())
+              .accessibilityLabel(attention.accessibility)
+          }
+        }
       }
     }
+  }
+
+  /// A "N issues" pill for the collapsed label when any check failed or warned.
+  private var attentionSummary: (text: String, color: Color, accessibility: String)? {
+    guard let checks = store.diagnostics?.checks else { return nil }
+    let failed = checks.filter { $0.status == .failed }.count
+    let warnings = checks.filter { $0.status == .warning }.count
+    let total = failed + warnings
+    guard total > 0 else { return nil }
+    let noun = total == 1 ? "issue" : "issues"
+    let color: Color = failed > 0 ? WavesDesign.error : WavesDesign.warning
+    return ("\(total) \(noun)", color, "\(total) diagnostics \(noun)")
   }
 
   private func color(for status: DiagnosticsStatus) -> Color {

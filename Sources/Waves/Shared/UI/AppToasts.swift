@@ -42,6 +42,8 @@ private struct AppToastBanner: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(2)
+            // Recover the full text when a long detail is clipped to two lines.
+            .help(detail)
         }
       }
 
@@ -72,6 +74,15 @@ private struct AppToastBanner: View {
     )
     .shadow(color: .black.opacity(0.14), radius: 12, y: 6)
     .contentShape(Rectangle())
+    // Pause the auto-dismiss while the pointer is over the banner so a 2s toast
+    // isn't lost mid-read; re-arm with a short grace when the cursor leaves.
+    .onHover { hovering in
+      if hovering {
+        store.pauseToastDismissal(id: toast.id)
+      } else {
+        store.resumeToastDismissal(id: toast.id)
+      }
+    }
     .transition(bannerTransition)
     .accessibilityElement(children: .combine)
     .accessibilityLabel(accessibilityMessage)
@@ -133,11 +144,11 @@ private struct AppToastBanner: View {
   private var iconColor: Color {
     switch toast.kind {
     case .success:
-      .green
+      WavesDesign.success
     case .warning:
-      .orange
+      WavesDesign.warning
     case .error:
-      .red
+      WavesDesign.error
     case .info:
       WavesDesign.accent
     }

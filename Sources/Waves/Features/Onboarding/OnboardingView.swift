@@ -3,6 +3,7 @@ import SwiftUI
 struct OnboardingView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.colorSchemeContrast) private var contrast
 
   private let steps: [(title: String, detail: String, action: String)] = [
     (
@@ -82,7 +83,7 @@ struct OnboardingView: View {
       }
 
       ProgressView(value: completionProgress)
-        .tint(isFullyComplete ? .green : WavesDesign.accent)
+        .tint(isFullyComplete ? WavesDesign.success : WavesDesign.accent)
         .accessibilityLabel("Setup progress")
         .accessibilityValue("\(Int((completionProgress * 3).rounded())) of 3 steps complete")
 
@@ -107,7 +108,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 12) {
           Text("Ready to use")
             .font(.headline)
-            .foregroundStyle(.green)
+            .foregroundStyle(WavesDesign.success)
 
           Text("You can now:")
             .font(.subheadline)
@@ -116,28 +117,28 @@ struct OnboardingView: View {
           VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
               Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(WavesDesign.success)
               Text("Adjust individual app volumes from the menu bar")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
             HStack(spacing: 8) {
               Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(WavesDesign.success)
               Text("Pin your favorite apps for quick access")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
             HStack(spacing: 8) {
               Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(WavesDesign.success)
               Text("Group apps into profiles, with optional saved levels")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
             HStack(spacing: 8) {
               Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(WavesDesign.success)
               Text("Use keyboard shortcuts (⌘R to refresh)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -145,7 +146,13 @@ struct OnboardingView: View {
           }
         }
         .padding(16)
-        .background(.green.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+        .background(WavesDesign.success.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+          // A defined edge so the card reads under Increase Contrast (matching
+          // wavesCard and the step rows).
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(WavesDesign.success.opacity(contrast == .increased ? 0.6 : 0.3))
+        )
       }
 
       Spacer()
@@ -354,9 +361,12 @@ private struct EnhancedSetupStepRow: View {
       }
     }
     .padding(12)
-    .background(
-      RoundedRectangle(cornerRadius: 8)
-        .strokeBorder(isComplete ? Color.green.opacity(0.3) : canPerformAction ? WavesDesign.warning.opacity(0.3) : Color.secondary.opacity(0.2))
+    // A tonal fill behind the status stroke so step rows match the app's other
+    // content cards instead of reading as thin outlines on the backdrop.
+    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .overlay(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .strokeBorder(isComplete ? WavesDesign.success.opacity(0.3) : canPerformAction ? WavesDesign.warning.opacity(0.3) : Color.secondary.opacity(0.2))
     )
   }
 }
