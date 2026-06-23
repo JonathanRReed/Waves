@@ -12,9 +12,11 @@ All notable changes to Waves are documented here. The format follows
   eased between samples for smooth 60fps motion). Calm when silent, alive when
   sound flows; freezes to a static level bar under Reduce Motion and pauses its
   render loop when idle.
-- **Genuine Liquid Glass** — adopts Apple's `glassEffect` on macOS 26 (Tahoe),
-  with a layered faux-glass (real `NSVisualEffectView` blur + frosted material +
-  specular bevel) fallback on macOS 14.2–15. Honors Reduce Transparency (opaque)
+- **Genuine Liquid Glass** — adopts Apple's `glassEffect` / `.glassProminent` on
+  the floating layer (sheets, primary actions) on macOS 26 (Tahoe), with native
+  `.borderedProminent` controls and a real `NSVisualEffectView` window backdrop on
+  macOS 14.2–15. Content cards stay tonal (not glass) — glass belongs to the
+  floating layer only, per Apple's guidance. Honors Reduce Transparency (opaque)
   and Increase Contrast (stronger borders).
 - **Profiles** — group the apps you use together (e.g. Work, Gaming) and switch
   between them from the sidebar or menu bar. A profile can be a pure grouping or

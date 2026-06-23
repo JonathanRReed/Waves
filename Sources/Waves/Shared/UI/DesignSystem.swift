@@ -38,6 +38,10 @@ enum WavesDesign {
 
   static let warning = Color.orange
   static let error = Color.red
+  /// The "done / healthy" hue (route recovered, onboarding complete, success
+  /// toast). Tokenized alongside warning/error so the success green is themeable
+  /// in one place rather than hard-coded at each call site.
+  static let success = Color.green
 
   // MARK: Strokes
 
@@ -49,15 +53,11 @@ enum WavesDesign {
   static let compactCardCornerRadius: CGFloat = 14
   static let chipCornerRadius: CGFloat = 8
 
-  // MARK: Spacing scale
+  // MARK: Layout
 
-  enum Spacing {
-    static let xs: CGFloat = 6
-    static let sm: CGFloat = 10
-    static let md: CGFloat = 14
-    static let lg: CGFloat = 20
-    static let xl: CGFloat = 28
-  }
+  /// Fixed width of the menu-bar popover panel (one source of truth for the panel
+  /// and the toast overlay it hosts).
+  static let menuBarPanelWidth: CGFloat = 400
 
   /// Hairline/border color that becomes a clearly visible separator when the
   /// user has macOS "Increase contrast" enabled (the default 9% white is

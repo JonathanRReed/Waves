@@ -71,7 +71,7 @@ struct WavesApp: App {
     ) {
       MenuBarMixerView()
         .environment(store)
-        .frame(width: 400)
+        .frame(width: WavesDesign.menuBarPanelWidth)
         .accessibilityLabel(Text(menuBarAccessibilityLabel))
     }
     .menuBarExtraStyle(.window)
