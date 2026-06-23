@@ -45,6 +45,14 @@ final class AppStore {
   /// Live per-app output levels for meters, populated only while a UI surface
   /// is visible (kept out of `session` so updates don't trigger re-sorts).
   var liveLevels: [String: AudioLevels] = [:]
+  /// Logical IDs of apps that are audible now OR went quiet within the last
+  /// `liveLingerWindow`. A just-silenced app stays in the Live list for a beat so
+  /// a brief gap, track change, or pause doesn't make its row flicker out — and so
+  /// its controls stay put for a moment in case the user wants to grab them or the
+  /// signal returns. Only Live-list *membership* lingers; the metered
+  /// `mixedAudioLevel` still follows the real signal, so the header ribbon eases
+  /// down to nothing on its own.
+  private(set) var recentlyLiveIDs: Set<String> = []
 
   private let backend: any AudioControlBackend
   private let preferencesStore: PreferencesStore
@@ -78,6 +86,11 @@ final class AppStore {
   private var appTerminationObserver: NSObjectProtocol?
   private var levelPollTask: Task<Void, Never>?
   private var liveLevelsRefcount = 0
+  // Per-app one-shot tasks that drop an app out of the lingering-live set once it
+  // has been quiet for `liveLingerWindow`. Cancelled (and the app kept) the moment
+  // it becomes audible again.
+  private var lingerRemovalTasks: [String: Task<Void, Never>] = [:]
+  private let liveLingerWindow = Duration.seconds(2.5)
   private let maxToasts = 3
   private let defaultToastDuration = Duration.seconds(2.0)
   // Failures need longer on screen than routine successes: 2.0s is too short to
@@ -184,8 +197,34 @@ final class AppStore {
     return max(app.peakLevel, app.rmsLevel) > Self.liveLevelThreshold
   }
 
+  /// True when the app is producing audio right now, OR went quiet within the
+  /// linger window. Drives Live-list membership (which lingers for a couple of
+  /// seconds so rows don't blink out on a brief gap); the metered
+  /// `mixedAudioLevel` deliberately keeps using `isLive` so the visualizer still
+  /// follows the real signal and fades out.
+  func isRecentlyLive(_ app: AudioApp) -> Bool {
+    isLive(app) || recentlyLiveIDs.contains(app.logicalID)
+  }
+
   var liveApps: [AudioApp] {
+    visibleApps.filter(isRecentlyLive)
+  }
+
+  /// Apps producing audio *right now* — no linger. `liveApps` (the Live list)
+  /// deliberately lingers a just-silenced app for a couple of seconds so its row
+  /// doesn't blink out, but "is something playing this instant" affordances — the
+  /// menu-bar status text/icon, the brand-mark drift, the "X playing" header
+  /// summary, the menu-bar accessibility label — must follow the *real* signal
+  /// (exactly like the visualizer ribbon, which fades to nothing), or they'd keep
+  /// asserting playback for the whole linger window after sound has stopped.
+  var actuallyLiveApps: [AudioApp] {
     visibleApps.filter(isLive)
+  }
+
+  /// Whether anything is producing audio right now (no linger). Cheaper than
+  /// `!actuallyLiveApps.isEmpty` — short-circuits without building an array.
+  var hasLiveAudio: Bool {
+    visibleApps.contains(where: isLive)
   }
 
   /// Combined live audio energy (0...1) across every currently-playing app, for
@@ -215,7 +254,9 @@ final class AppStore {
     // Evaluate visibleApps once and derive both sets locally rather than calling
     // the liveApps/pinnedApps computed props (which would each re-sort visibleApps).
     let visible = visibleApps
-    let liveIDs = Set(visible.filter(isLive).map(\.logicalID))
+    // Exclude lingering-live apps too (isRecentlyLive), so a just-silenced app
+    // doesn't briefly appear in BOTH Live (still lingering) and Recent.
+    let liveIDs = Set(visible.filter(isRecentlyLive).map(\.logicalID))
     return visible.filter { !$0.isPinned && !liveIDs.contains($0.logicalID) }
   }
 
@@ -238,7 +279,9 @@ final class AppStore {
     if visibleApps.contains(where: \.isMuted) {
       return "speaker.slash.fill"
     }
-    if !liveApps.isEmpty {
+    // Reflect what's playing *now*, not the lingering Live list — the glyph must
+    // drop back to the idle wave the moment audio actually stops.
+    if hasLiveAudio {
       return "speaker.wave.3.fill"
     }
     return "speaker.wave.2.fill"
@@ -818,11 +861,47 @@ final class AppStore {
         guard let self, !Task.isCancelled else { return }
         let levels = await self.backend.audioLevels()
         // Re-check after the await (the poll may have been cancelled while
-        // suspended) and skip no-op assignments to avoid needless redraws.
-        guard !Task.isCancelled, levels != self.liveLevels else { continue }
-        self.liveLevels = levels
+        // suspended). Skip the no-op level assignment to avoid needless redraws,
+        // but always reconcile the lingering-live set so a just-silenced app is
+        // scheduled to drop out — and a returning one is kept — every tick.
+        guard !Task.isCancelled else { return }
+        if levels != self.liveLevels {
+          self.liveLevels = levels
+        }
+        self.refreshLiveLinger()
       }
     }
+  }
+
+  /// Reconciles `recentlyLiveIDs` against who is audible right now. Apps that just
+  /// started playing are added immediately (any pending removal cancelled); apps
+  /// that just went quiet get a one-shot task that drops them after
+  /// `liveLingerWindow`. Mutates the observed set only when membership actually
+  /// changes, so a steady scene triggers no redraws.
+  private func refreshLiveLinger() {
+    let liveNow = Set(visibleApps.lazy.filter(isLive).map(\.logicalID))
+    var next = recentlyLiveIDs
+
+    // Audible now: keep it, and cancel any pending "drop it" task.
+    for id in liveNow {
+      if let task = lingerRemovalTasks.removeValue(forKey: id) { task.cancel() }
+      next.insert(id)
+    }
+
+    // Lingering but no longer audible: schedule a single delayed removal.
+    for id in next where !liveNow.contains(id) && lingerRemovalTasks[id] == nil {
+      let window = liveLingerWindow
+      lingerRemovalTasks[id] = Task { [weak self] in
+        try? await Task.sleep(for: window)
+        guard let self, !Task.isCancelled else { return }
+        self.lingerRemovalTasks.removeValue(forKey: id)
+        if self.recentlyLiveIDs.contains(id) {
+          self.recentlyLiveIDs.remove(id)
+        }
+      }
+    }
+
+    if next != recentlyLiveIDs { recentlyLiveIDs = next }
   }
 
   func endLiveLevels() {
@@ -831,6 +910,11 @@ final class AppStore {
     levelPollTask?.cancel()
     levelPollTask = nil
     liveLevels = [:]
+    // No more poll ticks will arrive, so cancel pending linger removals and clear
+    // the set rather than leave a stale "live" row frozen on a hidden surface.
+    for task in lingerRemovalTasks.values { task.cancel() }
+    lingerRemovalTasks.removeAll()
+    recentlyLiveIDs = []
   }
 
   // MARK: - Per-app output routing
@@ -1236,6 +1320,8 @@ final class AppStore {
     deviceChangeObserver = nil
     levelPollTask?.cancel()
     levelPollTask = nil
+    for task in lingerRemovalTasks.values { task.cancel() }
+    lingerRemovalTasks.removeAll()
     if let frontmostAppObserver {
       NSWorkspace.shared.notificationCenter.removeObserver(frontmostAppObserver)
       self.frontmostAppObserver = nil
@@ -1284,9 +1370,16 @@ final class AppStore {
 
     // Reflect the termination in the UI immediately.
     var changed = false
+    // Every session row matching the quit process — collected BEFORE the
+    // routing-state guard below — so linger cleanup covers an app that had
+    // already gone quiet (its row sits in Live only via the linger set, with a
+    // routingState already dropped to .monitorOnly) and would otherwise miss the
+    // guard and ghost in Live until its timer fires.
+    var matchedIDs: [String] = []
     for index in session.apps.indices {
       let app = session.apps[index]
       guard (bundleID != nil && app.bundleID == bundleID) || app.pid == pid else { continue }
+      matchedIDs.append(app.logicalID)
       if app.isActive || app.routingState == .managed || app.routingState == .live {
         session.apps[index].isActive = false
         session.apps[index].routingState = .monitorOnly
@@ -1298,6 +1391,16 @@ final class AppStore {
     }
     pausedMusicApps = pausedMusicApps.filter { id in
       session.apps.contains { $0.logicalID == id }
+    }
+    // A quit app must not keep lingering as "live": cancel its pending linger drop
+    // and remove it from the set now, so its row leaves the Live list at once
+    // rather than ghosting there for the linger window after the process is gone.
+    for id in matchedIDs {
+      if let task = lingerRemovalTasks.removeValue(forKey: id) { task.cancel() }
+    }
+    if !matchedIDs.isEmpty {
+      let next = recentlyLiveIDs.subtracting(matchedIDs)
+      if next != recentlyLiveIDs { recentlyLiveIDs = next }
     }
     if changed { invalidateVisibleAppsCache() }
 
@@ -1969,11 +2072,13 @@ final class AppStore {
       return 0
     }
 
-    // Route through the shared isLive (which consults the live-level poll), so
-    // the Activity sort agrees with the Live/Recent membership on one source of
-    // truth — otherwise a managed app playing right now would show in Live but
-    // sink to the idle tier here.
-    if isLive(app) {
+    // Route through the shared isRecentlyLive (which consults the live-level poll
+    // plus the linger window), so the Activity sort agrees with Live/Recent
+    // membership on one source of truth — otherwise a managed app playing right
+    // now would show in Live but sink to the idle tier here, and a just-silenced
+    // app would jump down a tier the instant it goes quiet, before its row has
+    // even finished lingering in the Live list.
+    if isRecentlyLive(app) {
       return 1
     }
 
