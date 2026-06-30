@@ -135,6 +135,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     updateGlobalHotkeysState()
   }
 
+  // Login-item status can go stale: if the user enables/disables "Open at
+  // Login" from System Settings (not from inside Waves) while Waves is
+  // running, the in-app toggle doesn't notice on its own. Re-sync from the
+  // system every time Waves becomes active — cheap (a single SMAppService
+  // status read) and covers the common case of the user returning from
+  // System Settings after changing it there.
+  func applicationDidBecomeActive(_ notification: Notification) {
+    store?.reconcileLoginItemStatus()
+  }
+
   /// Installs the system-wide key monitor only while the user has keyboard
   /// shortcuts enabled, so Waves never observes global keystrokes otherwise.
   private func updateGlobalHotkeysState() {

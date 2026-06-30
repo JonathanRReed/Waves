@@ -172,7 +172,7 @@ struct OnboardingView: View {
         }
       }
     }
-    .padding(28)
+    .padding(20)
     .onAppear {
       // Probe live route-health/diagnostics state when the flow is shown so the
       // route-health step reflects a fresh check rather than the last sync.
@@ -319,7 +319,7 @@ private struct EnhancedSetupStepRow: View {
     VStack(alignment: .leading, spacing: 12) {
       HStack(alignment: .top, spacing: 12) {
         Image(systemName: isComplete ? "checkmark.circle.fill" : canPerformAction ? "exclamationmark.triangle.fill" : "circle")
-          .foregroundStyle(isComplete ? .green : canPerformAction ? WavesDesign.warning : .secondary)
+          .foregroundStyle(isComplete ? WavesDesign.success : canPerformAction ? WavesDesign.warning : Color.secondary)
           .font(.title3)
           .accessibilityLabel(isComplete ? "Completed" : canPerformAction ? "Needs action" : "Pending")
 
@@ -361,11 +361,12 @@ private struct EnhancedSetupStepRow: View {
       }
     }
     .padding(12)
-    // A tonal fill behind the status stroke so step rows match the app's other
-    // content cards instead of reading as thin outlines on the backdrop.
-    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    // Same tonal-fill content card as the rest of Settings (HelpView, the
+    // completion card below), with a status-tinted stroke layered on top so
+    // complete/needs-action/pending still reads at a glance.
+    .wavesCard(cornerRadius: 12)
     .overlay(
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
         .strokeBorder(isComplete ? WavesDesign.success.opacity(0.3) : canPerformAction ? WavesDesign.warning.opacity(0.3) : Color.secondary.opacity(0.2))
     )
   }

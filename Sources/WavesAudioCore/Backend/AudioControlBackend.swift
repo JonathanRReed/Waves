@@ -16,6 +16,14 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func autoRestoreDevice() async throws -> AudioSessionSnapshot
   func diagnosticsReport() async -> DiagnosticsReport
 
+  /// Enables or disables automatic route recovery on a default-output-device
+  /// change. When disabled, the backend's internal device-change handler must
+  /// not call `autoRestoreDevice()` on its own — the device-change-detected
+  /// signal (`deviceChangeEvents`) should still fire so observers can refresh
+  /// read-only state (current device, device list), just without re-tapping
+  /// every managed app's route or restoring per-device volume presets.
+  func setAutoRestoreDeviceEnabled(_ enabled: Bool) async
+
   /// All output-capable devices currently available, for output switching.
   func availableOutputDevices() async -> [AudioDevice]
 

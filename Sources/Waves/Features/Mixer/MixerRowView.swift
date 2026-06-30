@@ -131,7 +131,7 @@ struct MixerRowView: View {
     // A quiet hover highlight so pointing at a row reads as interactive — the
     // native list feel — without shifting layout (background, not scale).
     .background(
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
+      RoundedRectangle(cornerRadius: WavesDesign.chipCornerRadius, style: .continuous)
         .fill(Color.white.opacity(isHovering ? 0.05 : 0))
     )
     .onHover { isHovering = $0 }
@@ -300,7 +300,12 @@ struct CompactMixerRow: View {
       AppIconView(app: app)
         .frame(width: 18, height: 18)
 
+      // Match the full row's weight treatment (medium) for the primary label so
+      // the two densities read as the same design language; size steps down to
+      // .caption to fit the compact row's tighter metrics (icon, pin, dot are
+      // already caption/caption2 scale here).
       Text(app.displayName)
+        .font(.caption.weight(.medium))
         .lineLimit(1)
 
       if isExcluded {
@@ -460,7 +465,12 @@ private struct BoostMenu: View {
         .foregroundStyle(isBoosted ? WavesDesign.accent : WavesDesign.tertiaryColor)
         .lineLimit(1)
         .minimumScaleFactor(0.7)
-        .frame(width: compact ? 34 : 38)
+        // Match the adjacent mute/pin buttons' 22pt minimum compact tap target —
+        // a bare Text label only hit-tests its glyph bounds, which sat well under
+        // HIG's ~22pt floor and made this an easy mis-click next to the mute
+        // button. The frame (not just the text) is what's clickable here.
+        .frame(width: compact ? 34 : 38, height: 22)
+        .contentShape(Rectangle())
     }
     .menuStyle(.borderlessButton)
     .help("Set boost for \(app.displayName)")
