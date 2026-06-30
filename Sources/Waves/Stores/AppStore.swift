@@ -62,6 +62,10 @@ final class AppStore {
   private let deviceVolumePresetsStore: DeviceVolumePresetsStore
   private let logger = Logger(subsystem: "com.waves.store", category: "AppStore")
   private var isBootstrapped = false
+  // Captured once at init from DeviceVolumePresetsStore.load(); consumed (and
+  // toasted) the first time start() runs so a corrupt-file recovery is
+  // surfaced to the user instead of failing silently.
+  private var didRecoverCorruptDeviceVolumePresets = false
   private var pendingVolumeTargets: [String: Float] = [:]
   private var pendingVolumeApplyTasks: [String: Task<Void, Never>] = [:]
   private var volumeApplyToken: [String: Int] = [:]
@@ -129,6 +133,7 @@ final class AppStore {
     self.profiles = profileStore.load(defaults: Profile.defaults)
     self.session = sessionStore.load() ?? Self.emptySession
     self.deviceVolumePresets = deviceVolumePresetsStore.load()
+    self.didRecoverCorruptDeviceVolumePresets = deviceVolumePresetsStore.consumeDidRecoverFromCorruptFile()
     // Migrate pins recorded only on the persisted session (builds before pin
     // state moved into preferences) into the authoritative set, just once.
     if preferences.pinnedAppIDs.isEmpty {
@@ -350,6 +355,7 @@ final class AppStore {
         }
 
         try await backend.start()
+        await backend.setAutoRestoreDeviceEnabled(preferences.autoRestoreDevice)
         startSessionMaintenance()
         let built = await backend.currentSnapshot()
         session = mergedSession(with: built, cached: warmSnapshot)
@@ -368,6 +374,14 @@ final class AppStore {
         persistSessionSnapshot()
         syncOnboarding(using: session)
         checkAutoPauseMusic()
+        if didRecoverCorruptDeviceVolumePresets {
+          didRecoverCorruptDeviceVolumePresets = false
+          showToast(
+            title: "Device presets reset",
+            detail: "A corrupted presets file was found and replaced.",
+            kind: .warning
+          )
+        }
         showToast(title: "Waves is ready", detail: "Per-app audio mixer loaded.", kind: .success)
       } catch {
         isBootstrapped = false
@@ -1192,9 +1206,12 @@ final class AppStore {
       session = await backend.currentSnapshot()
       invalidateVisibleAppsCache()
 
-      // Per-device preset restore is gated only on the per-device-presets toggle
-      // and an actual device change.
-      if preferences.enablePerDeviceVolumePresets, let newDeviceID = currentDeviceID, previousDeviceID != newDeviceID {
+      // Per-device preset restore additionally requires "Auto-restore device" —
+      // it IS the auto-restore behavior for saved per-app volumes, so honoring
+      // the per-device-presets toggle alone while ignoring the opt-out would
+      // restore levels the user explicitly asked Waves not to apply automatically.
+      if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice,
+         let newDeviceID = currentDeviceID, previousDeviceID != newDeviceID {
         await restoreDeviceVolumePresets(for: newDeviceID)
       }
 
@@ -1477,6 +1494,15 @@ final class AppStore {
       previousFrontmostApp = nil
       checkAutoPauseMusic()
     }
+  }
+
+  /// Updates the auto-restore-device preference and threads it to the backend,
+  /// which gates whether its internal device-change handler re-establishes
+  /// managed routes automatically (see WorkspaceAudioControlBackend.handleDeviceChange).
+  func setAutoRestoreDeviceEnabled(_ enabled: Bool) {
+    preferences.autoRestoreDevice = enabled
+    persistPreferences()
+    Task { await backend.setAutoRestoreDeviceEnabled(enabled) }
   }
 
   func checkAutoPauseMusic() {
@@ -2213,6 +2239,20 @@ final class AppStore {
     onboarding.accessibilityPermissionGranted = AXIsProcessTrusted()
     onboarding.outputDeviceVisible = snapshot.currentDevice != nil
     onboarding.routeHealthReady = snapshot.backendStatus.isRouteRecoveryHealthy
+    reconcileLoginItemStatus()
+  }
+
+  /// Re-reads the system's login-item registration and syncs it into
+  /// `preferences.launchAtLoginEnabled` / `onboarding.launchAtLoginEnabled`.
+  ///
+  /// The in-app toggle only learns about a login-item change made *inside*
+  /// Waves (via the `launchAtLoginEnabled` setter) at the moment it happens.
+  /// If the user instead flips "Open at Login" from System Settings while
+  /// Waves is already running, that goes unnoticed until the next full
+  /// `syncOnboarding` pass — so this is also called directly from
+  /// `AppDelegate.applicationDidBecomeActive`, which fires every time Waves
+  /// regains focus (e.g. right after the user returns from System Settings).
+  func reconcileLoginItemStatus() {
     let launchAtLoginEnabled = loginItemService.status.isEnabled
     onboarding.launchAtLoginEnabled = launchAtLoginEnabled
     // Persist the OS-derived launch-at-login state on every reconcile so a

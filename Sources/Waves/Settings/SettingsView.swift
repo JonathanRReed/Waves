@@ -1,25 +1,65 @@
 import SwiftUI
 import WavesAudioCore
 
+/// One case per settings pane. Order here drives the sidebar's top-to-bottom
+/// order, so reordering panes is a one-line change.
+private enum SettingsPane: String, CaseIterable, Identifiable {
+  case general, setup, audio, profiles, advanced, help
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .general: "General"
+    case .setup: "Setup"
+    case .audio: "Audio"
+    case .profiles: "Profiles"
+    case .advanced: "Advanced"
+    case .help: "Help"
+    }
+  }
+
+  var symbol: String {
+    switch self {
+    case .general: "gearshape"
+    case .setup: "checklist"
+    case .audio: "speaker.wave.3"
+    case .profiles: "rectangle.stack"
+    case .advanced: "waveform.path.ecg"
+    case .help: "questionmark.circle"
+    }
+  }
+}
+
+/// A modern System Settings-style preferences window: a fixed leading sidebar
+/// of section names (own color control, never the native icon-tab chrome) with
+/// the active pane's content to the right.
+///
+/// This replaces a prior `TabView { ... }.tabItem { ... }` implementation. That
+/// native icon-style TabView's selected-tab indicator pill always renders in
+/// the *system* accent color (NSColor.controlAccentColor) and ignores SwiftUI's
+/// `.tint()` modifier entirely — a confirmed AppKit-level limitation on this
+/// platform, not something fixable with more TabView styling. On a Mac whose
+/// system accent isn't blue/cyan (e.g. Red), that made the very first thing
+/// shown in this window render in a jarringly wrong color. Building the nav row
+/// ourselves means the selected-state color is always `WavesDesign.accent`,
+/// full stop — never delegated to a native control that can fall back to the
+/// system preference.
 struct SettingsView: View {
   @Environment(AppStore.self) private var store
+  @State private var selection: SettingsPane = .general
 
   var body: some View {
-    TabView {
-      GeneralSettingsView()
-        .tabItem { Label("General", systemImage: "gearshape") }
-      OnboardingView()
-        .tabItem { Label("Setup", systemImage: "checklist") }
-      AudioSettingsView()
-        .tabItem { Label("Audio", systemImage: "speaker.wave.3") }
-      ProfileSettingsView()
-        .tabItem { Label("Profiles", systemImage: "rectangle.stack") }
-      DiagnosticsSettingsView()
-        .tabItem { Label("Advanced", systemImage: "waveform.path.ecg") }
-      HelpView()
-        .tabItem { Label("Help", systemImage: "questionmark.circle") }
+    HStack(spacing: 0) {
+      SettingsSidebar(selection: $selection)
+        .frame(width: 190)
+
+      Divider()
+
+      paneContent
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
-    // One cyan accent everywhere — toggles, pickers, tab selection, primary
+    // One cyan accent everywhere — toggles, pickers, sidebar selection, primary
     // buttons — so the Settings chrome matches the app instead of rendering in
     // the user's (often clashing) system accent.
     .tint(WavesDesign.accent)
@@ -27,6 +67,74 @@ struct SettingsView: View {
     .onDisappear {
       store.persistPreferences()
     }
+  }
+
+  @ViewBuilder
+  private var paneContent: some View {
+    switch selection {
+    case .general: GeneralSettingsView()
+    case .setup: OnboardingView()
+    case .audio: AudioSettingsView()
+    case .profiles: ProfileSettingsView()
+    case .advanced: DiagnosticsSettingsView()
+    case .help: HelpView()
+    }
+  }
+}
+
+/// The leading sidebar of section names. Fully custom-drawn so the selected
+/// row's highlight is guaranteed to be `WavesDesign.accent`, never delegated to
+/// a native list/tab control that reads the system accent color instead.
+private struct SettingsSidebar: View {
+  @Binding var selection: SettingsPane
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      ForEach(SettingsPane.allCases) { pane in
+        SettingsSidebarRow(pane: pane, isSelected: selection == pane) {
+          selection = pane
+        }
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(10)
+    .frame(maxHeight: .infinity, alignment: .top)
+  }
+}
+
+private struct SettingsSidebarRow: View {
+  let pane: SettingsPane
+  let isSelected: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 8) {
+        Image(systemName: pane.symbol)
+          .frame(width: 18)
+          // Concrete Color on both arms — never wrap `.secondary` in
+          // AnyShapeStyle next to a concrete color (see DesignSystem.swift);
+          // that erasure silently falls back to the system accent color.
+          .foregroundStyle(isSelected ? WavesDesign.accent : Color.secondary)
+        Text(pane.title)
+          .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: WavesDesign.chipCornerRadius, style: .continuous)
+          .fill(isSelected ? WavesDesign.accent.opacity(0.16) : Color.clear)
+      )
+    }
+    .buttonStyle(.plain)
+    .contentShape(Rectangle())
+    // The native TabView this replaced announced "tab, N of 6" for free;
+    // restore equivalent VoiceOver discoverability on the custom row.
+    .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+    .accessibilityLabel("\(pane.title) settings")
+    .accessibilityHint(isSelected ? "" : "Shows \(pane.title) settings.")
   }
 }
 
@@ -92,6 +200,13 @@ private struct GeneralSettingsView: View {
           Text("Remember a separate volume for each output device.")
         }
         .help("Restoring a remembered level when you switch devices also requires “Auto-restore device” to be on. Turning this off stops recording new levels but leaves any already-stored device settings in place.")
+        Toggle(isOn: Binding(
+          get: { store.preferences.autoRestoreDevice },
+          set: { store.setAutoRestoreDeviceEnabled($0) }
+        )) {
+          Text("Auto-restore device")
+          Text("Apply the remembered volume automatically when you switch output devices.")
+        }
       }
 
       Section("Keyboard Shortcuts") {
@@ -314,9 +429,9 @@ private struct DiagnosticsCheckRow: View {
 
   private var color: Color {
     switch check.status {
-    case .passed: .green
-    case .warning: .orange
-    case .failed: .red
+    case .passed: WavesDesign.success
+    case .warning: WavesDesign.warning
+    case .failed: WavesDesign.error
     case .informational: .secondary
     }
   }

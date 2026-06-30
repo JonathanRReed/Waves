@@ -819,59 +819,57 @@ private struct DiagnosticsPanel: View {
   @State private var expanded = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      DisclosureGroup(isExpanded: $expanded) {
-        if let diagnostics = store.diagnostics {
-          VStack(alignment: .leading, spacing: 10) {
-            Text(diagnostics.summary)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-
-            ForEach(diagnostics.checks) { check in
-              VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
-                  // Shape-differentiated glyph per status so color-blind sighted
-                  // users can distinguish pass/warn/fail/info by shape, not hue
-                  // alone. Still hidden from VoiceOver; the combined label below
-                  // carries the status word.
-                  Image(systemName: symbol(for: check.status))
-                    .font(.caption)
-                    .foregroundStyle(color(for: check.status))
-                    .accessibilityHidden(true)
-                  Text(check.title)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(statusLabel(for: check.status)): \(check.title)")
-
-                Text(check.detail)
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-                  .padding(.leading, 15)
-              }
-            }
-          }
-          .padding(.top, 10)
-        } else {
-          Text("Diagnostics not available yet.")
+    DisclosureGroup(isExpanded: $expanded) {
+      if let diagnostics = store.diagnostics {
+        VStack(alignment: .leading, spacing: 10) {
+          Text(diagnostics.summary)
             .font(.caption)
             .foregroundStyle(.secondary)
-            .padding(.top, 10)
-        }
-      } label: {
-        HStack(spacing: 8) {
-          Text("Diagnostics")
-            .font(.callout.weight(.semibold))
-          // A collapsed panel gives no reason to open it; surface a colored count
-          // when a check needs attention so a problem is discoverable at a glance.
-          if let attention = attentionSummary {
-            Text(attention.text)
-              .font(.caption2.weight(.semibold))
-              .foregroundStyle(attention.color)
-              .padding(.horizontal, 6)
-              .padding(.vertical, 1)
-              .background(attention.color.opacity(0.14), in: Capsule())
-              .accessibilityLabel(attention.accessibility)
+
+          ForEach(diagnostics.checks) { check in
+            VStack(alignment: .leading, spacing: 2) {
+              HStack(spacing: 8) {
+                // Shape-differentiated glyph per status so color-blind sighted
+                // users can distinguish pass/warn/fail/info by shape, not hue
+                // alone. Still hidden from VoiceOver; the combined label below
+                // carries the status word.
+                Image(systemName: symbol(for: check.status))
+                  .font(.caption)
+                  .foregroundStyle(color(for: check.status))
+                  .accessibilityHidden(true)
+                Text(check.title)
+              }
+              .accessibilityElement(children: .combine)
+              .accessibilityLabel("\(statusLabel(for: check.status)): \(check.title)")
+
+              Text(check.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 15)
+            }
           }
+        }
+        .padding(.top, 10)
+      } else {
+        Text("Diagnostics not available yet.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .padding(.top, 10)
+      }
+    } label: {
+      HStack(spacing: 8) {
+        Text("Diagnostics")
+          .font(.callout.weight(.semibold))
+        // A collapsed panel gives no reason to open it; surface a colored count
+        // when a check needs attention so a problem is discoverable at a glance.
+        if let attention = attentionSummary {
+          Text(attention.text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(attention.color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(attention.color.opacity(0.14), in: Capsule())
+            .accessibilityLabel(attention.accessibility)
         }
       }
     }
@@ -891,9 +889,9 @@ private struct DiagnosticsPanel: View {
 
   private func color(for status: DiagnosticsStatus) -> Color {
     switch status {
-    case .passed: .green
-    case .warning: .orange
-    case .failed: .red
+    case .passed: WavesDesign.success
+    case .warning: WavesDesign.warning
+    case .failed: WavesDesign.error
     case .informational: .secondary
     }
   }
