@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WavesAudioCore
 
@@ -245,11 +246,31 @@ struct ProfileEditorSheet: View {
   }
 
   private func friendlyName(for id: String) -> String {
-    // Prefer a remembered display name from the session; fall back to the last
-    // dot-component of a bundle id (e.g. "com.tinyspeck.slackmacgap" → "slackmacgap").
+    // Prefer a remembered display name from the session (the app has run at
+    // some point this session, so Waves already knows its real name).
     if let app = store.session.apps.first(where: { $0.logicalID == id }) {
       return app.displayName
     }
+    // Otherwise ask Launch Services for the real name of the installed app —
+    // this is the case for the seeded default profiles' members before their
+    // first launch (e.g. "Focus" includes "us.zoom.xos" and
+    // "com.spotify.client"). Far more reliable than guessing from the bundle
+    // ID's shape: the naive "last dot-component, capitalized" fallback below
+    // turns those into "XOS" and "Client" — wrong on the very first profile a
+    // new user sees.
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id),
+       let bundle = Bundle(url: url) {
+      if let displayName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String,
+         !displayName.isEmpty {
+        return displayName
+      }
+      if let name = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String, !name.isEmpty {
+        return name
+      }
+    }
+    // Last resort, for an app that isn't installed at all: the last
+    // dot-component of the bundle id (e.g. "com.tinyspeck.slackmacgap" →
+    // "slackmacgap") — imperfect, but better than showing the raw bundle id.
     return id.split(separator: ".").last.map(String.init) ?? id
   }
 
