@@ -438,9 +438,9 @@ private struct SourceListView: View {
 
       // The live "mixed waves" band: the combined audio energy of everything
       // playing, on a solid content surface beneath the header.
-      HeaderWaveform(height: 26)
+      HeaderWaveform(height: 34)
         .padding(.horizontal, 18)
-        .padding(.vertical, 6)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
         .overlay(Divider(), alignment: .bottom)

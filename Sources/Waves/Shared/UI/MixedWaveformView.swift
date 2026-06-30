@@ -51,6 +51,7 @@ struct MixedWaveformView: View {
     Color(red: 0.0, green: 0.82, blue: 0.96),
     Color(red: 0.32, green: 0.58, blue: 1.0),
   ]
+  private static let amplitudeHeadroom = 0.62
   private var gradient: Gradient { Gradient(colors: Self.palette) }
   private var isAudible: Bool { level > 0.012 }
   /// How long the render loop stays alive after audio stops, giving
@@ -108,8 +109,8 @@ struct MixedWaveformView: View {
 
         // Soft glow underlay.
         context.drawLayer { layer in
-          layer.addFilter(.blur(radius: 5))
-          drawWave(layer, size: size, level: lvl, phase: phase, frequency: 1.2, scale: 1.0, lineWidth: 4)
+          layer.addFilter(.blur(radius: 3))
+          drawWave(layer, size: size, level: lvl, phase: phase, frequency: 1.2, scale: 1.0, lineWidth: 3)
         }
         // Filled mirrored body for weight.
         drawBody(context, size: size, level: lvl, phase: phase)
@@ -127,7 +128,7 @@ struct MixedWaveformView: View {
     level: Double, phase: Double, frequency: Double, scale: Double, lineWidth: Double
   ) {
     let midY = size.height / 2
-    let maxAmplitude = midY * 0.86 * scale * max(level, 0.04)
+    let maxAmplitude = midY * Self.amplitudeHeadroom * scale * max(level, 0.04)
     let step = 2.0
     var path = Path()
     var x = 0.0
@@ -150,7 +151,7 @@ struct MixedWaveformView: View {
   /// A soft, mirrored fill under the primary wave to give the ribbon body.
   private func drawBody(_ context: GraphicsContext, size: CGSize, level: Double, phase: Double) {
     let midY = size.height / 2
-    let maxAmplitude = midY * 0.86 * max(level, 0.04)
+    let maxAmplitude = midY * Self.amplitudeHeadroom * max(level, 0.04)
     let step = 3.0
     var path = Path()
     var x = 0.0

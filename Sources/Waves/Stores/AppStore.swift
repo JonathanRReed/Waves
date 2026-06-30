@@ -85,12 +85,15 @@ final class AppStore {
   private var frontmostAppObserver: NSObjectProtocol?
   private var appTerminationObserver: NSObjectProtocol?
   private var levelPollTask: Task<Void, Never>?
+  private var sessionMaintenanceTask: Task<Void, Never>?
   private var liveLevelsRefcount = 0
+  private var isRunningSessionMaintenance = false
   // Per-app one-shot tasks that drop an app out of the lingering-live set once it
   // has been quiet for `liveLingerWindow`. Cancelled (and the app kept) the moment
   // it becomes audible again.
   private var lingerRemovalTasks: [String: Task<Void, Never>] = [:]
   private let liveLingerWindow = Duration.seconds(2.5)
+  private let sessionMaintenanceInterval = Duration.seconds(8)
   private let maxToasts = 3
   private let defaultToastDuration = Duration.seconds(2.0)
   // Failures need longer on screen than routine successes: 2.0s is too short to
@@ -347,6 +350,7 @@ final class AppStore {
         }
 
         try await backend.start()
+        startSessionMaintenance()
         let built = await backend.currentSnapshot()
         session = mergedSession(with: built, cached: warmSnapshot)
         invalidateVisibleAppsCache()
@@ -411,6 +415,45 @@ final class AppStore {
       } catch {
         showToast(title: "Refresh failed", detail: error.localizedDescription, kind: .error)
       }
+    }
+  }
+
+  private func startSessionMaintenance() {
+    guard sessionMaintenanceTask == nil else { return }
+    sessionMaintenanceTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+      while !Task.isCancelled {
+        try? await Task.sleep(for: self.sessionMaintenanceInterval)
+        guard !Task.isCancelled else { return }
+        await self.performSilentSessionRefresh()
+      }
+    }
+  }
+
+  private func performSilentSessionRefresh() async {
+    guard !isRefreshing,
+          !isRecovering,
+          !isLoading,
+          !isRunningSessionMaintenance,
+          pendingVolumeTargets.isEmpty else {
+      return
+    }
+
+    isRunningSessionMaintenance = true
+    defer { isRunningSessionMaintenance = false }
+
+    do {
+      let rebuilt = try await backend.refresh()
+      session = mergedSession(with: rebuilt, cached: session)
+      invalidateVisibleAppsCache()
+      cleanupStaleEntries()
+      persistSessionSnapshot()
+      diagnostics = await backend.diagnosticsReport()
+      availableDevices = await backend.availableOutputDevices()
+      syncOnboarding(using: session)
+      checkAutoPauseMusic()
+    } catch {
+      logger.debug("Silent session refresh failed: \(error.localizedDescription)")
     }
   }
 
@@ -1318,6 +1361,8 @@ final class AppStore {
   func shutdown() {
     deviceChangeObserver?.cancel()
     deviceChangeObserver = nil
+    sessionMaintenanceTask?.cancel()
+    sessionMaintenanceTask = nil
     levelPollTask?.cancel()
     levelPollTask = nil
     for task in lingerRemovalTasks.values { task.cancel() }
