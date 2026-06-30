@@ -14,6 +14,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let currentBundleID = Bundle.main.bundleIdentifier
   private var controllers: [String: PerAppTapController] = [:]
   private var levelUpdateTask: Task<Void, Never>?
+  private var routeMaintenanceTick = 0
+  private var staleRouteTicks: [String: Int] = [:]
+  private let routeMaintenanceTickInterval = 20
+  private let staleRouteThresholdTicks = 24
+  private let staleRouteLevelThreshold: Float = 0.0005
   private var deviceChangeListenerToken: UInt32 = 0
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
   private let logger = Logger(subsystem: "com.waves.backend", category: "AudioBackend")
@@ -413,7 +418,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return captureAuthorization
   }
 
-  private func applyRoute(for app: AudioApp, toVolume volume: Float, muted: Bool) async throws {
+  private func applyRoute(for app: AudioApp, toVolume volume: Float, muted: Bool, forceRebuild: Bool = false) async throws {
     guard supportsPerAppRouting else {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
     }
@@ -427,7 +432,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // on every volume nudge — an audible glitch and heavy Core Audio churn. A
     // subset check rebuilds only when a genuinely new audio-producing process
     // appears that the current tap doesn't yet capture.
-    if let controller = controllers[app.id], controller.isActive, controller.covers(processObjectIDs) {
+    if !forceRebuild,
+       let controller = controllers[app.id],
+       controller.isActive,
+       controller.covers(processObjectIDs) {
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       return
     }
@@ -1304,6 +1312,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       if let controller = controllers.removeValue(forKey: id) {
         controller.dispose()
       }
+      staleRouteTicks.removeValue(forKey: id)
     }
 
     for index in snapshot.apps.indices where targetIDs.contains(snapshot.apps[index].id) {
@@ -1329,6 +1338,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     for appID in stale {
       controllers[appID]?.dispose()
       controllers.removeValue(forKey: appID)
+      staleRouteTicks.removeValue(forKey: appID)
     }
   }
 
@@ -1624,12 +1634,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       result[pair.element.logicalID] = pair.offset
     }
 
+    var routeIDsNeedingRebuild = Set<String>()
+
     for (appID, controller) in controllers {
-      guard controller.isActive else { continue }
+      guard controller.isActive else {
+        routeIDsNeedingRebuild.insert(appID)
+        continue
+      }
 
       let (peak, rms) = controller.getCurrentLevels()
 
       if let index = appIndexMap[appID] ?? snapshot.apps.firstIndex(where: { $0.id == appID }) {
+        let app = snapshot.apps[index]
         // A muted or volume-0 app emits silence, so its meters must read zero even
         // if the controller's last render cycle left a stale non-zero level (e.g.
         // the controller is gone, or a short-circuit branch raced the poll).
@@ -1637,15 +1653,97 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         // means "unknown", not "muted" (e.g. an app first enrolled via the Boost
         // menu has a managed route but no assigned appliedVolume), and must not
         // zero its meters.
-        let isVolumeZero = snapshot.apps[index].appliedVolume.map { $0 == 0 } ?? false
-        if snapshot.apps[index].isMuted || isVolumeZero {
+        let isVolumeZero = app.appliedVolume.map { $0 == 0 } ?? false
+        if app.isMuted || isVolumeZero {
           snapshot.apps[index].peakLevel = 0
           snapshot.apps[index].rmsLevel = 0
         } else {
           snapshot.apps[index].peakLevel = peak
           snapshot.apps[index].rmsLevel = rms
         }
+
+        let sourceIsRunningOutput = controller.targetProcessObjectIDs.contains { isProcessRunningOutput($0) }
+        let measuredLevel = max(peak, rms)
+        if app.routingState == .managed,
+           !app.isMuted,
+           !isVolumeZero,
+           sourceIsRunningOutput,
+           measuredLevel <= staleRouteLevelThreshold {
+          let ticks = (staleRouteTicks[app.logicalID] ?? 0) + 1
+          staleRouteTicks[app.logicalID] = ticks
+          if ticks >= staleRouteThresholdTicks {
+            routeIDsNeedingRebuild.insert(app.logicalID)
+          }
+        } else {
+          staleRouteTicks.removeValue(forKey: app.logicalID)
+        }
       }
+    }
+
+    routeMaintenanceTick += 1
+    if routeMaintenanceTick >= routeMaintenanceTickInterval || !routeIDsNeedingRebuild.isEmpty {
+      routeMaintenanceTick = 0
+      await maintainManagedRoutes(forceRebuildIDs: routeIDsNeedingRebuild)
+    }
+  }
+
+  private func maintainManagedRoutes(forceRebuildIDs: Set<String> = []) async {
+    let managedIDs = snapshot.apps
+      .filter { $0.routingState == .managed || forceRebuildIDs.contains($0.logicalID) || forceRebuildIDs.contains($0.id) }
+      .map(\.logicalID)
+    guard !managedIDs.isEmpty else { return }
+
+    var changed = false
+    var lastError: String?
+
+    for appID in managedIDs {
+      guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
+        continue
+      }
+
+      let app = snapshot.apps[index]
+      let shouldForceRebuild = forceRebuildIDs.contains(app.logicalID) || forceRebuildIDs.contains(app.id)
+
+      do {
+        let processObjectIDs = try resolveProcessObjectIDs(for: app)
+        if !shouldForceRebuild,
+           let controller = controllers[app.id],
+           controller.isActive,
+           controller.covers(processObjectIDs) {
+          continue
+        }
+
+        try await applyRoute(
+          for: app,
+          toVolume: app.desiredVolume,
+          muted: app.isMuted,
+          forceRebuild: shouldForceRebuild
+        )
+
+        if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+          snapshot.apps[currentIndex].routingState = .managed
+          snapshot.apps[currentIndex].appliedVolume =
+            snapshot.apps[currentIndex].isMuted ? 0 : snapshot.apps[currentIndex].desiredVolume
+          snapshot.apps[currentIndex].notes = nil
+        }
+        staleRouteTicks.removeValue(forKey: app.logicalID)
+        changed = true
+      } catch {
+        if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+          snapshot.apps[currentIndex].routingState = .error
+          snapshot.apps[currentIndex].notes = error.localizedDescription
+          snapshot.apps[currentIndex].appliedVolume =
+            snapshot.apps[currentIndex].isMuted ? 0 : snapshot.apps[currentIndex].desiredVolume
+        }
+        staleRouteTicks.removeValue(forKey: app.logicalID)
+        lastError = error.localizedDescription
+        changed = true
+      }
+    }
+
+    if changed {
+      refreshGlobalRouteHealth(latestError: lastError)
+      snapshot.updatedAt = .now
     }
   }
 
