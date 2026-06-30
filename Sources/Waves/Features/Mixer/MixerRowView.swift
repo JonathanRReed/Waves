@@ -333,6 +333,14 @@ struct CompactMixerRow: View {
         Text("Excluded")
           .font(.caption2)
           .foregroundStyle(.secondary)
+          .lineLimit(1)
+          // Without this, the compact row's tight spacing (the app-name
+          // Text just before this now has its own .layoutPriority(1), so it
+          // claims space first) squeezed this single word into a 3-line
+          // vertical wrap ("Ex-/clu-/ded") instead of fitting on one line —
+          // fixedSize forces SwiftUI to honor this label's true single-line
+          // width rather than compressing its height to fit.
+          .fixedSize()
           .accessibilityLabel("Excluded from Waves")
       } else {
         RoutingStateDot(state: app.routingState, notes: app.notes)
