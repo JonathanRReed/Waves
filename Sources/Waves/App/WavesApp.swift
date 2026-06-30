@@ -31,6 +31,14 @@ struct WavesApp: App {
       MainWindowView()
         .environment(store)
         .frame(minWidth: 980, minHeight: 620)
+        // Applied at the scene root (above NavigationSplitView's sidebar list and
+        // any toolbar/segmented chrome) so Waves' cyan signal accent wins over the
+        // user's *system* accent-color preference everywhere AppKit auto-tints
+        // "selectable" chrome (sidebar icons, toolbar item highlights). Without
+        // this, a non-blue system accent (e.g. Red) bleeds into sidebar icons that
+        // are explicitly styled `.secondary` in SwiftUI — the system accent wins
+        // at the AppKit bridging layer for that one specific effect.
+        .tint(WavesDesign.accent)
         .task {
           appDelegate.setStore(store)
           store.start()
@@ -72,6 +80,7 @@ struct WavesApp: App {
       MenuBarMixerView()
         .environment(store)
         .frame(width: WavesDesign.menuBarPanelWidth)
+        .tint(WavesDesign.accent)
         .accessibilityLabel(Text(menuBarAccessibilityLabel))
     }
     .menuBarExtraStyle(.window)

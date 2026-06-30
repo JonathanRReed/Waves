@@ -381,7 +381,7 @@ private struct SourceFilterRow: View {
       }
     } icon: {
       Image(systemName: filter.systemImage)
-        .foregroundStyle(filter == .frontmost ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.secondary))
+        .foregroundStyle(filter == .frontmost ? WavesDesign.accent : Color.secondary)
         .symbolEffect(.variableColor.iterative, isActive: isLive && !reduceMotion)
     }
   }
@@ -726,7 +726,7 @@ private struct OutputSummaryView: View {
             Label(liveSummary, systemImage: "waveform")
               // Drop to primary text under Increase Contrast so the cyan never
               // fails contrast on the .bar header.
-              .foregroundStyle(contrast == .increased ? AnyShapeStyle(Color.primary) : AnyShapeStyle(WavesDesign.accent))
+              .foregroundStyle(contrast == .increased ? Color.primary : WavesDesign.accent)
               // The accent "playing" signal survives truncation over the static count.
               .layoutPriority(1)
           }

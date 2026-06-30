@@ -199,8 +199,8 @@ private struct MenuBarHeader: View {
           // fall back to primary text there (mirrors RoutingStateIndicator).
           .foregroundStyle(
             store.hasLiveAudio
-              ? AnyShapeStyle(contrast == .increased ? Color.primary : WavesDesign.accent)
-              : AnyShapeStyle(.secondary)
+              ? (contrast == .increased ? Color.primary : WavesDesign.accent)
+              : Color.secondary
           )
           .lineLimit(1)
           .contentTransition(.numericText())

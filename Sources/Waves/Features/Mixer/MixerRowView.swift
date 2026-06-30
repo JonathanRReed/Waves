@@ -289,7 +289,7 @@ struct CompactMixerRow: View {
       } label: {
         Image(systemName: app.isPinned ? "pin.fill" : "pin")
           .font(.caption)
-          .foregroundStyle(app.isPinned ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.tertiary))
+          .foregroundStyle(app.isPinned ? WavesDesign.accent : WavesDesign.tertiaryColor)
           .frame(width: 22, height: 22)
           .contentShape(Rectangle())
       }
@@ -457,7 +457,7 @@ private struct BoostMenu: View {
       // the app is actually boosted, so a glance finds the boosted rows.
       Text("\(Int(app.volumeBoost))x")
         .font(.caption.monospacedDigit().weight(isBoosted ? .semibold : (compact ? .regular : .medium)))
-        .foregroundStyle(isBoosted ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.tertiary))
+        .foregroundStyle(isBoosted ? WavesDesign.accent : WavesDesign.tertiaryColor)
         .lineLimit(1)
         .minimumScaleFactor(0.7)
         .frame(width: compact ? 34 : 38)
