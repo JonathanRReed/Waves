@@ -69,7 +69,13 @@ struct WavesApp: App {
     Settings {
       SettingsView()
         .environment(store)
-        .frame(minWidth: 720, minHeight: 500)
+        // 500pt was tall enough to satisfy the constraint but not the
+        // content — Help and the longer Audio/Advanced panes opened needing
+        // 4-5 scroll gestures just to read top to bottom, which reads as
+        // cramped rather than "a real Settings window." 640 shows
+        // meaningfully more per screen (closer to System Settings' own
+        // proportions) while still fitting comfortably on a 13" display.
+        .frame(minWidth: 720, minHeight: 640)
     }
 
     MenuBarExtra(

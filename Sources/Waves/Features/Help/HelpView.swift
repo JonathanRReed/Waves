@@ -187,6 +187,10 @@ struct HelpView: View {
           solution: "Use 'Recover Routes' in the toolbar or Audio settings, then check Diagnostics in Advanced settings"
         )
         troubleshootingItem(
+          issue: "An app shows a red Core Audio error",
+          solution: "Some apps never produce sound (menu-bar utilities, CLI tools) and can't be managed — right-click the row and choose 'Exclude from Waves' to stop the warning"
+        )
+        troubleshootingItem(
           issue: "Keyboard shortcuts not working",
           solution: "Enable in Settings, check accessibility permissions, verify no conflicts"
         )
