@@ -658,8 +658,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return [processObjectID]
     }
 
+    // macOS only assigns a Core Audio "process object" to a process once it has
+    // actually engaged the audio subsystem — a process that has never produced
+    // sound (a menu-bar utility, a CLI tool, a background helper) never gets
+    // one, so this resolution fails every time, not just this once. That's the
+    // common case in practice; a genuinely audio-capable app whose process
+    // object isn't ready yet would normally succeed on retry (see
+    // createControllerWithRetry). Say so plainly and point at the fix —
+    // excluding it via the row's context menu — instead of a bare technical
+    // error that looks identical for a real, recoverable failure.
     throw BackendError.managedRouteUnavailable(
-      "Unable to resolve active Core Audio process objects for \(app.displayName)."
+      "\(app.displayName) doesn't appear to produce audio, so Waves can't create a managed route for it. "
+        + "If this app never plays sound, right-click its row and choose “Exclude from Waves” to stop this warning."
     )
   }
 
