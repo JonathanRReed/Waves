@@ -486,11 +486,31 @@ private struct SourceListView: View {
         Spacer(minLength: 0)
       } else {
         List(selection: $selectedAppID) {
-          ForEach(apps) { app in
+          ForEach(Array(apps.enumerated()), id: \.element.id) { index, app in
             MixerRowView(app: app)
               .listRowInsets(EdgeInsets(top: 2, leading: 18, bottom: 2, trailing: 18))
               .listRowBackground(Color.clear)
               .tag(app.id)
+              // Drag-and-drop reordering (.onMove below) has no VoiceOver
+              // equivalent on its own — these actions are the accessible path
+              // to the same store.reorderApps the drag handle uses. Only
+              // offered when the list is actually reorderable (Running scope,
+              // no active search) and there's somewhere to move to, mirroring
+              // .moveDisabled's gating below.
+              .accessibilityActions {
+                if isReorderable {
+                  if index > 0 {
+                    Button("Move Up") {
+                      store.reorderApps(from: IndexSet(integer: index), to: index - 1)
+                    }
+                  }
+                  if index < apps.count - 1 {
+                    Button("Move Down") {
+                      store.reorderApps(from: IndexSet(integer: index), to: index + 2)
+                    }
+                  }
+                }
+              }
           }
           .onMove { source, destination in
             // Only reorder against the full unfiltered list; a search shows a

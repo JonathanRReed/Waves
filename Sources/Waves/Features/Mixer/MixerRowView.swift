@@ -144,41 +144,7 @@ struct MixerRowView: View {
       }
     }
     .contextMenu {
-      Button(app.isPinned ? "Unpin" : "Pin") {
-        store.togglePinned(app)
-      }
-      if !isExcluded {
-        Menu("Output Device") {
-          Button {
-            store.setOutputDevice(nil, for: app)
-          } label: {
-            if app.targetDeviceUID == nil { Label("System Default", systemImage: "checkmark") }
-            else { Text("System Default") }
-          }
-          if store.availableDevices.isEmpty {
-            Divider()
-            // Mirror the menu-bar OutputDevicePicker's empty state so the
-            // per-app submenu doesn't silently collapse to just "System
-            // Default" when no real output devices are available.
-            Text("No output devices found")
-              .accessibilityLabel("No output devices found")
-          } else {
-            Divider()
-            ForEach(store.availableDevices) { device in
-              Button {
-                store.setOutputDevice(device, for: app)
-              } label: {
-                if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") }
-                else { Text(device.name) }
-              }
-            }
-          }
-        }
-      }
-      Divider()
-      Button(isExcluded ? "Manage with Waves" : "Exclude from Waves") {
-        store.setExcluded(!isExcluded, for: app)
-      }
+      MixerRowContextMenuItems(app: app)
     }
     .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
       store.togglePinned(app)
@@ -275,6 +241,55 @@ private struct MixerRowHelpers {
   }
 }
 
+/// The Pin / Output Device / Exclude actions shared by both row densities, so
+/// the menu-bar's compact row never silently falls behind the main window's
+/// full row in capability — a menu-bar-first user can route an app to a
+/// different output device or exclude it without opening the main window.
+private struct MixerRowContextMenuItems: View {
+  @Environment(AppStore.self) private var store
+  let app: AudioApp
+
+  private var isExcluded: Bool { store.isExcluded(app) }
+
+  var body: some View {
+    Button(app.isPinned ? "Unpin" : "Pin") {
+      store.togglePinned(app)
+    }
+    if !isExcluded {
+      Menu("Output Device") {
+        Button {
+          store.setOutputDevice(nil, for: app)
+        } label: {
+          if app.targetDeviceUID == nil { Label("System Default", systemImage: "checkmark") }
+          else { Text("System Default") }
+        }
+        if store.availableDevices.isEmpty {
+          Divider()
+          // Mirror the menu-bar OutputDevicePicker's empty state so the
+          // per-app submenu doesn't silently collapse to just "System
+          // Default" when no real output devices are available.
+          Text("No output devices found")
+            .accessibilityLabel("No output devices found")
+        } else {
+          Divider()
+          ForEach(store.availableDevices) { device in
+            Button {
+              store.setOutputDevice(device, for: app)
+            } label: {
+              if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") }
+              else { Text(device.name) }
+            }
+          }
+        }
+      }
+    }
+    Divider()
+    Button(isExcluded ? "Manage with Waves" : "Exclude from Waves") {
+      store.setExcluded(!isExcluded, for: app)
+    }
+  }
+}
+
 struct CompactMixerRow: View {
   @Environment(AppStore.self) private var store
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -318,6 +333,14 @@ struct CompactMixerRow: View {
         Text("Excluded")
           .font(.caption2)
           .foregroundStyle(.secondary)
+          .lineLimit(1)
+          // Without this, the compact row's tight spacing (the app-name
+          // Text just before this now has its own .layoutPriority(1), so it
+          // claims space first) squeezed this single word into a 3-line
+          // vertical wrap ("Ex-/clu-/ded") instead of fitting on one line —
+          // fixedSize forces SwiftUI to honor this label's true single-line
+          // width rather than compressing its height to fit.
+          .fixedSize()
           .accessibilityLabel("Excluded from Waves")
       } else {
         RoutingStateDot(state: app.routingState, notes: app.notes)
@@ -393,14 +416,16 @@ struct CompactMixerRow: View {
       }
     }
     .contextMenu {
-      // Let menu-bar-first users pin/unpin without opening the main window,
-      // reusing the same store.togglePinned the full row uses.
-      Button(app.isPinned ? "Unpin" : "Pin") {
-        store.togglePinned(app)
-      }
+      // Full parity with the main window's row — a menu-bar-first user can
+      // pin, route to a different output device, or exclude an app without
+      // ever opening the main window.
+      MixerRowContextMenuItems(app: app)
     }
     .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
       store.togglePinned(app)
+    }
+    .accessibilityAction(named: isExcluded ? "Manage with Waves" : "Exclude from Waves") {
+      store.setExcluded(!isExcluded, for: app)
     }
   }
 
