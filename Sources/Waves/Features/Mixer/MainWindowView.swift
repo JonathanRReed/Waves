@@ -818,38 +818,56 @@ private struct DiagnosticsPanel: View {
   @Environment(AppStore.self) private var store
   @State private var expanded = false
 
+  // Caps how tall the expanded checklist can grow. Without this, expanding
+  // the DisclosureGroup in a long checklist (several failing checks, each
+  // with a two-line description) could ask this VStack's List sibling above
+  // it to shrink toward zero/negative height in the same animated layout
+  // pass — a List (NSTableView-backed) squeezed that hard during a SwiftUI
+  // animation reliably blanks the entire window content, sidebar included,
+  // not just this panel (reproduced: clicking the disclosure with several
+  // checks present collapses the whole NavigationSplitView to nothing, with
+  // no crash/exception logged — a pure AppKit/SwiftUI layout corruption, not
+  // a Swift-level bug). Scrolling past this cap instead of growing forever
+  // keeps the panel's worst-case height bounded and predictable, mirroring
+  // the same height-capped-scroller pattern already used for the menu bar's
+  // app sections (MenuBarMixerView.sectionsScroller).
+  private static let maxExpandedHeight: CGFloat = 220
+
   var body: some View {
     DisclosureGroup(isExpanded: $expanded) {
       if let diagnostics = store.diagnostics {
-        VStack(alignment: .leading, spacing: 10) {
-          Text(diagnostics.summary)
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        ScrollView {
+          VStack(alignment: .leading, spacing: 10) {
+            Text(diagnostics.summary)
+              .font(.caption)
+              .foregroundStyle(.secondary)
 
-          ForEach(diagnostics.checks) { check in
-            VStack(alignment: .leading, spacing: 2) {
-              HStack(spacing: 8) {
-                // Shape-differentiated glyph per status so color-blind sighted
-                // users can distinguish pass/warn/fail/info by shape, not hue
-                // alone. Still hidden from VoiceOver; the combined label below
-                // carries the status word.
-                Image(systemName: symbol(for: check.status))
+            ForEach(diagnostics.checks) { check in
+              VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                  // Shape-differentiated glyph per status so color-blind sighted
+                  // users can distinguish pass/warn/fail/info by shape, not hue
+                  // alone. Still hidden from VoiceOver; the combined label below
+                  // carries the status word.
+                  Image(systemName: symbol(for: check.status))
+                    .font(.caption)
+                    .foregroundStyle(color(for: check.status))
+                    .accessibilityHidden(true)
+                  Text(check.title)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(statusLabel(for: check.status)): \(check.title)")
+
+                Text(check.detail)
                   .font(.caption)
-                  .foregroundStyle(color(for: check.status))
-                  .accessibilityHidden(true)
-                Text(check.title)
+                  .foregroundStyle(.secondary)
+                  .padding(.leading, 15)
               }
-              .accessibilityElement(children: .combine)
-              .accessibilityLabel("\(statusLabel(for: check.status)): \(check.title)")
-
-              Text(check.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 15)
             }
           }
+          .padding(.top, 10)
         }
-        .padding(.top, 10)
+        .frame(maxHeight: Self.maxExpandedHeight)
       } else {
         Text("Diagnostics not available yet.")
           .font(.caption)
