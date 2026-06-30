@@ -658,8 +658,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return [processObjectID]
     }
 
+    // macOS only assigns a Core Audio "process object" to a process once it has
+    // actually engaged the audio subsystem — a process that has never produced
+    // sound (a menu-bar utility, a CLI tool, a background helper) never gets
+    // one, so this resolution fails every time, not just this once. That's the
+    // common case in practice; a genuinely audio-capable app whose process
+    // object isn't ready yet would normally succeed on retry (see
+    // createControllerWithRetry). Say so plainly and point at the fix —
+    // excluding it via the row's context menu — instead of a bare technical
+    // error that looks identical for a real, recoverable failure.
     throw BackendError.managedRouteUnavailable(
-      "Unable to resolve active Core Audio process objects for \(app.displayName)."
+      "\(app.displayName) doesn't appear to produce audio, so Waves can't create a managed route for it. "
+        + "If this app never plays sound, right-click its row and choose “Exclude from Waves” to stop this warning."
     )
   }
 
@@ -1805,6 +1815,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func handleDeviceChange() async {
+    // Always re-tap managed routes to the new device — this is core "per-app
+    // control keeps working after you switch devices" functionality, not the
+    // optional convenience the "Auto-restore device" preference describes
+    // (restoring each device's *remembered volume level*, handled separately
+    // by AppStore's preferences.autoRestoreDevice-gated restoreDeviceVolumePresets
+    // calls). Skipping this on a real device change would silently leave every
+    // previously-managed app's Core Audio taps disposed-and-not-reattached —
+    // i.e. break per-app volume/mute control entirely — until the user noticed
+    // and manually hit "Recover Routes."
     do {
       _ = try await autoRestoreDevice()
       logger.info("Output device changed, managed routes restored")

@@ -9,6 +9,14 @@ struct UserPreferences: Codable, Sendable {
   var autoPauseMusicForConferencing = true
   var enableKeyboardShortcuts = true
   var enablePerDeviceVolumePresets = true
+  /// Whether switching the default output device should automatically restore
+  /// that device's remembered per-app volumes (when `enablePerDeviceVolumePresets`
+  /// is also on). Does NOT affect route recovery — Waves always re-establishes
+  /// managed Core Audio routes on a device change regardless of this setting;
+  /// that part isn't optional, since disabling it would silently break per-app
+  /// volume/mute control until the user noticed and manually recovered routes.
+  /// Defaults to on to match the existing behavior.
+  var autoRestoreDevice = true
   var enableURLScheme = false
   var urlSchemeAutomationAcknowledged = false
   /// Logical IDs of apps the user has excluded from Waves' management — Waves
@@ -31,6 +39,7 @@ struct UserPreferences: Codable, Sendable {
     case autoPauseMusicForConferencing
     case enableKeyboardShortcuts
     case enablePerDeviceVolumePresets
+    case autoRestoreDevice
     case enableURLScheme
     case urlSchemeAutomationAcknowledged
     case excludedAppIDs
@@ -57,6 +66,7 @@ struct UserPreferences: Codable, Sendable {
     autoPauseMusicForConferencing = value(.autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
     enableKeyboardShortcuts = value(.enableKeyboardShortcuts, defaults.enableKeyboardShortcuts)
     enablePerDeviceVolumePresets = value(.enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
+    autoRestoreDevice = value(.autoRestoreDevice, defaults.autoRestoreDevice)
     enableURLScheme = value(.enableURLScheme, defaults.enableURLScheme)
     urlSchemeAutomationAcknowledged = value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
     excludedAppIDs = value(.excludedAppIDs, defaults.excludedAppIDs)

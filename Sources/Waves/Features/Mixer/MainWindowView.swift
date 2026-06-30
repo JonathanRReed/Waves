@@ -381,7 +381,7 @@ private struct SourceFilterRow: View {
       }
     } icon: {
       Image(systemName: filter.systemImage)
-        .foregroundStyle(filter == .frontmost ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.secondary))
+        .foregroundStyle(WavesDesign.accentOrSecondary(filter == .frontmost))
         .symbolEffect(.variableColor.iterative, isActive: isLive && !reduceMotion)
     }
   }
@@ -726,7 +726,7 @@ private struct OutputSummaryView: View {
             Label(liveSummary, systemImage: "waveform")
               // Drop to primary text under Increase Contrast so the cyan never
               // fails contrast on the .bar header.
-              .foregroundStyle(contrast == .increased ? AnyShapeStyle(Color.primary) : AnyShapeStyle(WavesDesign.accent))
+              .foregroundStyle(contrast == .increased ? Color.primary : WavesDesign.accent)
               // The accent "playing" signal survives truncation over the static count.
               .layoutPriority(1)
           }
@@ -818,10 +818,25 @@ private struct DiagnosticsPanel: View {
   @Environment(AppStore.self) private var store
   @State private var expanded = false
 
+  // Caps how tall the expanded checklist can grow. Without this, expanding
+  // the DisclosureGroup in a long checklist (several failing checks, each
+  // with a two-line description) could ask this VStack's List sibling above
+  // it to shrink toward zero/negative height in the same animated layout
+  // pass — a List (NSTableView-backed) squeezed that hard during a SwiftUI
+  // animation reliably blanks the entire window content, sidebar included,
+  // not just this panel (reproduced: clicking the disclosure with several
+  // checks present collapses the whole NavigationSplitView to nothing, with
+  // no crash/exception logged — a pure AppKit/SwiftUI layout corruption, not
+  // a Swift-level bug). Scrolling past this cap instead of growing forever
+  // keeps the panel's worst-case height bounded and predictable, mirroring
+  // the same height-capped-scroller pattern already used for the menu bar's
+  // app sections (MenuBarMixerView.sectionsScroller).
+  private static let maxExpandedHeight: CGFloat = 220
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      DisclosureGroup(isExpanded: $expanded) {
-        if let diagnostics = store.diagnostics {
+    DisclosureGroup(isExpanded: $expanded) {
+      if let diagnostics = store.diagnostics {
+        ScrollView {
           VStack(alignment: .leading, spacing: 10) {
             Text(diagnostics.summary)
               .font(.caption)
@@ -851,27 +866,28 @@ private struct DiagnosticsPanel: View {
             }
           }
           .padding(.top, 10)
-        } else {
-          Text("Diagnostics not available yet.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.top, 10)
         }
-      } label: {
-        HStack(spacing: 8) {
-          Text("Diagnostics")
-            .font(.callout.weight(.semibold))
-          // A collapsed panel gives no reason to open it; surface a colored count
-          // when a check needs attention so a problem is discoverable at a glance.
-          if let attention = attentionSummary {
-            Text(attention.text)
-              .font(.caption2.weight(.semibold))
-              .foregroundStyle(attention.color)
-              .padding(.horizontal, 6)
-              .padding(.vertical, 1)
-              .background(attention.color.opacity(0.14), in: Capsule())
-              .accessibilityLabel(attention.accessibility)
-          }
+        .frame(maxHeight: Self.maxExpandedHeight)
+      } else {
+        Text("Diagnostics not available yet.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .padding(.top, 10)
+      }
+    } label: {
+      HStack(spacing: 8) {
+        Text("Diagnostics")
+          .font(.callout.weight(.semibold))
+        // A collapsed panel gives no reason to open it; surface a colored count
+        // when a check needs attention so a problem is discoverable at a glance.
+        if let attention = attentionSummary {
+          Text(attention.text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(attention.color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(attention.color.opacity(0.14), in: Capsule())
+            .accessibilityLabel(attention.accessibility)
         }
       }
     }
@@ -891,9 +907,9 @@ private struct DiagnosticsPanel: View {
 
   private func color(for status: DiagnosticsStatus) -> Color {
     switch status {
-    case .passed: .green
-    case .warning: .orange
-    case .failed: .red
+    case .passed: WavesDesign.success
+    case .warning: WavesDesign.warning
+    case .failed: WavesDesign.error
     case .informational: .secondary
     }
   }
