@@ -355,7 +355,6 @@ final class AppStore {
         }
 
         try await backend.start()
-        await backend.setAutoRestoreDeviceEnabled(preferences.autoRestoreDevice)
         startSessionMaintenance()
         let built = await backend.currentSnapshot()
         session = mergedSession(with: built, cached: warmSnapshot)
@@ -366,7 +365,7 @@ final class AppStore {
         // If the active output device at launch has its own tuned per-device
         // preset, apply it now so that device's saved levels win (and aren't
         // ignored until the user manually switches devices).
-        if preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID {
+        if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice, let deviceID = currentDeviceID {
           await restoreDeviceVolumePresets(for: deviceID)
         }
         diagnostics = await backend.diagnosticsReport()
@@ -412,7 +411,7 @@ final class AppStore {
         session = try await backend.refresh()
         invalidateVisibleAppsCache()
         cleanupStaleEntries()
-        if preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID {
+        if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice, let deviceID = currentDeviceID {
           await restoreDeviceVolumePresets(for: deviceID, limitedTo: { !knownAppIDs.contains($0) })
         }
         persistSessionSnapshot()
@@ -1496,13 +1495,14 @@ final class AppStore {
     }
   }
 
-  /// Updates the auto-restore-device preference and threads it to the backend,
-  /// which gates whether its internal device-change handler re-establishes
-  /// managed routes automatically (see WorkspaceAudioControlBackend.handleDeviceChange).
+  /// Updates the auto-restore-device preference. Read directly by
+  /// `performDeviceChangePass`/`start`/`refresh` wherever per-device volume
+  /// presets are restored — the backend itself always re-establishes managed
+  /// routes on a device change regardless of this preference (route recovery
+  /// is core functionality, not the optional convenience this toggle covers).
   func setAutoRestoreDeviceEnabled(_ enabled: Bool) {
     preferences.autoRestoreDevice = enabled
     persistPreferences()
-    Task { await backend.setAutoRestoreDeviceEnabled(enabled) }
   }
 
   func checkAutoPauseMusic() {

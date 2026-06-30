@@ -82,59 +82,44 @@ struct SettingsView: View {
   }
 }
 
-/// The leading sidebar of section names. Fully custom-drawn so the selected
-/// row's highlight is guaranteed to be `WavesDesign.accent`, never delegated to
-/// a native list/tab control that reads the system accent color instead.
+/// The leading sidebar of section names. A native `List(selection:)` — exactly
+/// the mechanism MainWindowView's own sidebar uses — so arrow-key navigation,
+/// VoiceOver row/selection semantics, and standard focus traversal all come
+/// for free from the system, while the row's own icon/label colors stay
+/// concrete `Color` values (never a hierarchical style erased through
+/// `AnyShapeStyle`, see the note in DesignSystem.swift) so the selected state
+/// is always `WavesDesign.accent`, never the system accent color.
 private struct SettingsSidebar: View {
   @Binding var selection: SettingsPane
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 2) {
+    List(selection: $selection) {
       ForEach(SettingsPane.allCases) { pane in
-        SettingsSidebarRow(pane: pane, isSelected: selection == pane) {
-          selection = pane
-        }
+        SettingsSidebarRow(pane: pane, isSelected: selection == pane)
+          .tag(pane)
       }
-      Spacer(minLength: 0)
     }
-    .padding(10)
-    .frame(maxHeight: .infinity, alignment: .top)
+    .listStyle(.sidebar)
+    // Let the WavesBackground() gradient behind the whole window show through,
+    // same as SettingsForm's grouped Form elsewhere in this file, instead of
+    // List's own opaque system list background.
+    .scrollContentBackground(.hidden)
   }
 }
 
 private struct SettingsSidebarRow: View {
   let pane: SettingsPane
   let isSelected: Bool
-  let action: () -> Void
 
   var body: some View {
-    Button(action: action) {
-      HStack(spacing: 8) {
-        Image(systemName: pane.symbol)
-          .frame(width: 18)
-          // Concrete Color on both arms — never wrap `.secondary` in
-          // AnyShapeStyle next to a concrete color (see DesignSystem.swift);
-          // that erasure silently falls back to the system accent color.
-          .foregroundStyle(isSelected ? WavesDesign.accent : Color.secondary)
-        Text(pane.title)
-          .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-        Spacer(minLength: 0)
-      }
-      .padding(.horizontal, 10)
-      .padding(.vertical, 6)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .background(
-        RoundedRectangle(cornerRadius: WavesDesign.chipCornerRadius, style: .continuous)
-          .fill(isSelected ? WavesDesign.accent.opacity(0.16) : Color.clear)
-      )
+    Label {
+      Text(pane.title)
+        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+    } icon: {
+      Image(systemName: pane.symbol)
+        .foregroundStyle(WavesDesign.accentOrSecondary(isSelected))
     }
-    .buttonStyle(.plain)
-    .contentShape(Rectangle())
-    // The native TabView this replaced announced "tab, N of 6" for free;
-    // restore equivalent VoiceOver discoverability on the custom row.
-    .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     .accessibilityLabel("\(pane.title) settings")
-    .accessibilityHint(isSelected ? "" : "Shows \(pane.title) settings.")
   }
 }
 
@@ -397,7 +382,17 @@ private struct DiagnosticsSettingsView: View {
       }
     }
     .onAppear {
-      store.refreshDiagnostics()
+      // Settings panes are now switched by destroying/recreating view identity
+      // (see SettingsView.paneContent), not by a native TabView that keeps
+      // inactive tabs alive — so onAppear fires every time this pane is
+      // revisited, not just once. Diagnostics already has its own explicit
+      // "Refresh Diagnostics" action for re-probing on demand, so only
+      // auto-refresh the first time there's nothing to show yet; don't redo
+      // the backend snapshot rebuild + capture-permission re-probe on every
+      // tab click.
+      if store.diagnostics == nil {
+        store.refreshDiagnostics()
+      }
     }
   }
 }

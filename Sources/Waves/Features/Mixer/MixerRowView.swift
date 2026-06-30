@@ -289,7 +289,7 @@ struct CompactMixerRow: View {
       } label: {
         Image(systemName: app.isPinned ? "pin.fill" : "pin")
           .font(.caption)
-          .foregroundStyle(app.isPinned ? WavesDesign.accent : WavesDesign.tertiaryColor)
+          .foregroundStyle(WavesDesign.accentOrTertiary(app.isPinned))
           .frame(width: 22, height: 22)
           .contentShape(Rectangle())
       }
@@ -462,7 +462,7 @@ private struct BoostMenu: View {
       // the app is actually boosted, so a glance finds the boosted rows.
       Text("\(Int(app.volumeBoost))x")
         .font(.caption.monospacedDigit().weight(isBoosted ? .semibold : (compact ? .regular : .medium)))
-        .foregroundStyle(isBoosted ? WavesDesign.accent : WavesDesign.tertiaryColor)
+        .foregroundStyle(WavesDesign.accentOrTertiary(isBoosted))
         .lineLimit(1)
         .minimumScaleFactor(0.7)
         // Match the adjacent mute/pin buttons' 22pt minimum compact tap target —
