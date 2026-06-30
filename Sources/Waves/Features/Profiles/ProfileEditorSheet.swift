@@ -300,7 +300,7 @@ private struct AppCheckRow: View {
         Spacer()
 
         Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-          .foregroundStyle(isOn ? WavesDesign.accent : WavesDesign.tertiaryColor)
+          .foregroundStyle(WavesDesign.accentOrTertiary(isOn))
           .font(.title3)
       }
       .padding(.horizontal, 12)

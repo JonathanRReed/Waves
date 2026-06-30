@@ -21,11 +21,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let staleRouteLevelThreshold: Float = 0.0005
   private var deviceChangeListenerToken: UInt32 = 0
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
-  // Gates whether handleDeviceChange() actually calls autoRestoreDevice() on a
-  // default-output-device change. Defaults to true (existing behavior); the
-  // store flips this to match UserPreferences.autoRestoreDevice at startup and
-  // whenever the user toggles the "Auto-restore device" setting.
-  private var autoRestoreDeviceEnabled = true
   private let logger = Logger(subsystem: "com.waves.backend", category: "AudioBackend")
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
@@ -283,10 +278,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     return snapshot
-  }
-
-  func setAutoRestoreDeviceEnabled(_ enabled: Bool) async {
-    autoRestoreDeviceEnabled = enabled
   }
 
   func diagnosticsReport() async -> DiagnosticsReport {
@@ -1814,19 +1805,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func handleDeviceChange() async {
-    // Auto-restore-device opt-out: when disabled, skip re-tapping every managed
-    // app's route on a device change. The deviceChangeEvents emission below
-    // still fires unconditionally, so the store can refresh read-only state
-    // (current device, device list) — it independently gates per-device volume
-    // preset restoration on this same preference.
-    if autoRestoreDeviceEnabled {
-      do {
-        _ = try await autoRestoreDevice()
-        logger.info("Output device changed, managed routes restored")
-      } catch {
-        refreshGlobalRouteHealth(latestError: error.localizedDescription)
-        logger.error("Output device change recovery failed: \(error.localizedDescription)")
-      }
+    // Always re-tap managed routes to the new device — this is core "per-app
+    // control keeps working after you switch devices" functionality, not the
+    // optional convenience the "Auto-restore device" preference describes
+    // (restoring each device's *remembered volume level*, handled separately
+    // by AppStore's preferences.autoRestoreDevice-gated restoreDeviceVolumePresets
+    // calls). Skipping this on a real device change would silently leave every
+    // previously-managed app's Core Audio taps disposed-and-not-reattached —
+    // i.e. break per-app volume/mute control entirely — until the user noticed
+    // and manually hit "Recover Routes."
+    do {
+      _ = try await autoRestoreDevice()
+      logger.info("Output device changed, managed routes restored")
+    } catch {
+      refreshGlobalRouteHealth(latestError: error.localizedDescription)
+      logger.error("Output device change recovery failed: \(error.localizedDescription)")
     }
     // Notify observers (the store) so they can refresh UI state and restore
     // per-device volume presets, regardless of whether restoration succeeded.

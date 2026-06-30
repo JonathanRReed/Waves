@@ -381,7 +381,7 @@ private struct SourceFilterRow: View {
       }
     } icon: {
       Image(systemName: filter.systemImage)
-        .foregroundStyle(filter == .frontmost ? WavesDesign.accent : Color.secondary)
+        .foregroundStyle(WavesDesign.accentOrSecondary(filter == .frontmost))
         .symbolEffect(.variableColor.iterative, isActive: isLive && !reduceMotion)
     }
   }

@@ -143,10 +143,6 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     return snapshot
   }
 
-  // The preview backend has no real device-change listener to gate, so this is
-  // a no-op kept only to satisfy the protocol.
-  public func setAutoRestoreDeviceEnabled(_ enabled: Bool) async {}
-
   public func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {
     // No real audio routes in the preview backend.
   }
