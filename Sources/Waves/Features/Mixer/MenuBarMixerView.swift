@@ -36,7 +36,13 @@ struct MenuBarMixerView: View {
               .strokeBorder(WavesDesign.stroke)
           )
 
-        OutputDevicePicker()
+        // Output device and profile pickers are the two most-used quick
+        // controls, so they sit as a tight cluster (Control Center groups
+        // related compact rows close together, not with full section spacing).
+        VStack(spacing: 6) {
+          OutputDevicePicker()
+          ProfileQuickPicker()
+        }
 
         if store.isLoading {
           HStack(spacing: 8) {
@@ -49,8 +55,6 @@ struct MenuBarMixerView: View {
           .accessibilityElement(children: .combine)
           .accessibilityLabel("Refreshing audio sessions, in progress")
         }
-
-        ProfileQuickPicker()
 
         sectionsScroller
 
@@ -65,6 +69,12 @@ struct MenuBarMixerView: View {
         .padding(.trailing, 10)
         .frame(maxWidth: WavesDesign.menuBarPanelWidth - 40)
     }
+    // `.menuBarExtraStyle(.window)` gives this popover raw system vibrancy
+    // with no tint of its own, unlike the Settings/Onboarding windows (which
+    // both sit on WavesBackground()) — without this, whatever's behind the
+    // popover on the user's desktop (wallpaper, another window) shows through
+    // as an uncontrolled color blob instead of the app's calm dark backdrop.
+    .background(WavesBackground())
     .task {
       store.start()
     }
@@ -199,8 +209,8 @@ private struct MenuBarHeader: View {
           // fall back to primary text there (mirrors RoutingStateIndicator).
           .foregroundStyle(
             store.hasLiveAudio
-              ? AnyShapeStyle(contrast == .increased ? Color.primary : WavesDesign.accent)
-              : AnyShapeStyle(.secondary)
+              ? (contrast == .increased ? Color.primary : WavesDesign.accent)
+              : Color.secondary
           )
           .lineLimit(1)
           .contentTransition(.numericText())
@@ -213,8 +223,10 @@ private struct MenuBarHeader: View {
       } label: {
         Image(systemName: "arrow.clockwise")
           .font(.callout)
+          .frame(width: 22, height: 22)
       }
       .buttonStyle(.borderless)
+      .clipShape(Circle())
       .accessibilityLabel("Refresh app list")
       .help("Refresh the app list")
       .keyboardShortcut("r", modifiers: [.command])
@@ -269,8 +281,11 @@ private struct OutputDevicePicker: View {
           .foregroundStyle(.secondary)
       }
       .font(.caption)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 7)
     }
     .menuStyle(.borderlessButton)
+    .wavesCard()
     .accessibilityLabel("Output device")
     .accessibilityValue(store.currentDeviceName)
     .help("Switch the system output device")
@@ -309,8 +324,11 @@ private struct ProfileQuickPicker: View {
           .foregroundStyle(.secondary)
       }
       .font(.caption)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 7)
     }
     .menuStyle(.borderlessButton)
+    .wavesCard()
     .accessibilityLabel("Profile")
     .accessibilityValue(activeProfileName)
     .help("Switch profile")
@@ -342,7 +360,10 @@ private struct CompactSection: View {
           trailing: AnyView(
             Text("\(apps.count)")
               .font(.caption2.weight(.semibold).monospacedDigit())
-              .foregroundStyle(.tertiary)
+              .foregroundStyle(WavesDesign.tertiaryColor)
+              .padding(.horizontal, 6)
+              .padding(.vertical, 1)
+              .background(Color.secondary.opacity(0.15), in: Capsule())
           )
         )
 

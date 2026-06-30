@@ -43,6 +43,37 @@ enum WavesDesign {
   /// in one place rather than hard-coded at each call site.
   static let success = Color.green
 
+  /// Concrete (non-hierarchical) stand-in for `.tertiary`. Use this — never
+  /// `AnyShapeStyle(.tertiary)` — wherever a tertiary tone sits in a ternary
+  /// alongside a concrete accent color. `AnyShapeStyle` erases a hierarchical
+  /// style's resolution context (it needs to know the current foreground to
+  /// compute its opacity), and the erased fallback resolves against
+  /// `NSColor.controlAccentColor` — the user's *system* accent-color
+  /// preference, not Waves' cyan signal color. That is how a non-blue system
+  /// accent (e.g. Red) silently bleeds into icons that read `.secondary` /
+  /// `.tertiary` in source. `Color.secondary` is already a concrete `Color`
+  /// and is safe to use directly; `.tertiary` has no built-in `Color`
+  /// equivalent, hence this token. Same rule applies to any future hierarchical
+  /// style (`.quaternary`, etc.) used this way.
+  static let tertiaryColor = Color(nsColor: .tertiaryLabelColor)
+
+  /// The standard "is this the active/selected one?" color choice used all
+  /// over the app (sidebar icons, boost/pin indicators, status text): accent
+  /// when active, a quiet neutral otherwise. Prefer this over hand-writing
+  /// `isActive ? AnyShapeStyle(accent) : AnyShapeStyle(.secondary)` — that
+  /// spelling is the exact pattern that caused the system-accent-color bleed
+  /// documented on `tertiaryColor` above. Calling this function instead of
+  /// writing the ternary by hand means the safe form is also the easy form.
+  static func accentOrSecondary(_ isActive: Bool) -> Color {
+    isActive ? accent : Color.secondary
+  }
+
+  /// As `accentOrSecondary`, but for the rarer case where the inactive state
+  /// should read as tertiary (more recessive) rather than secondary.
+  static func accentOrTertiary(_ isActive: Bool) -> Color {
+    isActive ? accent : tertiaryColor
+  }
+
   // MARK: Strokes
 
   static let stroke = Color.white.opacity(0.09)

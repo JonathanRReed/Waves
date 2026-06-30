@@ -31,6 +31,14 @@ struct WavesApp: App {
       MainWindowView()
         .environment(store)
         .frame(minWidth: 980, minHeight: 620)
+        // Applied at the scene root (above NavigationSplitView's sidebar list and
+        // any toolbar/segmented chrome) so Waves' cyan signal accent wins over the
+        // user's *system* accent-color preference everywhere AppKit auto-tints
+        // "selectable" chrome (sidebar icons, toolbar item highlights). Without
+        // this, a non-blue system accent (e.g. Red) bleeds into sidebar icons that
+        // are explicitly styled `.secondary` in SwiftUI — the system accent wins
+        // at the AppKit bridging layer for that one specific effect.
+        .tint(WavesDesign.accent)
         .task {
           appDelegate.setStore(store)
           store.start()
@@ -72,6 +80,7 @@ struct WavesApp: App {
       MenuBarMixerView()
         .environment(store)
         .frame(width: WavesDesign.menuBarPanelWidth)
+        .tint(WavesDesign.accent)
         .accessibilityLabel(Text(menuBarAccessibilityLabel))
     }
     .menuBarExtraStyle(.window)
@@ -124,6 +133,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @objc private func keyboardShortcutsPreferenceChanged() {
     updateGlobalHotkeysState()
+  }
+
+  // Login-item status can go stale: if the user enables/disables "Open at
+  // Login" from System Settings (not from inside Waves) while Waves is
+  // running, the in-app toggle doesn't notice on its own. Re-sync from the
+  // system every time Waves becomes active — cheap (a single SMAppService
+  // status read) and covers the common case of the user returning from
+  // System Settings after changing it there.
+  func applicationDidBecomeActive(_ notification: Notification) {
+    store?.reconcileLoginItemStatus()
   }
 
   /// Installs the system-wide key monitor only while the user has keyboard
