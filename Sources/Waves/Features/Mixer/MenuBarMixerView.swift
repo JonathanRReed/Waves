@@ -69,6 +69,12 @@ struct MenuBarMixerView: View {
         .padding(.trailing, 10)
         .frame(maxWidth: WavesDesign.menuBarPanelWidth - 40)
     }
+    // `.menuBarExtraStyle(.window)` gives this popover raw system vibrancy
+    // with no tint of its own, unlike the Settings/Onboarding windows (which
+    // both sit on WavesBackground()) — without this, whatever's behind the
+    // popover on the user's desktop (wallpaper, another window) shows through
+    // as an uncontrolled color blob instead of the app's calm dark backdrop.
+    .background(WavesBackground())
     .task {
       store.start()
     }

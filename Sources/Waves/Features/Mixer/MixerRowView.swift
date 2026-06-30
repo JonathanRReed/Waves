@@ -307,6 +307,12 @@ struct CompactMixerRow: View {
       Text(app.displayName)
         .font(.caption.weight(.medium))
         .lineLimit(1)
+        // Without this, an ordinary 7-8 character name (e.g. "CodexBar")
+        // truncates to "Codex…" — the row's fixed-width trailing controls
+        // (slider/percent/boost/mute) already claim most of the panel's
+        // fixed 400pt width, so the name needs priority over Spacer() to get
+        // its fair share before SwiftUI starts compressing it.
+        .layoutPriority(1)
 
       if isExcluded {
         Text("Excluded")
