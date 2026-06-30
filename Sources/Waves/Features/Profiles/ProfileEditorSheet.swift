@@ -257,16 +257,12 @@ struct ProfileEditorSheet: View {
     // "com.spotify.client"). Far more reliable than guessing from the bundle
     // ID's shape: the naive "last dot-component, capitalized" fallback below
     // turns those into "XOS" and "Client" — wrong on the very first profile a
-    // new user sees.
-    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id),
-       let bundle = Bundle(url: url) {
-      if let displayName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String,
-         !displayName.isEmpty {
-        return displayName
-      }
-      if let name = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String, !name.isEmpty {
-        return name
-      }
+    // new user sees. Cached (FriendlyNameCache) because this view's body
+    // re-evaluates on every keystroke in the name field, and an uncached
+    // lookup would re-hit Launch Services for every offline member on every
+    // keystroke.
+    if let cached = FriendlyNameCache.name(forBundleID: id) {
+      return cached
     }
     // Last resort, for an app that isn't installed at all: the last
     // dot-component of the bundle id (e.g. "com.tinyspeck.slackmacgap" →
@@ -285,6 +281,33 @@ struct ProfileEditorSheet: View {
       captureLevels: captureLevels
     )
     dismiss()
+  }
+}
+
+/// Caches Launch Services name lookups so `friendlyName(for:)` doesn't re-hit
+/// `NSWorkspace`/`Bundle` on every SwiftUI body re-evaluation — which happens
+/// on every keystroke in the profile name field, since `name` and `appPicker`
+/// live in the same view body. Mirrors `AppIconCache` in MixerRowView.swift.
+@MainActor
+private enum FriendlyNameCache {
+  private static var storage: [String: String] = [:]
+
+  static func name(forBundleID id: String) -> String? {
+    if let cached = storage[id] {
+      return cached
+    }
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id),
+          let bundle = Bundle(url: url)
+    else { return nil }
+
+    let resolved = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+      .flatMap { $0.isEmpty ? nil : $0 }
+      ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+      .flatMap { $0.isEmpty ? nil : $0 }
+
+    guard let resolved else { return nil }
+    storage[id] = resolved
+    return resolved
   }
 }
 
