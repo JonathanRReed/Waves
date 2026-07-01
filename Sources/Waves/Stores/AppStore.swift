@@ -33,6 +33,15 @@ final class AppStore {
   /// re-focus that profile even when `activeProfileID` is unchanged (e.g.
   /// re-applying the already-active profile from the menu bar).
   private(set) var profileFocusToken = 0
+  /// The source scope the menu bar's "N more in Waves" overflow link last
+  /// asked the main window to show (e.g. tapping "13 more" under Recent).
+  /// Paired with `sourceFocusToken` (bumped on every request, even a repeat
+  /// of the same filter) using the same pattern as `profileFocusToken` —
+  /// without this, opening the main window from that link could land on
+  /// whatever scope the window happened to be on, not the apps the user was
+  /// actually trying to see.
+  private(set) var sourceFocusRequest: SourceFilter?
+  private(set) var sourceFocusToken = 0
   var onboarding = OnboardingState()
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
@@ -1673,6 +1682,15 @@ final class AppStore {
   private func focusProfile(_ id: UUID) {
     activeProfileID = id
     profileFocusToken &+= 1
+  }
+
+  /// Signals the main window to switch to `filter`'s scope. Called by the
+  /// menu bar's "N more in Waves" overflow link right before it opens the
+  /// main window, so the window actually shows the apps the link promised
+  /// instead of whatever scope it happened to already be on.
+  func focusSource(_ filter: SourceFilter) {
+    sourceFocusRequest = filter
+    sourceFocusToken &+= 1
   }
 
   /// Creates or updates a profile from a chosen set of apps. When `captureLevels`

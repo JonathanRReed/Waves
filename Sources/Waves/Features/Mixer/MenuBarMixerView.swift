@@ -98,13 +98,13 @@ struct MenuBarMixerView: View {
     return ScrollView {
       VStack(alignment: .leading, spacing: 14) {
         if !store.pinnedApps.isEmpty {
-          CompactSection(title: "Pinned", systemImage: "pin.fill", apps: store.pinnedApps)
+          CompactSection(title: "Pinned", systemImage: "pin.fill", apps: store.pinnedApps, focusFilter: .pinned)
         }
 
-        CompactSection(title: "Live", systemImage: "waveform", apps: liveApps)
+        CompactSection(title: "Live", systemImage: "waveform", apps: liveApps, focusFilter: .frontmost)
 
         if store.preferences.showRecentApps {
-          CompactSection(title: "Recent", systemImage: "clock", apps: recentApps, maxVisible: 3)
+          CompactSection(title: "Recent", systemImage: "clock", apps: recentApps, maxVisible: 3, focusFilter: .recent)
         }
 
         if !store.isLoading && isEmpty {
@@ -344,12 +344,17 @@ private struct ProfileQuickPicker: View {
 }
 
 private struct CompactSection: View {
+  @Environment(AppStore.self) private var store
   @Environment(\.openWindow) private var openWindow
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let title: String
   var systemImage: String?
   let apps: [AudioApp]
   var maxVisible: Int = 4
+  /// The scope this section corresponds to in the main window's sidebar, so
+  /// "N more in Waves" can ask the window to switch there instead of leaving
+  /// it on whatever scope it already happened to be showing.
+  var focusFilter: SourceFilter?
 
   var body: some View {
     if !apps.isEmpty {
@@ -392,6 +397,9 @@ private struct CompactSection: View {
 
         if apps.count > maxVisible {
           Button {
+            if let focusFilter {
+              store.focusSource(focusFilter)
+            }
             openWindow(id: AppSceneID.mainWindow)
             NSApp.activate(ignoringOtherApps: true)
           } label: {

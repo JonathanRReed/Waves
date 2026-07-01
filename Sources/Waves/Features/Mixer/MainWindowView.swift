@@ -124,6 +124,15 @@ struct MainWindowView: View {
         selection = .profile(id)
       }
     }
+    .onChange(of: store.sourceFocusToken) { _, _ in
+      // The menu bar's "N more in Waves" overflow link asked to show a specific
+      // scope (Pinned/Live/Recent) right before opening this window — honor it,
+      // so the window shows the apps the link promised instead of whatever
+      // scope it happened to already be on.
+      if let filter = store.sourceFocusRequest {
+        selection = .source(filter)
+      }
+    }
     .onDisappear { store.endLiveLevels() }
   }
 
