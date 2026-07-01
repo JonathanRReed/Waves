@@ -264,6 +264,25 @@ final class AppStore {
     return Float(tanh(1.6 * perceptual))
   }
 
+  /// Per-app live contributions for the header visualizer's superposition
+  /// rendering — each currently-playing app's identity plus its perceptual
+  /// level, capped to the loudest few so the band stays legible. Follows the
+  /// same real-signal rule as `mixedAudioLevel` (isLive, no linger) so every
+  /// component wave genuinely fades out when its app goes quiet, and the same
+  /// nominal floor for audible-but-unmetered `.live` apps.
+  var waveComponents: [WaveComponent] {
+    var components: [WaveComponent] = []
+    for app in visibleApps where !app.isMuted && isLive(app) {
+      let measured = liveLevels[app.logicalID].map { Double(max($0.rms, $0.peak * 0.8)) } ?? 0
+      // A slightly higher nominal floor than mixedAudioLevel's: an audible
+      // but unmetered app should still ripple visibly in the showcase band.
+      let level = measured > 0.001 ? measured : 0.18
+      components.append(WaveComponent(id: app.logicalID, level: min(1, pow(level, 0.5))))
+    }
+    guard components.count > 6 else { return components }
+    return Array(components.sorted { $0.level > $1.level }.prefix(6))
+  }
+
   var recentApps: [AudioApp] {
     guard preferences.showRecentApps else { return [] }
     // Recent = visible apps that are neither live nor pinned, so an app never

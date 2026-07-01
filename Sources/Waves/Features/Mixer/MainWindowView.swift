@@ -445,9 +445,10 @@ private struct SourceListView: View {
         OutputSummaryView(scope: scope, visibleCount: apps.count, isSearching: isSearching)
       }
 
-      // The live "mixed waves" band: the combined audio energy of everything
-      // playing, on a solid content surface beneath the header.
-      HeaderWaveform(height: 34)
+      // The live "mixed waves" band: every playing app as a thin component
+      // wave summing into the bright mixed wave, on a solid content surface
+      // beneath the header.
+      HeaderWaveform(height: 48)
         .padding(.horizontal, 18)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity)

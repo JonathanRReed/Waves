@@ -19,11 +19,12 @@ struct MenuBarMixerView: View {
         // pickers stay put while only the app sections below scroll.
         MenuBarHeader()
 
-        // The "mixed waves" band — a live visualization of the combined audio
-        // energy of everything currently playing. Quiet when silent, alive when
-        // sound is flowing. Rendered on a solid content surface (not glass) per
-        // Apple's material guidance for real-time graphics.
-        HeaderWaveform(height: 40)
+        // The "mixed waves" band — live superposition: every playing app is a
+        // thin wave, and the bright wave is their literal sum. Quiet when
+        // silent, alive when sound is flowing. Rendered on a solid content
+        // surface (not glass) per Apple's material guidance for real-time
+        // graphics.
+        HeaderWaveform(height: 56)
           .padding(.horizontal, 4)
           .padding(.vertical, 6)
           .frame(maxWidth: .infinity)
