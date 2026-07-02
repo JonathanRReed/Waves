@@ -9,21 +9,24 @@ on:
 jobs:
   build-test:
     name: Build, test, and package
-    # Pin to macos-14 so the macOS 14.2 deployment target is actually exercised
-    # rather than masked by a newer SDK on macos-latest.
-    runs-on: macos-14
+    # Needs an Xcode whose SDK actually ships macOS 26 (the Liquid Glass APIs
+    # in GlassEffects.swift are gated behind `if #available(macOS 26, *)`, but
+    # that's a RUNTIME check — the compiler still must resolve those symbols
+    # against its SDK, which macos-14's Xcode lineup (topping out around
+    # Xcode 16 / macOS 15 SDK) can't do, regardless of build settings).
+    # macos-26 is GA and its Xcode 26.x line has that SDK. This does NOT relax
+    # the macOS 14.2 minimum: that's enforced by Package.swift's `platforms`
+    # declaration and checked by the compiler on every OS build machine, old
+    # or new — the build-machine OS was never what exercised that floor.
+    runs-on: macos-26
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # The macos-14 image's default-selected Xcode ships Swift 5.10, but
-      # Package.swift declares swift-tools-version 6.0 (needed for the
-      # concurrency features used throughout AppStore/WorkspaceAudioControlBackend).
-      # Select the newest Xcode actually installed on the runner rather than a
-      # hardcoded version, so this doesn't silently rot as the runner image's
-      # bundled Xcodes change — it targets macOS 14.2 (Package.swift's
-      # platforms) regardless of which Xcode does the building.
+      # Belt-and-suspenders: pick the newest Xcode actually on the runner
+      # rather than trusting the image's default selection, so a future image
+      # bump can't silently regress this to an older bundled Xcode again.
       - name: Select latest available Xcode
         run: |
           LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
