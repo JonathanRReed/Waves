@@ -1828,6 +1828,20 @@ final class AppStore {
     sourceFocusToken &+= 1
   }
 
+  /// Reads and clears `sourceFocusRequest` so it applies at most once. Needed
+  /// because the token/request are set *before* `openWindow` — when the main
+  /// window was already closed, that call creates a brand-new `MainWindowView`
+  /// whose `.onChange(of: sourceFocusToken)` starts observing only after the
+  /// bump already happened, so it never fires for that request. The new view's
+  /// `.onAppear` calls this instead to pick up the still-pending request; a
+  /// window that was already open and alive gets it via the `onChange` path.
+  /// Clearing on read prevents either path from re-applying a stale request on
+  /// some later, unrelated reopen.
+  func consumeSourceFocusRequest() -> SourceFilter? {
+    defer { sourceFocusRequest = nil }
+    return sourceFocusRequest
+  }
+
   /// Creates or updates a profile from a chosen set of apps. When `captureLevels`
   /// is true, each app's current volume/mute/boost is baked into its entry;
   /// otherwise the entries are membership-only (a pure grouping). Pass an `id`
@@ -2198,6 +2212,16 @@ final class AppStore {
   /// audible background app no longer steals the hotkey from a silent focused one.
   private func frontmostManagedApp() -> AudioApp? {
     let frontmost = NSWorkspace.shared.frontmostApplication
+    // The local hotkey monitor (unlike the global-only one it replaced) can
+    // now fire while Waves' own mixer/Settings window is frontmost. There is
+    // no single "the app the user is working in" in that case — falling
+    // through to the activeApps/visibleApps.first fallback below would
+    // silently act on an arbitrary row instead of the one the user actually
+    // has in view. Do nothing instead, matching the pre-local-monitor
+    // behavior for this specific case.
+    guard frontmost?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+      return nil
+    }
     let bundleID = frontmost?.bundleIdentifier
     let pid = frontmost?.processIdentifier
     if bundleID != nil || pid != nil {

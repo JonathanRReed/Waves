@@ -50,6 +50,21 @@ import Testing
   #expect(samples[3] == 1.0)
 }
 
+@Test func float32ScalingSilencesNonFiniteSamplesAtUnityGain() {
+  // Regression: sanitization must not be skipped by the gain == 1.0 fast
+  // path — 100% volume with no boost is the *default* configuration, not an
+  // edge case, so a NaN/Inf sample here must still be silenced rather than
+  // passing straight through to the output device.
+  var samples: [Float] = [Float.nan, Float.infinity, -Float.infinity, 0.123]
+  samples.withUnsafeMutableBytes { raw in
+    TapDSP.scale(raw.baseAddress!, byteCount: raw.count, format: .float32, gain: 1.0)
+  }
+  #expect(samples[0] == 0)
+  #expect(samples[1] == 0)
+  #expect(samples[2] == 0)
+  #expect(samples[3] == 0.123)
+}
+
 // MARK: - Integer saturation
 
 @Test func int16ScalingSaturatesInsteadOfOverflowing() {

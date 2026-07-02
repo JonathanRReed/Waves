@@ -17,15 +17,19 @@ public enum TapSampleFormat: Sendable {
 public enum TapDSP {
   /// Scales `byteCount` bytes of interleaved samples in place by `gain`,
   /// clamping to each format's valid range so boost cannot emit out-of-range
-  /// samples that clip harshly downstream. A gain of exactly 1.0 is a no-op.
+  /// samples that clip harshly downstream. A gain of exactly 1.0 leaves every
+  /// finite sample bit-for-bit unchanged — but float32 buffers are still
+  /// scanned at unity gain, because the non-finite-sample sanitization below
+  /// must run unconditionally: the caller has already `memcpy`'d the input
+  /// straight into the output buffer before this call, and 100% volume with
+  /// no boost (gain == 1.0) is the default, most common configuration, not
+  /// an edge case worth skipping.
   public static func scale(
     _ data: UnsafeMutableRawPointer,
     byteCount: Int,
     format: TapSampleFormat,
     gain: Float
   ) {
-    guard gain != 1.0 else { return }
-
     switch format {
     case .float32:
       let pointer = data.assumingMemoryBound(to: Float.self)
@@ -33,20 +37,24 @@ public enum TapDSP {
       for index in 0..<count {
         let sample = pointer[index]
         // A NaN sample survives the clamp as -1.0 — a full-scale pop. Replace
-        // non-finite input with silence instead.
+        // non-finite input with silence instead, regardless of gain.
         guard sample.isFinite else {
           pointer[index] = 0
           continue
         }
+        guard gain != 1.0 else { continue }
         pointer[index] = min(1.0, max(-1.0, sample * gain))
       }
     case .int16:
+      // Integer samples can't encode NaN/Inf, so unity gain really is a no-op.
+      guard gain != 1.0 else { return }
       let pointer = data.assumingMemoryBound(to: Int16.self)
       let count = byteCount / MemoryLayout<Int16>.size
       for index in 0..<count {
         pointer[index] = scaleSigned16(pointer[index], gain: gain)
       }
     case .int32:
+      guard gain != 1.0 else { return }
       let pointer = data.assumingMemoryBound(to: Int32.self)
       let count = byteCount / MemoryLayout<Int32>.size
       for index in 0..<count {
