@@ -31,6 +31,14 @@ struct WavesApp: App {
       MainWindowView()
         .environment(store)
         .frame(minWidth: 980, minHeight: 620)
+        // Applied at the scene root (above NavigationSplitView's sidebar list and
+        // any toolbar/segmented chrome) so Waves' cyan signal accent wins over the
+        // user's *system* accent-color preference everywhere AppKit auto-tints
+        // "selectable" chrome (sidebar icons, toolbar item highlights). Without
+        // this, a non-blue system accent (e.g. Red) bleeds into sidebar icons that
+        // are explicitly styled `.secondary` in SwiftUI — the system accent wins
+        // at the AppKit bridging layer for that one specific effect.
+        .tint(WavesDesign.accent)
         .task {
           appDelegate.setStore(store)
           store.start()
@@ -61,17 +69,25 @@ struct WavesApp: App {
     Settings {
       SettingsView()
         .environment(store)
-        .frame(minWidth: 720, minHeight: 500)
+        // 500pt was tall enough to satisfy the constraint but not the
+        // content — Help and the longer Audio/Advanced panes opened needing
+        // 4-5 scroll gestures just to read top to bottom, which reads as
+        // cramped rather than "a real Settings window." 640 shows
+        // meaningfully more per screen (closer to System Settings' own
+        // proportions) while still fitting comfortably on a 13" display.
+        .frame(minWidth: 720, minHeight: 640)
     }
 
-    MenuBarExtra(
-      "Waves",
-      systemImage: store.menuBarIconName,
-      isInserted: $showMenuBarExtra
-    ) {
+    MenuBarExtra(isInserted: $showMenuBarExtra) {
       MenuBarMixerView()
         .environment(store)
         .frame(width: WavesDesign.menuBarPanelWidth)
+        .tint(WavesDesign.accent)
+    } label: {
+      // The accessibility label must live on the status-item label itself —
+      // VoiceOver reads this view for the menu-bar item, not the popover
+      // content above.
+      Image(systemName: store.menuBarIconName)
         .accessibilityLabel(Text(menuBarAccessibilityLabel))
     }
     .menuBarExtraStyle(.window)
@@ -99,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private var store: AppStore?
   private var eventMonitor: Any?
+  private var localEventMonitor: Any?
 
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "URLScheme")
 
@@ -124,6 +141,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @objc private func keyboardShortcutsPreferenceChanged() {
     updateGlobalHotkeysState()
+  }
+
+  // Login-item status can go stale: if the user enables/disables "Open at
+  // Login" from System Settings (not from inside Waves) while Waves is
+  // running, the in-app toggle doesn't notice on its own. Re-sync from the
+  // system every time Waves becomes active — cheap (a single SMAppService
+  // status read) and covers the common case of the user returning from
+  // System Settings after changing it there.
+  func applicationDidBecomeActive(_ notification: Notification) {
+    store?.reconcileLoginItemStatus()
   }
 
   /// Installs the system-wide key monitor only while the user has keyboard
@@ -176,7 +203,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private func setupGlobalHotkeys() {
     guard eventMonitor == nil else { return }
     eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-      self?.handleGlobalKeyEvent(event)
+      _ = self?.handleGlobalKeyEvent(event)
+    }
+    // Global monitors never see events while Waves itself is frontmost, so a
+    // local monitor covers the hotkeys with the mixer/Settings focused.
+    // Returning nil consumes a handled event, keeping ⌘⌥M from also firing
+    // the Window menu's "Minimize All".
+    localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+      if self?.handleGlobalKeyEvent(event) == true {
+        return nil
+      }
+      return event
     }
   }
 
@@ -185,32 +222,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       NSEvent.removeMonitor(monitor)
       eventMonitor = nil
     }
+    if let monitor = localEventMonitor {
+      NSEvent.removeMonitor(monitor)
+      localEventMonitor = nil
+    }
   }
 
-  private func handleGlobalKeyEvent(_ event: NSEvent) {
+  /// Returns `true` when the event matched a Waves hotkey and was acted on.
+  private func handleGlobalKeyEvent(_ event: NSEvent) -> Bool {
     guard let store = store,
-          store.preferences.enableKeyboardShortcuts else { return }
+          store.preferences.enableKeyboardShortcuts else { return false }
 
     // Check if user is typing in a text field
     if let focusedElement = NSApp.keyWindow?.firstResponder,
        focusedElement.isKind(of: NSTextView.self) || focusedElement.isKind(of: NSTextField.self) {
-      return
+      return false
     }
 
     let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    // `contains` (not equality) because the arrow keys carry .function/
+    // .numericPad flags; .control/.shift are excluded so third-party chords
+    // like ⌃⌥⌘↓ don't also trigger Waves.
     let isCmdOption = modifiers.contains(.command) && modifiers.contains(.option)
+      && !modifiers.contains(.control) && !modifiers.contains(.shift)
 
-    guard isCmdOption else { return }
+    guard isCmdOption else { return false }
 
     switch event.keyCode {
     case 126: // Up arrow
       store.increaseVolumeForFrontmostApp()
+      return true
     case 125: // Down arrow
       store.decreaseVolumeForFrontmostApp()
+      return true
     case 46: // M key
       store.toggleMuteForFrontmostApp()
+      return true
     default:
-      break
+      return false
     }
   }
 

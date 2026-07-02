@@ -21,7 +21,26 @@ public enum AppDiscoveryPolicy {
       return String(sanitizedBundleID)
     }
 
-    return normalizedName.isEmpty ? "unknown-app" : "name-\(normalizedName)"
+    if !normalizedName.isEmpty {
+      return "name-\(normalizedName)"
+    }
+
+    // Names with no ASCII alphanumerics (e.g. CJK-only process names) normalize
+    // to empty; hashing the raw name keeps such apps distinct so persisted
+    // volume/mute for one is never restored onto another. Only a genuinely
+    // empty name falls back to the shared "unknown-app" id.
+    let trimmedName = sanitizedDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedName.isEmpty else { return "unknown-app" }
+    return "unnamed-\(String(fnv1aHash(trimmedName), radix: 16))"
+  }
+
+  static func fnv1aHash(_ string: String) -> UInt64 {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for byte in string.utf8 {
+      hash ^= UInt64(byte)
+      hash = hash &* 0x0000_0100_0000_01b3
+    }
+    return hash
   }
 
   public static func inferCategory(bundleID: String?, displayName: String) -> AppCategory {
@@ -42,8 +61,11 @@ public enum AppDiscoveryPolicy {
     }
 
     if token.contains("spotify") || token.contains("music") || token.contains("vlc")
-      || token.contains("podcast") || token.contains("tv")
+      || token.contains("podcast") || token.contains("tv") || token.contains("quicktime")
     {
+      // "quicktime" must be classified as media here, before the com.apple.
+      // system fallback below, or the default "hide system processes" filter
+      // hides an actively-playing QuickTime Player.
       return .media
     }
 

@@ -26,6 +26,11 @@ final class DeviceVolumePresetsStore: @unchecked Sendable {
     url = directory.appendingPathComponent("deviceVolumePresets.json")
   }
 
+  /// Set to true the moment `load()` has to back up and discard an unreadable
+  /// presets file. Read-and-cleared by the caller (AppStore) so it can surface
+  /// a one-time "your presets were reset" toast instead of failing silently.
+  private(set) var didRecoverFromCorruptFile = false
+
   func load() -> DeviceVolumePresets {
     return queue.sync {
       // A missing file is the normal first-launch case: return defaults without
@@ -39,6 +44,7 @@ final class DeviceVolumePresetsStore: @unchecked Sendable {
         if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
           logger.error("Volume presets file exceeds size limit: \(fileSize) bytes")
           backupCorruptFile()
+          didRecoverFromCorruptFile = true
           return DeviceVolumePresets()
         }
 
@@ -50,8 +56,19 @@ final class DeviceVolumePresetsStore: @unchecked Sendable {
         // user's saved per-device volumes.
         logger.warning("Failed to load volume presets: \(error.localizedDescription). Preserving file and using defaults.")
         backupCorruptFile()
+        didRecoverFromCorruptFile = true
         return DeviceVolumePresets()
       }
+    }
+  }
+
+  /// Reads and clears `didRecoverFromCorruptFile`, so a caller can check once
+  /// (e.g. right after `load()` at startup) without the flag lingering true
+  /// across later, unrelated reconciliation calls.
+  func consumeDidRecoverFromCorruptFile() -> Bool {
+    queue.sync {
+      defer { didRecoverFromCorruptFile = false }
+      return didRecoverFromCorruptFile
     }
   }
 
@@ -77,5 +94,12 @@ final class DeviceVolumePresetsStore: @unchecked Sendable {
         self.logger.error("Failed to save volume presets: \(error.localizedDescription)")
       }
     }
+  }
+
+  /// Blocks until every write already queued by `save` has completed. For app
+  /// termination only — a change made in the same instant as quit would
+  /// otherwise be lost when the process exits mid-queue.
+  func flush() {
+    queue.sync {}
   }
 }

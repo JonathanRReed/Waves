@@ -111,15 +111,26 @@ if ! is_publication_check_mode; then
     fi
   fi
 
-  BUILD_ARGS=()
-  if [ "$MODE" = "--dmg" ] || [ "$MODE" = "--release-check" ] || [ "$MODE" = "release-check" ] || [ "$MODE" = "--notarize" ] || [ "$MODE" = "notarize" ]; then
-    BUILD_ARGS=(-c release)
-  fi
-
   # Build once and capture the binary path.
-  if ((${#BUILD_ARGS[@]} > 0)); then
-    BUILD_OUTPUT_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
-    swift build "${BUILD_ARGS[@]}"
+  if [ "$MODE" = "--dmg" ] || [ "$MODE" = "--release-check" ] || [ "$MODE" = "release-check" ] || [ "$MODE" = "--notarize" ] || [ "$MODE" = "notarize" ]; then
+    # Distribution builds are universal (Apple Silicon + Intel) to match the
+    # README/cask support claims. Debug `run` stays host-arch for speed.
+    # `swift build --arch arm64 --arch x86_64` requires Xcode's XCBuild, which
+    # Command Line Tools installs lack, so build each slice and lipo them.
+    if ! command -v lipo >/dev/null 2>&1; then
+      echo "Error: lipo is required for universal distribution builds." >&2
+      exit 1
+    fi
+    swift build -c release --triple arm64-apple-macosx
+    swift build -c release --triple x86_64-apple-macosx
+    ARM64_BIN_DIR="$(swift build -c release --triple arm64-apple-macosx --show-bin-path)"
+    X86_64_BIN_DIR="$(swift build -c release --triple x86_64-apple-macosx --show-bin-path)"
+    BUILD_OUTPUT_DIR="$ROOT_DIR/.build/universal/release"
+    mkdir -p "$BUILD_OUTPUT_DIR"
+    lipo -create "$ARM64_BIN_DIR/$APP_NAME" "$X86_64_BIN_DIR/$APP_NAME" -output "$BUILD_OUTPUT_DIR/$APP_NAME"
+    # The resource bundle is architecture-independent; take one slice's copy.
+    rm -rf "$BUILD_OUTPUT_DIR/${APP_NAME}_${APP_NAME}.bundle"
+    cp -R "$ARM64_BIN_DIR/${APP_NAME}_${APP_NAME}.bundle" "$BUILD_OUTPUT_DIR/"
   else
     BUILD_OUTPUT_DIR="$(swift build --show-bin-path)"
     swift build
@@ -136,6 +147,19 @@ if ! is_publication_check_mode; then
     exit 1
   fi
   chmod +x "$APP_BINARY"
+
+  # SwiftPM resource bundle (Bundle.module). Without it the generated accessor
+  # falls back to an absolute path in this machine's .build directory and the
+  # app fatalErrors at launch on every other machine.
+  RESOURCE_BUNDLE="$BUILD_OUTPUT_DIR/${APP_NAME}_${APP_NAME}.bundle"
+  if [ ! -d "$RESOURCE_BUNDLE" ]; then
+    echo "Error: SwiftPM resource bundle not found at $RESOURCE_BUNDLE" >&2
+    exit 1
+  fi
+  if ! cp -R "$RESOURCE_BUNDLE" "$APP_RESOURCES/"; then
+    echo "Error: Failed to copy resource bundle to $APP_RESOURCES" >&2
+    exit 1
+  fi
 
   if [ -f "$LOGO_RESOURCE" ]; then
     if ! cp "$LOGO_RESOURCE" "$APP_RESOURCES/waves-logo.png"; then

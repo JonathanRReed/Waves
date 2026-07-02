@@ -37,6 +37,34 @@ import Testing
   #expect(abs(samples[1] - (-0.2)) < 1e-6)
 }
 
+@Test func float32ScalingSilencesNonFiniteSamples() {
+  // A NaN input sample must not survive the clamp as a -1.0 full-scale pop,
+  // and infinities must not pass through; both become silence.
+  var samples: [Float] = [Float.nan, Float.infinity, -Float.infinity, 0.5]
+  samples.withUnsafeMutableBytes { raw in
+    TapDSP.scale(raw.baseAddress!, byteCount: raw.count, format: .float32, gain: 2.0)
+  }
+  #expect(samples[0] == 0)
+  #expect(samples[1] == 0)
+  #expect(samples[2] == 0)
+  #expect(samples[3] == 1.0)
+}
+
+@Test func float32ScalingSilencesNonFiniteSamplesAtUnityGain() {
+  // Regression: sanitization must not be skipped by the gain == 1.0 fast
+  // path — 100% volume with no boost is the *default* configuration, not an
+  // edge case, so a NaN/Inf sample here must still be silenced rather than
+  // passing straight through to the output device.
+  var samples: [Float] = [Float.nan, Float.infinity, -Float.infinity, 0.123]
+  samples.withUnsafeMutableBytes { raw in
+    TapDSP.scale(raw.baseAddress!, byteCount: raw.count, format: .float32, gain: 1.0)
+  }
+  #expect(samples[0] == 0)
+  #expect(samples[1] == 0)
+  #expect(samples[2] == 0)
+  #expect(samples[3] == 0.123)
+}
+
 // MARK: - Integer saturation
 
 @Test func int16ScalingSaturatesInsteadOfOverflowing() {
@@ -83,6 +111,27 @@ import Testing
   let rms = TapDSP.rms(sum: 0, sampleCount: 0)
   #expect(rms == 0)
   #expect(!rms.isNaN)
+}
+
+@Test func levelsWithNonFiniteSamplesStayFinite() {
+  // NaN/inf samples poison the peak/sum accumulators; the poisoned levels must
+  // come back as 0, never NaN (a NaN level propagates into snapshots and makes
+  // every JSONEncoder session save throw).
+  let samples: [Float] = [0.5, Float.nan, Float.infinity, -0.5]
+  let (peak, sum, count) = samples.withUnsafeBytes { raw in
+    TapDSP.levels(from: raw.baseAddress!, byteCount: raw.count, format: .float32)
+  }
+  #expect(peak == 0)
+  #expect(sum == 0)
+  #expect(count == 4)
+  let rms = TapDSP.rms(sum: sum, sampleCount: count)
+  #expect(rms == 0)
+  #expect(!rms.isNaN)
+}
+
+@Test func rmsOfNonFiniteSumIsZero() {
+  #expect(TapDSP.rms(sum: Float.nan, sampleCount: 4) == 0)
+  #expect(TapDSP.rms(sum: Float.infinity, sampleCount: 4) == 0)
 }
 
 @Test func int16LevelsNormalizeToUnitRange() {
