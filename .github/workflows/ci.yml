@@ -17,6 +17,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # The macos-14 image's default-selected Xcode ships Swift 5.10, but
+      # Package.swift declares swift-tools-version 6.0 (needed for the
+      # concurrency features used throughout AppStore/WorkspaceAudioControlBackend).
+      # Select the newest Xcode actually installed on the runner rather than a
+      # hardcoded version, so this doesn't silently rot as the runner image's
+      # bundled Xcodes change — it targets macOS 14.2 (Package.swift's
+      # platforms) regardless of which Xcode does the building.
+      - name: Select latest available Xcode
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST_XCODE" ]; then
+            echo "::error::No versioned Xcode installation found on this runner; Package.swift requires a Swift 6 toolchain."
+            exit 1
+          fi
+          echo "Selecting $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE"
+
       - name: Show Swift version
         run: swift --version
 

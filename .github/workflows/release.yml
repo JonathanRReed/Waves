@@ -27,6 +27,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Same Swift-6-toolchain selection as ci.yml — the macos-14 image's
+      # default Xcode only supports up to Swift 5.10, but Package.swift
+      # declares swift-tools-version 6.0. See ci.yml for the full rationale.
+      - name: Select latest available Xcode
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST_XCODE" ]; then
+            echo "::error::No versioned Xcode installation found on this runner; Package.swift requires a Swift 6 toolchain."
+            exit 1
+          fi
+          echo "Selecting $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE"
+          swift --version
+
       - name: Derive version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
