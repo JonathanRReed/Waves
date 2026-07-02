@@ -65,6 +65,35 @@ struct OnboardingView: View {
   }
 
   var body: some View {
+    // Scrolls like every other Settings pane (SettingsForm's grouped Form,
+    // HelpView's ScrollView): with all steps shown plus the completion card,
+    // the content is taller than the Settings window.
+    ScrollView {
+      checklist
+        .padding(20)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .onAppear {
+      // Probe live route-health/diagnostics state when the flow is shown so the
+      // route-health step reflects a fresh check rather than the last sync.
+      // refresh(announce: false) already rebuilds the snapshot, re-runs
+      // diagnosticsReport(), and re-syncs onboarding, so a separate
+      // refreshDiagnostics() would only duplicate that work — and announce:false
+      // keeps this automatic re-sync from emitting a "Library refreshed" toast.
+      store.refresh(announce: false)
+    }
+    .onChange(of: scenePhase) { _, newPhase in
+      // Re-evaluate permissions (e.g. AXIsProcessTrusted for Accessibility) when
+      // the user returns to Waves after granting them in System Settings, so the
+      // relevant step updates without requiring a manual Refresh. Silent so
+      // returning focus to Waves doesn't spam a toast on every reactivation.
+      if newPhase == .active {
+        store.refresh(announce: false)
+      }
+    }
+  }
+
+  private var checklist: some View {
     VStack(alignment: .leading, spacing: 24) {
       HStack(spacing: 14) {
         WavesMark(size: 48, live: isFullyComplete)
@@ -155,8 +184,6 @@ struct OnboardingView: View {
         )
       }
 
-      Spacer()
-
       HStack(spacing: 12) {
         Button("Refresh Status") {
           store.refresh()
@@ -170,25 +197,6 @@ struct OnboardingView: View {
           }
           .buttonStyle(.bordered)
         }
-      }
-    }
-    .padding(28)
-    .onAppear {
-      // Probe live route-health/diagnostics state when the flow is shown so the
-      // route-health step reflects a fresh check rather than the last sync.
-      // refresh(announce: false) already rebuilds the snapshot, re-runs
-      // diagnosticsReport(), and re-syncs onboarding, so a separate
-      // refreshDiagnostics() would only duplicate that work — and announce:false
-      // keeps this automatic re-sync from emitting a "Library refreshed" toast.
-      store.refresh(announce: false)
-    }
-    .onChange(of: scenePhase) { _, newPhase in
-      // Re-evaluate permissions (e.g. AXIsProcessTrusted for Accessibility) when
-      // the user returns to Waves after granting them in System Settings, so the
-      // relevant step updates without requiring a manual Refresh. Silent so
-      // returning focus to Waves doesn't spam a toast on every reactivation.
-      if newPhase == .active {
-        store.refresh(announce: false)
       }
     }
   }
@@ -319,7 +327,7 @@ private struct EnhancedSetupStepRow: View {
     VStack(alignment: .leading, spacing: 12) {
       HStack(alignment: .top, spacing: 12) {
         Image(systemName: isComplete ? "checkmark.circle.fill" : canPerformAction ? "exclamationmark.triangle.fill" : "circle")
-          .foregroundStyle(isComplete ? .green : canPerformAction ? WavesDesign.warning : .secondary)
+          .foregroundStyle(isComplete ? WavesDesign.success : canPerformAction ? WavesDesign.warning : Color.secondary)
           .font(.title3)
           .accessibilityLabel(isComplete ? "Completed" : canPerformAction ? "Needs action" : "Pending")
 
@@ -361,11 +369,12 @@ private struct EnhancedSetupStepRow: View {
       }
     }
     .padding(12)
-    // A tonal fill behind the status stroke so step rows match the app's other
-    // content cards instead of reading as thin outlines on the backdrop.
-    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    // Same tonal-fill content card as the rest of Settings (HelpView, the
+    // completion card below), with a status-tinted stroke layered on top so
+    // complete/needs-action/pending still reads at a glance.
+    .wavesCard(cornerRadius: 12)
     .overlay(
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
         .strokeBorder(isComplete ? WavesDesign.success.opacity(0.3) : canPerformAction ? WavesDesign.warning.opacity(0.3) : Color.secondary.opacity(0.2))
     )
   }

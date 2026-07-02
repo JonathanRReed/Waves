@@ -1,3 +1,4 @@
+import Accessibility
 import AppKit
 import ApplicationServices
 import Foundation
@@ -18,6 +19,24 @@ struct AppToast: Identifiable, Equatable {
   let detail: String?
   let kind: Kind
   let duration: Duration
+
+  /// The spoken form of the toast, shared by the banner's accessibility label
+  /// and the one-shot VoiceOver announcement posted when the toast is added.
+  var accessibilityMessage: String {
+    let prefix: String
+    switch kind {
+    case .error:
+      prefix = "Error. "
+    case .warning:
+      prefix = "Warning. "
+    case .success, .info:
+      prefix = ""
+    }
+    if let detail, !detail.isEmpty {
+      return "\(prefix)\(title). \(detail)"
+    }
+    return "\(prefix)\(title)"
+  }
 }
 
 @Observable
@@ -33,6 +52,15 @@ final class AppStore {
   /// re-focus that profile even when `activeProfileID` is unchanged (e.g.
   /// re-applying the already-active profile from the menu bar).
   private(set) var profileFocusToken = 0
+  /// The source scope the menu bar's "N more in Waves" overflow link last
+  /// asked the main window to show (e.g. tapping "13 more" under Recent).
+  /// Paired with `sourceFocusToken` (bumped on every request, even a repeat
+  /// of the same filter) using the same pattern as `profileFocusToken` —
+  /// without this, opening the main window from that link could land on
+  /// whatever scope the window happened to be on, not the apps the user was
+  /// actually trying to see.
+  private(set) var sourceFocusRequest: SourceFilter?
+  private(set) var sourceFocusToken = 0
   var onboarding = OnboardingState()
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
@@ -62,6 +90,16 @@ final class AppStore {
   private let deviceVolumePresetsStore: DeviceVolumePresetsStore
   private let logger = Logger(subsystem: "com.waves.store", category: "AppStore")
   private var isBootstrapped = false
+  // Captured once at init from DeviceVolumePresetsStore.load(); consumed (and
+  // toasted) the first time start() runs so a corrupt-file recovery is
+  // surfaced to the user instead of failing silently.
+  private var didRecoverCorruptDeviceVolumePresets = false
+  // Same one-shot recovery capture for the other three stores, so a corrupt
+  // profiles/preferences/session file is surfaced to the user (with its
+  // .corrupt backup mentioned) instead of resetting silently.
+  private var didRecoverCorruptPreferences = false
+  private var didRecoverCorruptProfiles = false
+  private var didRecoverCorruptSession = false
   private var pendingVolumeTargets: [String: Float] = [:]
   private var pendingVolumeApplyTasks: [String: Task<Void, Never>] = [:]
   private var volumeApplyToken: [String: Int] = [:]
@@ -70,8 +108,8 @@ final class AppStore {
   private var deviceChangeObserver: Task<Void, Never>?
   // Reentrancy guard so rapid device flapping (dock/undock, BT connect) can't
   // stack overlapping handleDeviceChange Tasks that each reassign `session`
-  // mid-flight (an overlapping snapshot could shrink session.apps under an
-  // in-loop index in restoreDeviceVolumePresets and trap).
+  // mid-flight (interleaved snapshot reassignments and preset restores would
+  // leave the UI on whichever pass happened to land last).
   private var isHandlingDeviceChange = false
   // Set when a device-change event arrives while a handler is already in flight.
   // The in-flight handler clears it and runs exactly one more pass, so a coalesced
@@ -85,12 +123,15 @@ final class AppStore {
   private var frontmostAppObserver: NSObjectProtocol?
   private var appTerminationObserver: NSObjectProtocol?
   private var levelPollTask: Task<Void, Never>?
+  private var sessionMaintenanceTask: Task<Void, Never>?
   private var liveLevelsRefcount = 0
+  private var isRunningSessionMaintenance = false
   // Per-app one-shot tasks that drop an app out of the lingering-live set once it
   // has been quiet for `liveLingerWindow`. Cancelled (and the app kept) the moment
   // it becomes audible again.
   private var lingerRemovalTasks: [String: Task<Void, Never>] = [:]
   private let liveLingerWindow = Duration.seconds(2.5)
+  private let sessionMaintenanceInterval = Duration.seconds(8)
   private let maxToasts = 3
   private let defaultToastDuration = Duration.seconds(2.0)
   // Failures need longer on screen than routine successes: 2.0s is too short to
@@ -99,6 +140,16 @@ final class AppStore {
   private let errorToastDuration = Duration.seconds(4.5)
   private var previousFrontmostApp: String?
   private var pausedMusicApps: Set<String> = []
+  // Reentrancy guard mirroring isHandlingDeviceChange: rapid frontmost-app
+  // switches (activate Zoom, cmd-tab away within ~100ms) must not stack
+  // overlapping pause/resume passes that each read mute state captured before
+  // the other's backend writes landed — media could end up auto-muted with no
+  // call app frontmost and nothing to resume it until the next app switch.
+  private var isRunningAutoPausePass = false
+  // Set when checkAutoPauseMusic fires while a pass is in flight. The runner
+  // clears it and runs exactly one more pass, which re-reads the *current*
+  // frontmost app — so the latest app switch always wins and none are dropped.
+  private var pendingAutoPausePassRerun = false
   private let maxPendingTasks = 100
   private var urlSchemeRequestTimes: [Date] = []
   private let maxURLSchemeRequests = 10
@@ -126,6 +177,10 @@ final class AppStore {
     self.profiles = profileStore.load(defaults: Profile.defaults)
     self.session = sessionStore.load() ?? Self.emptySession
     self.deviceVolumePresets = deviceVolumePresetsStore.load()
+    self.didRecoverCorruptDeviceVolumePresets = deviceVolumePresetsStore.consumeDidRecoverFromCorruptFile()
+    self.didRecoverCorruptPreferences = preferencesStore.consumeDidRecoverFromCorruptFile()
+    self.didRecoverCorruptProfiles = profileStore.consumeDidRecoverFromCorruptFile()
+    self.didRecoverCorruptSession = sessionStore.consumeDidRecoverFromCorruptFile()
     // Migrate pins recorded only on the persisted session (builds before pin
     // state moved into preferences) into the authoritative set, just once.
     if preferences.pinnedAppIDs.isEmpty {
@@ -247,6 +302,25 @@ final class AppStore {
     return Float(tanh(1.6 * perceptual))
   }
 
+  /// Per-app live contributions for the header visualizer's superposition
+  /// rendering — each currently-playing app's identity plus its perceptual
+  /// level, capped to the loudest few so the band stays legible. Follows the
+  /// same real-signal rule as `mixedAudioLevel` (isLive, no linger) so every
+  /// component wave genuinely fades out when its app goes quiet, and the same
+  /// nominal floor for audible-but-unmetered `.live` apps.
+  var waveComponents: [WaveComponent] {
+    var components: [WaveComponent] = []
+    for app in visibleApps where !app.isMuted && isLive(app) {
+      let measured = liveLevels[app.logicalID].map { Double(max($0.rms, $0.peak * 0.8)) } ?? 0
+      // A slightly higher nominal floor than mixedAudioLevel's: an audible
+      // but unmetered app should still ripple visibly in the showcase band.
+      let level = measured > 0.001 ? measured : 0.18
+      components.append(WaveComponent(id: app.logicalID, level: min(1, pow(level, 0.5))))
+    }
+    guard components.count > 6 else { return components }
+    return Array(components.sorted { $0.level > $1.level }.prefix(6))
+  }
+
   var recentApps: [AudioApp] {
     guard preferences.showRecentApps else { return [] }
     // Recent = visible apps that are neither live nor pinned, so an app never
@@ -347,6 +421,7 @@ final class AppStore {
         }
 
         try await backend.start()
+        startSessionMaintenance()
         let built = await backend.currentSnapshot()
         session = mergedSession(with: built, cached: warmSnapshot)
         invalidateVisibleAppsCache()
@@ -356,7 +431,7 @@ final class AppStore {
         // If the active output device at launch has its own tuned per-device
         // preset, apply it now so that device's saved levels win (and aren't
         // ignored until the user manually switches devices).
-        if preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID {
+        if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice, let deviceID = currentDeviceID {
           await restoreDeviceVolumePresets(for: deviceID)
         }
         diagnostics = await backend.diagnosticsReport()
@@ -364,6 +439,26 @@ final class AppStore {
         persistSessionSnapshot()
         syncOnboarding(using: session)
         checkAutoPauseMusic()
+        // One combined toast for every store that had to reset a corrupted
+        // file — the originals are preserved beside the replacements, and the
+        // user deserves to know both facts (a silent reset reads as data loss
+        // with no explanation and no recovery path).
+        var recoveredStores: [String] = []
+        if didRecoverCorruptDeviceVolumePresets { recoveredStores.append("device presets") }
+        if didRecoverCorruptProfiles { recoveredStores.append("profiles") }
+        if didRecoverCorruptPreferences { recoveredStores.append("settings") }
+        if didRecoverCorruptSession { recoveredStores.append("session") }
+        didRecoverCorruptDeviceVolumePresets = false
+        didRecoverCorruptProfiles = false
+        didRecoverCorruptPreferences = false
+        didRecoverCorruptSession = false
+        if !recoveredStores.isEmpty {
+          showToast(
+            title: "Saved data recovered",
+            detail: "Corrupted \(recoveredStores.joined(separator: ", ")) reset to defaults. Originals kept as .corrupt files.",
+            kind: .warning
+          )
+        }
         showToast(title: "Waves is ready", detail: "Per-app audio mixer loaded.", kind: .success)
       } catch {
         isBootstrapped = false
@@ -391,10 +486,14 @@ final class AppStore {
         // that appears after a device switch otherwise never gets its device-B
         // levels — only apps running at switch time are restored).
         let knownAppIDs = Set(session.apps.map { $0.logicalID })
-        session = try await backend.refresh()
+        // Merge cached-only fields (like the .autoConferencing muteSource tag,
+        // which the backend never knows about) instead of reassigning wholesale
+        // — a bare reassignment resets muteSource to .user, so auto-paused
+        // media could never auto-resume after a manual refresh.
+        session = mergedSession(with: try await backend.refresh(), cached: session)
         invalidateVisibleAppsCache()
         cleanupStaleEntries()
-        if preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID {
+        if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice, let deviceID = currentDeviceID {
           await restoreDeviceVolumePresets(for: deviceID, limitedTo: { !knownAppIDs.contains($0) })
         }
         persistSessionSnapshot()
@@ -411,6 +510,45 @@ final class AppStore {
       } catch {
         showToast(title: "Refresh failed", detail: error.localizedDescription, kind: .error)
       }
+    }
+  }
+
+  private func startSessionMaintenance() {
+    guard sessionMaintenanceTask == nil else { return }
+    sessionMaintenanceTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+      while !Task.isCancelled {
+        try? await Task.sleep(for: self.sessionMaintenanceInterval)
+        guard !Task.isCancelled else { return }
+        await self.performSilentSessionRefresh()
+      }
+    }
+  }
+
+  private func performSilentSessionRefresh() async {
+    guard !isRefreshing,
+          !isRecovering,
+          !isLoading,
+          !isRunningSessionMaintenance,
+          pendingVolumeTargets.isEmpty else {
+      return
+    }
+
+    isRunningSessionMaintenance = true
+    defer { isRunningSessionMaintenance = false }
+
+    do {
+      let rebuilt = try await backend.refresh()
+      session = mergedSession(with: rebuilt, cached: session)
+      invalidateVisibleAppsCache()
+      cleanupStaleEntries()
+      persistSessionSnapshot()
+      diagnostics = await backend.diagnosticsReport()
+      availableDevices = await backend.availableOutputDevices()
+      syncOnboarding(using: session)
+      checkAutoPauseMusic()
+    } catch {
+      logger.debug("Silent session refresh failed: \(error.localizedDescription)")
     }
   }
 
@@ -1088,6 +1226,10 @@ final class AppStore {
         availableDevices = await backend.availableOutputDevices()
         showToast(title: "Output switched", detail: device.name, kind: .success, duration: .seconds(1.4))
       } catch {
+        // The switch never happened, so no device-change event will consume the
+        // flag. Left set, it would suppress the "Output device changed" toast
+        // for a later *external* auto-switch to this same device.
+        pendingSelfInitiatedDeviceID = nil
         showToast(title: "Couldn't switch output", detail: error.localizedDescription, kind: .error)
       }
     }
@@ -1114,9 +1256,9 @@ final class AppStore {
   func handleDeviceChange() {
     // Coalesce overlapping events instead of dropping them: a device-change in
     // flight already reassigns `session` and (optionally) walks
-    // restoreDeviceVolumePresets indexing session.apps across awaits; a second
-    // concurrent pass could shrink that array mid-loop. So we never run two passes
-    // at once. But dropping the second event outright could leave the UI on the
+    // restoreDeviceVolumePresets across backend awaits; a second concurrent
+    // pass would interleave those reassignments and restores. So we never run two
+    // passes at once. But dropping the second event outright could leave the UI on the
     // earlier snapshot/device-list/onboarding (rapid dock/undock, Bluetooth
     // reconnect) until some unrelated refresh. Instead, record a pending rerun and
     // let the in-flight handler run exactly one more pass once it finishes.
@@ -1146,12 +1288,19 @@ final class AppStore {
       // The backend has already re-established managed routes before emitting the
       // event, so read the current snapshot rather than restoring again.
       let previousDeviceID = currentDeviceID
-      session = await backend.currentSnapshot()
+      // Merge cached-only fields (like the .autoConferencing muteSource tag,
+      // which the backend never knows about) instead of reassigning wholesale
+      // — a bare reassignment resets muteSource to .user, so auto-paused
+      // media could never auto-resume after a device change.
+      session = mergedSession(with: await backend.currentSnapshot(), cached: session)
       invalidateVisibleAppsCache()
 
-      // Per-device preset restore is gated only on the per-device-presets toggle
-      // and an actual device change.
-      if preferences.enablePerDeviceVolumePresets, let newDeviceID = currentDeviceID, previousDeviceID != newDeviceID {
+      // Per-device preset restore additionally requires "Auto-restore device" —
+      // it IS the auto-restore behavior for saved per-app volumes, so honoring
+      // the per-device-presets toggle alone while ignoring the opt-out would
+      // restore levels the user explicitly asked Waves not to apply automatically.
+      if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice,
+         let newDeviceID = currentDeviceID, previousDeviceID != newDeviceID {
         await restoreDeviceVolumePresets(for: newDeviceID)
       }
 
@@ -1181,8 +1330,8 @@ final class AppStore {
     // and boosts, but the freshly started backend has not applied them yet.
     // Re-apply the customized apps so audible output matches the restored UI.
     // Collect the IDs of pinned apps whose route re-establishment failed; merge
-    // the backend's resulting .error state for them AFTER the loop so we never
-    // mutate `session` mid-iteration over `session.apps.indices`.
+    // the backend's resulting .error state for them AFTER the loop, from a
+    // single post-loop snapshot fetch.
     // An auto-pause (.autoConferencing) mute is a transient, call-time state, not
     // durable user intent. Persisting and re-applying it on relaunch audibly
     // re-mutes media hours after a call, and with the auto-pause toggle off it
@@ -1201,8 +1350,11 @@ final class AppStore {
     pausedMusicApps.removeAll()
 
     var failedPinnedAppIDs: [String] = []
-    for index in session.apps.indices {
-      let app = session.apps[index]
+    // Iterate a value snapshot, never a live index: the backend awaits below
+    // suspend the actor, and a concurrent session reassignment (silent refresh,
+    // device change, profile apply) can shrink session.apps mid-loop — a
+    // pre-await index would then trap. Writes re-resolve the row by logicalID.
+    for app in session.apps {
       guard !isExcluded(app) else { continue }
       // A pinned output device is also "customized" — re-establish its route so
       // it plays to the chosen device immediately, even at default volume.
@@ -1275,13 +1427,18 @@ final class AppStore {
     limitedTo shouldRestore: ((String) -> Bool)? = nil
   ) async {
     var failedRestoreIDs: [String] = []
-    for index in session.apps.indices {
-      let app = session.apps[index]
+    // Iterate a value snapshot, never a live index: the backend awaits below
+    // suspend the actor, and a concurrent session reassignment (silent refresh,
+    // device change, profile apply) can shrink session.apps mid-loop — a
+    // pre-await index would then trap. Each row is re-resolved by logicalID.
+    for app in session.apps {
       // Never re-tap an excluded app, even if it has saved per-device presets
       // from before it was excluded (mirrors reapplyRestoredAudioState).
       guard !isExcluded(app) else { continue }
       if let shouldRestore, !shouldRestore(app.logicalID) { continue }
       if let settings = deviceVolumePresets.getVolumeSettings(for: app.logicalID, deviceID: deviceID) {
+        // Skip rows that vanished while an earlier iteration was suspended.
+        guard let index = session.apps.firstIndex(matchingAppKey: app.logicalID) else { continue }
         session.apps[index].desiredVolume = settings.desiredVolume
         session.apps[index].isMuted = settings.isMuted
         session.apps[index].volumeBoost = settings.volumeBoost
@@ -1318,6 +1475,8 @@ final class AppStore {
   func shutdown() {
     deviceChangeObserver?.cancel()
     deviceChangeObserver = nil
+    sessionMaintenanceTask?.cancel()
+    sessionMaintenanceTask = nil
     levelPollTask?.cancel()
     levelPollTask = nil
     for task in lingerRemovalTasks.values { task.cancel() }
@@ -1330,6 +1489,12 @@ final class AppStore {
       NSWorkspace.shared.notificationCenter.removeObserver(appTerminationObserver)
       self.appTerminationObserver = nil
     }
+    // Drain the stores' serial write queues before the process exits, so a
+    // change made in the same instant as ⌘Q/logout still lands on disk.
+    preferencesStore.flush()
+    profileStore.flush()
+    sessionStore.flush()
+    deviceVolumePresetsStore.flush()
     let backend = backend
     Task { await backend.stop() }
   }
@@ -1420,22 +1585,61 @@ final class AppStore {
     }
   }
 
-  /// Updates the auto-pause preference. When turning it on, reset the frontmost
-  /// guard and re-evaluate immediately so a conferencing app that is *already*
-  /// frontmost gets its music paused now, instead of waiting for focus to leave
-  /// and return (checkAutoPauseMusic short-circuits while frontmost is unchanged).
+  /// Updates the auto-pause preference. Toggling in either direction resets the
+  /// frontmost guard and re-evaluates immediately (the pass short-circuits while
+  /// frontmost is unchanged): turning it ON must pause for a conferencing app
+  /// that is *already* frontmost, and turning it OFF must resume anything still
+  /// auto-paused right away — every other resume path runs inside the auto-pause
+  /// pass, so without this the toggle would strand auto-paused apps muted.
   func setAutoPauseMusicEnabled(_ enabled: Bool) {
     let wasEnabled = preferences.autoPauseMusicForConferencing
     preferences.autoPauseMusicForConferencing = enabled
     persistPreferences()
-    if enabled && !wasEnabled {
+    if enabled != wasEnabled {
       previousFrontmostApp = nil
       checkAutoPauseMusic()
     }
   }
 
+  /// Updates the auto-restore-device preference. Read directly by
+  /// `performDeviceChangePass`/`start`/`refresh` wherever per-device volume
+  /// presets are restored — the backend itself always re-establishes managed
+  /// routes on a device change regardless of this preference (route recovery
+  /// is core functionality, not the optional convenience this toggle covers).
+  func setAutoRestoreDeviceEnabled(_ enabled: Bool) {
+    preferences.autoRestoreDevice = enabled
+    persistPreferences()
+  }
+
   func checkAutoPauseMusic() {
-    guard preferences.autoPauseMusicForConferencing else { return }
+    // Coalesce overlapping passes (mirroring handleDeviceChange) so two never
+    // run at once. Frontmost detection happens inside each pass, so the
+    // coalesced rerun reads the *then-current* frontmost app — the latest app
+    // switch always wins and none are dropped.
+    guard !isRunningAutoPausePass else {
+      pendingAutoPausePassRerun = true
+      return
+    }
+    isRunningAutoPausePass = true
+    Task {
+      defer { isRunningAutoPausePass = false }
+      repeat {
+        // Clear the pending flag before each pass; any call arriving during
+        // this pass re-sets it and earns exactly one more iteration.
+        pendingAutoPausePassRerun = false
+        await performAutoPausePass()
+      } while pendingAutoPausePassRerun
+    }
+  }
+
+  private func performAutoPausePass() async {
+    let enabled = preferences.autoPauseMusicForConferencing
+    // With the preference off the pass still runs as a resume-only sweep (see
+    // setAutoPauseMusicEnabled) — every other resume path lives inside this
+    // pass, so bailing outright would strand auto-paused apps muted.
+    if !enabled {
+      guard session.apps.contains(where: { $0.isMuted && $0.muteSource == .autoConferencing }) else { return }
+    }
 
     // Detect conferencing from the live frontmost application rather than the
     // session snapshot, whose `isActive` flags are only refreshed periodically.
@@ -1447,72 +1651,70 @@ final class AppStore {
     let frontmostCategory = frontmost.map {
       AppDiscoveryPolicy.inferCategory(bundleID: $0.bundleIdentifier, displayName: $0.localizedName ?? "")
     }
-    let isConferencingAppActive = frontmostCategory == .conferencing
+    let isConferencingAppActive = enabled && frontmostCategory == .conferencing
 
-    Task {
-      var muteChanges: [String: (muted: Bool, source: MuteSource)] = [:]
-      // Track names of apps actually paused/resumed so an automatic, otherwise
-      // invisible mutation surfaces a confirmation toast (a silently muted row is
-      // indistinguishable from an unexpected mute / bug).
-      var pausedNames: [String] = []
-      var resumedNames: [String] = []
-      if isConferencingAppActive {
-        // Pause currently-unmuted music apps and tag the mute as automatic.
-        let musicApps = visibleApps.filter { $0.category == .media && !$0.isMuted && !isExcluded($0) }
-        for app in musicApps {
-          do {
-            try await backend.setMuted(true, forAppID: app.logicalID)
-            pausedMusicApps.insert(app.logicalID)
-            muteChanges[app.logicalID] = (true, .autoConferencing)
-            pausedNames.append(app.displayName)
-            logger.info("Auto-paused music app: \(app.displayName)")
-          } catch {
-            logger.error("Failed to pause music app \(app.displayName): \(error)")
-          }
-        }
-      } else {
-        // Resume ONLY apps Waves auto-paused that the user hasn't since touched
-        // (muteSource still .autoConferencing). Never override a user's mute.
-        let resumable = visibleApps.filter { $0.isMuted && $0.muteSource == .autoConferencing && !isExcluded($0) }
-        for app in resumable {
-          do {
-            try await backend.setMuted(false, forAppID: app.logicalID)
-            muteChanges[app.logicalID] = (false, .user)
-            resumedNames.append(app.displayName)
-            logger.info("Auto-resumed music app: \(app.displayName)")
-          } catch {
-            logger.error("Failed to resume music app \(app.displayName): \(error)")
-          }
-        }
-        pausedMusicApps.removeAll()
-      }
-
-      // Apply only the affected apps' mute state in place. Replacing the whole
-      // session here would wipe state restored/merged during launch.
-      guard !muteChanges.isEmpty else { return }
-      for (appID, change) in muteChanges {
-        if let index = session.apps.firstIndex(matchingAppKey: appID) {
-          session.apps[index].isMuted = change.muted
-          session.apps[index].muteSource = change.source
-          session.apps[index].appliedVolume = change.muted ? 0 : session.apps[index].desiredVolume
+    var muteChanges: [String: (muted: Bool, source: MuteSource)] = [:]
+    // Track names of apps actually paused/resumed so an automatic, otherwise
+    // invisible mutation surfaces a confirmation toast (a silently muted row is
+    // indistinguishable from an unexpected mute / bug).
+    var pausedNames: [String] = []
+    var resumedNames: [String] = []
+    if isConferencingAppActive {
+      // Pause currently-unmuted music apps and tag the mute as automatic.
+      let musicApps = visibleApps.filter { $0.category == .media && !$0.isMuted && !isExcluded($0) }
+      for app in musicApps {
+        do {
+          try await backend.setMuted(true, forAppID: app.logicalID)
+          pausedMusicApps.insert(app.logicalID)
+          muteChanges[app.logicalID] = (true, .autoConferencing)
+          pausedNames.append(app.displayName)
+          logger.info("Auto-paused music app: \(app.displayName)")
+        } catch {
+          logger.error("Failed to pause music app \(app.displayName): \(error)")
         }
       }
-      invalidateVisibleAppsCache()
-      persistSessionSnapshot()
-
-      // Tell the user Waves did this automatically — without this the silenced
-      // app looks like a bug. Aggregate so N apps yield one toast.
-      if !pausedNames.isEmpty {
-        let detail = pausedNames.count == 1
-          ? "\(pausedNames[0]) muted for your call."
-          : "\(pausedNames.count) apps muted for your call."
-        showToast(title: "Auto-paused media", detail: detail, kind: .info, duration: .seconds(2.4))
-      } else if !resumedNames.isEmpty {
-        let detail = resumedNames.count == 1
-          ? "\(resumedNames[0]) resumed."
-          : "\(resumedNames.count) apps resumed."
-        showToast(title: "Resumed media", detail: detail, kind: .info, duration: .seconds(2.0))
+    } else {
+      // Resume ONLY apps Waves auto-paused that the user hasn't since touched
+      // (muteSource still .autoConferencing). Never override a user's mute.
+      let resumable = visibleApps.filter { $0.isMuted && $0.muteSource == .autoConferencing && !isExcluded($0) }
+      for app in resumable {
+        do {
+          try await backend.setMuted(false, forAppID: app.logicalID)
+          muteChanges[app.logicalID] = (false, .user)
+          resumedNames.append(app.displayName)
+          logger.info("Auto-resumed music app: \(app.displayName)")
+        } catch {
+          logger.error("Failed to resume music app \(app.displayName): \(error)")
+        }
       }
+      pausedMusicApps.removeAll()
+    }
+
+    // Apply only the affected apps' mute state in place. Replacing the whole
+    // session here would wipe state restored/merged during launch.
+    guard !muteChanges.isEmpty else { return }
+    for (appID, change) in muteChanges {
+      if let index = session.apps.firstIndex(matchingAppKey: appID) {
+        session.apps[index].isMuted = change.muted
+        session.apps[index].muteSource = change.source
+        session.apps[index].appliedVolume = change.muted ? 0 : session.apps[index].desiredVolume
+      }
+    }
+    invalidateVisibleAppsCache()
+    persistSessionSnapshot()
+
+    // Tell the user Waves did this automatically — without this the silenced
+    // app looks like a bug. Aggregate so N apps yield one toast.
+    if !pausedNames.isEmpty {
+      let detail = pausedNames.count == 1
+        ? "\(pausedNames[0]) muted for your call."
+        : "\(pausedNames.count) apps muted for your call."
+      showToast(title: "Auto-paused media", detail: detail, kind: .info, duration: .seconds(2.4))
+    } else if !resumedNames.isEmpty {
+      let detail = resumedNames.count == 1
+        ? "\(resumedNames[0]) resumed."
+        : "\(resumedNames.count) apps resumed."
+      showToast(title: "Resumed media", detail: detail, kind: .info, duration: .seconds(2.0))
     }
   }
 
@@ -1538,7 +1740,20 @@ final class AppStore {
     }
     Task {
       do {
-        session = try await backend.applyProfile(profile)
+        // A profile apply replaces route state wholesale, but an auto-paused
+        // app must keep its .autoConferencing tag or it can never
+        // auto-resume. `cached: session` is deliberately read inline — Swift
+        // evaluates arguments left to right, so it picks up the session AFTER
+        // the await resumes, including tags an auto-pause pass applied while
+        // the apply was in flight. Only entries that explicitly set a mute
+        // override the tag: the backend skips membership-only entries and
+        // carries the existing mute forward for mute-less level entries, so
+        // neither expresses user intent about the mute.
+        session = preservingAutoPauseTags(
+          in: try await backend.applyProfile(profile),
+          cached: session,
+          except: Set(profile.entries.filter { $0.isMuted != nil }.map(\.appID))
+        )
         focusProfile(profile.id)
         invalidateVisibleAppsCache()
         diagnostics = await backend.diagnosticsReport()
@@ -1602,6 +1817,29 @@ final class AppStore {
   private func focusProfile(_ id: UUID) {
     activeProfileID = id
     profileFocusToken &+= 1
+  }
+
+  /// Signals the main window to switch to `filter`'s scope. Called by the
+  /// menu bar's "N more in Waves" overflow link right before it opens the
+  /// main window, so the window actually shows the apps the link promised
+  /// instead of whatever scope it happened to already be on.
+  func focusSource(_ filter: SourceFilter) {
+    sourceFocusRequest = filter
+    sourceFocusToken &+= 1
+  }
+
+  /// Reads and clears `sourceFocusRequest` so it applies at most once. Needed
+  /// because the token/request are set *before* `openWindow` — when the main
+  /// window was already closed, that call creates a brand-new `MainWindowView`
+  /// whose `.onChange(of: sourceFocusToken)` starts observing only after the
+  /// bump already happened, so it never fires for that request. The new view's
+  /// `.onAppear` calls this instead to pick up the still-pending request; a
+  /// window that was already open and alive gets it via the `onChange` path.
+  /// Clearing on read prevents either path from re-applying a stale request on
+  /// some later, unrelated reopen.
+  func consumeSourceFocusRequest() -> SourceFilter? {
+    defer { sourceFocusRequest = nil }
+    return sourceFocusRequest
   }
 
   /// Creates or updates a profile from a chosen set of apps. When `captureLevels`
@@ -1880,7 +2118,12 @@ final class AppStore {
     Task {
       defer { isRecovering = false }
       do {
-        session = try await backend.recoverRoutes()
+        // Route recovery reattaches taps; it expresses no new intent about
+        // mutes, so auto-paused apps keep their .autoConferencing tags.
+        // `cached: session` is read inline (after the await resumes, per
+        // left-to-right argument evaluation) so tags applied while recovery
+        // was in flight survive too.
+        session = preservingAutoPauseTags(in: try await backend.recoverRoutes(), cached: session)
         invalidateVisibleAppsCache()
         diagnostics = await backend.diagnosticsReport()
         persistSessionSnapshot()
@@ -1969,6 +2212,16 @@ final class AppStore {
   /// audible background app no longer steals the hotkey from a silent focused one.
   private func frontmostManagedApp() -> AudioApp? {
     let frontmost = NSWorkspace.shared.frontmostApplication
+    // The local hotkey monitor (unlike the global-only one it replaced) can
+    // now fire while Waves' own mixer/Settings window is frontmost. There is
+    // no single "the app the user is working in" in that case — falling
+    // through to the activeApps/visibleApps.first fallback below would
+    // silently act on an arbitrary row instead of the one the user actually
+    // has in view. Do nothing instead, matching the pre-local-monitor
+    // behavior for this specific case.
+    guard frontmost?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+      return nil
+    }
     let bundleID = frontmost?.bundleIdentifier
     let pid = frontmost?.processIdentifier
     if bundleID != nil || pid != nil {
@@ -2168,6 +2421,20 @@ final class AppStore {
     onboarding.accessibilityPermissionGranted = AXIsProcessTrusted()
     onboarding.outputDeviceVisible = snapshot.currentDevice != nil
     onboarding.routeHealthReady = snapshot.backendStatus.isRouteRecoveryHealthy
+    reconcileLoginItemStatus()
+  }
+
+  /// Re-reads the system's login-item registration and syncs it into
+  /// `preferences.launchAtLoginEnabled` / `onboarding.launchAtLoginEnabled`.
+  ///
+  /// The in-app toggle only learns about a login-item change made *inside*
+  /// Waves (via the `launchAtLoginEnabled` setter) at the moment it happens.
+  /// If the user instead flips "Open at Login" from System Settings while
+  /// Waves is already running, that goes unnoticed until the next full
+  /// `syncOnboarding` pass — so this is also called directly from
+  /// `AppDelegate.applicationDidBecomeActive`, which fires every time Waves
+  /// regains focus (e.g. right after the user returns from System Settings).
+  func reconcileLoginItemStatus() {
     let launchAtLoginEnabled = loginItemService.status.isEnabled
     onboarding.launchAtLoginEnabled = launchAtLoginEnabled
     // Persist the OS-derived launch-at-login state on every reconcile so a
@@ -2195,6 +2462,33 @@ final class AppStore {
       ),
       updatedAt: .now
     )
+  }
+
+  /// Re-tags apps that were auto-paused before a wholesale snapshot
+  /// replacement and are still muted in the new snapshot, so the auto-resume
+  /// pass can still find them. Unlike `mergedSession` this deliberately
+  /// preserves ONLY the tag: the new snapshot's volumes and mutes are
+  /// authoritative (a profile apply or route recovery just installed them) —
+  /// we only must not forget *why* an already-muted app is muted. Apps in
+  /// `excludedIDs` (apps whose just-applied profile entry explicitly set a
+  /// mute) keep the new snapshot's `.user` attribution, since an explicit
+  /// profile mute overrides the auto-pause claim on that app.
+  private func preservingAutoPauseTags(
+    in liveSession: AudioSessionSnapshot,
+    cached: AudioSessionSnapshot,
+    except excludedIDs: Set<String> = []
+  ) -> AudioSessionSnapshot {
+    var result = liveSession
+    for index in result.apps.indices {
+      let id = result.apps[index].logicalID
+      guard !excludedIDs.contains(id),
+            result.apps[index].isMuted,
+            let cachedApp = cached.apps.first(where: { $0.logicalID == id }),
+            cachedApp.muteSource == .autoConferencing
+      else { continue }
+      result.apps[index].muteSource = .autoConferencing
+    }
+    return result
   }
 
   private func mergedSession(with liveSession: AudioSessionSnapshot, cached: AudioSessionSnapshot) -> AudioSessionSnapshot {
@@ -2289,6 +2583,21 @@ final class AppStore {
 
     toasts.append(toast)
     trimToasts()
+
+    // VoiceOver does not announce transient banners on its own. Announce here —
+    // exactly once per toast — rather than in each banner's onAppear: with both
+    // surfaces mounted (main window + menu-bar popover) a per-banner
+    // announcement fires twice, and reopening the popover re-announces stale
+    // toasts. Errors/warnings get high priority so they are not interrupted by
+    // lower-severity toasts that arrive in the same burst.
+    var announcement = AttributedString(toast.accessibilityMessage)
+    switch kind {
+    case .error, .warning:
+      announcement.accessibilitySpeechAnnouncementPriority = .high
+    case .success, .info:
+      break
+    }
+    AccessibilityNotification.Announcement(announcement).post()
 
     scheduleDismissal(id: toast.id, after: toast.duration)
   }

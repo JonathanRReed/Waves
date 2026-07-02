@@ -107,6 +107,14 @@ struct MainWindowView: View {
     .onAppear {
       store.beginLiveLevels()
       validateSelection()
+      // Covers the case where the menu bar's "N more in Waves" link had to
+      // create this window from scratch (it was closed): the request was
+      // already made before openWindow, so this fresh view's onChange below
+      // never sees it change. If the window was already open and alive, this
+      // is a no-op (onChange already consumed it).
+      if let filter = store.consumeSourceFocusRequest() {
+        selection = .source(filter)
+      }
     }
     .onChange(of: store.preferences.showRecentApps) { _, _ in
       validateSelection()
@@ -122,6 +130,16 @@ struct MainWindowView: View {
       // one from the menu bar) brings that group into focus in the main window.
       if let id = store.activeProfileID, store.profiles.contains(where: { $0.id == id }) {
         selection = .profile(id)
+      }
+    }
+    .onChange(of: store.sourceFocusToken) { _, _ in
+      // The menu bar's "N more in Waves" overflow link asked to show a specific
+      // scope (Pinned/Live/Recent) right before opening this window — honor it,
+      // so the window shows the apps the link promised instead of whatever
+      // scope it happened to already be on. This fires when the window was
+      // already open (see onAppear above for the window-was-closed case).
+      if let filter = store.consumeSourceFocusRequest() {
+        selection = .source(filter)
       }
     }
     .onDisappear { store.endLiveLevels() }
@@ -296,6 +314,9 @@ private struct SidebarView: View {
   @Binding var selection: MixerScope
   let onNewProfile: () -> Void
   let onEditProfile: (Profile) -> Void
+  // Deleting a profile discards a hand-tuned captured mix with no undo, so the
+  // context menu's Delete asks first instead of firing on a single misclick.
+  @State private var profilePendingDeletion: Profile?
 
   var body: some View {
     List(selection: $selection) {
@@ -327,10 +348,8 @@ private struct SidebarView: View {
               Button("Edit Profile…") { onEditProfile(profile) }
               Button("Export…") { store.exportProfile(profile) }
               Divider()
-              Button("Delete Profile", role: .destructive) {
-                if let index = store.profiles.firstIndex(where: { $0.id == profile.id }) {
-                  store.deleteProfiles(at: IndexSet(integer: index))
-                }
+              Button("Delete Profile…", role: .destructive) {
+                profilePendingDeletion = profile
               }
             }
         }
@@ -351,6 +370,24 @@ private struct SidebarView: View {
     }
     .listStyle(.sidebar)
     .navigationTitle("Waves")
+    .confirmationDialog(
+      "Delete “\(profilePendingDeletion?.name ?? "")”?",
+      isPresented: Binding(
+        get: { profilePendingDeletion != nil },
+        set: { if !$0 { profilePendingDeletion = nil } }
+      ),
+      titleVisibility: .visible,
+      presenting: profilePendingDeletion
+    ) { profile in
+      Button("Delete Profile", role: .destructive) {
+        if let index = store.profiles.firstIndex(where: { $0.id == profile.id }) {
+          store.deleteProfiles(at: IndexSet(integer: index))
+        }
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: { profile in
+      Text("This removes \(profile.name)\(profile.carriesLevels ? " and its saved levels" : "") from your profiles. This can't be undone.")
+    }
   }
 
   /// Mirrors the menu bar: the Recent scope is only offered when the user has
@@ -381,7 +418,7 @@ private struct SourceFilterRow: View {
       }
     } icon: {
       Image(systemName: filter.systemImage)
-        .foregroundStyle(filter == .frontmost ? AnyShapeStyle(WavesDesign.accent) : AnyShapeStyle(.secondary))
+        .foregroundStyle(WavesDesign.accentOrSecondary(filter == .frontmost))
         .symbolEffect(.variableColor.iterative, isActive: isLive && !reduceMotion)
     }
   }
@@ -431,16 +468,17 @@ private struct SourceListView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       if let profile {
-        ProfileHeaderView(profile: profile, visibleCount: apps.count, onEdit: { onEditProfile(profile) })
+        ProfileHeaderView(profile: profile, visibleCount: apps.count, isSearching: isSearching, onEdit: { onEditProfile(profile) })
       } else {
         OutputSummaryView(scope: scope, visibleCount: apps.count, isSearching: isSearching)
       }
 
-      // The live "mixed waves" band: the combined audio energy of everything
-      // playing, on a solid content surface beneath the header.
-      HeaderWaveform(height: 26)
+      // The live "mixed waves" band: every playing app as a thin component
+      // wave summing into the bright mixed wave, on a solid content surface
+      // beneath the header.
+      HeaderWaveform(height: 48)
         .padding(.horizontal, 18)
-        .padding(.vertical, 6)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
         .overlay(Divider(), alignment: .bottom)
@@ -486,11 +524,31 @@ private struct SourceListView: View {
         Spacer(minLength: 0)
       } else {
         List(selection: $selectedAppID) {
-          ForEach(apps) { app in
+          ForEach(Array(apps.enumerated()), id: \.element.id) { index, app in
             MixerRowView(app: app)
               .listRowInsets(EdgeInsets(top: 2, leading: 18, bottom: 2, trailing: 18))
               .listRowBackground(Color.clear)
               .tag(app.id)
+              // Drag-and-drop reordering (.onMove below) has no VoiceOver
+              // equivalent on its own — these actions are the accessible path
+              // to the same store.reorderApps the drag handle uses. Only
+              // offered when the list is actually reorderable (Running scope,
+              // no active search) and there's somewhere to move to, mirroring
+              // .moveDisabled's gating below.
+              .accessibilityActions {
+                if isReorderable {
+                  if index > 0 {
+                    Button("Move Up") {
+                      store.reorderApps(from: IndexSet(integer: index), to: index - 1)
+                    }
+                  }
+                  if index < apps.count - 1 {
+                    Button("Move Down") {
+                      store.reorderApps(from: IndexSet(integer: index), to: index + 2)
+                    }
+                  }
+                }
+              }
           }
           .onMove { source, destination in
             // Only reorder against the full unfiltered list; a search shows a
@@ -570,7 +628,9 @@ private struct SourceListView: View {
 
   private var emptyTitle: String {
     if systemProcessesHidden { return "System Processes Hidden" }
-    if let profile { return "No \(profile.name) Apps Running" }
+    // While searching, "No <profile> Apps Running" would be a false claim — the
+    // emptiness is just a non-matching query.
+    if let profile { return isSearching ? "No Results" : "No \(profile.name) Apps Running" }
     if case .source(let filter) = scope { return filter.emptyTitle }
     return "Nothing Here"
   }
@@ -580,6 +640,9 @@ private struct SourceListView: View {
       return "System processes are hidden. Enable Show system processes in Settings to see them."
     }
     if let profile {
+      // A search spans all visible apps, so an empty result here just means the
+      // query matched nothing — not that the profile's apps aren't running.
+      if isSearching { return "Try a different search term." }
       return "None of \(profile.name)'s \(profile.entries.count) \(profile.entries.count == 1 ? "app" : "apps") are running right now. Launch one to control it here."
     }
     if case .source(let filter) = scope {
@@ -599,8 +662,8 @@ private struct SourceListView: View {
 
   /// Runs `action` on the currently selected row, if any.
   ///
-  /// These are focused-window "app shortcuts," which the Help copy promises
-  /// always work while a Waves window is focused. They are intentionally NOT
+  /// These are focused-window keys that work while the mixer window (this
+  /// list) is focused, like the Help copy's ⌘N/⌘R. They are intentionally NOT
   /// gated on `preferences.enableKeyboardShortcuts` — that toggle governs the
   /// global ⌘⌥ hotkeys (the NSEvent monitor), not in-list keys. Gating here
   /// would silently strip keyboard control of the mixer (including the only
@@ -629,6 +692,11 @@ private struct ProfileHeaderView: View {
   @Environment(AppStore.self) private var store
   let profile: Profile
   let visibleCount: Int
+  // True when a search is active. Search spans all visible apps regardless of
+  // scope, so "N of M running" would count cross-scope matches against this
+  // profile's membership; use a neutral "result(s)" noun instead (matching
+  // OutputSummaryView).
+  let isSearching: Bool
   let onEdit: () -> Void
 
   var body: some View {
@@ -679,6 +747,9 @@ private struct ProfileHeaderView: View {
   }
 
   private var subtitle: String {
+    if isSearching {
+      return "\(visibleCount) \(visibleCount == 1 ? "result" : "results")"
+    }
     let running = "\(visibleCount) of \(profile.entries.count) running"
     return profile.carriesLevels ? "\(running) · carries saved levels" : "\(running) · group"
   }
@@ -726,7 +797,7 @@ private struct OutputSummaryView: View {
             Label(liveSummary, systemImage: "waveform")
               // Drop to primary text under Increase Contrast so the cyan never
               // fails contrast on the .bar header.
-              .foregroundStyle(contrast == .increased ? AnyShapeStyle(Color.primary) : AnyShapeStyle(WavesDesign.accent))
+              .foregroundStyle(contrast == .increased ? Color.primary : WavesDesign.accent)
               // The accent "playing" signal survives truncation over the static count.
               .layoutPriority(1)
           }
@@ -818,10 +889,25 @@ private struct DiagnosticsPanel: View {
   @Environment(AppStore.self) private var store
   @State private var expanded = false
 
+  // Caps how tall the expanded checklist can grow. Without this, expanding
+  // the DisclosureGroup in a long checklist (several failing checks, each
+  // with a two-line description) could ask this VStack's List sibling above
+  // it to shrink toward zero/negative height in the same animated layout
+  // pass — a List (NSTableView-backed) squeezed that hard during a SwiftUI
+  // animation reliably blanks the entire window content, sidebar included,
+  // not just this panel (reproduced: clicking the disclosure with several
+  // checks present collapses the whole NavigationSplitView to nothing, with
+  // no crash/exception logged — a pure AppKit/SwiftUI layout corruption, not
+  // a Swift-level bug). Scrolling past this cap instead of growing forever
+  // keeps the panel's worst-case height bounded and predictable, mirroring
+  // the same height-capped-scroller pattern already used for the menu bar's
+  // app sections (MenuBarMixerView.sectionsScroller).
+  private static let maxExpandedHeight: CGFloat = 220
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      DisclosureGroup(isExpanded: $expanded) {
-        if let diagnostics = store.diagnostics {
+    DisclosureGroup(isExpanded: $expanded) {
+      if let diagnostics = store.diagnostics {
+        ScrollView {
           VStack(alignment: .leading, spacing: 10) {
             Text(diagnostics.summary)
               .font(.caption)
@@ -851,27 +937,28 @@ private struct DiagnosticsPanel: View {
             }
           }
           .padding(.top, 10)
-        } else {
-          Text("Diagnostics not available yet.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.top, 10)
         }
-      } label: {
-        HStack(spacing: 8) {
-          Text("Diagnostics")
-            .font(.callout.weight(.semibold))
-          // A collapsed panel gives no reason to open it; surface a colored count
-          // when a check needs attention so a problem is discoverable at a glance.
-          if let attention = attentionSummary {
-            Text(attention.text)
-              .font(.caption2.weight(.semibold))
-              .foregroundStyle(attention.color)
-              .padding(.horizontal, 6)
-              .padding(.vertical, 1)
-              .background(attention.color.opacity(0.14), in: Capsule())
-              .accessibilityLabel(attention.accessibility)
-          }
+        .frame(maxHeight: Self.maxExpandedHeight)
+      } else {
+        Text("Diagnostics not available yet.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .padding(.top, 10)
+      }
+    } label: {
+      HStack(spacing: 8) {
+        Text("Diagnostics")
+          .font(.callout.weight(.semibold))
+        // A collapsed panel gives no reason to open it; surface a colored count
+        // when a check needs attention so a problem is discoverable at a glance.
+        if let attention = attentionSummary {
+          Text(attention.text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(attention.color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(attention.color.opacity(0.14), in: Capsule())
+            .accessibilityLabel(attention.accessibility)
         }
       }
     }
@@ -891,9 +978,9 @@ private struct DiagnosticsPanel: View {
 
   private func color(for status: DiagnosticsStatus) -> Color {
     switch status {
-    case .passed: .green
-    case .warning: .orange
-    case .failed: .red
+    case .passed: WavesDesign.success
+    case .warning: WavesDesign.warning
+    case .failed: WavesDesign.error
     case .informational: .secondary
     }
   }

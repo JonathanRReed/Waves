@@ -27,14 +27,32 @@ final class SessionStore: @unchecked Sendable {
     url = directory.appendingPathComponent("session.json")
   }
 
+  /// Test-only entry point: keeps the store's file inside `directory` instead
+  /// of the real Application Support location.
+  init(directory: URL) {
+    url = directory.appendingPathComponent("session.json")
+  }
+
+  /// Set to true the moment `load()` has to back up and discard an unreadable
+  /// session file. Read-and-cleared by the caller (AppStore) so it can
+  /// surface a one-time "your session was reset" toast instead of failing
+  /// silently.
+  private(set) var didRecoverFromCorruptFile = false
+
   func load() -> AudioSessionSnapshot? {
     return queue.sync {
+      // A missing file is the normal first-launch case: no session to restore,
+      // and nothing to log or back up.
+      guard FileManager.default.fileExists(atPath: url.path) else {
+        return nil
+      }
       do {
         // Check file size before loading
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
           logger.error("Session file exceeds size limit: \(fileSize) bytes")
           backupCorruptFile()
+          didRecoverFromCorruptFile = true
           return nil
         }
 
@@ -46,8 +64,19 @@ final class SessionStore: @unchecked Sendable {
         // save overwrite it (e.g. a session.json from a newer schema version).
         logger.warning("Failed to load session: \(error.localizedDescription). Preserving file and using defaults.")
         backupCorruptFile()
+        didRecoverFromCorruptFile = true
         return nil
       }
+    }
+  }
+
+  /// Reads and clears `didRecoverFromCorruptFile`, so a caller can check once
+  /// (e.g. right after `load()` at startup) without the flag lingering true
+  /// across later, unrelated calls.
+  func consumeDidRecoverFromCorruptFile() -> Bool {
+    queue.sync {
+      defer { didRecoverFromCorruptFile = false }
+      return didRecoverFromCorruptFile
     }
   }
 
@@ -108,5 +137,12 @@ final class SessionStore: @unchecked Sendable {
         self.logger.error("Failed to save session: \(error.localizedDescription)")
       }
     }
+  }
+
+  /// Blocks until every write already queued by `save` has completed. For app
+  /// termination only — a change made in the same instant as quit would
+  /// otherwise be lost when the process exits mid-queue.
+  func flush() {
+    queue.sync {}
   }
 }

@@ -23,9 +23,26 @@ permissions:
 jobs:
   release:
     name: Build, notarize, publish
-    runs-on: macos-14
+    # See ci.yml: needs an Xcode whose SDK ships macOS 26 to resolve the
+    # Liquid Glass API symbols in GlassEffects.swift at compile time, which
+    # macos-14's Xcode lineup can't do. Package.swift's `platforms` (not the
+    # build-machine OS) is what enforces the macOS 14.2 minimum.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+
+      # Belt-and-suspenders: pick the newest Xcode actually on the runner
+      # rather than trusting the image's default selection. See ci.yml.
+      - name: Select latest available Xcode
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST_XCODE" ]; then
+            echo "::error::No versioned Xcode installation found on this runner; Package.swift requires a Swift 6 toolchain."
+            exit 1
+          fi
+          echo "Selecting $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE"
+          swift --version
 
       - name: Derive version from tag
         id: version

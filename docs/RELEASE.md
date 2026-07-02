@@ -10,12 +10,17 @@ Run these checks before cutting any release candidate:
 swift test
 ./script/build_and_run.sh --verify
 ./script/build_and_run.sh --release-check
+lipo -archs dist/Waves.app/Contents/MacOS/Waves
 ```
 
 Expected result:
 - The test suite passes.
 - The app bundle launches and stays alive.
 - `dist/Waves.dmg` is recreated and validates with `hdiutil imageinfo`.
+- `lipo -archs` reports `x86_64 arm64` — distribution builds are universal
+  (Apple Silicon + Intel), matching the README and cask support claims.
+- `dist/Waves.app/Contents/Resources/Waves_Waves.bundle` exists — the SwiftPM
+  resource bundle `Bundle.module` loads at launch.
 
 ## Public Distribution Validation
 

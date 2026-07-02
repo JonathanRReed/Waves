@@ -106,7 +106,7 @@ struct HelpView: View {
       }
       .font(.system(.body, design: .monospaced))
 
-      Text("App shortcuts always work while a Waves window is focused.")
+      Text("⌘N and ⌘R work while the mixer window is focused; ⌘, opens Settings from any Waves window.")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
@@ -185,6 +185,10 @@ struct HelpView: View {
         troubleshootingItem(
           issue: "Volume changes not applying",
           solution: "Use 'Recover Routes' in the toolbar or Audio settings, then check Diagnostics in Advanced settings"
+        )
+        troubleshootingItem(
+          issue: "An app shows a red Core Audio error",
+          solution: "Some apps never produce sound (menu-bar utilities, CLI tools) and can't be managed — right-click the row and choose 'Exclude from Waves' to stop the warning"
         )
         troubleshootingItem(
           issue: "Keyboard shortcuts not working",

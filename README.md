@@ -63,7 +63,7 @@ parametric EQ or audio capture-to-file, eqMac or Audio Hijack are better fits.
 
 ## System Requirements
 
-- macOS 14.2 or later
+- macOS 14.2 or later (Apple Silicon or Intel — release builds are universal)
 - Accessibility permission is only required for global shortcuts
 - Audio capture permission when macOS prompts for Core Audio process taps
 
