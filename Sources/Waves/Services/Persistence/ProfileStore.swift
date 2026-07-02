@@ -32,6 +32,12 @@ final class ProfileStore: @unchecked Sendable {
     legacyURL = directory.appendingPathComponent("presets.json")
   }
 
+  /// Set to true the moment `load()` has to back up and discard an unreadable
+  /// profiles file. Read-and-cleared by the caller (AppStore) so it can
+  /// surface a one-time "your profiles were reset" toast instead of failing
+  /// silently.
+  private(set) var didRecoverFromCorruptFile = false
+
   func load(defaults: [Profile]) -> [Profile] {
     return queue.sync {
       let fileManager = FileManager.default
@@ -41,7 +47,22 @@ final class ProfileStore: @unchecked Sendable {
       if !fileManager.fileExists(atPath: url.path),
          fileManager.fileExists(atPath: legacyURL.path) {
         if let migrated = loadFile(at: legacyURL) {
-          save(migrated)
+          // Written synchronously (we already hold the queue — an enqueued
+          // save couldn't run until load() returns) and the legacy file is
+          // retired only AFTER the new file is durably on disk: otherwise a
+          // crash between the rename and the deferred write would leave
+          // neither file, silently losing every saved profile. Retired =
+          // renamed rather than deleted, so a future corrupt profiles.json
+          // can't silently resurrect stale pre-rename data as current while
+          // the contents stay recoverable by hand.
+          do {
+            let data = try PersistedSchema.encode(migrated, using: encoder)
+            try data.write(to: url, options: .atomic)
+            retireLegacyFile()
+          } catch {
+            // Leave presets.json in place so migration retries next launch.
+            logger.error("Failed to persist migrated profiles: \(error.localizedDescription)")
+          }
           return migrated
         }
       }
@@ -62,6 +83,7 @@ final class ProfileStore: @unchecked Sendable {
       if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
         logger.error("Profiles file exceeds size limit: \(fileSize) bytes")
         backupCorruptFile(fileURL)
+        didRecoverFromCorruptFile = true
         return nil
       }
 
@@ -72,7 +94,28 @@ final class ProfileStore: @unchecked Sendable {
       // user's saved profiles.
       logger.warning("Failed to load profiles at \(fileURL.lastPathComponent): \(error.localizedDescription). Preserving file.")
       backupCorruptFile(fileURL)
+      didRecoverFromCorruptFile = true
       return nil
+    }
+  }
+
+  /// Reads and clears `didRecoverFromCorruptFile`, so a caller can check once
+  /// (e.g. right after `load()` at startup) without the flag lingering true
+  /// across later, unrelated calls.
+  func consumeDidRecoverFromCorruptFile() -> Bool {
+    queue.sync {
+      defer { didRecoverFromCorruptFile = false }
+      return didRecoverFromCorruptFile
+    }
+  }
+
+  private func retireLegacyFile() {
+    let retiredURL = legacyURL.appendingPathExtension("migrated")
+    try? FileManager.default.removeItem(at: retiredURL)
+    do {
+      try FileManager.default.moveItem(at: legacyURL, to: retiredURL)
+    } catch {
+      logger.error("Failed to retire migrated legacy presets file: \(error.localizedDescription)")
     }
   }
 
@@ -97,5 +140,12 @@ final class ProfileStore: @unchecked Sendable {
         self.logger.error("Failed to save profiles: \(error.localizedDescription)")
       }
     }
+  }
+
+  /// Blocks until every write already queued by `save` has completed. For app
+  /// termination only — a change made in the same instant as quit would
+  /// otherwise be lost when the process exits mid-queue.
+  func flush() {
+    queue.sync {}
   }
 }

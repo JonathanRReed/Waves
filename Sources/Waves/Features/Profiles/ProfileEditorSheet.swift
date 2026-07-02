@@ -130,7 +130,7 @@ struct ProfileEditorSheet: View {
           .font(.caption.weight(.semibold))
           .foregroundStyle(.secondary)
         Spacer()
-        Text("\(selectedIDs.count) selected")
+        Text("\(savableSelectedIDs.count) selected")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
@@ -148,7 +148,8 @@ struct ProfileEditorSheet: View {
               title: app.displayName,
               subtitle: app.category == .unknown ? nil : app.category.displayName,
               iconApp: app,
-              isOn: selectedIDs.contains(app.logicalID)
+              isOn: selectedIDs.contains(app.logicalID),
+              isExcluded: excludedIDs.contains(app.logicalID)
             ) { toggle(app.logicalID) }
             if app.id != runningApps.last?.id || !offlineMembers.isEmpty {
               Divider().padding(.leading, 44)
@@ -161,7 +162,8 @@ struct ProfileEditorSheet: View {
                 title: friendlyName(for: id),
                 subtitle: subtitle(for: id),
                 iconApp: nil,
-                isOn: selectedIDs.contains(id)
+                isOn: selectedIDs.contains(id),
+                isExcluded: excludedIDs.contains(id)
               ) { toggle(id) }
               if id != offlineMembers.last {
                 Divider().padding(.leading, 44)
@@ -198,6 +200,7 @@ struct ProfileEditorSheet: View {
     if canSave { return "Save profile" }
     if trimmedName.isEmpty { return "Enter a profile name" }
     if isTooLong { return "Name too long (max \(Self.maxNameLength) characters)" }
+    if !selectedIDs.isEmpty { return "Every selected app is excluded from Waves" }
     return "Select at least one app"
   }
 
@@ -227,6 +230,18 @@ struct ProfileEditorSheet: View {
     store.session.apps.contains { $0.logicalID == id } ? "Running (hidden)" : "Not running"
   }
 
+  /// Apps the user has told Waves to leave alone. Saving strips these from the
+  /// profile (AppStore.saveProfile), so the sheet must count, tag, and gate on
+  /// the same rule — otherwise "3 selected" could save a 2-member profile.
+  private var excludedIDs: Set<String> {
+    Set(store.preferences.excludedAppIDs)
+  }
+
+  /// The selection Save will actually write: selected members minus excluded.
+  private var savableSelectedIDs: Set<String> {
+    selectedIDs.subtracting(excludedIDs)
+  }
+
   private var trimmedName: String {
     name.trimmingCharacters(in: .whitespacesAndNewlines)
   }
@@ -234,7 +249,7 @@ struct ProfileEditorSheet: View {
   private var isTooLong: Bool { trimmedName.count > Self.maxNameLength }
 
   private var canSave: Bool {
-    !trimmedName.isEmpty && !isTooLong && !selectedIDs.isEmpty
+    !trimmedName.isEmpty && !isTooLong && !savableSelectedIDs.isEmpty
   }
 
   private func toggle(_ id: String) {
@@ -290,24 +305,30 @@ struct ProfileEditorSheet: View {
 /// live in the same view body. Mirrors `AppIconCache` in MixerRowView.swift.
 @MainActor
 private enum FriendlyNameCache {
-  private static var storage: [String: String] = [:]
+  /// The value is itself optional so a miss (uninstalled bundle id, or a bundle
+  /// with no usable name) is cached as `nil` too — otherwise every keystroke in
+  /// the name field would re-hit Launch Services for each unresolvable member.
+  private static var storage: [String: String?] = [:]
 
   static func name(forBundleID id: String) -> String? {
     if let cached = storage[id] {
       return cached
     }
+
+    let resolved = lookup(id)
+    storage[id] = resolved
+    return resolved
+  }
+
+  private static func lookup(_ id: String) -> String? {
     guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id),
           let bundle = Bundle(url: url)
     else { return nil }
 
-    let resolved = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+    return (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
       .flatMap { $0.isEmpty ? nil : $0 }
       ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
       .flatMap { $0.isEmpty ? nil : $0 }
-
-    guard let resolved else { return nil }
-    storage[id] = resolved
-    return resolved
   }
 }
 
@@ -316,6 +337,10 @@ private struct AppCheckRow: View {
   let subtitle: String?
   let iconApp: AudioApp?
   let isOn: Bool
+  /// Excluded apps are stripped by AppStore.saveProfile no matter what's ticked
+  /// here, so the row carries the same quiet "Excluded" tag as the mixer row —
+  /// the checkbox alone would promise a membership Save won't keep.
+  var isExcluded: Bool = false
   let toggle: () -> Void
 
   var body: some View {
@@ -331,8 +356,18 @@ private struct AppCheckRow: View {
         }
 
         VStack(alignment: .leading, spacing: 1) {
-          Text(title)
-            .lineLimit(1)
+          HStack(spacing: 6) {
+            Text(title)
+              .lineLimit(1)
+            if isExcluded {
+              Text("Excluded")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(.secondary.opacity(0.15), in: Capsule())
+            }
+          }
           if let subtitle {
             Text(subtitle)
               .font(.caption2)
@@ -353,7 +388,7 @@ private struct AppCheckRow: View {
     }
     .buttonStyle(.plain)
     .accessibilityElement(children: .ignore)
-    .accessibilityLabel(title)
+    .accessibilityLabel(isExcluded ? "\(title), excluded from Waves" : title)
     .accessibilityValue(isOn ? "Selected" : "Not selected")
     .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
     .accessibilityHint("Toggles membership in this profile.")

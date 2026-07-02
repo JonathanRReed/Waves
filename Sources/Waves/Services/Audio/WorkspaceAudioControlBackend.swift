@@ -80,16 +80,25 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return
     }
 
+    // applyRoute suspends (tap-retry backoff) and the actor is reentrant, so a
+    // concurrent refresh/buildSnapshot can replace `snapshot.apps` while it is
+    // awaited. Every write after the await must re-resolve the row by appID —
+    // the captured index would trap or land on the wrong app — and skip it if
+    // the row vanished. Same pattern in the other setters below.
     do {
       try await applyRoute(for: snapshot.apps[index], toVolume: target, muted: snapshot.apps[index].isMuted)
-      snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : target
-      snapshot.apps[index].routingState = .managed
-      snapshot.apps[index].notes = nil
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : target
+        snapshot.apps[index].routingState = .managed
+        snapshot.apps[index].notes = nil
+      }
       refreshGlobalRouteHealth()
     } catch {
-      snapshot.apps[index].routingState = .error
-      snapshot.apps[index].notes = error.localizedDescription
-      snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].routingState = .error
+        snapshot.apps[index].notes = error.localizedDescription
+        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+      }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
     }
@@ -115,24 +124,31 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return
     }
 
+    // Re-resolve the row after the await (see setDesiredVolume): a concurrent
+    // rebuild during applyRoute's suspension can replace `snapshot.apps`.
     do {
       try await applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: isMuted)
-      snapshot.apps[index].routingState = .managed
-      snapshot.apps[index].peakLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].peakLevel)
-      snapshot.apps[index].rmsLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].rmsLevel)
-      snapshot.apps[index].appliedVolume = isMuted ? 0 : snapshot.apps[index].desiredVolume
-      snapshot.apps[index].notes = nil
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].isMuted = isMuted
+        snapshot.apps[index].routingState = .managed
+        snapshot.apps[index].peakLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].peakLevel)
+        snapshot.apps[index].rmsLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].rmsLevel)
+        snapshot.apps[index].appliedVolume = isMuted ? 0 : snapshot.apps[index].desiredVolume
+        snapshot.apps[index].notes = nil
+      }
       refreshGlobalRouteHealth()
     } catch {
       // The mute could not be applied (no tap established), so revert the
       // snapshot flag — otherwise the row shows the muted glyph while audio
       // still plays at full volume. routingState=.error surfaces the failure.
-      snapshot.apps[index].isMuted = previousMuted
-      snapshot.apps[index].routingState = .error
-      snapshot.apps[index].notes = error.localizedDescription
-      snapshot.apps[index].peakLevel = 0
-      snapshot.apps[index].rmsLevel = 0
-      snapshot.apps[index].appliedVolume = previousMuted ? 0 : snapshot.apps[index].desiredVolume
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].isMuted = previousMuted
+        snapshot.apps[index].routingState = .error
+        snapshot.apps[index].notes = error.localizedDescription
+        snapshot.apps[index].peakLevel = 0
+        snapshot.apps[index].rmsLevel = 0
+        snapshot.apps[index].appliedVolume = previousMuted ? 0 : snapshot.apps[index].desiredVolume
+      }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
     }
@@ -159,14 +175,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // a single queued write, so there's no need for a separate (redundant,
     // off-queue) controller.setVolumeBoost call that could clobber a concurrent
     // volume/mute change with a stale captured value.
+    // Re-resolve the row after the await (see setDesiredVolume): a concurrent
+    // rebuild during applyRoute's suspension can replace `snapshot.apps`.
     do {
       try await applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: snapshot.apps[index].isMuted)
-      snapshot.apps[index].routingState = .managed
-      snapshot.apps[index].notes = nil
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].routingState = .managed
+        snapshot.apps[index].notes = nil
+      }
       refreshGlobalRouteHealth()
     } catch {
-      snapshot.apps[index].routingState = .error
-      snapshot.apps[index].notes = error.localizedDescription
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].routingState = .error
+        snapshot.apps[index].notes = error.localizedDescription
+      }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
     }
@@ -205,20 +227,26 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       snapshot.apps[index].isMuted = targetMuted
       snapshot.apps[index].volumeBoost = targetBoost
 
+      // Re-resolve the row after the await (see setDesiredVolume): a concurrent
+      // rebuild during applyRoute's suspension can replace `snapshot.apps`.
       do {
         try await applyRoute(
           for: snapshot.apps[index],
           toVolume: targetVolume,
           muted: targetMuted
         )
-        snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
-        snapshot.apps[index].routingState = .managed
-        snapshot.apps[index].notes = nil
+        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) {
+          snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
+          snapshot.apps[index].routingState = .managed
+          snapshot.apps[index].notes = nil
+        }
         refreshGlobalRouteHealth()
       } catch {
-        snapshot.apps[index].routingState = .error
-        snapshot.apps[index].notes = error.localizedDescription
-        snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
+        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) {
+          snapshot.apps[index].routingState = .error
+          snapshot.apps[index].notes = error.localizedDescription
+          snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
+        }
         refreshGlobalRouteHealth(latestError: error.localizedDescription)
       }
     }
@@ -837,15 +865,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let wasManaged = app.routingState == .managed || app.routingState == .live
     guard wasManaged else { return }
 
+    // Re-resolve the row after the await (see setDesiredVolume): a concurrent
+    // rebuild during applyRoute's suspension can replace `snapshot.apps`.
     do {
       try await applyRoute(for: app, toVolume: app.desiredVolume, muted: app.isMuted)
-      snapshot.apps[index].routingState = .managed
-      snapshot.apps[index].appliedVolume = app.isMuted ? 0 : app.desiredVolume
-      snapshot.apps[index].notes = nil
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].routingState = .managed
+        snapshot.apps[index].appliedVolume =
+          snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+        snapshot.apps[index].notes = nil
+      }
       refreshGlobalRouteHealth()
     } catch {
-      snapshot.apps[index].routingState = .error
-      snapshot.apps[index].notes = error.localizedDescription
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].routingState = .error
+        snapshot.apps[index].notes = error.localizedDescription
+      }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
     }
@@ -1261,8 +1296,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let runningIDs: Set<String> = Set(mergedApps.map(\.id))
     disposeControllers(keeping: runningIDs)
 
-    let backendError = snapshot.backendStatus.lastError
     let hasRouteErrors = mergedApps.contains { $0.routingState == .error }
+    // Mirror refreshGlobalRouteHealth: carry lastError forward only while some
+    // app is still in .error, so surfaces never show a stale error message next
+    // to an otherwise healthy status.
+    let backendError = hasRouteErrors ? snapshot.backendStatus.lastError : nil
     let currentDevice = (try? currentOutputDevice())
       ?? previousSnapshot?.currentDevice
       ?? AudioDevice(
@@ -1596,22 +1634,32 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) async {
     var lastError: String?
 
-    for index in snapshot.apps.indices {
-      guard logicalIDs.contains(snapshot.apps[index].logicalID) else { continue }
+    // applyRoute suspends (tap-retry backoff) and the actor is reentrant, so a
+    // concurrent refresh/buildSnapshot can replace `snapshot.apps` mid-loop.
+    // Iterate by logicalID and re-resolve the row after every await — a stale
+    // index would trap or write onto the wrong app. Rows that vanished are
+    // skipped.
+    let targetLogicalIDs = snapshot.apps.map(\.logicalID).filter { logicalIDs.contains($0) }
+    for logicalID in targetLogicalIDs {
+      guard let app = snapshot.apps.first(where: { $0.logicalID == logicalID }) else { continue }
 
       do {
         try await applyRoute(
-          for: snapshot.apps[index],
-          toVolume: snapshot.apps[index].desiredVolume,
-          muted: snapshot.apps[index].isMuted
+          for: app,
+          toVolume: app.desiredVolume,
+          muted: app.isMuted
         )
-        snapshot.apps[index].routingState = .managed
-        snapshot.apps[index].appliedVolume =
-          snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
-        snapshot.apps[index].notes = nil
+        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
+          snapshot.apps[index].routingState = .managed
+          snapshot.apps[index].appliedVolume =
+            snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+          snapshot.apps[index].notes = nil
+        }
       } catch {
-        snapshot.apps[index].routingState = .error
-        snapshot.apps[index].notes = error.localizedDescription
+        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
+          snapshot.apps[index].routingState = .error
+          snapshot.apps[index].notes = error.localizedDescription
+        }
         lastError = error.localizedDescription
       }
     }

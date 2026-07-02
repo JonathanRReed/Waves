@@ -26,6 +26,18 @@ final class PreferencesStore: @unchecked Sendable {
     url = directory.appendingPathComponent("preferences.json")
   }
 
+  /// Test-only entry point: keeps the store's file inside `directory` instead
+  /// of the real Application Support location.
+  init(directory: URL) {
+    url = directory.appendingPathComponent("preferences.json")
+  }
+
+  /// Set to true the moment `load()` has to back up and discard an unreadable
+  /// preferences file. Read-and-cleared by the caller (AppStore) so it can
+  /// surface a one-time "your settings were reset" toast instead of failing
+  /// silently.
+  private(set) var didRecoverFromCorruptFile = false
+
   func load() -> UserPreferences {
     return queue.sync {
       // A missing file is the normal first-launch case: return defaults without
@@ -39,10 +51,21 @@ final class PreferencesStore: @unchecked Sendable {
         if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
           logger.error("Preferences file exceeds size limit: \(fileSize) bytes")
           backupCorruptFile()
+          didRecoverFromCorruptFile = true
           return UserPreferences()
         }
 
         let data = try Data(contentsOf: url)
+        // UserPreferences decodes leniently by design (per-field forward
+        // compat), so valid JSON of the wrong shape ([], null, a scalar) would
+        // otherwise "load" as defaults and be overwritten on the next save.
+        // Require a top-level object so those files take the backup path.
+        guard (try? JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+          logger.warning("Preferences file is not a JSON object. Preserving file and using defaults.")
+          backupCorruptFile()
+          didRecoverFromCorruptFile = true
+          return UserPreferences()
+        }
         let preferences = try PersistedSchema.decode(UserPreferences.self, from: data, using: decoder)
         return preferences
       } catch {
@@ -50,8 +73,19 @@ final class PreferencesStore: @unchecked Sendable {
         // overwriting the user's saved preferences with defaults.
         logger.warning("Failed to load preferences: \(error.localizedDescription). Preserving file and using defaults.")
         backupCorruptFile()
+        didRecoverFromCorruptFile = true
         return UserPreferences()
       }
+    }
+  }
+
+  /// Reads and clears `didRecoverFromCorruptFile`, so a caller can check once
+  /// (e.g. right after `load()` at startup) without the flag lingering true
+  /// across later, unrelated calls.
+  func consumeDidRecoverFromCorruptFile() -> Bool {
+    queue.sync {
+      defer { didRecoverFromCorruptFile = false }
+      return didRecoverFromCorruptFile
     }
   }
 
@@ -76,5 +110,12 @@ final class PreferencesStore: @unchecked Sendable {
         self.logger.error("Failed to save preferences: \(error.localizedDescription)")
       }
     }
+  }
+
+  /// Blocks until every write already queued by `save` has completed. For app
+  /// termination only — a change made in the same instant as quit would
+  /// otherwise be lost when the process exits mid-queue.
+  func flush() {
+    queue.sync {}
   }
 }

@@ -237,6 +237,21 @@ struct MixedWaveformView: View {
         }
       }
     }
+    // Fade every layer — baseline, threads, sum, glow — out over the last few
+    // percent of each side, so the band dissolves into its surface instead of
+    // ending in a hard-cut line against the container edge.
+    .mask(
+      LinearGradient(
+        stops: [
+          .init(color: .clear, location: 0),
+          .init(color: .black, location: 0.07),
+          .init(color: .black, location: 0.93),
+          .init(color: .clear, location: 1),
+        ],
+        startPoint: .leading,
+        endPoint: .trailing
+      )
+    )
     // Mount the full-rate loop the instant sound appears; after it stops,
     // hold long enough for the slow release to carry every wave back down to
     // the baseline, then relax to the idle cadence.

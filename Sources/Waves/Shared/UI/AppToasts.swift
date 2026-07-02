@@ -85,23 +85,14 @@ private struct AppToastBanner: View {
     }
     .transition(bannerTransition)
     .accessibilityElement(children: .combine)
-    .accessibilityLabel(accessibilityMessage)
+    // The VoiceOver announcement is posted once by AppStore.showToast when the
+    // toast is added — a per-banner onAppear announcement would fire once per
+    // mounted surface (main window + menu-bar popover) and re-announce stale
+    // toasts whenever the popover reopens.
+    .accessibilityLabel(toast.accessibilityMessage)
     // .combine absorbs the dismiss button, so expose dismissal as an action.
     .accessibilityAction(named: "Dismiss") {
       store.dismissToast(id: toast.id)
-    }
-    .onAppear {
-      // VoiceOver does not announce transient banners on its own.
-      // Give errors/warnings high priority so they are not interrupted by
-      // lower-severity toasts that appear in the same burst.
-      var message = AttributedString(accessibilityMessage)
-      switch toast.kind {
-      case .error, .warning:
-        message.accessibilitySpeechAnnouncementPriority = .high
-      case .success, .info:
-        break
-      }
-      AccessibilityNotification.Announcement(message).post()
     }
   }
 
@@ -110,22 +101,6 @@ private struct AppToastBanner: View {
       insertion: reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity),
       removal: .opacity
     )
-  }
-
-  private var accessibilityMessage: String {
-    let prefix: String
-    switch toast.kind {
-    case .error:
-      prefix = "Error. "
-    case .warning:
-      prefix = "Warning. "
-    case .success, .info:
-      prefix = ""
-    }
-    if let detail = toast.detail, !detail.isEmpty {
-      return "\(prefix)\(toast.title). \(detail)"
-    }
-    return "\(prefix)\(toast.title)"
   }
 
   private var iconName: String {
