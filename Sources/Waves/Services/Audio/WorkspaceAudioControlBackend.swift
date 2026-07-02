@@ -85,9 +85,19 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // awaited. Every write after the await must re-resolve the row by appID —
     // the captured index would trap or land on the wrong app — and skip it if
     // the row vanished. Same pattern in the other setters below.
+    //
+    // buildSnapshot's merge (see its `app.desiredVolume = previous.desiredVolume`)
+    // copies desiredVolume from whatever `previousSnapshot` it was handed — if
+    // that snapshot was captured before this call's write above, a concurrent
+    // rebuild finishing during this await clobbers `desiredVolume` back to the
+    // pre-change value even though `target` is what's actually being applied.
+    // Re-asserting `target` (the locally captured, authoritative value, not a
+    // re-read of the possibly-clobbered snapshot) after re-resolution in BOTH
+    // branches below closes that window.
     do {
       try await applyRoute(for: snapshot.apps[index], toVolume: target, muted: snapshot.apps[index].isMuted)
       if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].desiredVolume = target
         snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : target
         snapshot.apps[index].routingState = .managed
         snapshot.apps[index].notes = nil
@@ -95,9 +105,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       refreshGlobalRouteHealth()
     } catch {
       if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].desiredVolume = target
         snapshot.apps[index].routingState = .error
         snapshot.apps[index].notes = error.localizedDescription
-        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : target
       }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
@@ -176,16 +187,23 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // off-queue) controller.setVolumeBoost call that could clobber a concurrent
     // volume/mute change with a stale captured value.
     // Re-resolve the row after the await (see setDesiredVolume): a concurrent
-    // rebuild during applyRoute's suspension can replace `snapshot.apps`.
+    // rebuild during applyRoute's suspension can replace `snapshot.apps` — and
+    // its merge copies volumeBoost from whatever previousSnapshot it was
+    // handed, which can clobber this row's boost back to the pre-change value
+    // if that snapshot was captured before the write above. Re-assert
+    // `clampedBoost` (the locally captured, authoritative value) after
+    // re-resolution in both branches to close that window.
     do {
       try await applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: snapshot.apps[index].isMuted)
       if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].volumeBoost = clampedBoost
         snapshot.apps[index].routingState = .managed
         snapshot.apps[index].notes = nil
       }
       refreshGlobalRouteHealth()
     } catch {
       if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+        snapshot.apps[index].volumeBoost = clampedBoost
         snapshot.apps[index].routingState = .error
         snapshot.apps[index].notes = error.localizedDescription
       }

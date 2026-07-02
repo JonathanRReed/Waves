@@ -107,6 +107,14 @@ struct MainWindowView: View {
     .onAppear {
       store.beginLiveLevels()
       validateSelection()
+      // Covers the case where the menu bar's "N more in Waves" link had to
+      // create this window from scratch (it was closed): the request was
+      // already made before openWindow, so this fresh view's onChange below
+      // never sees it change. If the window was already open and alive, this
+      // is a no-op (onChange already consumed it).
+      if let filter = store.consumeSourceFocusRequest() {
+        selection = .source(filter)
+      }
     }
     .onChange(of: store.preferences.showRecentApps) { _, _ in
       validateSelection()
@@ -128,8 +136,9 @@ struct MainWindowView: View {
       // The menu bar's "N more in Waves" overflow link asked to show a specific
       // scope (Pinned/Live/Recent) right before opening this window — honor it,
       // so the window shows the apps the link promised instead of whatever
-      // scope it happened to already be on.
-      if let filter = store.sourceFocusRequest {
+      // scope it happened to already be on. This fires when the window was
+      // already open (see onAppear above for the window-was-closed case).
+      if let filter = store.consumeSourceFocusRequest() {
         selection = .source(filter)
       }
     }
