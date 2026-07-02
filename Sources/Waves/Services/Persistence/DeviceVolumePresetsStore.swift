@@ -95,4 +95,11 @@ final class DeviceVolumePresetsStore: @unchecked Sendable {
       }
     }
   }
+
+  /// Blocks until every write already queued by `save` has completed. For app
+  /// termination only — a change made in the same instant as quit would
+  /// otherwise be lost when the process exits mid-queue.
+  func flush() {
+    queue.sync {}
+  }
 }

@@ -305,6 +305,9 @@ private struct SidebarView: View {
   @Binding var selection: MixerScope
   let onNewProfile: () -> Void
   let onEditProfile: (Profile) -> Void
+  // Deleting a profile discards a hand-tuned captured mix with no undo, so the
+  // context menu's Delete asks first instead of firing on a single misclick.
+  @State private var profilePendingDeletion: Profile?
 
   var body: some View {
     List(selection: $selection) {
@@ -336,10 +339,8 @@ private struct SidebarView: View {
               Button("Edit Profile…") { onEditProfile(profile) }
               Button("Export…") { store.exportProfile(profile) }
               Divider()
-              Button("Delete Profile", role: .destructive) {
-                if let index = store.profiles.firstIndex(where: { $0.id == profile.id }) {
-                  store.deleteProfiles(at: IndexSet(integer: index))
-                }
+              Button("Delete Profile…", role: .destructive) {
+                profilePendingDeletion = profile
               }
             }
         }
@@ -360,6 +361,24 @@ private struct SidebarView: View {
     }
     .listStyle(.sidebar)
     .navigationTitle("Waves")
+    .confirmationDialog(
+      "Delete “\(profilePendingDeletion?.name ?? "")”?",
+      isPresented: Binding(
+        get: { profilePendingDeletion != nil },
+        set: { if !$0 { profilePendingDeletion = nil } }
+      ),
+      titleVisibility: .visible,
+      presenting: profilePendingDeletion
+    ) { profile in
+      Button("Delete Profile", role: .destructive) {
+        if let index = store.profiles.firstIndex(where: { $0.id == profile.id }) {
+          store.deleteProfiles(at: IndexSet(integer: index))
+        }
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: { profile in
+      Text("This removes \(profile.name)\(profile.carriesLevels ? " and its saved levels" : "") from your profiles. This can't be undone.")
+    }
   }
 
   /// Mirrors the menu bar: the Recent scope is only offered when the user has
@@ -440,7 +459,7 @@ private struct SourceListView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       if let profile {
-        ProfileHeaderView(profile: profile, visibleCount: apps.count, onEdit: { onEditProfile(profile) })
+        ProfileHeaderView(profile: profile, visibleCount: apps.count, isSearching: isSearching, onEdit: { onEditProfile(profile) })
       } else {
         OutputSummaryView(scope: scope, visibleCount: apps.count, isSearching: isSearching)
       }
@@ -600,7 +619,9 @@ private struct SourceListView: View {
 
   private var emptyTitle: String {
     if systemProcessesHidden { return "System Processes Hidden" }
-    if let profile { return "No \(profile.name) Apps Running" }
+    // While searching, "No <profile> Apps Running" would be a false claim — the
+    // emptiness is just a non-matching query.
+    if let profile { return isSearching ? "No Results" : "No \(profile.name) Apps Running" }
     if case .source(let filter) = scope { return filter.emptyTitle }
     return "Nothing Here"
   }
@@ -610,6 +631,9 @@ private struct SourceListView: View {
       return "System processes are hidden. Enable Show system processes in Settings to see them."
     }
     if let profile {
+      // A search spans all visible apps, so an empty result here just means the
+      // query matched nothing — not that the profile's apps aren't running.
+      if isSearching { return "Try a different search term." }
       return "None of \(profile.name)'s \(profile.entries.count) \(profile.entries.count == 1 ? "app" : "apps") are running right now. Launch one to control it here."
     }
     if case .source(let filter) = scope {
@@ -629,8 +653,8 @@ private struct SourceListView: View {
 
   /// Runs `action` on the currently selected row, if any.
   ///
-  /// These are focused-window "app shortcuts," which the Help copy promises
-  /// always work while a Waves window is focused. They are intentionally NOT
+  /// These are focused-window keys that work while the mixer window (this
+  /// list) is focused, like the Help copy's ⌘N/⌘R. They are intentionally NOT
   /// gated on `preferences.enableKeyboardShortcuts` — that toggle governs the
   /// global ⌘⌥ hotkeys (the NSEvent monitor), not in-list keys. Gating here
   /// would silently strip keyboard control of the mixer (including the only
@@ -659,6 +683,11 @@ private struct ProfileHeaderView: View {
   @Environment(AppStore.self) private var store
   let profile: Profile
   let visibleCount: Int
+  // True when a search is active. Search spans all visible apps regardless of
+  // scope, so "N of M running" would count cross-scope matches against this
+  // profile's membership; use a neutral "result(s)" noun instead (matching
+  // OutputSummaryView).
+  let isSearching: Bool
   let onEdit: () -> Void
 
   var body: some View {
@@ -709,6 +738,9 @@ private struct ProfileHeaderView: View {
   }
 
   private var subtitle: String {
+    if isSearching {
+      return "\(visibleCount) \(visibleCount == 1 ? "result" : "results")"
+    }
     let running = "\(visibleCount) of \(profile.entries.count) running"
     return profile.carriesLevels ? "\(running) · carries saved levels" : "\(running) · group"
   }

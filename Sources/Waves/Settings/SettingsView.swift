@@ -314,6 +314,9 @@ private struct ProfileSettingsView: View {
 private struct ProfileRow: View {
   @Environment(AppStore.self) private var store
   let profile: Profile
+  // Deleting a profile discards a hand-tuned captured mix with no undo, so the
+  // one-click borderless button (right beside Export) asks first.
+  @State private var confirmingDelete = false
 
   var body: some View {
     HStack(spacing: 10) {
@@ -335,14 +338,26 @@ private struct ProfileRow: View {
         .controlSize(.small)
         .accessibilityLabel("Export profile \(profile.name)")
 
-      Button("Delete", role: .destructive) {
-        if let index = store.profiles.firstIndex(where: { $0.id == profile.id }) {
-          store.deleteProfiles(at: IndexSet(integer: index))
-        }
+      Button("Delete…", role: .destructive) {
+        confirmingDelete = true
       }
       .buttonStyle(.borderless)
       .controlSize(.small)
       .accessibilityLabel("Delete profile \(profile.name)")
+      .confirmationDialog(
+        "Delete “\(profile.name)”?",
+        isPresented: $confirmingDelete,
+        titleVisibility: .visible
+      ) {
+        Button("Delete Profile", role: .destructive) {
+          if let index = store.profiles.firstIndex(where: { $0.id == profile.id }) {
+            store.deleteProfiles(at: IndexSet(integer: index))
+          }
+        }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text("This removes \(profile.name)\(profile.carriesLevels ? " and its saved levels" : "") from your profiles. This can't be undone.")
+      }
     }
   }
 

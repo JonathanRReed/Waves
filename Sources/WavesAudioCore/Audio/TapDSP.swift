@@ -31,7 +31,14 @@ public enum TapDSP {
       let pointer = data.assumingMemoryBound(to: Float.self)
       let count = byteCount / MemoryLayout<Float>.size
       for index in 0..<count {
-        pointer[index] = min(1.0, max(-1.0, pointer[index] * gain))
+        let sample = pointer[index]
+        // A NaN sample survives the clamp as -1.0 — a full-scale pop. Replace
+        // non-finite input with silence instead.
+        guard sample.isFinite else {
+          pointer[index] = 0
+          continue
+        }
+        pointer[index] = min(1.0, max(-1.0, sample * gain))
       }
     case .int16:
       let pointer = data.assumingMemoryBound(to: Int16.self)
@@ -94,12 +101,20 @@ public enum TapDSP {
       break
     }
 
+    // Non-finite input samples (NaN/inf from a misbehaving app) poison the
+    // accumulators; NaN levels would propagate into snapshots and make every
+    // JSONEncoder session save throw. Report silence for such buffers.
+    if !peak.isFinite { peak = 0 }
+    if !sum.isFinite { sum = 0 }
+
     return (peak, sum, sampleCount)
   }
 
   /// Root-mean-square from accumulated sum-of-squares and sample count.
   public static func rms(sum: Float, sampleCount: UInt32) -> Float {
-    sampleCount > 0 ? (sum / Float(sampleCount)).squareRoot() : 0
+    guard sampleCount > 0 else { return 0 }
+    let value = (sum / Float(sampleCount)).squareRoot()
+    return value.isFinite ? value : 0
   }
 
   static func scaleSigned16(_ sample: Int16, gain: Float) -> Int16 {

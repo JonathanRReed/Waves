@@ -106,7 +106,7 @@ struct HelpView: View {
       }
       .font(.system(.body, design: .monospaced))
 
-      Text("App shortcuts always work while a Waves window is focused.")
+      Text("⌘N and ⌘R work while the mixer window is focused; ⌘, opens Settings from any Waves window.")
         .font(.caption)
         .foregroundStyle(.secondary)
     }

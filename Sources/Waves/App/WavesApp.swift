@@ -78,15 +78,16 @@ struct WavesApp: App {
         .frame(minWidth: 720, minHeight: 640)
     }
 
-    MenuBarExtra(
-      "Waves",
-      systemImage: store.menuBarIconName,
-      isInserted: $showMenuBarExtra
-    ) {
+    MenuBarExtra(isInserted: $showMenuBarExtra) {
       MenuBarMixerView()
         .environment(store)
         .frame(width: WavesDesign.menuBarPanelWidth)
         .tint(WavesDesign.accent)
+    } label: {
+      // The accessibility label must live on the status-item label itself —
+      // VoiceOver reads this view for the menu-bar item, not the popover
+      // content above.
+      Image(systemName: store.menuBarIconName)
         .accessibilityLabel(Text(menuBarAccessibilityLabel))
     }
     .menuBarExtraStyle(.window)
@@ -114,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private var store: AppStore?
   private var eventMonitor: Any?
+  private var localEventMonitor: Any?
 
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "URLScheme")
 
@@ -201,7 +203,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private func setupGlobalHotkeys() {
     guard eventMonitor == nil else { return }
     eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-      self?.handleGlobalKeyEvent(event)
+      _ = self?.handleGlobalKeyEvent(event)
+    }
+    // Global monitors never see events while Waves itself is frontmost, so a
+    // local monitor covers the hotkeys with the mixer/Settings focused.
+    // Returning nil consumes a handled event, keeping ⌘⌥M from also firing
+    // the Window menu's "Minimize All".
+    localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+      if self?.handleGlobalKeyEvent(event) == true {
+        return nil
+      }
+      return event
     }
   }
 
@@ -210,32 +222,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       NSEvent.removeMonitor(monitor)
       eventMonitor = nil
     }
+    if let monitor = localEventMonitor {
+      NSEvent.removeMonitor(monitor)
+      localEventMonitor = nil
+    }
   }
 
-  private func handleGlobalKeyEvent(_ event: NSEvent) {
+  /// Returns `true` when the event matched a Waves hotkey and was acted on.
+  private func handleGlobalKeyEvent(_ event: NSEvent) -> Bool {
     guard let store = store,
-          store.preferences.enableKeyboardShortcuts else { return }
+          store.preferences.enableKeyboardShortcuts else { return false }
 
     // Check if user is typing in a text field
     if let focusedElement = NSApp.keyWindow?.firstResponder,
        focusedElement.isKind(of: NSTextView.self) || focusedElement.isKind(of: NSTextField.self) {
-      return
+      return false
     }
 
     let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    // `contains` (not equality) because the arrow keys carry .function/
+    // .numericPad flags; .control/.shift are excluded so third-party chords
+    // like ⌃⌥⌘↓ don't also trigger Waves.
     let isCmdOption = modifiers.contains(.command) && modifiers.contains(.option)
+      && !modifiers.contains(.control) && !modifiers.contains(.shift)
 
-    guard isCmdOption else { return }
+    guard isCmdOption else { return false }
 
     switch event.keyCode {
     case 126: // Up arrow
       store.increaseVolumeForFrontmostApp()
+      return true
     case 125: // Down arrow
       store.decreaseVolumeForFrontmostApp()
+      return true
     case 46: // M key
       store.toggleMuteForFrontmostApp()
+      return true
     default:
-      break
+      return false
     }
   }
 

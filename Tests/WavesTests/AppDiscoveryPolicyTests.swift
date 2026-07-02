@@ -27,6 +27,25 @@ import Testing
   #expect(helper != "com.google.Chrome.helper")
 }
 
+@Test func logicalAppIDKeepsNonASCIINamedAppsDistinct() {
+  // Names with no ASCII alphanumerics (e.g. CJK-only) normalize to empty and
+  // must NOT collapse onto a shared id, or persisted volume/mute for one app
+  // would be restored onto the other. Only a truly empty name is "unknown-app".
+  let first = AppDiscoveryPolicy.logicalAppID(bundleID: nil, displayName: "音楽プレーヤー")
+  let second = AppDiscoveryPolicy.logicalAppID(bundleID: nil, displayName: "视频播放器")
+  #expect(first != second)
+  #expect(first.hasPrefix("unnamed-"))
+  #expect(first == AppDiscoveryPolicy.logicalAppID(bundleID: nil, displayName: "音楽プレーヤー"))
+  #expect(AppDiscoveryPolicy.logicalAppID(bundleID: nil, displayName: "  ") == "unknown-app")
+}
+
+@Test func inferCategoryClassifiesQuickTimeAsMediaNotSystem() {
+  // Regression: QuickTime Player must hit the media clause before the
+  // com.apple. system fallback, or the default "hide system processes" filter
+  // hides it while it is actively playing.
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.apple.quicktimeplayerx", displayName: "QuickTime Player") == .media)
+}
+
 @Test func logicalAppIDIsStableAcrossCalls() {
   let first = AppDiscoveryPolicy.logicalAppID(bundleID: "com.foo.Bar", displayName: "Bar")
   let second = AppDiscoveryPolicy.logicalAppID(bundleID: "com.foo.Bar", displayName: "Bar")
