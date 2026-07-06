@@ -125,6 +125,7 @@ struct OnboardingView: View {
             action: actionLabel(for: index, fallback: step.action),
             canPerformAction: canPerformAction(for: index),
             badge: badge(for: index),
+            crossReference: crossReference(for: index),
             secondaryAction: secondaryAction(for: index),
             onSecondaryAction: { handleSecondaryAction(for: index) }
           ) {
@@ -262,6 +263,22 @@ struct OnboardingView: View {
     index == 3 ? "Optional" : nil
   }
 
+  /// The Settings > Advanced diagnostics check describing the same underlying
+  /// state as this step, so a user who's seen one doesn't wonder whether the
+  /// other is describing something different — this setup checklist and the
+  /// Advanced/main-window Diagnostics panel are two views onto the same
+  /// booleans, worded differently for their different contexts (task-oriented
+  /// setup vs. flat status report). Step 1 (output device visibility) has no
+  /// Advanced equivalent, so it returns nil.
+  private func crossReference(for index: Int) -> String? {
+    switch index {
+    case 0: return "Audio component"
+    case 2: return "Route recovery"
+    case 3: return "Accessibility permission"
+    default: return nil
+    }
+  }
+
   /// A secondary affordance shown on an already-complete step. Currently used to
   /// let the user re-run the route-recovery check after it has passed, since the
   /// primary action vanishes once the step is complete.
@@ -317,6 +334,10 @@ private struct EnhancedSetupStepRow: View {
   let canPerformAction: Bool
   /// Optional non-warning chip (e.g. "Optional") shown beside the title.
   var badge: String? = nil
+  /// The Settings > Advanced diagnostics check title describing this same
+  /// state, shown as a small linking caption. Nil when this step has no
+  /// Advanced equivalent.
+  var crossReference: String? = nil
   /// Optional secondary action label shown even when the step is complete
   /// (e.g. a "Re-test" control). Rendered only when non-nil.
   var secondaryAction: String? = nil
@@ -349,6 +370,12 @@ private struct EnhancedSetupStepRow: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+
+          if let crossReference {
+            Text("Also shown as “\(crossReference)” in Settings → Advanced.")
+              .font(.caption2)
+              .foregroundStyle(.tertiary)
+          }
         }
 
         Spacer()

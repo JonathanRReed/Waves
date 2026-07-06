@@ -1,4 +1,5 @@
 import SwiftUI
+import WavesAudioCore
 
 // MARK: - Design tokens
 //
@@ -250,6 +251,40 @@ struct WavesSectionHeader: View {
       if let trailing {
         trailing
       }
+    }
+  }
+}
+
+/// Single source of truth for a diagnostics check's color/symbol/status word —
+/// previously reimplemented separately in Settings > Advanced's
+/// `DiagnosticsCheckRow` and the main window's `DiagnosticsPanel`, which read
+/// the same `store.diagnostics.checks` data but could have drifted in styling
+/// since neither referenced the other.
+extension DiagnosticsStatus {
+  var color: Color {
+    switch self {
+    case .passed: WavesDesign.success
+    case .warning: WavesDesign.warning
+    case .failed: WavesDesign.error
+    case .informational: .secondary
+    }
+  }
+
+  var symbolName: String {
+    switch self {
+    case .passed: "checkmark.circle"
+    case .warning: "exclamationmark.triangle"
+    case .failed: "xmark.octagon"
+    case .informational: "info.circle"
+    }
+  }
+
+  var statusWord: String {
+    switch self {
+    case .passed: "Passed"
+    case .warning: "Warning"
+    case .failed: "Failed"
+    case .informational: "Info"
     }
   }
 }
