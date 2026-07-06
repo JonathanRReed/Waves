@@ -483,6 +483,14 @@ private struct SourceListView: View {
         .background(Color(nsColor: .textBackgroundColor))
         .overlay(Divider(), alignment: .bottom)
 
+      if !unroutableApps.isEmpty {
+        UnroutableAppsBanner(apps: unroutableApps) {
+          store.excludeUnroutableApps(unroutableApps)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 10)
+      }
+
       // Suppress the empty state during the first scan so the window never
       // tells the user it is "Refreshing" (the pill in MainWindowView) and that
       // nothing was found at the same time. Mirrors the menu bar's gating.
@@ -494,34 +502,37 @@ private struct SourceListView: View {
             description: Text(emptyMessage)
           )
 
-          // When apps are hidden by the system-processes filter, a Refresh is a
-          // no-op — the remedy is the Settings toggle, so make that the primary.
+          // Each empty scope gets the one action that actually resolves it —
+          // a generic Refresh/Settings pair here used to show for every scope
+          // even when neither button did anything for that scope (e.g. Settings
+          // has no toggle relevant to "no pinned apps").
           if systemProcessesHidden {
+            // Apps are hidden by the system-processes filter, so a Refresh is a
+            // no-op — the remedy is the Settings toggle.
             Button {
               openSettings()
             } label: {
               Label("Open Settings", systemImage: "gearshape")
             }
             .wavesGlassProminentButton()
-          } else {
-            HStack(spacing: 10) {
-              Button {
-                store.refresh()
-              } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-              }
-              .wavesGlassProminentButton()
-
-              Button {
-                openSettings()
-              } label: {
-                Label("Settings", systemImage: "gearshape")
-              }
-              .buttonStyle(.bordered)
+          } else if case .source(.pinned) = scope, !isSearching {
+            // Pinning only happens from the Running list, never from here.
+            Button {
+              store.focusSource(.running)
+            } label: {
+              Label("Go to Running Apps", systemImage: "square.stack.3d.up.fill")
             }
+            .wavesGlassProminentButton()
+          } else {
+            Button {
+              store.refresh()
+            } label: {
+              Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .wavesGlassProminentButton()
           }
         }
-        Spacer(minLength: 0)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         List(selection: $selectedAppID) {
           ForEach(Array(apps.enumerated()), id: \.element.id) { index, app in
@@ -609,6 +620,13 @@ private struct SourceListView: View {
     .background(Color(nsColor: .textBackgroundColor))
   }
 
+  /// Apps in the current scope that can never produce audio (see
+  /// `AudioApp.hasNoAudioCapability`) — summarized once in `UnroutableAppsBanner`
+  /// instead of repeating the same explanation on every such row.
+  private var unroutableApps: [AudioApp] {
+    apps.filter { $0.routingState == .error && $0.hasNoAudioCapability }
+  }
+
   /// True when the user has an active (non-whitespace) search query. Search
   /// looks across ALL visible apps regardless of the selected scope, so any
   /// scope-specific noun ("pinned apps", "running apps") would mislabel the
@@ -685,6 +703,54 @@ private struct SourceListView: View {
   private func cycleBoost(_ app: AudioApp) {
     let next = app.volumeBoost >= 4 ? 1 : (app.volumeBoost + 1).rounded()
     store.setVolumeBoost(next, for: app)
+  }
+}
+
+/// One combined notice for apps that can never produce audio (no Core Audio
+/// process object — see `AudioApp.hasNoAudioCapability`), replacing the same
+/// explanatory paragraph repeated verbatim on every such row. Neutral in
+/// tone: these apps are working as expected (menu-bar utilities, CLI tools),
+/// not broken, so this isn't styled as an error/warning.
+private struct UnroutableAppsBanner: View {
+  let apps: [AudioApp]
+  let onExcludeAll: () -> Void
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 10) {
+      Image(systemName: "info.circle")
+        .foregroundStyle(.secondary)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(.caption.weight(.medium))
+        Text(detail)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      Spacer(minLength: 10)
+
+      Button(apps.count == 1 ? "Exclude" : "Exclude All", action: onExcludeAll)
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+    .padding(10)
+    .wavesCard()
+    .accessibilityElement(children: .combine)
+  }
+
+  private var title: String {
+    apps.count == 1
+      ? "\(apps[0].displayName) can't produce audio"
+      : "\(apps.count) apps can't produce audio"
+  }
+
+  private var detail: String {
+    if apps.count == 1 {
+      return "Waves can't create a managed route for it. Exclude it to stop this notice."
+    }
+    let names = apps.map(\.displayName).joined(separator: ", ")
+    return "Waves can't create managed routes for: \(names). Exclude them to stop this notice."
   }
 }
 
@@ -920,14 +986,14 @@ private struct DiagnosticsPanel: View {
                   // users can distinguish pass/warn/fail/info by shape, not hue
                   // alone. Still hidden from VoiceOver; the combined label below
                   // carries the status word.
-                  Image(systemName: symbol(for: check.status))
+                  Image(systemName: check.status.symbolName)
                     .font(.caption)
-                    .foregroundStyle(color(for: check.status))
+                    .foregroundStyle(check.status.color)
                     .accessibilityHidden(true)
                   Text(check.title)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(statusLabel(for: check.status)): \(check.title)")
+                .accessibilityLabel("\(check.status.statusWord): \(check.title)")
 
                 Text(check.detail)
                   .font(.caption)
@@ -974,32 +1040,5 @@ private struct DiagnosticsPanel: View {
     let noun = total == 1 ? "issue" : "issues"
     let color: Color = failed > 0 ? WavesDesign.error : WavesDesign.warning
     return ("\(total) \(noun)", color, "\(total) diagnostics \(noun)")
-  }
-
-  private func color(for status: DiagnosticsStatus) -> Color {
-    switch status {
-    case .passed: WavesDesign.success
-    case .warning: WavesDesign.warning
-    case .failed: WavesDesign.error
-    case .informational: .secondary
-    }
-  }
-
-  private func symbol(for status: DiagnosticsStatus) -> String {
-    switch status {
-    case .passed: "checkmark.circle"
-    case .warning: "exclamationmark.triangle"
-    case .failed: "xmark.octagon"
-    case .informational: "info.circle"
-    }
-  }
-
-  private func statusLabel(for status: DiagnosticsStatus) -> String {
-    switch status {
-    case .passed: "Passed"
-    case .warning: "Warning"
-    case .failed: "Failed"
-    case .informational: "Info"
-    }
   }
 }
