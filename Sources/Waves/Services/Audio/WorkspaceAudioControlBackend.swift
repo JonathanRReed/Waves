@@ -66,6 +66,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       logger.warning("Invalid volume value for \(appID): \(volume), defaulting to 1.0")
     }
     let target: Float = volume.isFinite ? max(0.0, min(1.0, volume)) : 1.0
+    let previousVolume = snapshot.apps[index].desiredVolume
     snapshot.apps[index].desiredVolume = target
 
     // On unsupported OSes (macOS < 14.2) no route can ever be established, so
@@ -105,10 +106,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       refreshGlobalRouteHealth()
     } catch {
       if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        snapshot.apps[index].desiredVolume = target
-        snapshot.apps[index].routingState = .error
-        snapshot.apps[index].notes = error.localizedDescription
-        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : target
+        // A permanently-unroutable app (no audio capability) will never apply
+        // this volume, so committing `target` would show a value the user was
+        // just told failed. Revert it. Any other failure keeps `target` (see
+        // the comment above `do`): it may be transient, and a later
+        // rebuild/retry can still pick it up.
+        if case BackendError.noAudioCapability = error {
+          snapshot.apps[index].desiredVolume = previousVolume
+        } else {
+          snapshot.apps[index].desiredVolume = target
+        }
+        markRouteError(at: index, error: error)
+        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
       }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
@@ -154,8 +163,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // still plays at full volume. routingState=.error surfaces the failure.
       if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
         snapshot.apps[index].isMuted = previousMuted
-        snapshot.apps[index].routingState = .error
-        snapshot.apps[index].notes = error.localizedDescription
+        markRouteError(at: index, error: error)
         snapshot.apps[index].peakLevel = 0
         snapshot.apps[index].rmsLevel = 0
         snapshot.apps[index].appliedVolume = previousMuted ? 0 : snapshot.apps[index].desiredVolume
@@ -171,6 +179,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     let clampedBoost = max(1.0, min(4.0, boost))
+    let previousBoost = snapshot.apps[index].volumeBoost
     snapshot.apps[index].volumeBoost = clampedBoost
 
     // Unsupported OS: stay monitor-only instead of attempting a doomed route
@@ -203,9 +212,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       refreshGlobalRouteHealth()
     } catch {
       if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        snapshot.apps[index].volumeBoost = clampedBoost
-        snapshot.apps[index].routingState = .error
-        snapshot.apps[index].notes = error.localizedDescription
+        // Same reasoning as setDesiredVolume's catch: a boost that can never
+        // apply shouldn't be committed as if it had.
+        if case BackendError.noAudioCapability = error {
+          snapshot.apps[index].volumeBoost = previousBoost
+        } else {
+          snapshot.apps[index].volumeBoost = clampedBoost
+        }
+        markRouteError(at: index, error: error)
       }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
@@ -261,8 +275,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         refreshGlobalRouteHealth()
       } catch {
         if let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) {
-          snapshot.apps[index].routingState = .error
-          snapshot.apps[index].notes = error.localizedDescription
+          markRouteError(at: index, error: error)
           snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
         }
         refreshGlobalRouteHealth(latestError: error.localizedDescription)
@@ -336,7 +349,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // A hard route failure is one where the OS and capture permission are both
     // fine yet real routes errored — that is genuinely broken, not transient or
     // unsupported, so the Route recovery check should read as .failed (red).
-    let hasRouteErrors = snapshot.apps.contains { $0.routingState == .error }
+    let hasRouteErrors = hasBlockingRouteErrors(in: snapshot.apps)
     let routeRecoveryStatus: DiagnosticsStatus
     if snapshot.backendStatus.isRouteRecoveryHealthy {
       routeRecoveryStatus = .passed
@@ -713,7 +726,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // createControllerWithRetry). Say so plainly and point at the fix —
     // excluding it via the row's context menu — instead of a bare technical
     // error that looks identical for a real, recoverable failure.
-    throw BackendError.managedRouteUnavailable(
+    throw BackendError.noAudioCapability(
       "\(app.displayName) doesn't appear to produce audio, so Waves can't create a managed route for it. "
         + "If this app never plays sound, right-click its row and choose “Exclude from Waves” to stop this warning."
     )
@@ -896,8 +909,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       refreshGlobalRouteHealth()
     } catch {
       if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        snapshot.apps[index].routingState = .error
-        snapshot.apps[index].notes = error.localizedDescription
+        markRouteError(at: index, error: error)
       }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
@@ -1258,6 +1270,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       if previous.routingState == .error && candidate.routingState != .live {
         app.routingState = .error
         app.notes = previous.notes
+        app.hasNoAudioCapability = previous.hasNoAudioCapability
       }
       return app
     }
@@ -1314,7 +1327,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let runningIDs: Set<String> = Set(mergedApps.map(\.id))
     disposeControllers(keeping: runningIDs)
 
-    let hasRouteErrors = mergedApps.contains { $0.routingState == .error }
+    let hasRouteErrors = hasBlockingRouteErrors(in: mergedApps)
     // Mirror refreshGlobalRouteHealth: carry lastError forward only while some
     // app is still in .error, so surfaces never show a stale error message next
     // to an otherwise healthy status.
@@ -1637,7 +1650,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// another app remains errored. `lastError` is cleared only when nothing is
   /// errored; otherwise the most recent error is preserved.
   private func refreshGlobalRouteHealth(latestError: String? = nil) {
-    let hasRouteErrors = snapshot.apps.contains { $0.routingState == .error }
+    let hasRouteErrors = hasBlockingRouteErrors(in: snapshot.apps)
     snapshot.backendStatus.isRouteRecoveryHealthy =
       supportsPerAppRouting && captureAuthorization == .authorized && !hasRouteErrors
     if hasRouteErrors {
@@ -1646,6 +1659,29 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       snapshot.backendStatus.lastError = latestError ?? snapshot.backendStatus.lastError
     } else {
       snapshot.backendStatus.lastError = nil
+    }
+  }
+
+  // Apps with hasNoAudioCapability never had a Core Audio process object to
+  // begin with (menu-bar utilities, CLI tools) — retrying can never route
+  // them, so they shouldn't hold the global "Needs attention" badge or the
+  // Route recovery diagnostic red forever. Their row still shows an Error
+  // chip + explanation; this only excludes them from the app-wide signal.
+  private func hasBlockingRouteErrors(in apps: [AudioApp]) -> Bool {
+    apps.contains { $0.routingState == .error && !$0.hasNoAudioCapability }
+  }
+
+  /// Sets a row to the error routing state and records whether the failure is
+  /// the permanent "this app doesn't produce audio" condition (see
+  /// resolveProcessObjectIDs) rather than a genuine, possibly-transient route
+  /// failure — hasBlockingRouteErrors treats the two differently.
+  private func markRouteError(at index: Int, error: Error) {
+    snapshot.apps[index].routingState = .error
+    snapshot.apps[index].notes = error.localizedDescription
+    if case BackendError.noAudioCapability = error {
+      snapshot.apps[index].hasNoAudioCapability = true
+    } else {
+      snapshot.apps[index].hasNoAudioCapability = false
     }
   }
 
@@ -1675,8 +1711,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         }
       } catch {
         if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
-          snapshot.apps[index].routingState = .error
-          snapshot.apps[index].notes = error.localizedDescription
+          markRouteError(at: index, error: error)
         }
         lastError = error.localizedDescription
       }
@@ -1806,8 +1841,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         changed = true
       } catch {
         if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-          snapshot.apps[currentIndex].routingState = .error
-          snapshot.apps[currentIndex].notes = error.localizedDescription
+          markRouteError(at: currentIndex, error: error)
           snapshot.apps[currentIndex].appliedVolume =
             snapshot.apps[currentIndex].isMuted ? 0 : snapshot.apps[currentIndex].desiredVolume
         }
