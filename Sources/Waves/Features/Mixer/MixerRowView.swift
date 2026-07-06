@@ -119,7 +119,11 @@ struct MixerRowView: View {
       // already-secondary text doesn't fall below a legible ratio.
       .opacity(isExcluded ? (contrast == .increased ? 0.85 : 0.55) : 1)
 
-      if app.routingState == .error, let notes = app.notes {
+      // A permanently-unroutable app's explanation is summarized once above
+      // the list (see UnroutableAppsBanner) instead of repeated verbatim on
+      // every such row — the Error chip above is still enough context here.
+      // Genuine (possibly transient) route errors keep their inline reason.
+      if app.routingState == .error, !app.hasNoAudioCapability, let notes = app.notes {
         Text(notes)
           .font(.caption)
           .foregroundStyle(.secondary)

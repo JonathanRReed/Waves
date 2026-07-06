@@ -251,11 +251,15 @@ private struct GeneralSettingsView: View {
 
 private struct AudioSettingsView: View {
   @Environment(AppStore.self) private var store
+  @State private var confirmingClearPresets = false
 
   var body: some View {
     SettingsForm {
       Section("Output") {
         LabeledContent("Current device", value: store.currentDeviceName)
+        if let kind = store.session.currentDevice?.kind {
+          LabeledContent("Type", value: kind.displayName)
+        }
       }
 
       Section {
@@ -274,28 +278,79 @@ private struct AudioSettingsView: View {
       } footer: {
         Text("Boost is set per row in the mixer. Use 1× for transparent playback; reserve 2×–4× for quiet apps to avoid clipping.")
       }
+
+      Section {
+        LabeledContent("Saved for this device", value: "\(currentDevicePresetCount) \(currentDevicePresetCount == 1 ? "app" : "apps")")
+        LabeledContent("Devices with saved levels", value: "\(devicesWithPresetsCount)")
+
+        Button("Clear All Saved Levels…", role: .destructive) {
+          confirmingClearPresets = true
+        }
+        .disabled(!hasAnyPresets)
+        .confirmationDialog(
+          "Clear all saved per-device levels?",
+          isPresented: $confirmingClearPresets,
+          titleVisibility: .visible
+        ) {
+          Button("Clear Saved Levels", role: .destructive) {
+            store.clearDeviceVolumePresets()
+          }
+          Button("Cancel", role: .cancel) {}
+        } message: {
+          Text("Removes the remembered volume, mute, and boost per app for every output device. This can't be undone.")
+        }
+      } header: {
+        Text("Per-Device Volume Presets")
+      } footer: {
+        Text("When \"Per-device volume presets\" is on (General), Waves remembers each app's level per output device and reapplies it when you switch back.")
+      }
     }
+  }
+
+  private var currentDevicePresetCount: Int {
+    guard let id = store.currentDeviceID else { return 0 }
+    return store.deviceVolumePresets.deviceVolumes[id]?.count ?? 0
+  }
+
+  private var devicesWithPresetsCount: Int {
+    store.deviceVolumePresets.deviceVolumes.filter { !$0.value.isEmpty }.count
+  }
+
+  private var hasAnyPresets: Bool {
+    devicesWithPresetsCount > 0
   }
 }
 
 private struct ProfileSettingsView: View {
   @Environment(AppStore.self) private var store
+  // Presenting the same ProfileEditorSheet MainWindowView's sidebar "+"/"Edit
+  // Profile…" use — this pane used to only hint at using that sidebar instead
+  // of offering the action itself.
+  @State private var editorContext: ProfileEditorContext?
 
   var body: some View {
     SettingsForm {
       Section {
         if store.profiles.isEmpty {
-          Text("No profiles yet. Create one with the + button in the main window's sidebar, or import one.")
+          Text("No profiles yet. Create one below, or import one.")
             .foregroundStyle(.secondary)
         } else {
           ForEach(store.profiles) { profile in
-            ProfileRow(profile: profile)
+            ProfileRow(profile: profile, onEdit: { presentEditProfile(profile) })
           }
         }
       } header: {
         HStack {
           Text("Profiles")
           Spacer()
+          Button {
+            presentNewProfile()
+          } label: {
+            Label("New Profile", systemImage: "plus")
+          }
+          .buttonStyle(.borderless)
+          .textCase(nil)
+
           Button {
             store.importProfiles()
           } label: {
@@ -308,12 +363,27 @@ private struct ProfileSettingsView: View {
         Text("Groups of apps you switch between — optionally with saved levels.")
       }
     }
+    .sheet(item: $editorContext) { context in
+      ProfileEditorSheet(context: context)
+        .environment(store)
+    }
+  }
+
+  private func presentNewProfile() {
+    // Mirrors MainWindowView.presentNewProfile: seed with whatever is
+    // currently playing, the most common starting set.
+    editorContext = ProfileEditorContext(profile: nil, preselectedAppIDs: store.liveApps.map(\.logicalID))
+  }
+
+  private func presentEditProfile(_ profile: Profile) {
+    editorContext = ProfileEditorContext(profile: profile, preselectedAppIDs: profile.appIDs)
   }
 }
 
 private struct ProfileRow: View {
   @Environment(AppStore.self) private var store
   let profile: Profile
+  let onEdit: () -> Void
   // Deleting a profile discards a hand-tuned captured mix with no undo, so the
   // one-click borderless button (right beside Export) asks first.
   @State private var confirmingDelete = false
@@ -332,6 +402,11 @@ private struct ProfileRow: View {
       }
 
       Spacer()
+
+      Button("Edit…") { onEdit() }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .accessibilityLabel("Edit profile \(profile.name)")
 
       Button("Export") { store.exportProfile(profile) }
         .buttonStyle(.borderless)
@@ -420,8 +495,8 @@ private struct DiagnosticsCheckRow: View {
       // Shape-differentiated glyph per status so color-blind sighted users can
       // distinguish pass/warn/fail/info by shape, not hue alone. Hidden from
       // VoiceOver; the combined label below carries the status word.
-      Image(systemName: symbol)
-        .foregroundStyle(color)
+      Image(systemName: check.status.symbolName)
+        .foregroundStyle(check.status.color)
         .accessibilityHidden(true)
         .frame(width: 18)
 
@@ -434,34 +509,7 @@ private struct DiagnosticsCheckRow: View {
       }
     }
     .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(statusLabel): \(check.title). \(check.detail)")
-  }
-
-  private var color: Color {
-    switch check.status {
-    case .passed: WavesDesign.success
-    case .warning: WavesDesign.warning
-    case .failed: WavesDesign.error
-    case .informational: .secondary
-    }
-  }
-
-  private var symbol: String {
-    switch check.status {
-    case .passed: "checkmark.circle"
-    case .warning: "exclamationmark.triangle"
-    case .failed: "xmark.octagon"
-    case .informational: "info.circle"
-    }
-  }
-
-  private var statusLabel: String {
-    switch check.status {
-    case .passed: "Passed"
-    case .warning: "Warning"
-    case .failed: "Failed"
-    case .informational: "Info"
-    }
+    .accessibilityLabel("\(check.status.statusWord): \(check.title). \(check.detail)")
   }
 }
 

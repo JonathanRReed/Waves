@@ -1115,7 +1115,10 @@ final class AppStore {
   /// never tapped, so their audio is left completely untouched — the escape
   /// hatch for DAWs, conferencing/echo-cancellation apps, and other audio tools
   /// that misbehave when their output is tapped.
-  func setExcluded(_ excluded: Bool, for app: AudioApp) {
+  ///
+  /// `showToast` is `false` only when called from `excludeUnroutableApps`,
+  /// which shows one combined toast instead of one per app.
+  func setExcluded(_ excluded: Bool, for app: AudioApp, showToast: Bool = true) {
     var ids = Set(preferences.excludedAppIDs)
     if excluded {
       ids.insert(app.logicalID)
@@ -1145,9 +1148,29 @@ final class AppStore {
       pausedMusicApps.remove(app.logicalID)
     }
     invalidateVisibleAppsCache()
+    if showToast {
+      self.showToast(
+        title: excluded ? "Excluded from Waves" : "Managed by Waves",
+        detail: app.displayName,
+        kind: .info,
+        duration: .seconds(1.4)
+      )
+    }
+  }
+
+  /// Excludes every app in `apps` that can never produce audio (see
+  /// `AudioApp.hasNoAudioCapability`) in one action, instead of requiring a
+  /// right-click per row. Scoped to the apps passed in (the caller's current
+  /// visible list) rather than the whole session.
+  func excludeUnroutableApps(_ apps: [AudioApp]) {
+    let targets = apps.filter { $0.routingState == .error && $0.hasNoAudioCapability && !isExcluded($0) }
+    guard !targets.isEmpty else { return }
+    for app in targets {
+      setExcluded(true, for: app, showToast: false)
+    }
     showToast(
-      title: excluded ? "Excluded from Waves" : "Managed by Waves",
-      detail: app.displayName,
+      title: "Excluded from Waves",
+      detail: targets.count == 1 ? targets[0].displayName : "\(targets.count) apps that can't produce audio",
       kind: .info,
       duration: .seconds(1.4)
     )
@@ -1802,6 +1825,16 @@ final class AppStore {
       )
       deviceVolumePresets.saveVolumeSettings(for: app.logicalID, deviceID: deviceID, settings: settings)
     }
+    deviceVolumePresetsStore.save(deviceVolumePresets)
+  }
+
+  /// Discards every saved per-device volume/mute/boost preset — the escape
+  /// hatch for Settings > Audio's "Clear All Saved Levels", for a user who
+  /// wants to start over rather than have Waves keep re-applying old levels
+  /// per device. Does not touch the `enablePerDeviceVolumePresets` preference
+  /// itself, only the accumulated data.
+  func clearDeviceVolumePresets() {
+    deviceVolumePresets = DeviceVolumePresets()
     deviceVolumePresetsStore.save(deviceVolumePresets)
   }
 

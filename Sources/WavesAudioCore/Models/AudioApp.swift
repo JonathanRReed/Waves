@@ -18,6 +18,13 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public var isMuted: Bool
   public var isPinned: Bool
   public var routingState: RoutingState
+  /// True only when `routingState == .error` because the app has never
+  /// engaged the audio subsystem (no Core Audio process object), a permanent
+  /// property of that process — not a transient route failure. Only
+  /// meaningful while `routingState == .error`; ignored otherwise. Not
+  /// persisted: it's re-derived from the live error the next time a route is
+  /// attempted, and never meaningfully survives a relaunch anyway.
+  public var hasNoAudioCapability: Bool
   public var compatibility: CompatibilityState
   public var notes: String?
   public var volumeBoost: Float
@@ -46,6 +53,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     isMuted: Bool = false,
     isPinned: Bool = false,
     routingState: RoutingState = .recent,
+    hasNoAudioCapability: Bool = false,
     compatibility: CompatibilityState = .planned,
     notes: String? = nil,
     volumeBoost: Float = 1.0,
@@ -79,6 +87,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.isMuted = isMuted
     self.isPinned = isPinned
     self.routingState = routingState
+    self.hasNoAudioCapability = hasNoAudioCapability
     self.compatibility = compatibility
 
     // Validate notes length
