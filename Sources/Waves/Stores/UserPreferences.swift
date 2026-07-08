@@ -3,11 +3,12 @@ import Foundation
 struct UserPreferences: Codable, Sendable {
   var launchAtLoginEnabled = false
   var showRecentApps = true
+  var liveListLinger: LiveListLinger = .standard
   var showSystemProcesses = false
   var sortMode: SortMode = .name
   var customAppOrder: [String] = []
   var autoPauseMusicForConferencing = true
-  var enableKeyboardShortcuts = true
+  var enableKeyboardShortcuts = false
   var enablePerDeviceVolumePresets = true
   /// Whether switching the default output device should automatically restore
   /// that device's remembered per-app volumes (when `enablePerDeviceVolumePresets`
@@ -33,6 +34,7 @@ struct UserPreferences: Codable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case launchAtLoginEnabled
     case showRecentApps
+    case liveListLinger
     case showSystemProcesses
     case sortMode
     case customAppOrder
@@ -60,6 +62,7 @@ struct UserPreferences: Codable, Sendable {
     }
     launchAtLoginEnabled = value(.launchAtLoginEnabled, defaults.launchAtLoginEnabled)
     showRecentApps = value(.showRecentApps, defaults.showRecentApps)
+    liveListLinger = value(.liveListLinger, defaults.liveListLinger)
     showSystemProcesses = value(.showSystemProcesses, defaults.showSystemProcesses)
     sortMode = value(.sortMode, defaults.sortMode)
     customAppOrder = value(.customAppOrder, defaults.customAppOrder)
@@ -71,6 +74,36 @@ struct UserPreferences: Codable, Sendable {
     urlSchemeAutomationAcknowledged = value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
     excludedAppIDs = value(.excludedAppIDs, defaults.excludedAppIDs)
     pinnedAppIDs = value(.pinnedAppIDs, defaults.pinnedAppIDs)
+  }
+}
+
+enum LiveListLinger: String, Codable, CaseIterable, Identifiable, Sendable {
+  case brief
+  case standard
+  case relaxed
+
+  var id: Self { self }
+
+  var displayName: String {
+    switch self {
+    case .brief:
+      "Brief"
+    case .standard:
+      "Standard"
+    case .relaxed:
+      "Relaxed"
+    }
+  }
+
+  var duration: Duration {
+    switch self {
+    case .brief:
+      .seconds(1)
+    case .standard:
+      .milliseconds(2500)
+    case .relaxed:
+      .seconds(5)
+    }
   }
 }
 

@@ -1,8 +1,28 @@
 import Foundation
+import ServiceManagement
 import Testing
 import WavesAudioCore
 
 @testable import Waves
+
+// MARK: - Login item status mapping
+
+@Test func loginItemStatusMapsRequiresApprovalAsUserIntentEnabled() {
+  let status = LoginItemService.loginItemStatus(from: .requiresApproval)
+  #expect(status.isEnabled == false)
+  #expect(status.isUserIntentEnabled == true)
+  #expect(status.requiresApproval == true)
+}
+
+@Test func loginItemStatusMapsEnabledAndNotRegisteredIntent() {
+  let enabled = LoginItemService.loginItemStatus(from: .enabled)
+  #expect(enabled.isEnabled == true)
+  #expect(enabled.isUserIntentEnabled == true)
+
+  let disabled = LoginItemService.loginItemStatus(from: .notRegistered)
+  #expect(disabled.isEnabled == false)
+  #expect(disabled.isUserIntentEnabled == false)
+}
 
 // MARK: - Profile import decoding
 
@@ -31,6 +51,8 @@ import WavesAudioCore
   let data = Data("{}".utf8)
   let prefs = try JSONDecoder().decode(UserPreferences.self, from: data)
   #expect(prefs.showRecentApps == true)
+  #expect(prefs.liveListLinger == .standard)
+  #expect(prefs.enableKeyboardShortcuts == false)
   #expect(prefs.enableURLScheme == false)
   #expect(prefs.sortMode == .name)
 }
@@ -44,12 +66,14 @@ import WavesAudioCore
   let prefs = try JSONDecoder().decode(UserPreferences.self, from: Data(json.utf8))
   #expect(prefs.enableKeyboardShortcuts == false)
   #expect(prefs.sortMode == .activity)
+  #expect(prefs.liveListLinger == .standard)
   #expect(prefs.enablePerDeviceVolumePresets == true) // default preserved
 }
 
 @Test func userPreferencesRoundTripsThroughCodable() throws {
   var prefs = UserPreferences()
   prefs.enableURLScheme = true
+  prefs.liveListLinger = .relaxed
   prefs.sortMode = .category
   prefs.customAppOrder = ["com.a", "com.b"]
   prefs.excludedAppIDs = ["com.apple.logic", "com.zoom.xos"]
@@ -59,6 +83,7 @@ import WavesAudioCore
   let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
 
   #expect(decoded.enableURLScheme == true)
+  #expect(decoded.liveListLinger == .relaxed)
   #expect(decoded.sortMode == .category)
   #expect(decoded.customAppOrder == ["com.a", "com.b"])
   #expect(decoded.excludedAppIDs == ["com.apple.logic", "com.zoom.xos"])
@@ -77,6 +102,24 @@ import WavesAudioCore
   #expect(decoded.excludedAppIDs.isEmpty)
 }
 
+@Test func preferencesStoreWritesPrivatePermissions() throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("waves-preferences-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let store = PreferencesStore(directory: directory)
+  var prefs = UserPreferences()
+  prefs.showRecentApps = false
+  store.save(prefs)
+  store.flush()
+
+  let file = directory.appendingPathComponent("preferences.json")
+  let directoryMode = try permissions(at: directory)
+  let fileMode = try permissions(at: file)
+  #expect(directoryMode == 0o700)
+  #expect(fileMode == 0o600)
+}
+
 // MARK: - Per-app volume settings
 
 @Test func appVolumeSettingsClampsBoostOnInit() {
@@ -92,4 +135,9 @@ import WavesAudioCore
   #expect(prefs.desiredVolume == 1.0)
   #expect(prefs.isMuted == false)
   #expect(prefs.volumeBoost == 1.0)
+}
+
+private func permissions(at url: URL) throws -> Int {
+  let raw = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+  return raw?.intValue ?? -1
 }

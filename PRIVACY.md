@@ -15,16 +15,23 @@ no account, no analytics, and no servers.
 - **Audio output devices.** Waves reads available output devices to show the
   current device and, optionally, switch it.
 - **Accessibility (optional).** Only required if you enable global keyboard
-  shortcuts. Per-app routing works without it.
+  shortcuts. While enabled, Waves listens for system-wide key presses but ignores
+  everything except its supported shortcuts and does not store or transmit
+  keystrokes. Per-app routing works without it.
 
 ## What Waves stores
 
 Locally, in `~/Library/Application Support/Waves/` (or `~/.Waves` as a fallback):
 
-- Your preferences, presets, per-device volume settings, and the last session.
+- Your preferences, profiles, per-device volume settings, and the last session.
 
-These contain app names and your volume/mute/boost choices. They never leave your
-Mac.
+These can include app names, bundle identifiers, route state, selected output
+device identifiers, diagnostic notes, and your volume/mute/boost choices. They
+never leave your Mac.
+
+`Copy Diagnostics` places the current diagnostic report on the general
+pasteboard. That report can include app names, device names, routing state, and
+recent error text; only copy it when you intend to share it.
 
 ## What Waves does **not** do
 

@@ -17,19 +17,23 @@ final class ProfileStore: @unchecked Sendable {
     guard let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
       logger.error("Failed to get application support directory")
       let fallbackDirectory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves", isDirectory: true)
-      try? fileManager.createDirectory(at: fallbackDirectory, withIntermediateDirectories: true)
+      try? PersistenceSecurity.preparePrivateDirectory(fallbackDirectory, fileManager: fileManager)
       url = fallbackDirectory.appendingPathComponent("profiles.json")
       legacyURL = fallbackDirectory.appendingPathComponent("presets.json")
+      PersistenceSecurity.secureExistingFile(at: url, fileManager: fileManager)
+      PersistenceSecurity.secureExistingFile(at: legacyURL, fileManager: fileManager)
       return
     }
     let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
     do {
-      try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+      try PersistenceSecurity.preparePrivateDirectory(directory, fileManager: fileManager)
     } catch {
       logger.error("Failed to create profiles directory: \(error.localizedDescription)")
     }
     url = directory.appendingPathComponent("profiles.json")
     legacyURL = directory.appendingPathComponent("presets.json")
+    PersistenceSecurity.secureExistingFile(at: url, fileManager: fileManager)
+    PersistenceSecurity.secureExistingFile(at: legacyURL, fileManager: fileManager)
   }
 
   /// Set to true the moment `load()` has to back up and discard an unreadable
@@ -58,6 +62,7 @@ final class ProfileStore: @unchecked Sendable {
           do {
             let data = try PersistedSchema.encode(migrated, using: encoder)
             try data.write(to: url, options: .atomic)
+            try PersistenceSecurity.setPrivateFilePermissions(url)
             retireLegacyFile()
           } catch {
             // Leave presets.json in place so migration retries next launch.
@@ -78,6 +83,7 @@ final class ProfileStore: @unchecked Sendable {
   }
 
   private func loadFile(at fileURL: URL) -> [Profile]? {
+    PersistenceSecurity.secureExistingFile(at: fileURL)
     do {
       let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
       if let fileSize = attributes[.size] as? Int64, fileSize > maxFileSize {
@@ -114,6 +120,7 @@ final class ProfileStore: @unchecked Sendable {
     try? FileManager.default.removeItem(at: retiredURL)
     do {
       try FileManager.default.moveItem(at: legacyURL, to: retiredURL)
+      try? PersistenceSecurity.setPrivateFilePermissions(retiredURL)
     } catch {
       logger.error("Failed to retire migrated legacy presets file: \(error.localizedDescription)")
     }
@@ -124,6 +131,7 @@ final class ProfileStore: @unchecked Sendable {
     try? FileManager.default.removeItem(at: backupURL)
     do {
       try FileManager.default.moveItem(at: fileURL, to: backupURL)
+      try? PersistenceSecurity.setPrivateFilePermissions(backupURL)
       logger.warning("Moved unreadable profiles file to \(backupURL.lastPathComponent)")
     } catch {
       logger.error("Failed to back up unreadable profiles file: \(error.localizedDescription)")
@@ -136,6 +144,7 @@ final class ProfileStore: @unchecked Sendable {
       do {
         let data = try PersistedSchema.encode(profiles, using: self.encoder)
         try data.write(to: self.url, options: .atomic)
+        try PersistenceSecurity.setPrivateFilePermissions(self.url)
       } catch {
         self.logger.error("Failed to save profiles: \(error.localizedDescription)")
       }

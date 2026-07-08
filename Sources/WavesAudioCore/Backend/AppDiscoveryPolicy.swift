@@ -44,24 +44,29 @@ public enum AppDiscoveryPolicy {
   }
 
   public static func inferCategory(bundleID: String?, displayName: String) -> AppCategory {
-    let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
+    let rawToken = [bundleID ?? "", displayName].joined(separator: " ")
+    let token = rawToken.lowercased()
+    let words = searchWords(in: rawToken)
 
-    if token.contains("safari") || token.contains("chrome") || token.contains("firefox")
-      || token.range(of: #"\barc\b"#, options: .regularExpression) != nil || token.contains("browser")
+    if token.contains("safari") || token.contains("chrome") || token.contains("chromium")
+      || token.contains("firefox") || token.contains("brave") || token.contains("vivaldi")
+      || token.contains("helium") || words.contains("edge") || words.contains("opera")
+      || token.contains("microsoft.edge") || token.contains("operasoftware")
+      || words.contains("arc") || token.contains("browser")
     {
       // Match "arc" only as a whole word so unrelated apps like "Archive
       // Utility" or "Monarch" are not misclassified as browsers.
       return .browser
     }
 
-    if token.contains("zoom") || token.contains("meet") || token.contains("teams")
+    if token.contains("zoom") || words.contains("meet") || token.contains("teams")
       || token.contains("webex") || token.contains("facetime")
     {
       return .conferencing
     }
 
-    if token.contains("spotify") || token.contains("music") || token.contains("vlc")
-      || token.contains("podcast") || token.contains("tv") || token.contains("quicktime")
+    if token.contains("spotify") || words.contains("music") || token.contains("vlc")
+      || token.contains("podcast") || words.contains("tv") || token.contains("quicktime")
     {
       // "quicktime" must be classified as media here, before the com.apple.
       // system fallback below, or the default "hide system processes" filter
@@ -80,6 +85,18 @@ public enum AppDiscoveryPolicy {
     }
 
     return .unknown
+  }
+
+  private static func searchWords(in token: String) -> Set<String> {
+    // Split separators and camel-case product names so short, real app names like
+    // "GoogleMeet", "MeetInOne", "YouTubeMusic", and "AppleTV" keep matching
+    // without reintroducing false positives such as "Meeting Notes" or "TVRemote".
+    let camelSeparated = token.replacingOccurrences(
+      of: #"([a-z0-9])([A-Z])"#,
+      with: "$1 $2",
+      options: .regularExpression
+    )
+    return Set(camelSeparated.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
   }
 
   public static func normalizedProcessName(_ displayName: String) -> String {
@@ -107,6 +124,54 @@ public enum AppDiscoveryPolicy {
   public static func isCompanionAudioProcess(named displayName: String, bundleID: String?) -> Bool {
     let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
     return companionProcessMarkers.contains(where: { token.contains($0) })
+  }
+
+  public static func treatsMissingAudioProcessAsPermanent(
+    bundleID: String?,
+    displayName: String,
+    category: AppCategory
+  ) -> Bool {
+    if isLikelyAudioCapableApp(bundleID: bundleID, displayName: displayName, category: category) {
+      return false
+    }
+
+    // Unknown user-facing apps are not safe to call permanently silent. Games,
+    // niche browsers, web wrappers, creative tools, and Electron apps often have
+    // no Core Audio process object until playback starts or a helper spins up.
+    guard category == .system else { return false }
+    return true
+  }
+
+  public static func isLikelyAudioCapableApp(
+    bundleID: String?,
+    displayName: String,
+    category: AppCategory
+  ) -> Bool {
+    switch category {
+    case .browser, .conferencing, .media, .communication:
+      return true
+    case .system:
+      return false
+    case .unknown:
+      break
+    }
+
+    let rawToken = [bundleID ?? "", displayName].joined(separator: " ")
+    let token = rawToken.lowercased()
+    let words = searchWords(in: rawToken)
+    return token.contains("electron")
+      || token.contains("chromium")
+      || token.contains("chrome")
+      || token.contains("browser")
+      || token.contains("helium")
+      || words.contains("audio")
+      || words.contains("music")
+      || words.contains("video")
+      || words.contains("player")
+      || words.contains("stream")
+      || words.contains("game")
+      || words.contains("call")
+      || words.contains("meet")
   }
 
   public static func iconName(for category: AppCategory) -> String {

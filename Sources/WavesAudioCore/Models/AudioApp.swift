@@ -18,12 +18,12 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public var isMuted: Bool
   public var isPinned: Bool
   public var routingState: RoutingState
-  /// True only when `routingState == .error` because the app has never
-  /// engaged the audio subsystem (no Core Audio process object), a permanent
-  /// property of that process — not a transient route failure. Only
-  /// meaningful while `routingState == .error`; ignored otherwise. Not
-  /// persisted: it's re-derived from the live error the next time a route is
-  /// attempted, and never meaningfully survives a relaunch anyway.
+  /// True only when `routingState == .error` because the process appears to be
+  /// a true non-audio/system row with no manageable Core Audio stream. Browser
+  /// shells and user-facing apps that merely have no active stream yet must not
+  /// set this; those should remain retryable route errors. Only meaningful
+  /// while `routingState == .error`; ignored otherwise. Not persisted: it is
+  /// re-derived from the live error the next time a route is attempted.
   public var hasNoAudioCapability: Bool
   public var compatibility: CompatibilityState
   public var notes: String?

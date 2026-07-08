@@ -175,7 +175,9 @@ struct MenuBarMixerView: View {
         Text("Launch at login")
       }
       .toggleStyle(.switch)
-      .help("Launch Waves automatically at login")
+      .help(store.launchAtLoginRequiresApproval
+        ? "Approve Waves in System Settings > General > Login Items"
+        : "Launch Waves automatically at login")
     }
     .controlSize(.small)
   }

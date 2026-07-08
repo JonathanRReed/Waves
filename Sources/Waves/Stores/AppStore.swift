@@ -68,6 +68,11 @@ final class AppStore {
   var isRecovering = false
   var isLoading = false
   var toasts: [AppToast] = []
+  private(set) var loginItemStatus = LoginItemStatus(
+    isEnabled: false,
+    isUserIntentEnabled: false,
+    statusDescription: "Disabled"
+  )
   var deviceVolumePresets = DeviceVolumePresets()
   var availableDevices: [AudioDevice] = []
   /// Live per-app output levels for meters, populated only while a UI surface
@@ -130,7 +135,7 @@ final class AppStore {
   // has been quiet for `liveLingerWindow`. Cancelled (and the app kept) the moment
   // it becomes audible again.
   private var lingerRemovalTasks: [String: Task<Void, Never>] = [:]
-  private let liveLingerWindow = Duration.seconds(2.5)
+  private var liveLingerWindow: Duration { preferences.liveListLinger.duration }
   private let sessionMaintenanceInterval = Duration.seconds(8)
   private let maxToasts = 3
   private let defaultToastDuration = Duration.seconds(2.0)
@@ -199,9 +204,11 @@ final class AppStore {
       preferences.enableURLScheme = false
       preferences.urlSchemeAutomationAcknowledged = true
     }
-    self.preferences.launchAtLoginEnabled = loginItemService.status.isEnabled
+    loginItemStatus = loginItemService.status
+    self.preferences.launchAtLoginEnabled = loginItemStatus.isUserIntentEnabled
     self.onboarding = OnboardingState(
-      launchAtLoginEnabled: loginItemService.status.isEnabled
+      launchAtLoginEnabled: loginItemStatus.isEnabled,
+      launchAtLoginRequiresApproval: loginItemStatus.requiresApproval
     )
     persistPreferences()
     syncOnboarding(using: session)
@@ -373,8 +380,10 @@ final class AppStore {
       do {
         try loginItemService.setEnabled(newValue)
         let status = loginItemService.status
-        preferences.launchAtLoginEnabled = status.isEnabled
+        loginItemStatus = status
+        preferences.launchAtLoginEnabled = status.isUserIntentEnabled
         onboarding.launchAtLoginEnabled = status.isEnabled
+        onboarding.launchAtLoginRequiresApproval = status.requiresApproval
         persistPreferences()
         if status.isEnabled != newValue {
           // Only the .requiresApproval case actually points the user at the
@@ -391,12 +400,26 @@ final class AppStore {
         }
       } catch {
         let status = loginItemService.status
-        preferences.launchAtLoginEnabled = status.isEnabled
+        loginItemStatus = status
+        preferences.launchAtLoginEnabled = status.isUserIntentEnabled
         onboarding.launchAtLoginEnabled = status.isEnabled
+        onboarding.launchAtLoginRequiresApproval = status.requiresApproval
         persistPreferences()
         showToast(title: "Login item update failed", detail: error.localizedDescription, kind: .error)
       }
     }
+  }
+
+  var launchAtLoginRequiresApproval: Bool {
+    loginItemStatus.requiresApproval
+  }
+
+  var launchAtLoginStatusDescription: String {
+    loginItemStatus.statusDescription
+  }
+
+  func openLoginItemsSettings() {
+    loginItemService.openSystemSettingsLoginItems()
   }
 
   func start() {
@@ -1158,9 +1181,9 @@ final class AppStore {
     }
   }
 
-  /// Excludes every app in `apps` that can never produce audio (see
-  /// `AudioApp.hasNoAudioCapability`) in one action, instead of requiring a
-  /// right-click per row. Scoped to the apps passed in (the caller's current
+  /// Excludes every app in `apps` that does not expose a manageable audio stream
+  /// (see `AudioApp.hasNoAudioCapability`) in one action, instead of requiring
+  /// a right-click per row. Scoped to the apps passed in (the caller's current
   /// visible list) rather than the whole session.
   func excludeUnroutableApps(_ apps: [AudioApp]) {
     let targets = apps.filter { $0.routingState == .error && $0.hasNoAudioCapability && !isExcluded($0) }
@@ -1170,7 +1193,7 @@ final class AppStore {
     }
     showToast(
       title: "Excluded from Waves",
-      detail: targets.count == 1 ? targets[0].displayName : "\(targets.count) apps that can't produce audio",
+      detail: targets.count == 1 ? targets[0].displayName : "\(targets.count) apps without manageable audio streams",
       kind: .info,
       duration: .seconds(1.4)
     )
@@ -1331,14 +1354,17 @@ final class AppStore {
       diagnostics = await backend.diagnosticsReport()
       availableDevices = await backend.availableOutputDevices()
       syncOnboarding(using: session)
+      let didDefaultDeviceChange = previousDeviceID != currentDeviceID
 
       // Suppress the info toast when this change was triggered by our own
       // selectOutputDevice (which already showed an "Output switched" success
       // toast). Clearing the flag here makes it one-shot, so the next genuinely
       // external device change still announces itself.
-      let wasSelfInitiated = pendingSelfInitiatedDeviceID == currentDeviceID
-      pendingSelfInitiatedDeviceID = nil
-      if !wasSelfInitiated {
+      let wasSelfInitiated = didDefaultDeviceChange && pendingSelfInitiatedDeviceID == currentDeviceID
+      if didDefaultDeviceChange {
+        pendingSelfInitiatedDeviceID = nil
+      }
+      if didDefaultDeviceChange && !wasSelfInitiated {
         showToast(
           title: "Output device changed",
           detail: currentDeviceName,
@@ -1632,6 +1658,17 @@ final class AppStore {
   func setAutoRestoreDeviceEnabled(_ enabled: Bool) {
     preferences.autoRestoreDevice = enabled
     persistPreferences()
+  }
+
+  /// Updates how long a just-quiet app stays in Live. Existing pending removals
+  /// are rebuilt with the new timing so the control takes effect immediately.
+  func setLiveListLinger(_ linger: LiveListLinger) {
+    guard preferences.liveListLinger != linger else { return }
+    preferences.liveListLinger = linger
+    persistPreferences()
+    for task in lingerRemovalTasks.values { task.cancel() }
+    lingerRemovalTasks.removeAll()
+    refreshLiveLinger()
   }
 
   func checkAutoPauseMusic() {
@@ -2468,15 +2505,18 @@ final class AppStore {
   /// `AppDelegate.applicationDidBecomeActive`, which fires every time Waves
   /// regains focus (e.g. right after the user returns from System Settings).
   func reconcileLoginItemStatus() {
-    let launchAtLoginEnabled = loginItemService.status.isEnabled
-    onboarding.launchAtLoginEnabled = launchAtLoginEnabled
+    let status = loginItemService.status
+    loginItemStatus = status
+    let launchAtLoginIntentEnabled = status.isUserIntentEnabled
+    onboarding.launchAtLoginEnabled = status.isEnabled
+    onboarding.launchAtLoginRequiresApproval = status.requiresApproval
     // Persist the OS-derived launch-at-login state on every reconcile so a
     // mid-session change reaches disk, not only when Settings happens to be
     // open at quit. Guarded by a change check so the frequent refresh/level
     // callers that invoke syncOnboarding don't rewrite the preferences file
     // when the value is unchanged.
-    if preferences.launchAtLoginEnabled != launchAtLoginEnabled {
-      preferences.launchAtLoginEnabled = launchAtLoginEnabled
+    if preferences.launchAtLoginEnabled != launchAtLoginIntentEnabled {
+      preferences.launchAtLoginEnabled = launchAtLoginIntentEnabled
       persistPreferences()
     }
   }
@@ -2707,6 +2747,7 @@ struct OnboardingState {
   var outputDeviceVisible = false
   var routeHealthReady = false
   var launchAtLoginEnabled = false
+  var launchAtLoginRequiresApproval = false
 }
 
 extension Notification.Name {

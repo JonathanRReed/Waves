@@ -26,6 +26,14 @@ is_publication_check_mode() {
   [ "$MODE" = "--publication-check" ] || [ "$MODE" = "publication-check" ]
 }
 
+is_distribution_build_mode() {
+  [ "$MODE" = "--dmg" ] \
+    || [ "$MODE" = "--release-check" ] \
+    || [ "$MODE" = "release-check" ] \
+    || [ "$MODE" = "--notarize" ] \
+    || [ "$MODE" = "notarize" ]
+}
+
 if is_notarize_mode; then
   if [ -z "$SIGN_IDENTITY" ]; then
     echo "Error: SIGN_IDENTITY must be set to a Developer ID Application identity for notarization." >&2
@@ -167,19 +175,48 @@ if ! is_publication_check_mode; then
     else
       SOURCE_LOGO="$LOGO_RESOURCE"
     fi
+  elif is_distribution_build_mode; then
+    echo "Error: App icon source is missing at $LOGO_RESOURCE" >&2
+    exit 1
   fi
 
   # Apple privacy manifest (required-reason APIs). Lives at the app bundle's
   # Resources root.
   PRIVACY_MANIFEST="$ROOT_DIR/PrivacyInfo.xcprivacy"
   if [ -f "$PRIVACY_MANIFEST" ]; then
-    cp "$PRIVACY_MANIFEST" "$APP_RESOURCES/PrivacyInfo.xcprivacy" || echo "Warning: Failed to copy privacy manifest" >&2
+    if command -v plutil >/dev/null 2>&1; then
+      plutil -lint "$PRIVACY_MANIFEST" >/dev/null
+    fi
+    if cp "$PRIVACY_MANIFEST" "$APP_RESOURCES/PrivacyInfo.xcprivacy"; then
+      if command -v plutil >/dev/null 2>&1; then
+        plutil -lint "$APP_RESOURCES/PrivacyInfo.xcprivacy" >/dev/null
+      fi
+    elif is_distribution_build_mode; then
+      echo "Error: Failed to copy privacy manifest into $APP_RESOURCES" >&2
+      exit 1
+    else
+      echo "Warning: Failed to copy privacy manifest" >&2
+    fi
+  elif is_distribution_build_mode; then
+    echo "Error: PrivacyInfo.xcprivacy is required for distribution packaging." >&2
+    exit 1
   fi
 
   if [ -n "${SOURCE_LOGO-}" ] && [ -f "$SOURCE_LOGO" ]; then
     if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
-      generate_icns "$SOURCE_LOGO" "$APP_RESOURCES/$APP_ICON_NAME.icns" || true
+      if ! generate_icns "$SOURCE_LOGO" "$APP_RESOURCES/$APP_ICON_NAME.icns"; then
+        if is_distribution_build_mode; then
+          echo "Error: Failed to generate app icon at $APP_RESOURCES/$APP_ICON_NAME.icns" >&2
+          exit 1
+        fi
+      fi
+    elif is_distribution_build_mode; then
+      echo "Error: sips and iconutil are required to generate the distribution app icon." >&2
+      exit 1
     fi
+  elif is_distribution_build_mode; then
+    echo "Error: No app icon source was available for distribution packaging." >&2
+    exit 1
   fi
 
   cat >"$INFO_PLIST" <<PLIST
@@ -236,6 +273,9 @@ PLIST
 
   if [ -f "$APP_RESOURCES/$APP_ICON_NAME.icns" ] && command -v plutil >/dev/null 2>&1; then
     plutil -replace CFBundleIconFile -string "$APP_ICON_NAME" "$INFO_PLIST"
+  elif is_distribution_build_mode; then
+    echo "Error: Distribution bundle is missing $APP_RESOURCES/$APP_ICON_NAME.icns" >&2
+    exit 1
   fi
 
   # Entitlements: Core Audio process taps require the audio-input entitlement.
@@ -282,6 +322,8 @@ verify_app() {
 
   if command -v plutil >/dev/null 2>&1; then
     plutil -lint "$INFO_PLIST" >/dev/null
+    plutil -lint "$ROOT_DIR/PrivacyInfo.xcprivacy" >/dev/null
+    plutil -lint "$APP_RESOURCES/PrivacyInfo.xcprivacy" >/dev/null
   fi
 
   if command -v codesign >/dev/null 2>&1; then
@@ -358,6 +400,11 @@ notarize_release() {
 publication_check() {
   local dmg_path="$DIST_DIR/$APP_NAME.dmg"
   local signature_info
+  local entitlements_file
+  local mount_dir
+  local mounted_app
+  local built_cdhash
+  local mounted_cdhash
 
   if [ ! -d "$APP_BUNDLE" ]; then
     echo "Error: $APP_BUNDLE does not exist. Run --release-check or --notarize first." >&2
@@ -367,6 +414,21 @@ publication_check() {
   if [ ! -f "$dmg_path" ]; then
     echo "Error: $dmg_path does not exist. Run --release-check or --notarize first." >&2
     exit 1
+  fi
+
+  if [ ! -f "$APP_RESOURCES/$APP_ICON_NAME.icns" ]; then
+    echo "Error: $APP_BUNDLE is missing its app icon. Rebuild with --release-check or --notarize." >&2
+    exit 1
+  fi
+
+  if [ ! -f "$APP_RESOURCES/PrivacyInfo.xcprivacy" ]; then
+    echo "Error: $APP_BUNDLE is missing PrivacyInfo.xcprivacy. Rebuild with --release-check or --notarize." >&2
+    exit 1
+  fi
+
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$ROOT_DIR/PrivacyInfo.xcprivacy" >/dev/null
+    plutil -lint "$APP_RESOURCES/PrivacyInfo.xcprivacy" >/dev/null
   fi
 
   if ! command -v codesign >/dev/null 2>&1; then
@@ -387,7 +449,45 @@ publication_check() {
   fi
 
   codesign --verify --deep --strict "$APP_BUNDLE"
+  entitlements_file="$(mktemp)"
+
+  if ! codesign -d --entitlements :- "$APP_BUNDLE" >"$entitlements_file" 2>/dev/null; then
+    rm -f "$entitlements_file"
+    echo "Error: Failed to read entitlements from $APP_BUNDLE." >&2
+    exit 1
+  fi
+  if ! tr -d '[:space:]' <"$entitlements_file" \
+    | grep -Fq "<key>com.apple.security.device.audio-input</key><true/>"; then
+    rm -f "$entitlements_file"
+    echo "Error: $APP_BUNDLE is missing the audio-input entitlement required for per-app routing." >&2
+    exit 1
+  fi
+  rm -f "$entitlements_file"
+
   hdiutil imageinfo "$dmg_path" >/dev/null
+  mount_dir="$(mktemp -d)"
+  if ! hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null; then
+    rm -rf "$mount_dir"
+    echo "Error: Failed to mount $dmg_path for publication validation." >&2
+    exit 1
+  fi
+  mounted_app="$mount_dir/$APP_NAME.app"
+  if [ ! -d "$mounted_app" ]; then
+    hdiutil detach "$mount_dir" -quiet >/dev/null 2>&1 || true
+    rm -rf "$mount_dir"
+    echo "Error: $dmg_path does not contain $APP_NAME.app at its volume root." >&2
+    exit 1
+  fi
+  built_cdhash="$(codesign -dvvv "$APP_BUNDLE" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')"
+  mounted_cdhash="$(codesign -dvvv "$mounted_app" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')"
+  if [ -z "$built_cdhash" ] || [ "$built_cdhash" != "$mounted_cdhash" ]; then
+    hdiutil detach "$mount_dir" -quiet >/dev/null 2>&1 || true
+    rm -rf "$mount_dir"
+    echo "Error: $dmg_path contains an app that does not match $APP_BUNDLE." >&2
+    exit 1
+  fi
+  hdiutil detach "$mount_dir" -quiet >/dev/null
+  rm -rf "$mount_dir"
 
   if ! command -v spctl >/dev/null 2>&1; then
     echo "Error: spctl is required for publication checks." >&2
@@ -395,6 +495,11 @@ publication_check() {
   fi
 
   spctl --assess --type execute --verbose "$APP_BUNDLE"
+  if ! command -v xcrun >/dev/null 2>&1; then
+    echo "Error: xcrun is required for stapler validation." >&2
+    exit 1
+  fi
+  xcrun stapler validate "$dmg_path"
   spctl --assess --type open --context context:primary-signature --verbose "$dmg_path"
 }
 

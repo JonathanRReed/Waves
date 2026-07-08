@@ -286,6 +286,9 @@ private struct MixerRowContextMenuItems: View {
           }
         }
       }
+      .onAppear {
+        store.refreshOutputDevices()
+      }
     }
     Divider()
     Button(isExcluded ? "Manage with Waves" : "Exclude from Waves") {

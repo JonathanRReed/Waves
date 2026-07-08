@@ -55,8 +55,9 @@ the same driver-free approach, so against those Waves leads on other fronts:
 - **Reliability escape hatch** — any app that dislikes being tapped (DAWs,
   conferencing/echo-cancellation apps, other audio tools) can be excluded in one
   click.
-- **Private** — audio is processed locally and never recorded or transmitted; no
-  microphone permission, no telemetry.
+- **Private** — audio is processed locally and never recorded, transmitted, or
+  used for telemetry. macOS may still ask for audio-capture permission because
+  Core Audio process taps share that privacy gate.
 
 Waves is intentionally a **mixer, not an EQ suite or recorder** — if you need a
 parametric EQ or audio capture-to-file, eqMac or Audio Hijack are better fits.

@@ -56,6 +56,7 @@ import Testing
 
 @Test func inferCategoryClassifiesKnownApps() {
   #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.apple.Safari", displayName: "Safari") == .browser)
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: "net.imput.helium", displayName: "Helium") == .browser)
   #expect(AppDiscoveryPolicy.inferCategory(bundleID: "us.zoom.xos", displayName: "zoom.us") == .conferencing)
   #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.spotify.client", displayName: "Spotify") == .media)
   #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.hnc.Discord", displayName: "Discord") == .communication)
@@ -69,9 +70,50 @@ import Testing
   #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.apple.archiveutility", displayName: "Archive Utility") != .browser)
 }
 
+@Test func inferCategoryAvoidsShortTokenFalsePositives() {
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.example.meetingnotes", displayName: "Meeting Notes") != .conferencing)
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.example.musicality", displayName: "Musicality") != .media)
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.example.tvremote", displayName: "TVRemote") != .media)
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.example.knowledgebase", displayName: "Knowledge Base") != .browser)
+}
+
+@Test func inferCategoryKeepsConcatenatedProductNames() {
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.example.GoogleMeet", displayName: "GoogleMeet") == .conferencing)
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: nil, displayName: "MeetInOne") == .conferencing)
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: "com.example.YouTubeMusic", displayName: "YouTubeMusic") == .media)
+  #expect(AppDiscoveryPolicy.inferCategory(bundleID: nil, displayName: "AppleTV") == .media)
+}
+
 @Test func isManageableAppRejectsHelperProcesses() {
   #expect(AppDiscoveryPolicy.isManageableApp(named: "Spotify", bundleID: "com.spotify.client"))
   #expect(!AppDiscoveryPolicy.isManageableApp(named: "Google Chrome Helper (Renderer)", bundleID: "com.google.Chrome.helper.renderer"))
+}
+
+@Test func missingAudioProcessIsRetryableForHeliumAndUserFacingApps() {
+  #expect(
+    !AppDiscoveryPolicy.treatsMissingAudioProcessAsPermanent(
+      bundleID: "net.imput.helium",
+      displayName: "Helium",
+      category: .browser
+    )
+  )
+  #expect(
+    !AppDiscoveryPolicy.treatsMissingAudioProcessAsPermanent(
+      bundleID: "com.example.CustomPlayer",
+      displayName: "Custom Player",
+      category: .unknown
+    )
+  )
+}
+
+@Test func missingAudioProcessCanBePermanentForSystemRows() {
+  #expect(
+    AppDiscoveryPolicy.treatsMissingAudioProcessAsPermanent(
+      bundleID: "com.apple.finder",
+      displayName: "Finder",
+      category: .system
+    )
+  )
 }
 
 // MARK: - Helper-process audio attribution (Chromium / Electron)

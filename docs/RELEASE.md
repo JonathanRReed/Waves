@@ -21,6 +21,10 @@ Expected result:
   (Apple Silicon + Intel), matching the README and cask support claims.
 - `dist/Waves.app/Contents/Resources/Waves_Waves.bundle` exists — the SwiftPM
   resource bundle `Bundle.module` loads at launch.
+- `dist/Waves.app/Contents/Resources/waves-logo.icns` exists — the public
+  app bundle has the generated Dock/Finder icon.
+- `dist/Waves.app/Contents/Resources/PrivacyInfo.xcprivacy` exists and passes
+  `plutil -lint`.
 
 ## Public Distribution Validation
 
@@ -58,8 +62,24 @@ Confirm the final artifact is acceptable for distribution:
 Expected result:
 - `codesign` reports a Developer ID signature, not an ad hoc signature.
 - `TeamIdentifier` is set.
+- The signed app carries `com.apple.security.device.audio-input = true`.
+- The app inside `dist/Waves.dmg` matches `dist/Waves.app`.
+- `xcrun stapler validate dist/Waves.dmg` succeeds.
 - Gatekeeper accepts the app bundle.
 - Gatekeeper accepts the DMG.
+
+Before publishing the Homebrew cask, replace `sha256 :no_check` in
+`Casks/waves.rb` with the SHA-256 checksum of the signed, notarized DMG:
+
+```bash
+shasum -a 256 dist/Waves.dmg
+```
+
+Then audit the final cask:
+
+```bash
+brew audit --cask ./Casks/waves.rb
+```
 
 ## Privacy and Security Review
 

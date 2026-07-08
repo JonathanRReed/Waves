@@ -11,7 +11,8 @@ Please include:
 
 - A description of the issue and its impact.
 - Steps to reproduce (a `Copy Diagnostics` export from Waves › Settings ›
-  Diagnostics is helpful).
+  Diagnostics is helpful, but review it first because it may include app names,
+  device names, routing state, and recent error text).
 - Affected version and macOS version.
 
 You can expect an acknowledgement within a few days. Please give a reasonable
