@@ -122,7 +122,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     store = Self.bootstrapStore
     store?.start()
-    applyLogoBranding()
     NSApp.setActivationPolicy(.regular)
     // Waves' visual language is a dark audio-console surface (see DESIGN.md).
     // Pin the app to a dark appearance so custom dark gradients never sit under
@@ -273,10 +272,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     store?.handleURLScheme(url)
   }
 
-  private func applyLogoBranding() {
-    guard let logoImage = WavesBrandAssets.logoImage else { return }
-    NSApp.applicationIconImage = logoImage
-  }
 }
 
 enum AppSceneID {

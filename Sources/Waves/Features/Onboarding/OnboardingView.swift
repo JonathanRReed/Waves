@@ -192,7 +192,18 @@ struct OnboardingView: View {
         }
         .wavesGlassProminentButton()
 
-        if !store.onboarding.launchAtLoginEnabled {
+        if store.onboarding.launchAtLoginRequiresApproval {
+          VStack(alignment: .leading, spacing: 6) {
+            Label("Launch at Login needs approval in System Settings > General > Login Items.", systemImage: "exclamationmark.triangle.fill")
+              .font(.caption)
+              .foregroundStyle(WavesDesign.warning)
+            Button("Open Login Items") {
+              store.openLoginItemsSettings()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+          }
+        } else if !store.onboarding.launchAtLoginEnabled {
           Button("Enable Launch at Login") {
             store.launchAtLoginEnabled = true
           }

@@ -620,7 +620,7 @@ private struct SourceListView: View {
     .background(Color(nsColor: .textBackgroundColor))
   }
 
-  /// Apps in the current scope that can never produce audio (see
+  /// Apps in the current scope that do not expose a manageable audio stream (see
   /// `AudioApp.hasNoAudioCapability`) — summarized once in `UnroutableAppsBanner`
   /// instead of repeating the same explanation on every such row.
   private var unroutableApps: [AudioApp] {
@@ -706,11 +706,11 @@ private struct SourceListView: View {
   }
 }
 
-/// One combined notice for apps that can never produce audio (no Core Audio
-/// process object — see `AudioApp.hasNoAudioCapability`), replacing the same
-/// explanatory paragraph repeated verbatim on every such row. Neutral in
-/// tone: these apps are working as expected (menu-bar utilities, CLI tools),
-/// not broken, so this isn't styled as an error/warning.
+/// One combined notice for apps that do not expose a manageable Core Audio
+/// stream (see `AudioApp.hasNoAudioCapability`), replacing the same explanatory
+/// paragraph repeated verbatim on every such row. Neutral in tone: these apps
+/// are working as expected (menu-bar utilities, CLI tools), not broken, so this
+/// isn't styled as an error/warning.
 private struct UnroutableAppsBanner: View {
   let apps: [AudioApp]
   let onExcludeAll: () -> Void
@@ -741,16 +741,16 @@ private struct UnroutableAppsBanner: View {
 
   private var title: String {
     apps.count == 1
-      ? "\(apps[0].displayName) can't produce audio"
-      : "\(apps.count) apps can't produce audio"
+      ? "\(apps[0].displayName) has no manageable audio stream"
+      : "\(apps.count) apps have no manageable audio stream"
   }
 
   private var detail: String {
     if apps.count == 1 {
-      return "Waves can't create a managed route for it. Exclude it to stop this notice."
+      return "Waves cannot create a managed route for it. Exclude it to stop this notice."
     }
     let names = apps.map(\.displayName).joined(separator: ", ")
-    return "Waves can't create managed routes for: \(names). Exclude them to stop this notice."
+    return "Waves cannot create managed routes for: \(names). Exclude them to stop this notice."
   }
 }
 

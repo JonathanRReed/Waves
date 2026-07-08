@@ -4,12 +4,14 @@ public enum BackendError: LocalizedError, Sendable {
   case appNotFound(String)
   case managedRouteUnavailable(String)
   case unsupportedOperation(String)
-  /// A route could not be created because the app has never engaged the audio
-  /// subsystem and so has no Core Audio process object — a permanent property
-  /// of that process (a menu-bar utility, CLI tool, background helper), not a
-  /// transient failure. Kept distinct from `.managedRouteUnavailable` so route
-  /// health/diagnostics can tell "this will never route" apart from "routing
-  /// broke and retrying might fix it."
+  /// A route could not be created because a normal user-facing app has no Core
+  /// Audio process object right now. Browser and Electron apps often only get
+  /// one while an audio helper is actively playing, so this is retryable.
+  case noActiveAudioStream(String)
+  /// A route could not be created because the process appears to be a true
+  /// non-audio/system utility with no Core Audio process object. Kept distinct
+  /// from `.noActiveAudioStream` so UI can suggest exclusion only when that is
+  /// a reasonable, low-risk recommendation.
   case noAudioCapability(String)
 
   public var errorDescription: String? {
@@ -19,6 +21,8 @@ public enum BackendError: LocalizedError, Sendable {
     case .managedRouteUnavailable(let message):
       message
     case .unsupportedOperation(let message):
+      message
+    case .noActiveAudioStream(let message):
       message
     case .noAudioCapability(let message):
       message

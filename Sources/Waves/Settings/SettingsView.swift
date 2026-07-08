@@ -154,13 +154,33 @@ private struct GeneralSettingsView: View {
           Text("Launch at login")
           Text("Start Waves automatically when you log in.")
         }
+        if store.launchAtLoginRequiresApproval {
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Label("Needs approval in System Settings > General > Login Items.", systemImage: "exclamationmark.triangle.fill")
+              .font(.caption)
+              .foregroundStyle(WavesDesign.warning)
+            Button("Open Login Items") {
+              store.openLoginItemsSettings()
+            }
+            .font(.caption)
+          }
+        }
       }
 
-      Section("App List") {
+      Section {
         Toggle(isOn: pref(\.showRecentApps)) {
           Text("Show recent apps")
           Text("Include apps that recently played, not just the live ones.")
         }
+        Picker("Keep quiet apps in Live", selection: Binding(
+          get: { store.preferences.liveListLinger },
+          set: { store.setLiveListLinger($0) }
+        )) {
+          ForEach(LiveListLinger.allCases) { option in
+            Text(option.displayName).tag(option)
+          }
+        }
+        .help("Controls how long a just-silent app stays in Live before moving to Recent.")
         Toggle(isOn: pref(\.showSystemProcesses)) {
           Text("Show system processes")
           Text("Show macOS background audio processes in the mixer.")
@@ -170,6 +190,10 @@ private struct GeneralSettingsView: View {
             Text(mode.displayName).tag(mode)
           }
         }
+      } header: {
+        Text("App List")
+      } footer: {
+        Text("Use Brief if Live feels sticky. Use Relaxed if apps disappear during pauses or track changes.")
       }
 
       Section("Playback") {
@@ -200,7 +224,7 @@ private struct GeneralSettingsView: View {
           set: { store.setKeyboardShortcutsEnabled($0) }
         )) {
           Text("Enable keyboard shortcuts")
-          Text("Global ⌘⌥ hotkeys for the frontmost app's volume and mute.")
+          Text("Installs a system-wide key listener only while enabled; Waves ignores everything except its ⌘⌥ shortcuts.")
         }
         if store.preferences.enableKeyboardShortcuts {
           shortcutRow("Increase volume", "⌘⌥↑")
@@ -219,12 +243,12 @@ private struct GeneralSettingsView: View {
           }
         )) {
           Text("URL scheme automation")
-          Text("Let other apps and links control Waves through waves:// URLs.")
+          Text("Lets other apps, browsers, and links send supported waves:// commands to Waves.")
         }
       } header: {
         Text("Automation")
       } footer: {
-        Text("Off by default — enable only if you rely on automation.")
+        Text("Off by default. Enable only for automation you trust, then turn it off when you no longer need it.")
       }
     }
   }

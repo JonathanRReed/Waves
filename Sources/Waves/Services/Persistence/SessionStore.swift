@@ -14,13 +14,13 @@ final class SessionStore: @unchecked Sendable {
     guard let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
       logger.error("Failed to get application support directory")
       let fallbackDirectory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves", isDirectory: true)
-      try? fileManager.createDirectory(at: fallbackDirectory, withIntermediateDirectories: true)
+      try? PersistenceSecurity.preparePrivateDirectory(fallbackDirectory, fileManager: fileManager)
       url = fallbackDirectory.appendingPathComponent("session.json")
       return
     }
     let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
     do {
-      try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+      try PersistenceSecurity.preparePrivateDirectory(directory, fileManager: fileManager)
     } catch {
       logger.error("Failed to create session directory: \(error.localizedDescription)")
     }
@@ -30,6 +30,7 @@ final class SessionStore: @unchecked Sendable {
   /// Test-only entry point: keeps the store's file inside `directory` instead
   /// of the real Application Support location.
   init(directory: URL) {
+    try? PersistenceSecurity.preparePrivateDirectory(directory)
     url = directory.appendingPathComponent("session.json")
   }
 
@@ -46,6 +47,7 @@ final class SessionStore: @unchecked Sendable {
       guard FileManager.default.fileExists(atPath: url.path) else {
         return nil
       }
+      PersistenceSecurity.secureExistingFile(at: url)
       do {
         // Check file size before loading
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -85,6 +87,7 @@ final class SessionStore: @unchecked Sendable {
     try? FileManager.default.removeItem(at: backupURL)
     do {
       try FileManager.default.moveItem(at: url, to: backupURL)
+      try? PersistenceSecurity.setPrivateFilePermissions(backupURL)
       logger.warning("Moved unreadable session file to \(backupURL.lastPathComponent)")
     } catch {
       logger.error("Failed to back up unreadable session file: \(error.localizedDescription)")
@@ -133,6 +136,7 @@ final class SessionStore: @unchecked Sendable {
       do {
         let data = try PersistedSchema.encode(payload, using: self.encoder)
         try data.write(to: self.url, options: .atomic)
+        try PersistenceSecurity.setPrivateFilePermissions(self.url)
       } catch {
         self.logger.error("Failed to save session: \(error.localizedDescription)")
       }

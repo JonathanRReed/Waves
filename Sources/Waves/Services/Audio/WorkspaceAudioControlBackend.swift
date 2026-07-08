@@ -19,8 +19,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let routeMaintenanceTickInterval = 20
   private let staleRouteThresholdTicks = 24
   private let staleRouteLevelThreshold: Float = 0.0005
-  private var deviceChangeListenerToken: UInt32 = 0
+  private var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
+  private var lastKnownDefaultOutputDeviceUID: String?
   private let logger = Logger(subsystem: "com.waves.backend", category: "AudioBackend")
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
@@ -34,12 +35,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   func start() async throws {
     snapshot = await buildSnapshot(merging: snapshot)
+    lastKnownDefaultOutputDeviceUID = try? currentDefaultOutputDeviceUID()
     startLevelUpdateTask()
     addDeviceChangeListener()
   }
 
   func stop() async {
     removeDeviceChangeListener()
+    lastKnownDefaultOutputDeviceUID = nil
     stopLevelUpdateTask()
     disposeControllers(keeping: [])
     deviceChangeContinuation.finish()
@@ -717,18 +720,26 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return [processObjectID]
     }
 
-    // macOS only assigns a Core Audio "process object" to a process once it has
-    // actually engaged the audio subsystem — a process that has never produced
-    // sound (a menu-bar utility, a CLI tool, a background helper) never gets
-    // one, so this resolution fails every time, not just this once. That's the
-    // common case in practice; a genuinely audio-capable app whose process
-    // object isn't ready yet would normally succeed on retry (see
-    // createControllerWithRetry). Say so plainly and point at the fix —
-    // excluding it via the row's context menu — instead of a bare technical
-    // error that looks identical for a real, recoverable failure.
-    throw BackendError.noAudioCapability(
-      "\(app.displayName) doesn't appear to produce audio, so Waves can't create a managed route for it. "
-        + "If this app never plays sound, right-click its row and choose “Exclude from Waves” to stop this warning."
+    // macOS only assigns a Core Audio process object once a process engages the
+    // audio subsystem. For browsers/Electron shells (Helium, Chrome, Slack) that
+    // object may belong to a short-lived helper and may not exist until playback
+    // starts. Treat user-facing apps as retryable; reserve the permanent
+    // no-audio path for true system/non-audio rows where exclusion is a safe
+    // recommendation.
+    if AppDiscoveryPolicy.treatsMissingAudioProcessAsPermanent(
+      bundleID: app.bundleID,
+      displayName: app.displayName,
+      category: app.category
+    ) {
+      throw BackendError.noAudioCapability(
+        "\(app.displayName) does not expose an audio stream Waves can manage. "
+          + "If this app never plays sound, exclude it from Waves to stop this notice."
+      )
+    }
+
+    throw BackendError.noActiveAudioStream(
+      "No active audio stream was available for \(app.displayName), so Waves could not create a managed route yet. "
+        + "Start playback in the app, then try again."
     )
   }
 
@@ -1671,11 +1682,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     apps.contains { $0.routingState == .error && !$0.hasNoAudioCapability }
   }
 
-  /// Sets a row to the error routing state and records whether the failure is
-  /// the permanent "this app doesn't produce audio" condition (see
-  /// resolveProcessObjectIDs) rather than a genuine, possibly-transient route
-  /// failure — hasBlockingRouteErrors treats the two differently.
+  /// Records route failures. A missing active stream on a normal app is kept as
+  /// monitor-only because it is a retryable precondition, not a broken route.
+  /// True route failures become `.error`; permanent non-audio rows also record
+  /// `hasNoAudioCapability` so UI can suggest exclusion.
   private func markRouteError(at index: Int, error: Error) {
+    if case BackendError.noActiveAudioStream = error {
+      snapshot.apps[index].routingState = .monitorOnly
+      snapshot.apps[index].notes = error.localizedDescription
+      snapshot.apps[index].hasNoAudioCapability = false
+      return
+    }
+
     snapshot.apps[index].routingState = .error
     snapshot.apps[index].notes = error.localizedDescription
     if case BackendError.noAudioCapability = error {
@@ -1860,80 +1878,138 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func addDeviceChangeListener() {
     // Avoid registering a second listener (and leaking the previous block) if
     // start() runs more than once.
-    guard deviceChangeListenerToken == 0 else { return }
+    guard deviceChangeListenerBlock == nil else { return }
 
-    var address = AudioObjectPropertyAddress(
-      mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-
-    let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+    let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] count, addresses in
+      let selectors = (0..<Int(count)).map { addresses[$0].mSelector }
       Task { [weak self] in
-        await self?.handleDeviceChange()
+        await self?.handleDeviceChange(selectors: selectors)
       }
     }
 
-    let status = AudioObjectAddPropertyListenerBlock(
-      AudioObjectID(kAudioObjectSystemObject),
-      &address,
-      DispatchQueue.main,
-      listenerBlock
-    )
+    let selectors: [AudioObjectPropertySelector] = [
+      kAudioHardwarePropertyDefaultOutputDevice,
+      kAudioHardwarePropertyDevices,
+    ]
 
-    if status == noErr {
-      deviceChangeListenerToken = 1
+    for selector in selectors {
+      var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+      )
+
+      let status = AudioObjectAddPropertyListenerBlock(
+        AudioObjectID(kAudioObjectSystemObject),
+        &address,
+        DispatchQueue.main,
+        listenerBlock
+      )
+
+      if status == noErr {
+        deviceChangeListenerSelectors.append(selector)
+      } else {
+        logger.error("Failed to add device change listener \(selector): \(status)")
+      }
+    }
+
+    if !deviceChangeListenerSelectors.isEmpty {
       deviceChangeListenerBlock = listenerBlock
-    } else {
-      logger.error("Failed to add device change listener: \(status)")
     }
   }
 
   private func removeDeviceChangeListener() {
-    guard deviceChangeListenerToken != 0 else { return }
-
-    var address = AudioObjectPropertyAddress(
-      mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-
     guard let listenerBlock = deviceChangeListenerBlock else {
-      deviceChangeListenerToken = 0
+      deviceChangeListenerSelectors.removeAll()
       return
     }
 
-    _ = AudioObjectRemovePropertyListenerBlock(
-      AudioObjectID(kAudioObjectSystemObject),
-      &address,
-      DispatchQueue.main,
-      listenerBlock
-    )
+    for selector in deviceChangeListenerSelectors {
+      var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+      )
 
-    deviceChangeListenerToken = 0
+      _ = AudioObjectRemovePropertyListenerBlock(
+        AudioObjectID(kAudioObjectSystemObject),
+        &address,
+        DispatchQueue.main,
+        listenerBlock
+      )
+    }
+
+    deviceChangeListenerSelectors.removeAll()
     deviceChangeListenerBlock = nil
   }
 
-  private func handleDeviceChange() async {
-    // Always re-tap managed routes to the new device — this is core "per-app
-    // control keeps working after you switch devices" functionality, not the
-    // optional convenience the "Auto-restore device" preference describes
-    // (restoring each device's *remembered volume level*, handled separately
-    // by AppStore's preferences.autoRestoreDevice-gated restoreDeviceVolumePresets
-    // calls). Skipping this on a real device change would silently leave every
-    // previously-managed app's Core Audio taps disposed-and-not-reattached —
-    // i.e. break per-app volume/mute control entirely — until the user noticed
-    // and manually hit "Recover Routes."
-    do {
-      _ = try await autoRestoreDevice()
-      logger.info("Output device changed, managed routes restored")
-    } catch {
-      refreshGlobalRouteHealth(latestError: error.localizedDescription)
-      logger.error("Output device change recovery failed: \(error.localizedDescription)")
+  private func handleDeviceChange(selectors: [AudioObjectPropertySelector]) async {
+    let currentDefaultUID = try? currentDefaultOutputDeviceUID()
+    let defaultOutputChanged = selectors.contains(kAudioHardwarePropertyDefaultOutputDevice)
+      || (lastKnownDefaultOutputDeviceUID != nil && currentDefaultUID != lastKnownDefaultOutputDeviceUID)
+    lastKnownDefaultOutputDeviceUID = currentDefaultUID
+
+    if defaultOutputChanged {
+      // Re-tap managed routes only when the effective default output changed.
+      // Plain device inventory churn, such as plugging in an unused interface,
+      // should not tear down audible routes.
+      do {
+        _ = try await autoRestoreDevice()
+        logger.info("Output device changed, managed routes restored")
+      } catch {
+        refreshGlobalRouteHealth(latestError: error.localizedDescription)
+        logger.error("Output device change recovery failed: \(error.localizedDescription)")
+      }
+    } else {
+      await reconcilePinnedRoutesAfterDeviceInventoryChange()
     }
     // Notify observers (the store) so they can refresh UI state and restore
     // per-device volume presets, regardless of whether restoration succeeded.
     deviceChangeContinuation.yield()
+  }
+
+  private func reconcilePinnedRoutesAfterDeviceInventoryChange() async {
+    let availableUIDs = Set(allDeviceIDs().compactMap(deviceUID))
+    guard !availableUIDs.isEmpty else { return }
+
+    var lastError: String?
+    var routesNeedingReattach: Set<String> = []
+
+    for app in snapshot.apps {
+      guard let targetDeviceUID = app.targetDeviceUID else { continue }
+      let isActivelyManaged = app.routingState == .managed || controllers[app.id]?.isActive == true
+      let targetIsAvailable = availableUIDs.contains(targetDeviceUID)
+
+      if isActivelyManaged, !targetIsAvailable {
+        if let controller = controllers.removeValue(forKey: app.id) {
+          controller.dispose()
+        }
+        staleRouteTicks.removeValue(forKey: app.logicalID)
+        let error = BackendError.managedRouteUnavailable(
+          "The chosen output device for \(app.displayName) is unavailable. Pick another in the app's Output Device menu."
+        )
+        if let index = snapshot.apps.firstIndex(where: { $0.id == app.id || $0.logicalID == app.logicalID }) {
+          markRouteError(at: index, error: error)
+          snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+          snapshot.apps[index].peakLevel = 0
+          snapshot.apps[index].rmsLevel = 0
+        }
+        lastError = error.localizedDescription
+      } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability {
+        routesNeedingReattach.insert(app.logicalID)
+      }
+    }
+
+    if !routesNeedingReattach.isEmpty {
+      await reattachRoutes(forLogicalIDs: routesNeedingReattach)
+      if lastError != nil {
+        refreshGlobalRouteHealth(latestError: lastError)
+        snapshot.updatedAt = .now
+      }
+    } else if lastError != nil {
+      refreshGlobalRouteHealth(latestError: lastError)
+      snapshot.updatedAt = .now
+    }
   }
 }
 
