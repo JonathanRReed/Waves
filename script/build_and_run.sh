@@ -260,7 +260,7 @@ if ! is_publication_check_mode; then
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>NSAudioCaptureUsageDescription</key>
-  <string>Waves captures audio from selected apps so it can apply per-app volume and mute controls before playing the audio back to your output device.</string>
+  <string>Waves captures audio from selected apps so it can apply per-app volume, mute, equalizer, and adaptive mixing controls before playing the audio back to your output device.</string>
 </dict>
 </plist>
 PLIST

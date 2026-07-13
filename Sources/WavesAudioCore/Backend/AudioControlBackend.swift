@@ -8,6 +8,9 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws
   func setMuted(_ isMuted: Bool, forAppID appID: String) async throws
   func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws
+  func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws
+  func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels]
+  func setAdaptiveGains(_ gainsDB: [String: Float]) async
   func setVolumeControlMode(_ mode: VolumeControlMode, forDeviceID deviceID: String) async throws
   func pinApp(_ isPinned: Bool, appID: String) async throws
   func applyProfile(_ profile: Profile) async throws -> AudioSessionSnapshot
@@ -51,6 +54,18 @@ public struct AudioLevels: Hashable, Sendable {
   public init(peak: Float, rms: Float) {
     self.peak = peak
     self.rms = rms
+  }
+}
+
+/// Analysis values used by Adaptive Mix. These values are transient, contain
+/// no retained audio samples, and are separate from the final-output UI meters.
+public struct AdaptiveAnalysisLevels: Hashable, Sendable {
+  public var rms: Float
+  public var voiceBandEnergy: Float
+
+  public init(rms: Float, voiceBandEnergy: Float) {
+    self.rms = rms.isFinite ? max(0, rms) : 0
+    self.voiceBandEnergy = voiceBandEnergy.isFinite ? max(0, voiceBandEnergy) : 0
   }
 }
 

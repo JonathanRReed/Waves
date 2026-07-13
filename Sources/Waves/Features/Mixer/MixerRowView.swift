@@ -96,6 +96,20 @@ struct MixerRowView: View {
           .disabled(isExcluded)
 
         Button {
+          store.focusEqualizer(for: app)
+        } label: {
+          Image(systemName: "slider.horizontal.3")
+            .foregroundStyle(WavesDesign.accentOrSecondary(equalizerIsEnabled))
+            .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help("Equalizer for \(app.displayName)")
+        .accessibilityLabel("Open equalizer for \(app.displayName)")
+        .accessibilityValue(equalizerIsEnabled ? "On" : "Off")
+        .disabled(isExcluded)
+
+        Button {
           store.setMuted(!app.isMuted, for: app)
           if !reduceMotion { animateMuteChange.toggle() }
         } label: {
@@ -148,7 +162,7 @@ struct MixerRowView: View {
       }
     }
     .contextMenu {
-      MixerRowContextMenuItems(app: app)
+      MixerRowContextMenuItems(app: app, opensMainWindow: false)
     }
     .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
       store.togglePinned(app)
@@ -159,6 +173,7 @@ struct MixerRowView: View {
   }
 
   private var isExcluded: Bool { store.isExcluded(app) }
+  private var equalizerIsEnabled: Bool { store.equalizerSettings(for: app).isEnabled }
 
   private var showsLevelMeter: Bool {
     !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
@@ -245,17 +260,30 @@ private struct MixerRowHelpers {
   }
 }
 
-/// The Pin / Output Device / Exclude actions shared by both row densities, so
+/// The Equalizer / Pin / Output Device / Exclude actions shared by both row densities, so
 /// the menu-bar's compact row never silently falls behind the main window's
 /// full row in capability — a menu-bar-first user can route an app to a
 /// different output device or exclude it without opening the main window.
 private struct MixerRowContextMenuItems: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.openWindow) private var openWindow
   let app: AudioApp
+  let opensMainWindow: Bool
 
   private var isExcluded: Bool { store.isExcluded(app) }
 
   var body: some View {
+    Button(opensMainWindow ? "Open Equalizer in Waves" : "Equalizer") {
+      store.focusEqualizer(for: app, source: opensMainWindow ? .running : nil)
+      if opensMainWindow {
+        openWindow(id: AppSceneID.mainWindow)
+        NSApp.activate(ignoringOtherApps: true)
+      }
+    }
+    .disabled(isExcluded)
+
+    Divider()
+
     Button(app.isPinned ? "Unpin" : "Pin") {
       store.togglePinned(app)
     }
@@ -423,10 +451,9 @@ struct CompactMixerRow: View {
       }
     }
     .contextMenu {
-      // Full parity with the main window's row — a menu-bar-first user can
-      // pin, route to a different output device, or exclude an app without
-      // ever opening the main window.
-      MixerRowContextMenuItems(app: app)
+      // Full parity with the main window's row. Equalizer opens the main
+      // window because an inspector is too large for the compact menu panel.
+      MixerRowContextMenuItems(app: app, opensMainWindow: true)
     }
     .accessibilityAction(named: app.isPinned ? "Unpin" : "Pin") {
       store.togglePinned(app)

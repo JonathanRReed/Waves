@@ -13,6 +13,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var snapshot: AudioSessionSnapshot = .empty
   private let currentBundleID = Bundle.main.bundleIdentifier
   private var controllers: [String: PerAppTapController] = [:]
+  private var equalizerSettingsByAppID: [String: EqualizerSettings] = [:]
+  private var adaptiveGainDBByAppID: [String: Float] = [:]
   private var levelUpdateTask: Task<Void, Never>?
   private var routeMaintenanceTick = 0
   private var staleRouteTicks: [String: Int] = [:]
@@ -226,6 +228,71 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
       throw error
+    }
+  }
+
+  func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws {
+    guard let initialIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
+      throw BackendError.appNotFound(appID)
+    }
+
+    let logicalID = snapshot.apps[initialIndex].logicalID
+    equalizerSettingsByAppID[logicalID] = settings
+
+    // A role-only change should not seize a route. Enroll only when EQ is
+    // enabled or the app is already managed by another mixer control.
+    let shouldManageRoute = settings.isEnabled
+      || snapshot.apps[initialIndex].routingState == .managed
+      || controllers[snapshot.apps[initialIndex].id]?.isActive == true
+    guard shouldManageRoute else { return }
+
+    guard supportsPerAppRouting else {
+      snapshot.apps[initialIndex].routingState = .monitorOnly
+      snapshot.apps[initialIndex].notes = "Per-app route requires macOS 14.2+"
+      return
+    }
+
+    do {
+      let app = snapshot.apps[initialIndex]
+      try await applyRoute(for: app, toVolume: app.desiredVolume, muted: app.isMuted)
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID || $0.id == appID }) {
+        snapshot.apps[index].routingState = .managed
+        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted
+          ? 0
+          : snapshot.apps[index].desiredVolume
+        snapshot.apps[index].notes = nil
+      }
+      refreshGlobalRouteHealth()
+    } catch {
+      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID || $0.id == appID }) {
+        markRouteError(at: index, error: error)
+      }
+      refreshGlobalRouteHealth(latestError: error.localizedDescription)
+      throw error
+    }
+  }
+
+  func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels] {
+    snapshot.apps.reduce(into: [:]) { result, app in
+      guard let controller = controllers[app.id], controller.isActive else { return }
+      result[app.logicalID] = controller.getAdaptiveAnalysis()
+    }
+  }
+
+  func setAdaptiveGains(_ gainsDB: [String: Float]) async {
+    var normalized: [String: Float] = [:]
+    normalized.reserveCapacity(gainsDB.count)
+    for (appID, gainDB) in gainsDB {
+      let safeGain = gainDB.isFinite ? gainDB : 0
+      normalized[appID] = min(3, max(-18, safeGain))
+    }
+    adaptiveGainDBByAppID = normalized
+
+    // Omitted apps explicitly return to unity gain, preventing a stopped or
+    // cancelled coordinator from leaving old attenuation on a live route.
+    for app in snapshot.apps {
+      guard let controller = controllers[app.id] else { continue }
+      controller.setAdaptiveGainDB(normalized[app.logicalID] ?? 0)
     }
   }
 
@@ -499,6 +566,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
        controller.isActive,
        controller.covers(processObjectIDs) {
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
+      controller.setEqualizer(equalizerSettingsByAppID[app.logicalID] ?? EqualizerSettings())
+      controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
       return
     }
 
@@ -654,6 +723,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         volume: app.desiredVolume,
         volumeBoost: app.volumeBoost,
         muted: app.isMuted,
+        equalizerSettings: equalizerSettingsByAppID[app.logicalID] ?? EqualizerSettings(),
+        adaptiveGainDB: adaptiveGainDBByAppID[app.logicalID] ?? 0,
         tapFormat: tapFormat
       )
 
@@ -2032,6 +2103,8 @@ private struct TapRenderState {
   var isActive: UInt32
   var peakLevel: Float
   var rmsLevel: Float
+  var analysisRMS: Float
+  var voiceBandEnergy: Float
 }
 
 private struct TapAudioFormat {
@@ -2059,7 +2132,16 @@ private struct TapAudioFormat {
 private final class TapRenderStateBox {
   let state: UnsafeMutablePointer<TapRenderState>
   private let stateLock = NSLock()
-  private var stateBox = TapRenderState(volume: 1.0, volumeBoost: 1.0, isMuted: 0, isActive: 0, peakLevel: 0, rmsLevel: 0)
+  private var stateBox = TapRenderState(
+    volume: 1.0,
+    volumeBoost: 1.0,
+    isMuted: 0,
+    isActive: 0,
+    peakLevel: 0,
+    rmsLevel: 0,
+    analysisRMS: 0,
+    voiceBandEnergy: 0
+  )
 
   init(initialState: TapRenderState) {
     state = UnsafeMutablePointer<TapRenderState>.allocate(capacity: 1)
@@ -2086,7 +2168,16 @@ private final class TapRenderStateBox {
     return value
   }
 
-  func write(volume: Float, volumeBoost: Float, muted: Bool, isActive: UInt32, peakLevel: Float, rmsLevel: Float) {
+  func write(
+    volume: Float,
+    volumeBoost: Float,
+    muted: Bool,
+    isActive: UInt32,
+    peakLevel: Float,
+    rmsLevel: Float,
+    analysisRMS: Float,
+    voiceBandEnergy: Float
+  ) {
     stateLock.lock()
     state.pointee.volume = volume
     state.pointee.volumeBoost = volumeBoost
@@ -2094,12 +2185,16 @@ private final class TapRenderStateBox {
     state.pointee.isActive = isActive
     state.pointee.peakLevel = peakLevel
     state.pointee.rmsLevel = rmsLevel
+    state.pointee.analysisRMS = analysisRMS
+    state.pointee.voiceBandEnergy = voiceBandEnergy
     stateBox.volume = volume
     stateBox.volumeBoost = volumeBoost
     stateBox.isMuted = muted ? 1 : 0
     stateBox.isActive = isActive
     stateBox.peakLevel = peakLevel
     stateBox.rmsLevel = rmsLevel
+    stateBox.analysisRMS = analysisRMS
+    stateBox.voiceBandEnergy = voiceBandEnergy
     stateLock.unlock()
   }
 
@@ -2114,15 +2209,24 @@ private final class TapRenderStateBox {
     stateLock.unlock()
   }
 
-  func writeLevels(peakLevel: Float, rmsLevel: Float) {
+  func writeLevels(
+    peakLevel: Float,
+    rmsLevel: Float,
+    analysisRMS: Float,
+    voiceBandEnergy: Float
+  ) {
     // Invoked from the realtime IO render thread, which must never block. If the
     // lock is contended, skip this update — level meters are cosmetic and the
     // next render cycle will refresh them.
     guard stateLock.try() else { return }
     state.pointee.peakLevel = peakLevel
     state.pointee.rmsLevel = rmsLevel
+    state.pointee.analysisRMS = analysisRMS
+    state.pointee.voiceBandEnergy = voiceBandEnergy
     stateBox.peakLevel = peakLevel
     stateBox.rmsLevel = rmsLevel
+    stateBox.analysisRMS = analysisRMS
+    stateBox.voiceBandEnergy = voiceBandEnergy
     stateLock.unlock()
   }
 
@@ -2131,6 +2235,16 @@ private final class TapRenderStateBox {
     let levels = (state.pointee.peakLevel, state.pointee.rmsLevel)
     stateLock.unlock()
     return levels
+  }
+
+  func readAdaptiveAnalysis() -> AdaptiveAnalysisLevels {
+    stateLock.lock()
+    let analysis = AdaptiveAnalysisLevels(
+      rms: state.pointee.analysisRMS,
+      voiceBandEnergy: state.pointee.voiceBandEnergy
+    )
+    stateLock.unlock()
+    return analysis
   }
 
   func setInactive() {
@@ -2150,11 +2264,15 @@ private final class PerAppTapController: @unchecked Sendable {
 
   private let stateBox: TapRenderStateBox
   private let tapFormat: TapAudioFormat
+  private let equalizerDSP: EqualizerDSP
+  private let voiceBandAnalyzer: VoiceBandEnergyAnalyzer
   private let callbackQueue: DispatchQueue
   private let callbackQueueKey = DispatchSpecificKey<UUID>()
   private let callbackQueueToken = UUID()
   private var ioProcID: AudioDeviceIOProcID?
   private var didDispose = false
+  private var equalizerHeadroomGain: Float
+  private var adaptiveGain: Float
 
   init(
     appID: String,
@@ -2165,6 +2283,8 @@ private final class PerAppTapController: @unchecked Sendable {
     volume: Float,
     volumeBoost: Float,
     muted: Bool,
+    equalizerSettings: EqualizerSettings,
+    adaptiveGainDB: Float,
     tapFormat: TapAudioFormat
   ) throws {
     self.appID = appID
@@ -2173,8 +2293,33 @@ private final class PerAppTapController: @unchecked Sendable {
     self.tapID = tapID
     self.aggregateDeviceID = aggregateDeviceID
     self.tapFormat = tapFormat
+    let sampleRate = tapFormat.streamDescription.mSampleRate
+    let channelCount = max(1, Int(tapFormat.streamDescription.mChannelsPerFrame))
+    self.equalizerDSP = EqualizerDSP(
+      sampleRate: sampleRate,
+      channelCount: channelCount,
+      settings: equalizerSettings
+    )
+    self.voiceBandAnalyzer = VoiceBandEnergyAnalyzer(
+      sampleRate: sampleRate,
+      channelCount: channelCount
+    )
+    self.equalizerHeadroomGain = equalizerSettings.isEnabled
+      ? Float(pow(10, Double(equalizerSettings.headroomCompensationDB) / 20))
+      : 1
+    let safeAdaptiveGainDB = adaptiveGainDB.isFinite ? min(3, max(-18, adaptiveGainDB)) : 0
+    self.adaptiveGain = Float(pow(10, Double(safeAdaptiveGainDB) / 20))
     self.callbackQueue = DispatchQueue(label: "com.waves.backend.tap.\(appID)", qos: .userInitiated)
-    let initialState = TapRenderState(volume: volume, volumeBoost: volumeBoost, isMuted: muted ? 1 : 0, isActive: 1, peakLevel: 0, rmsLevel: 0)
+    let initialState = TapRenderState(
+      volume: volume,
+      volumeBoost: volumeBoost,
+      isMuted: muted ? 1 : 0,
+      isActive: 1,
+      peakLevel: 0,
+      rmsLevel: 0,
+      analysisRMS: 0,
+      voiceBandEnergy: 0
+    )
     self.stateBox = TapRenderStateBox(initialState: initialState)
     self.callbackQueue.setSpecific(key: callbackQueueKey, value: callbackQueueToken)
   }
@@ -2217,8 +2362,29 @@ private final class PerAppTapController: @unchecked Sendable {
     }
   }
 
+  func setEqualizer(_ settings: EqualizerSettings) {
+    callbackQueue.async { [weak self] in
+      guard let self else { return }
+      self.equalizerDSP.update(settings: settings)
+      self.equalizerHeadroomGain = settings.isEnabled
+        ? Float(pow(10, Double(settings.headroomCompensationDB) / 20))
+        : 1
+    }
+  }
+
+  func setAdaptiveGainDB(_ gainDB: Float) {
+    let safeGainDB = gainDB.isFinite ? min(3, max(-18, gainDB)) : 0
+    callbackQueue.async { [weak self] in
+      self?.adaptiveGain = Float(pow(10, Double(safeGainDB) / 20))
+    }
+  }
+
   func getCurrentLevels() -> (peak: Float, rms: Float) {
     stateBox.readLevels()
+  }
+
+  func getAdaptiveAnalysis() -> AdaptiveAnalysisLevels {
+    stateBox.readAdaptiveAnalysis()
   }
 
   func start() throws {
@@ -2236,13 +2402,13 @@ private final class PerAppTapController: @unchecked Sendable {
       }
 
       guard currentState.isActive != 0 else {
-        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0)
+        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
         self.zeroOutput(outOutputData)
         return
       }
 
       if currentState.isMuted != 0 {
-        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0)
+        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
         self.zeroOutput(outOutputData)
         return
       }
@@ -2250,7 +2416,7 @@ private final class PerAppTapController: @unchecked Sendable {
       let volume = currentState.volume
       let volumeBoost = currentState.volumeBoost
       if volume == 0.0 {
-        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0)
+        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
         self.zeroOutput(outOutputData)
         return
       }
@@ -2442,15 +2608,22 @@ private final class PerAppTapController: @unchecked Sendable {
     let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
     let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
 
-    var peak: Float = 0
-    var sum: Float = 0
-    var sampleCount: UInt32 = 0
+    var analysisSum: Float = 0
+    var analysisSampleCount: UInt32 = 0
+    var voiceEnergySum: Float = 0
+    var voiceSampleCount: UInt32 = 0
+    var finalPeak: Float = 0
+    var finalSum: Float = 0
+    var finalSampleCount: UInt32 = 0
+    var channelOffset = 0
 
-    // Apply volume boost to the volume
-    let effectiveVolume = volume * volumeBoost
+    let manualGain = volume * volumeBoost * equalizerHeadroomGain
 
     for index in outputBuffers.indices {
       let outputBuffer = outputBuffers[index]
+      let bufferChannelCount = max(1, Int(outputBuffer.mNumberChannels))
+      let currentChannelOffset = channelOffset
+      channelOffset += bufferChannelCount
       guard let outputPointer = outputBuffer.mData else { continue }
       guard index < inputBuffers.count else {
         memset(outputPointer, 0, Int(outputBuffer.mDataByteSize))
@@ -2472,20 +2645,55 @@ private final class PerAppTapController: @unchecked Sendable {
         memset(outputPointer.advanced(by: copyByteCount), 0, outputByteCount - copyByteCount)
       }
 
-      // Compute peak and RMS from the original input before scaling.
-      let (bufferPeak, bufferSum, bufferSamples) = TapDSP.levels(
-        from: inputPointer,
+      equalizerDSP.process(
+        outputPointer,
+        byteCount: copyByteCount,
+        format: sampleFormat,
+        bufferChannelCount: bufferChannelCount,
+        channelOffset: currentChannelOffset
+      )
+      TapDSP.scale(outputPointer, byteCount: copyByteCount, format: sampleFormat, gain: manualGain)
+
+      // Adaptive analysis observes the user's EQ and manual controls, but not
+      // its own temporary correction, so it cannot chase itself.
+      let (_, preAdaptiveSum, preAdaptiveSamples) = TapDSP.levels(
+        from: outputPointer,
         byteCount: copyByteCount,
         format: sampleFormat
       )
-      peak = max(peak, bufferPeak)
-      sum += bufferSum
-      sampleCount += bufferSamples
+      analysisSum += preAdaptiveSum
+      analysisSampleCount += preAdaptiveSamples
+      let voice = voiceBandAnalyzer.analyze(
+        UnsafeRawPointer(outputPointer),
+        byteCount: copyByteCount,
+        format: sampleFormat,
+        bufferChannelCount: bufferChannelCount,
+        channelOffset: currentChannelOffset
+      )
+      voiceEnergySum += voice.energySum
+      voiceSampleCount += voice.sampleCount
 
-      TapDSP.scale(outputPointer, byteCount: copyByteCount, format: sampleFormat, gain: effectiveVolume)
+      TapDSP.scale(outputPointer, byteCount: copyByteCount, format: sampleFormat, gain: adaptiveGain)
+
+      let (bufferPeak, bufferSum, bufferSamples) = TapDSP.levels(
+        from: outputPointer,
+        byteCount: copyByteCount,
+        format: sampleFormat
+      )
+      finalPeak = max(finalPeak, bufferPeak)
+      finalSum += bufferSum
+      finalSampleCount += bufferSamples
     }
 
-    stateBox.writeLevels(peakLevel: peak, rmsLevel: TapDSP.rms(sum: sum, sampleCount: sampleCount))
+    let voiceBandEnergy = voiceSampleCount > 0
+      ? voiceEnergySum / Float(voiceSampleCount)
+      : 0
+    stateBox.writeLevels(
+      peakLevel: finalPeak,
+      rmsLevel: TapDSP.rms(sum: finalSum, sampleCount: finalSampleCount),
+      analysisRMS: TapDSP.rms(sum: analysisSum, sampleCount: analysisSampleCount),
+      voiceBandEnergy: voiceBandEnergy.isFinite ? voiceBandEnergy : 0
+    )
   }
 
   private func zeroOutput(_ outOutputData: UnsafeMutablePointer<AudioBufferList>) {

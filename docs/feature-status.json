@@ -1,11 +1,11 @@
 {
   "meta": {
     "app": "Waves",
-    "phase": "iter3-ui-parity",
-    "totalStories": 176,
+    "phase": "eq-adaptive-mixing",
+    "totalStories": 184,
     "coverageNotes": "Reviewed the entire Sources tree (Waves + WavesAudioCore) and all root docs (README, PRODUCT, DESIGN, CHANGELOG, PRIVACY, SECURITY, CONTRIBUTING). The 171 captured stories are accurate and cover the vast majority of user-facing surface: every public AppStore func, every Settings toggle, the menu-bar panel, URL-scheme commands, global hotkeys, presets, exclusions, onboarding, diagnostics, accessibility, and persistence are represented.\n\nThe five items above are the only genuinely uncaptured user-facing behaviors I found, ordered by confidence:\n\n1. AUDIO-01 (highest-value finding): The volume-control-mode (hardware/software/automatic) capability is a documented-but-dead feature. The UI picker was removed (CHANGELOG line 39 confirms it was a no-op) yet the backend protocol method setVolumeControlMode, the VolumeControlMode enum, AudioDevice.volumeControlMode, and TWO README claims ('Smart Volume Backend' line 16; 'Choose the preferred route-control mode' line 163) all remain. No view calls setVolumeControlMode (verified by grep). This is both a missing story AND a stale-README/dead-code issue worth flagging for cleanup.\n\n2-3. DISC-07 / DISC-08: The 'Show system processes' and 'Show recent apps' toggles each drive a distinct list-population/grouping behavior (system-category inclusion; the Recent computed set used as a sidebar scope + menu-bar section). They are only loosely folded under the catch-all SET-02 'General preferences toggles', so I surfaced them as distinct discovery behaviors.\n\n4. WIN-08: Sidebar scope is persisted via @SceneStorage and restored across launches — a UX-continuity behavior not covered by the existing session/preference persistence stories.\n\n5. WIN-09 (lowest confidence; partial overlap with WIN-07/BOOST-03): in-list onKeyPress handlers include 'b' (cycle boost, wrapping 4x->1x) and 'p' (toggle pin) on the selected row. Pin-via-keyboard and the in-window boost-cycle key are not separately captured. If WIN-07's 'keyboard-driven control' is read broadly this is a duplicate, so treat it as a candidate rather than a certain gap.\n\nThings I explicitly checked and confirmed are NOT gaps (already covered): @AppStorage('showMenuBarExtra') menu-bar visibility = MENU-06; Cmd-S save-preset + sheet = PRE-01/WIN-04; Cmd-R refresh = WIN-04/MENU; preset context-menu delete in sidebar = PRE-03; versioned persistence envelope = PERSIST-06; Homebrew cask (Casks/waves.rb) and notarized release CI are distribution/build, not in-app user features. No EQ, spatial audio, recording, sleep/wake-specific, or notification features exist in the code (consistent with PRODUCT.md positioning as 'a mixer, not an EQ suite or recorder').",
     "implDist": {
-      "implemented": 138,
+      "implemented": 146,
       "partial": 35,
       "missing": 2,
       "stubbed": 1
@@ -52,7 +52,14 @@
       "note": "Login-item English-string fragility fixed by hand (LoginItemStatus.requiresApproval boolean)."
     },
     "finalRegressionFixed": "restoreDeviceVolumePresets no longer renders a false .managed when a re-tap fails (reconciles backend state post-loop)",
-    "finalBuild": "swift build pass, swift test 47/47 pass, 0 warnings (Swift 6.2.3)"
+    "finalBuild": "swift build pass, swift test 47/47 pass, 0 warnings (Swift 6.2.3)",
+    "featureExpansionNote": "Per-app 3-band and 8-band EQ plus local Adaptive Mix were added on 2026-07-13. Earlier inventory text describing EQ as absent is historical.",
+    "currentVerification": {
+      "date": "2026-07-13",
+      "swiftBuild": "pass",
+      "swiftTest": "112/112 pass",
+      "renderedUI": "pass: compact toolbar, EQ inspector, 3-band and 8-band modes, presets, adaptive menu, and inspector close flow"
+    }
   },
   "rows": [
     {
@@ -11417,6 +11424,259 @@
           "canonicalFile": "Sources/Waves/Features/Mixer/MainWindowView.swift"
         }
       ]
+    },
+    {
+      "id": "WIN-10",
+      "area": "Main Window Mixer UI & Empty State",
+      "feature": "Compact native toolbar with nonduplicated global actions",
+      "priority": "P1",
+      "userStory": "As a Mac user, I want the Waves toolbar to stay compact so the mixer has more room and does not repeat controls already available in context.",
+      "expectedBehavior": [
+        "The main window uses the native unified compact toolbar style without a redundant title",
+        "The toolbar contains only Adaptive Mix and Refresh",
+        "New Profile and Recover Routes remain available in their contextual surfaces",
+        "Command-N remains attached to the sidebar New Profile action"
+      ],
+      "acceptanceCriteria": [
+        "Toolbar height and controls follow compact macOS metrics",
+        "No duplicate New Profile or Recover Routes toolbar buttons remain",
+        "Refresh and Command-N remain keyboard accessible"
+      ],
+      "codeRefs": [
+        "Sources/Waves/App/WavesApp.swift",
+        "Sources/Waves/Features/Mixer/MainWindowView.swift"
+      ],
+      "implStatus": "implemented",
+      "implNotes": "Uses unifiedCompact window chrome and icon-only global controls.",
+      "source": "2026-07-13-eq-adaptive-mixing",
+      "testStatus": "PASS (112 tests + rendered macOS QA)",
+      "errorsFound": "",
+      "fixStatus": "implemented",
+      "fixNotes": "",
+      "retestStatus": "PASS"
+    },
+    {
+      "id": "EQ-01",
+      "area": "Per-App Equalizer",
+      "feature": "Per-app 3-band equalizer inspector",
+      "priority": "P0",
+      "userStory": "As a listener, I want a simple low, mid, and high EQ for each app so I can make voice, music, and noisy sources coexist more clearly.",
+      "expectedBehavior": [
+        "Each main mixer row exposes an Equalizer button",
+        "The native inspector identifies the selected app and exposes Low, Mid, and High gain controls",
+        "Gain is adjustable from -12 dB to +12 dB in 0.5 dB steps",
+        "Changing a band enables EQ and applies only to that app"
+      ],
+      "acceptanceCriteria": [
+        "EQ settings for one app do not alter another app",
+        "Controls have labels, values, help, and VoiceOver descriptions",
+        "Excluded apps cannot be edited"
+      ],
+      "codeRefs": [
+        "Sources/Waves/Features/Mixer/EqualizerInspectorView.swift",
+        "Sources/Waves/Features/Mixer/MixerRowView.swift",
+        "Sources/WavesAudioCore/Models/EqualizerSettings.swift"
+      ],
+      "implStatus": "implemented",
+      "implNotes": "A native inspector keeps EQ controls beside the app list without expanding every mixer row.",
+      "source": "2026-07-13-eq-adaptive-mixing",
+      "testStatus": "PASS (112 tests + rendered macOS QA)",
+      "errorsFound": "",
+      "fixStatus": "implemented",
+      "fixNotes": "",
+      "retestStatus": "PASS"
+    },
+    {
+      "id": "EQ-02",
+      "area": "Per-App Equalizer",
+      "feature": "Advanced 8-band equalizer and presets",
+      "priority": "P1",
+      "userStory": "As an advanced listener, I want eight frequency bands and useful presets so I can tune difficult app mixes quickly or precisely.",
+      "expectedBehavior": [
+        "The inspector switches between independent 3-band and 8-band curves",
+        "The advanced curve exposes 60, 120, 250, 500, 1000, 2000, 4000, and 8000 Hz bands",
+        "Flat, Voice Focus, Warm, Bass Reduce, and Treble Soften presets are available in both modes",
+        "Manual changes mark the active curve Custom and Reset to Flat restores zero gain"
+      ],
+      "acceptanceCriteria": [
+        "Switching modes preserves each mode's prior curve",
+        "Preset curves stay within the documented gain limits",
+        "Voice Focus reduces rumble and excess highs while supporting speech frequencies"
+      ],
+      "codeRefs": [
+        "Sources/WavesAudioCore/Models/EqualizerSettings.swift",
+        "Sources/Waves/Features/Mixer/EqualizerInspectorView.swift",
+        "Tests/WavesTests/EqualizerSettingsTests.swift"
+      ],
+      "implStatus": "implemented",
+      "implNotes": "Both modes share the same preset vocabulary while preserving separate curves.",
+      "source": "2026-07-13-eq-adaptive-mixing",
+      "testStatus": "PASS (112 tests + rendered macOS QA)",
+      "errorsFound": "",
+      "fixStatus": "implemented",
+      "fixNotes": "",
+      "retestStatus": "PASS"
+    },
+    {
+      "id": "EQ-03",
+      "area": "Per-App Equalizer",
+      "feature": "Realtime EQ DSP, headroom, persistence, and route recovery",
+      "priority": "P0",
+      "userStory": "As a listener, I want EQ changes to be smooth, saved, and restored so app audio remains reliable across playback and launch changes.",
+      "expectedBehavior": [
+        "Realtime biquad coefficients are smoothed over 20 milliseconds",
+        "EQ state is processed locally in the existing per-app tap and retains no audio samples",
+        "Positive curves reserve headroom and final output remains clamped safely",
+        "Settings persist per logical app ID and reapply when a supported route becomes available",
+        "Unsupported or inactive routes report saved but not active instead of claiming success"
+      ],
+      "acceptanceCriteria": [
+        "Disabled EQ is a bit-identical bypass",
+        "Float32, Int16, and Int32 tap formats are supported",
+        "Malformed persisted EQ data falls back safely",
+        "Route recovery reapplies the saved EQ before normal playback controls"
+      ],
+      "codeRefs": [
+        "Sources/WavesAudioCore/Audio/EqualizerDSP.swift",
+        "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
+        "Sources/Waves/Stores/UserPreferences.swift",
+        "Sources/Waves/Stores/AppStore.swift",
+        "Tests/WavesTests/EqualizerDSPTests.swift"
+      ],
+      "implStatus": "implemented",
+      "implNotes": "EQ runs inside the existing local process-tap render path with preallocated state.",
+      "source": "2026-07-13-eq-adaptive-mixing",
+      "testStatus": "PASS (112 tests + rendered macOS QA)",
+      "errorsFound": "",
+      "fixStatus": "implemented",
+      "fixNotes": "",
+      "retestStatus": "PASS"
+    },
+    {
+      "id": "ADAPT-01",
+      "area": "Adaptive Mixing",
+      "feature": "Adaptive Mix modes and per-app roles",
+      "priority": "P0",
+      "userStory": "As a multitasking listener, I want explicit adaptive modes and app roles so Waves can help my mix without making hidden decisions I cannot control.",
+      "expectedBehavior": [
+        "Adaptive Mix offers Off, Speech Focus, Loudness Balance, and Both",
+        "Each app can be Auto, Voice, Media, or Ignore",
+        "Auto classifies conferencing as voice and media-category apps as media while leaving neutral categories neutral",
+        "The global mode is available in the main toolbar and General settings"
+      ],
+      "acceptanceCriteria": [
+        "Ignore never receives adaptive gain",
+        "Mode and role settings persist",
+        "Adaptive Mix remains off by default"
+      ],
+      "codeRefs": [
+        "Sources/WavesAudioCore/Models/EqualizerSettings.swift",
+        "Sources/Waves/Settings/SettingsView.swift",
+        "Sources/Waves/Features/Mixer/MainWindowView.swift",
+        "Sources/Waves/Features/Mixer/EqualizerInspectorView.swift"
+      ],
+      "implStatus": "implemented",
+      "implNotes": "Modes are explicit and reversible, with a per-app override for ambiguous categories.",
+      "source": "2026-07-13-eq-adaptive-mixing",
+      "testStatus": "PASS (112 tests + rendered macOS QA)",
+      "errorsFound": "",
+      "fixStatus": "implemented",
+      "fixNotes": "",
+      "retestStatus": "PASS"
+    },
+    {
+      "id": "ADAPT-02",
+      "area": "Adaptive Mixing",
+      "feature": "Speech-aware media ducking",
+      "priority": "P0",
+      "userStory": "As a caller who also plays music, I want media to lower smoothly only while speech is present so the call stays intelligible without stopping my other audio.",
+      "expectedBehavior": [
+        "Voice apps activate speech after two qualifying 100 millisecond analysis frames",
+        "Detection requires at least -42 dBFS and 55 percent voice-band energy",
+        "Speech state holds for 600 milliseconds after qualifying audio stops",
+        "Eligible media moves toward -10 dB over 120 milliseconds and restores over 900 milliseconds"
+      ],
+      "acceptanceCriteria": [
+        "Quiet or non-voice-heavy audio does not trigger ducking",
+        "Voice and ignored apps are not ducked",
+        "The legacy full-mute call mode cannot run at the same time as speech ducking"
+      ],
+      "codeRefs": [
+        "Sources/WavesAudioCore/Audio/AdaptiveMixing.swift",
+        "Sources/Waves/Stores/AppStore.swift",
+        "Tests/WavesTests/AdaptiveMixingTests.swift"
+      ],
+      "implStatus": "implemented",
+      "implNotes": "Speech analysis uses transient RMS and filtered energy values, not retained audio.",
+      "source": "2026-07-13-eq-adaptive-mixing",
+      "testStatus": "PASS (112 tests + rendered macOS QA)",
+      "errorsFound": "",
+      "fixStatus": "implemented",
+      "fixNotes": "",
+      "retestStatus": "PASS"
+    },
+    {
+      "id": "ADAPT-03",
+      "area": "Adaptive Mixing",
+      "feature": "Slow loudness balancing across active apps",
+      "priority": "P1",
+      "userStory": "As a listener mixing several apps, I want large loudness differences smoothed gradually so one source does not dominate the others.",
+      "expectedBehavior": [
+        "Active app RMS is averaged with a three-second time constant",
+        "The target is -24 dBFS with correction limited from -6 dB to +3 dB",
+        "Downward correction is limited to 1 dB per second and upward correction to 0.5 dB per second",
+        "Signals below -50 dBFS are never raised"
+      ],
+      "acceptanceCriteria": [
+        "Silence returns toward unity instead of being amplified",
+        "Manual per-app volume remains unchanged",
+        "Combined adaptive gain stays within -18 dB and +3 dB"
+      ],
+      "codeRefs": [
+        "Sources/WavesAudioCore/Audio/AdaptiveMixing.swift",
+        "Sources/Waves/Stores/AppStore.swift",
+        "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
+        "Tests/WavesTests/AdaptiveMixingTests.swift"
+      ],
+      "implStatus": "implemented",
+      "implNotes": "The coordinator polls transient levels at 100 millisecond intervals and applies a separate temporary gain layer.",
+      "source": "2026-07-13-eq-adaptive-mixing",
+      "testStatus": "PASS (112 tests + rendered macOS QA)",
+      "errorsFound": "",
+      "fixStatus": "implemented",
+      "fixNotes": "",
+      "retestStatus": "PASS"
+    },
+    {
+      "id": "ADAPT-04",
+      "area": "Adaptive Mixing",
+      "feature": "Local-only adaptive analysis and immediate Off restoration",
+      "priority": "P0",
+      "userStory": "As a privacy-conscious listener, I want adaptive mixing to remain local and restore my exact manual mix when disabled.",
+      "expectedBehavior": [
+        "Only RMS and voice-band energy leave the realtime controller",
+        "No audio samples are stored, exported, or sent over the network",
+        "Turning Adaptive Mix off clears all temporary gains and coordinator state",
+        "App termination, exclusion, and shutdown remove stale adaptive state"
+      ],
+      "acceptanceCriteria": [
+        "Off sends unity adaptive gain to every active controller",
+        "Manual volume, mute, boost, device routing, and EQ remain untouched",
+        "Cancelled coordination cannot leave a stale duck or loudness trim"
+      ],
+      "codeRefs": [
+        "Sources/WavesAudioCore/Backend/AudioControlBackend.swift",
+        "Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
+        "Sources/Waves/Stores/AppStore.swift"
+      ],
+      "implStatus": "implemented",
+      "implNotes": "Adaptive state is transient and separate from persisted manual mixer controls.",
+      "source": "2026-07-13-eq-adaptive-mixing",
+      "testStatus": "PASS (112 tests + rendered macOS QA)",
+      "errorsFound": "",
+      "fixStatus": "implemented",
+      "fixNotes": "",
+      "retestStatus": "PASS"
     }
   ]
 }

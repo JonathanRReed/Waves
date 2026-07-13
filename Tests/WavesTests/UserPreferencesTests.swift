@@ -55,6 +55,8 @@ import WavesAudioCore
   #expect(prefs.enableKeyboardShortcuts == false)
   #expect(prefs.enableURLScheme == false)
   #expect(prefs.sortMode == .name)
+  #expect(prefs.appEqualizerSettings.isEmpty)
+  #expect(prefs.adaptiveMixMode == .off)
 }
 
 @Test func userPreferencesPreservesKnownKeysAndDefaultsMissingOnes() throws {
@@ -78,6 +80,10 @@ import WavesAudioCore
   prefs.customAppOrder = ["com.a", "com.b"]
   prefs.excludedAppIDs = ["com.apple.logic", "com.zoom.xos"]
   prefs.pinnedAppIDs = ["com.spotify.client", "com.hnc.Discord"]
+  var equalizer = EqualizerSettings(isEnabled: true, mode: .advanced, adaptiveRole: .media)
+  equalizer.applyPreset(.warm)
+  prefs.appEqualizerSettings = ["com.spotify.client": equalizer]
+  prefs.adaptiveMixMode = .both
 
   let data = try JSONEncoder().encode(prefs)
   let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
@@ -88,6 +94,8 @@ import WavesAudioCore
   #expect(decoded.customAppOrder == ["com.a", "com.b"])
   #expect(decoded.excludedAppIDs == ["com.apple.logic", "com.zoom.xos"])
   #expect(decoded.pinnedAppIDs == ["com.spotify.client", "com.hnc.Discord"])
+  #expect(decoded.appEqualizerSettings["com.spotify.client"] == equalizer)
+  #expect(decoded.adaptiveMixMode == .both)
 }
 
 @Test func userPreferencesDefaultsPinsEmptyForLegacyFile() throws {

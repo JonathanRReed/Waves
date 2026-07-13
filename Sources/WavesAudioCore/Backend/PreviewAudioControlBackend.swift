@@ -3,6 +3,8 @@ import Foundation
 public actor PreviewAudioControlBackend: AudioControlBackend {
   private var snapshot: AudioSessionSnapshot
   private var profiles: [Profile]
+  private var equalizerSettings: [String: EqualizerSettings] = [:]
+  private var adaptiveGainsDB: [String: Float] = [:]
 
   // The preview backend has no real audio hardware, so it never reports device
   // changes. An immediately-finishing stream lets observers attach harmlessly.
@@ -73,6 +75,40 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
 
     let clampedBoost = max(1.0, min(4.0, boost))
     snapshot.apps[index].volumeBoost = clampedBoost
+  }
+
+  public func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws {
+    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
+      throw BackendError.appNotFound(appID)
+    }
+
+    equalizerSettings[snapshot.apps[index].logicalID] = settings
+    if snapshot.apps[index].compatibility == .supported {
+      snapshot.apps[index].routingState = .managed
+      snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted
+        ? 0
+        : snapshot.apps[index].desiredVolume
+    } else {
+      snapshot.apps[index].routingState = .monitorOnly
+    }
+  }
+
+  public func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels] {
+    snapshot.apps.reduce(into: [:]) { result, app in
+      let rms = app.isMuted ? 0 : max(0, app.rmsLevel)
+      let voiceRatio: Float = app.category == .conferencing ? 0.75 : 0.3
+      result[app.logicalID] = AdaptiveAnalysisLevels(
+        rms: rms,
+        voiceBandEnergy: rms * rms * voiceRatio
+      )
+    }
+  }
+
+  public func setAdaptiveGains(_ gainsDB: [String: Float]) async {
+    adaptiveGainsDB = gainsDB.reduce(into: [:]) { result, pair in
+      let value = pair.value.isFinite ? pair.value : 0
+      result[pair.key] = min(3, max(-18, value))
+    }
   }
 
   public func setVolumeControlMode(_ mode: VolumeControlMode, forDeviceID deviceID: String) async throws {
