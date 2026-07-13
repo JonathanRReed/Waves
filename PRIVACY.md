@@ -5,11 +5,12 @@ no account, no analytics, and no servers.
 
 ## What Waves accesses
 
-- **App audio (Core Audio process taps).** To apply per-app volume, mute, and
-  boost, Waves taps the audio of apps you choose and replays it to your output
+- **App audio (Core Audio process taps).** To apply per-app volume, mute, boost,
+  EQ, and adaptive mixing, Waves taps the audio of apps you choose and replays it to your output
   device. **Audio is processed locally and in real time on your Mac. It is never
   recorded, stored, or transmitted.** macOS asks for audio-capture permission
-  the first time Waves needs it.
+  the first time Waves needs it. Adaptive Mix retains only transient loudness
+  and voice-band energy values, never audio samples.
 - **Running applications.** Waves lists your running apps (names and icons) so it
   can show them in the mixer.
 - **Audio output devices.** Waves reads available output devices to show the
@@ -23,7 +24,8 @@ no account, no analytics, and no servers.
 
 Locally, in `~/Library/Application Support/Waves/` (or `~/.Waves` as a fallback):
 
-- Your preferences, profiles, per-device volume settings, and the last session.
+- Your preferences, profiles, per-app EQ and adaptive role settings, per-device
+  volume settings, and the last session.
 
 These can include app names, bundle identifiers, route state, selected output
 device identifiers, diagnostic notes, and your volume/mute/boost choices. They
@@ -44,7 +46,7 @@ recent error text; only copy it when you intend to share it.
 
 | Permission | Why | Required? |
 | --- | --- | --- |
-| Audio capture | Per-app volume/mute/boost via process taps | Yes, for control |
+| Audio capture | Per-app volume, mute, boost, EQ, and adaptive mixing via process taps | Yes, for control |
 | Accessibility | Global keyboard shortcuts | Optional |
 
 Questions or concerns: please open an issue.

@@ -39,6 +39,11 @@ struct AppToast: Identifiable, Equatable {
   }
 }
 
+struct EqualizerFocusRequest: Equatable {
+  let appID: String
+  let source: SourceFilter?
+}
+
 @Observable
 @MainActor
 final class AppStore {
@@ -61,6 +66,8 @@ final class AppStore {
   /// actually trying to see.
   private(set) var sourceFocusRequest: SourceFilter?
   private(set) var sourceFocusToken = 0
+  private(set) var equalizerFocusRequest: EqualizerFocusRequest?
+  private(set) var equalizerFocusToken = 0
   var onboarding = OnboardingState()
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
@@ -107,6 +114,7 @@ final class AppStore {
   private var didRecoverCorruptSession = false
   private var pendingVolumeTargets: [String: Float] = [:]
   private var pendingVolumeApplyTasks: [String: Task<Void, Never>] = [:]
+  private var pendingEqualizerApplyTasks: [String: Task<Void, Never>] = [:]
   private var volumeApplyToken: [String: Int] = [:]
   private let volumeApplyDelay = Duration.milliseconds(50) // Optimized from 80ms for better responsiveness
   private var toastDismissals: [UUID: Task<Void, Never>] = [:]
@@ -129,6 +137,10 @@ final class AppStore {
   private var appTerminationObserver: NSObjectProtocol?
   private var levelPollTask: Task<Void, Never>?
   private var sessionMaintenanceTask: Task<Void, Never>?
+  private var adaptiveMixTask: Task<Void, Never>?
+  private var speechDetectionStates: [String: SpeechDetectionState] = [:]
+  private var speechDuckingStates: [String: SpeechDuckingState] = [:]
+  private var loudnessTrimStates: [String: LoudnessTrimState] = [:]
   private var liveLevelsRefcount = 0
   private var isRunningSessionMaintenance = false
   // Per-app one-shot tasks that drop an app out of the lingering-live set once it
@@ -137,6 +149,7 @@ final class AppStore {
   private var lingerRemovalTasks: [String: Task<Void, Never>] = [:]
   private var liveLingerWindow: Duration { preferences.liveListLinger.duration }
   private let sessionMaintenanceInterval = Duration.seconds(8)
+  private let adaptiveMixInterval = Duration.milliseconds(100)
   private let maxToasts = 3
   private let defaultToastDuration = Duration.seconds(2.0)
   // Failures need longer on screen than routine successes: 2.0s is too short to
@@ -450,6 +463,12 @@ final class AppStore {
         invalidateVisibleAppsCache()
         cleanupStaleEntries()
         await reapplyRestoredAudioState()
+        if preferences.adaptiveMixMode.usesSpeechFocus,
+           preferences.autoPauseMusicForConferencing {
+          preferences.autoPauseMusicForConferencing = false
+          persistPreferences()
+        }
+        restartAdaptiveMixing()
         // The generic session snapshot replays the last persisted device's levels.
         // If the active output device at launch has its own tuned per-device
         // preset, apply it now so that device's saved levels win (and aren't
@@ -972,6 +991,209 @@ final class AppStore {
     }
   }
 
+  // MARK: - Per-app equalizer and adaptive mixing
+
+  func equalizerSettings(for app: AudioApp) -> EqualizerSettings {
+    preferences.appEqualizerSettings[app.logicalID] ?? EqualizerSettings()
+  }
+
+  func setEqualizerEnabled(_ enabled: Bool, for app: AudioApp) {
+    updateEqualizerSettings(for: app) { settings in
+      settings.isEnabled = enabled
+    }
+  }
+
+  func setEqualizerMode(_ mode: EqualizerMode, for app: AudioApp) {
+    updateEqualizerSettings(for: app) { settings in
+      settings.mode = mode
+    }
+  }
+
+  func setEqualizerGain(_ gainDB: Float, at index: Int, for app: AudioApp) {
+    updateEqualizerSettings(for: app) { settings in
+      settings.isEnabled = true
+      settings.setGain(gainDB, at: index)
+    }
+  }
+
+  func applyEqualizerPreset(_ preset: EqualizerPreset, for app: AudioApp) {
+    updateEqualizerSettings(for: app) { settings in
+      settings.isEnabled = true
+      settings.applyPreset(preset)
+    }
+  }
+
+  func resetEqualizer(for app: AudioApp) {
+    updateEqualizerSettings(for: app) { settings in
+      settings.resetActiveMode()
+    }
+  }
+
+  func setAdaptiveRole(_ role: AdaptiveAppRole, for app: AudioApp) {
+    updateEqualizerSettings(for: app) { settings in
+      settings.adaptiveRole = role
+    }
+  }
+
+  func setAdaptiveMixMode(_ mode: AdaptiveMixMode) {
+    guard preferences.adaptiveMixMode != mode else { return }
+    preferences.adaptiveMixMode = mode
+    if mode.usesSpeechFocus {
+      // The legacy frontmost-app behavior fully mutes media. It cannot run at
+      // the same time as speech ducking without defeating the new mix.
+      preferences.autoPauseMusicForConferencing = false
+      previousFrontmostApp = nil
+      checkAutoPauseMusic()
+    }
+    persistPreferences()
+    restartAdaptiveMixing()
+    showToast(
+      title: "Adaptive Mix",
+      detail: mode.displayName,
+      kind: mode == .off ? .info : .success,
+      duration: .seconds(1.4)
+    )
+  }
+
+  private func updateEqualizerSettings(
+    for app: AudioApp,
+    mutation: (inout EqualizerSettings) -> Void
+  ) {
+    guard !isExcluded(app) else { return }
+    var settings = equalizerSettings(for: app)
+    mutation(&settings)
+    preferences.appEqualizerSettings[app.logicalID] = settings
+    persistPreferences()
+    scheduleEqualizerApply(settings, for: app)
+  }
+
+  private func scheduleEqualizerApply(_ settings: EqualizerSettings, for app: AudioApp) {
+    let appID = app.logicalID
+    let appName = app.displayName
+    pendingEqualizerApplyTasks[appID]?.cancel()
+    pendingEqualizerApplyTasks[appID] = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(80))
+      guard let self, !Task.isCancelled else { return }
+      defer { self.pendingEqualizerApplyTasks.removeValue(forKey: appID) }
+
+      do {
+        try await self.backend.setEqualizer(settings, forAppID: appID)
+        let backendSession = await self.backend.currentSnapshot()
+        self.mergeAppStateAndSyncOnboarding(from: backendSession, appID: appID)
+        self.persistSessionSnapshot()
+      } catch {
+        let backendSession = await self.backend.currentSnapshot()
+        self.mergeAppStateAndSyncOnboarding(from: backendSession, appID: appID)
+        self.persistSessionSnapshot()
+        let routingState = self.session.apps.first(matchingAppKey: appID)?.routingState
+        if routingState == .monitorOnly {
+          self.showToast(
+            title: "EQ saved, not active",
+            detail: "Start playback in \(appName), then try again.",
+            kind: .info,
+            duration: .seconds(2.0)
+          )
+        } else {
+          self.showToast(title: "EQ not active", detail: error.localizedDescription, kind: .error)
+        }
+      }
+    }
+  }
+
+  private func restartAdaptiveMixing() {
+    adaptiveMixTask?.cancel()
+    adaptiveMixTask = nil
+
+    guard preferences.adaptiveMixMode != .off else {
+      speechDetectionStates.removeAll()
+      speechDuckingStates.removeAll()
+      loudnessTrimStates.removeAll()
+      Task { await backend.setAdaptiveGains([:]) }
+      return
+    }
+
+    adaptiveMixTask = Task { [weak self] in
+      guard let self else { return }
+      while !Task.isCancelled {
+        await self.performAdaptiveMixPass(elapsed: 0.1)
+        guard !Task.isCancelled else { break }
+        try? await Task.sleep(for: self.adaptiveMixInterval)
+      }
+      await self.backend.setAdaptiveGains([:])
+    }
+  }
+
+  private func performAdaptiveMixPass(elapsed: TimeInterval) async {
+    let analysis = await backend.adaptiveAnalysis()
+    guard !Task.isCancelled, preferences.adaptiveMixMode != .off else { return }
+
+    let mode = preferences.adaptiveMixMode
+    let apps = visibleApps
+    let liveIDs = Set(apps.map(\.logicalID))
+    speechDetectionStates = speechDetectionStates.filter { liveIDs.contains($0.key) }
+    speechDuckingStates = speechDuckingStates.filter { liveIDs.contains($0.key) }
+    loudnessTrimStates = loudnessTrimStates.filter { liveIDs.contains($0.key) }
+
+    var speechIsActive = false
+    if mode.usesSpeechFocus {
+      for app in apps {
+        let settings = equalizerSettings(for: app)
+        guard AdaptiveMixing.resolvedRole(settings.adaptiveRole, category: app.category) == .voice,
+              let levels = analysis[app.logicalID],
+              !app.isMuted else { continue }
+        var state = speechDetectionStates[app.logicalID] ?? SpeechDetectionState()
+        let isActive = state.update(
+          fullBandRMS: Double(levels.rms),
+          voiceBandEnergy: Double(levels.voiceBandEnergy),
+          elapsed: elapsed
+        )
+        speechDetectionStates[app.logicalID] = state
+        speechIsActive = speechIsActive || isActive
+      }
+    } else {
+      speechDetectionStates.removeAll()
+    }
+
+    var gainsDB: [String: Float] = [:]
+    gainsDB.reserveCapacity(apps.count)
+    for app in apps {
+      let settings = equalizerSettings(for: app)
+      let levels = analysis[app.logicalID]
+      let routeIsActive = app.routingState == .managed && levels != nil && !app.isMuted
+
+      var duck = speechDuckingStates[app.logicalID] ?? SpeechDuckingState()
+      let duckGain = duck.update(
+        isSpeechActive: speechIsActive,
+        isEligible: mode.usesSpeechFocus
+          && routeIsActive
+          && AdaptiveMixing.isSpeechDuckEligible(role: settings.adaptiveRole, category: app.category),
+        elapsed: elapsed
+      )
+      speechDuckingStates[app.logicalID] = duck
+
+      var loudness = loudnessTrimStates[app.logicalID] ?? LoudnessTrimState()
+      let loudnessGain = loudness.update(
+        rms: Double(levels?.rms ?? 0),
+        isEligible: mode.usesLoudnessBalance
+          && routeIsActive
+          && AdaptiveMixing.isLoudnessBalanceEligible(role: settings.adaptiveRole, category: app.category),
+        elapsed: elapsed
+      )
+      loudnessTrimStates[app.logicalID] = loudness
+
+      gainsDB[app.logicalID] = Float(AdaptiveMixing.combinedGainDB(
+        mode: mode,
+        role: settings.adaptiveRole,
+        category: app.category,
+        speechDuckDB: duckGain,
+        loudnessTrimDB: loudnessGain
+      ))
+    }
+
+    guard !Task.isCancelled, preferences.adaptiveMixMode == mode else { return }
+    await backend.setAdaptiveGains(gainsDB)
+  }
+
   func togglePinned(_ app: AudioApp) {
     let appName = app.displayName
     let appKey = app.logicalID
@@ -1168,6 +1390,11 @@ final class AppStore {
       }
       pendingVolumeApplyTasks[app.logicalID]?.cancel()
       pendingVolumeTargets.removeValue(forKey: app.logicalID)
+      pendingEqualizerApplyTasks[app.logicalID]?.cancel()
+      pendingEqualizerApplyTasks.removeValue(forKey: app.logicalID)
+      speechDetectionStates.removeValue(forKey: app.logicalID)
+      speechDuckingStates.removeValue(forKey: app.logicalID)
+      loudnessTrimStates.removeValue(forKey: app.logicalID)
       pausedMusicApps.remove(app.logicalID)
     }
     invalidateVisibleAppsCache()
@@ -1405,10 +1632,12 @@ final class AppStore {
     // pre-await index would then trap. Writes re-resolve the row by logicalID.
     for app in session.apps {
       guard !isExcluded(app) else { continue }
+      let equalizer = equalizerSettings(for: app)
       // A pinned output device is also "customized" — re-establish its route so
       // it plays to the chosen device immediately, even at default volume.
       let isCustomized = app.isMuted || app.volumeBoost > 1.0
         || abs(app.desiredVolume - 1.0) > 0.001 || app.targetDeviceUID != nil
+        || equalizer.isEnabled || equalizer.adaptiveRole != .auto
       guard isCustomized else { continue }
       // Only a pinned route can surface as a user-visible .error chip; a plain
       // volume/mute re-apply that fails just means the app isn't running.
@@ -1421,6 +1650,7 @@ final class AppStore {
         if let targetDeviceUID = app.targetDeviceUID {
           try await backend.setOutputDevice(uid: targetDeviceUID, forAppID: app.logicalID)
         }
+        try await backend.setEqualizer(equalizer, forAppID: app.logicalID)
         try await backend.setVolumeBoost(app.volumeBoost, forAppID: app.logicalID)
         try await backend.setMuted(app.isMuted, forAppID: app.logicalID)
         try await backend.setDesiredVolume(app.desiredVolume, forAppID: app.logicalID)
@@ -1526,8 +1756,12 @@ final class AppStore {
     deviceChangeObserver = nil
     sessionMaintenanceTask?.cancel()
     sessionMaintenanceTask = nil
+    adaptiveMixTask?.cancel()
+    adaptiveMixTask = nil
     levelPollTask?.cancel()
     levelPollTask = nil
+    for task in pendingEqualizerApplyTasks.values { task.cancel() }
+    pendingEqualizerApplyTasks.removeAll()
     for task in lingerRemovalTasks.values { task.cancel() }
     lingerRemovalTasks.removeAll()
     if let frontmostAppObserver {
@@ -1545,7 +1779,10 @@ final class AppStore {
     sessionStore.flush()
     deviceVolumePresetsStore.flush()
     let backend = backend
-    Task { await backend.stop() }
+    Task {
+      await backend.setAdaptiveGains([:])
+      await backend.stop()
+    }
   }
 
   private func observeFrontmostAppChanges() {
@@ -1611,6 +1848,11 @@ final class AppStore {
     // rather than ghosting there for the linger window after the process is gone.
     for id in matchedIDs {
       if let task = lingerRemovalTasks.removeValue(forKey: id) { task.cancel() }
+      pendingEqualizerApplyTasks[id]?.cancel()
+      pendingEqualizerApplyTasks.removeValue(forKey: id)
+      speechDetectionStates.removeValue(forKey: id)
+      speechDuckingStates.removeValue(forKey: id)
+      loudnessTrimStates.removeValue(forKey: id)
     }
     if !matchedIDs.isEmpty {
       let next = recentlyLiveIDs.subtracting(matchedIDs)
@@ -1643,6 +1885,20 @@ final class AppStore {
   func setAutoPauseMusicEnabled(_ enabled: Bool) {
     let wasEnabled = preferences.autoPauseMusicForConferencing
     preferences.autoPauseMusicForConferencing = enabled
+    if enabled {
+      // Full muting and speech ducking are mutually exclusive. Preserve the
+      // loudness layer when Both was selected, otherwise turn Adaptive Mix off.
+      switch preferences.adaptiveMixMode {
+      case .speechFocus:
+        preferences.adaptiveMixMode = .off
+        restartAdaptiveMixing()
+      case .both:
+        preferences.adaptiveMixMode = .loudnessBalance
+        restartAdaptiveMixing()
+      case .off, .loudnessBalance:
+        break
+      }
+    }
     persistPreferences()
     if enabled != wasEnabled {
       previousFrontmostApp = nil
@@ -1896,6 +2152,16 @@ final class AppStore {
   func focusSource(_ filter: SourceFilter) {
     sourceFocusRequest = filter
     sourceFocusToken &+= 1
+  }
+
+  func focusEqualizer(for app: AudioApp, source: SourceFilter? = nil) {
+    equalizerFocusRequest = EqualizerFocusRequest(appID: app.logicalID, source: source)
+    equalizerFocusToken &+= 1
+  }
+
+  func consumeEqualizerFocusRequest() -> EqualizerFocusRequest? {
+    defer { equalizerFocusRequest = nil }
+    return equalizerFocusRequest
   }
 
   /// Reads and clears `sourceFocusRequest` so it applies at most once. Needed

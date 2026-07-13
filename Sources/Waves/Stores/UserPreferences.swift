@@ -1,4 +1,5 @@
 import Foundation
+import WavesAudioCore
 
 struct UserPreferences: Codable, Sendable {
   var launchAtLoginEnabled = false
@@ -28,6 +29,10 @@ struct UserPreferences: Codable, Sendable {
   /// here (rather than only on the per-app session row) so a pin survives the
   /// app quitting and relaunching, and a full relaunch of Waves.
   var pinnedAppIDs: [String] = []
+  /// Persistent per-app tone and adaptive-role settings keyed by logical app ID.
+  var appEqualizerSettings: [String: EqualizerSettings] = [:]
+  /// Global adaptive processing mode. Temporary gains themselves are never persisted.
+  var adaptiveMixMode: AdaptiveMixMode = .off
 
   init() {}
 
@@ -46,6 +51,8 @@ struct UserPreferences: Codable, Sendable {
     case urlSchemeAutomationAcknowledged
     case excludedAppIDs
     case pinnedAppIDs
+    case appEqualizerSettings
+    case adaptiveMixMode
   }
 
   // Decode each field independently so a preferences file written by an older
@@ -74,6 +81,8 @@ struct UserPreferences: Codable, Sendable {
     urlSchemeAutomationAcknowledged = value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
     excludedAppIDs = value(.excludedAppIDs, defaults.excludedAppIDs)
     pinnedAppIDs = value(.pinnedAppIDs, defaults.pinnedAppIDs)
+    appEqualizerSettings = value(.appEqualizerSettings, defaults.appEqualizerSettings)
+    adaptiveMixMode = value(.adaptiveMixMode, defaults.adaptiveMixMode)
   }
 }
 

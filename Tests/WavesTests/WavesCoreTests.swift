@@ -83,6 +83,25 @@ import Testing
   #expect(updatedApp.desiredVolume == 0.5)
 }
 
+@Test func previewBackendAppliesEqualizerAndReportsAdaptiveAnalysis() async throws {
+  let backend = PreviewAudioControlBackend()
+  let initialSnapshot = await backend.currentSnapshot()
+  let app = try #require(initialSnapshot.apps.first { $0.compatibility == .supported })
+  var equalizer = EqualizerSettings(isEnabled: true)
+  equalizer.applyPreset(.voiceFocus)
+
+  try await backend.setEqualizer(equalizer, forAppID: app.logicalID)
+  let updatedSnapshot = await backend.currentSnapshot()
+  let updatedApp = try #require(
+    updatedSnapshot.apps.first { $0.logicalID == app.logicalID || $0.id == app.logicalID }
+  )
+  let analysis = await backend.adaptiveAnalysis()
+
+  #expect(updatedApp.routingState == .managed)
+  #expect(updatedApp.appliedVolume == updatedApp.desiredVolume)
+  #expect(analysis[app.logicalID] != nil)
+}
+
 @Test func appDiscoveryMatchesPrefixHelperFamilies() {
   #expect(
     AppDiscoveryPolicy.bundleFamilyMatches(

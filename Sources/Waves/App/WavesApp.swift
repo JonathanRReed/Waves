@@ -45,6 +45,7 @@ struct WavesApp: App {
         }
     }
     .defaultSize(width: 1100, height: 680)
+    .windowToolbarStyle(.unifiedCompact(showsTitle: false))
     .commands {
       // The Settings scene below already provides the standard "Settings…"
       // item (⌘,) in the app menu, so no custom command is needed here.

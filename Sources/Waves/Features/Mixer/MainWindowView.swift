@@ -7,6 +7,7 @@ struct MainWindowView: View {
   // Restored across launches so the user returns to the scope they left.
   @SceneStorage("waves.selectedScope") private var selection: MixerScope = .source(.running)
   @State private var editorContext: ProfileEditorContext?
+  @State private var equalizerAppID: String?
 
   var body: some View {
     ZStack(alignment: .top) {
@@ -24,18 +25,30 @@ struct MainWindowView: View {
       .navigationSplitViewStyle(.balanced)
       .searchable(text: $searchText, placement: .sidebar, prompt: "Filter apps")
       .toolbar {
-        // Document-scoped controls belong trailing (.primaryAction) where macOS
-        // users expect them; the two maintenance actions show in-flight spinners.
+        // Keep global controls compact. Profile creation and route recovery stay
+        // in their contextual UI, so the toolbar does not duplicate large labels.
         ToolbarItemGroup(placement: .primaryAction) {
-          Button {
-            presentNewProfile()
+          Menu {
+            ForEach(AdaptiveMixMode.allCases, id: \.self) { mode in
+              Button {
+                store.setAdaptiveMixMode(mode)
+              } label: {
+                if store.preferences.adaptiveMixMode == mode {
+                  Label(mode.displayName, systemImage: "checkmark")
+                } else {
+                  Text(mode.displayName)
+                }
+              }
+            }
           } label: {
-            Image(systemName: "rectangle.stack.badge.plus")
+            Image(systemName: "waveform.badge.plus")
+              .foregroundStyle(
+                WavesDesign.accentOrSecondary(store.preferences.adaptiveMixMode != .off)
+              )
           }
-          .help("New Profile (⌘N)")
-          .accessibilityLabel("New profile")
-          .accessibilityHint("Opens a sheet to group apps into a profile, optionally with saved levels.")
-          .keyboardShortcut("n", modifiers: [.command])
+          .help("Adaptive Mix: \(store.preferences.adaptiveMixMode.displayName)")
+          .accessibilityLabel("Adaptive Mix")
+          .accessibilityValue(store.preferences.adaptiveMixMode.displayName)
 
           Button {
             store.refresh()
@@ -53,20 +66,6 @@ struct MainWindowView: View {
           .accessibilityLabel(store.isRefreshing ? "Refreshing app list, in progress" : "Refresh app list")
           .accessibilityHint("Refreshes running apps and audio session state.")
           .keyboardShortcut("r", modifiers: [.command])
-
-          Button {
-            store.recoverRoutes()
-          } label: {
-            if store.isRecovering {
-              ProgressView().controlSize(.small)
-            } else {
-              Image(systemName: "waveform.path")
-            }
-          }
-          .disabled(store.isRecovering)
-          .help("Recover Managed Routes")
-          .accessibilityLabel(store.isRecovering ? "Recovering managed routes, in progress" : "Recover managed routes")
-          .accessibilityHint("Reattaches active per-app audio routes.")
         }
       }
 
@@ -98,6 +97,30 @@ struct MainWindowView: View {
       ProfileEditorSheet(context: context)
         .environment(store)
     }
+    .inspector(
+      isPresented: Binding(
+        get: { equalizerAppID != nil },
+        set: { isPresented in
+          if !isPresented { equalizerAppID = nil }
+        }
+      )
+    ) {
+      if let equalizerApp {
+        EqualizerInspectorView(
+          app: equalizerApp,
+          onClose: { equalizerAppID = nil }
+        )
+          .environment(store)
+          .inspectorColumnWidth(min: 290, ideal: 330, max: 390)
+      } else {
+        ContentUnavailableView(
+          "App Unavailable",
+          systemImage: "waveform.slash",
+          description: Text("Close the equalizer and choose a running app.")
+        )
+        .inspectorColumnWidth(min: 290, ideal: 330, max: 390)
+      }
+    }
     .onOpenURL { url in
       store.handleURLScheme(url)
     }
@@ -115,6 +138,7 @@ struct MainWindowView: View {
       if let filter = store.consumeSourceFocusRequest() {
         selection = .source(filter)
       }
+      handleEqualizerFocusRequest()
     }
     .onChange(of: store.preferences.showRecentApps) { _, _ in
       validateSelection()
@@ -142,7 +166,23 @@ struct MainWindowView: View {
         selection = .source(filter)
       }
     }
+    .onChange(of: store.equalizerFocusToken) { _, _ in
+      handleEqualizerFocusRequest()
+    }
     .onDisappear { store.endLiveLevels() }
+  }
+
+  private var equalizerApp: AudioApp? {
+    guard let equalizerAppID else { return nil }
+    return store.visibleApps.first { $0.logicalID == equalizerAppID }
+  }
+
+  private func handleEqualizerFocusRequest() {
+    guard let request = store.consumeEqualizerFocusRequest() else { return }
+    if let source = request.source {
+      selection = .source(source)
+    }
+    equalizerAppID = request.appID
   }
 
   /// A persisted scope can become invalid: a `.recent` source after the user
@@ -365,6 +405,7 @@ private struct SidebarView: View {
           .foregroundStyle(.secondary)
           .help("New Profile (⌘N)")
           .accessibilityLabel("New profile")
+          .keyboardShortcut("n", modifiers: [.command])
         }
       }
     }

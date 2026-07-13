@@ -197,6 +197,18 @@ private struct GeneralSettingsView: View {
       }
 
       Section("Playback") {
+        Picker("Adaptive Mix", selection: Binding(
+          get: { store.preferences.adaptiveMixMode },
+          set: { store.setAdaptiveMixMode($0) }
+        )) {
+          ForEach(AdaptiveMixMode.allCases, id: \.self) { mode in
+            Text(mode.displayName).tag(mode)
+          }
+        }
+        Text(adaptiveMixDescription)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
         Toggle(isOn: Binding(
           get: { store.preferences.autoPauseMusicForConferencing },
           set: { store.setAutoPauseMusicEnabled($0) }
@@ -258,6 +270,19 @@ private struct GeneralSettingsView: View {
       Text(keys)
         .font(.system(.body, design: .monospaced))
         .foregroundStyle(.secondary)
+    }
+  }
+
+  private var adaptiveMixDescription: String {
+    switch store.preferences.adaptiveMixMode {
+    case .off:
+      "Leaves every app at its manual volume."
+    case .speechFocus:
+      "Gently lowers media while a voice app carries speech."
+    case .loudnessBalance:
+      "Smooths large loudness differences between active apps."
+    case .both:
+      "Balances active apps, then makes room for speech when needed."
     }
   }
 

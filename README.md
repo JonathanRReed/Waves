@@ -1,6 +1,6 @@
 # Waves
 
-Waves is a native macOS per-app audio mixer. It uses local Core Audio process taps on macOS 14.2 or newer to route selected app audio through per-app volume, mute, and boost controls before playback.
+Waves is a native macOS per-app audio mixer. It uses local Core Audio process taps on macOS 14.2 or newer to route selected app audio through per-app volume, mute, boost, equalizer, and adaptive mixing controls before playback.
 
 ## Features
 
@@ -10,6 +10,13 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 - **Volume Boost**: Enhance audio output with 2×, 3×, or 4× boost
 - **Audio-Aware Discovery**: Uses Core Audio process output state when available, with a manageable running-app fallback
 - **Browser & Electron support**: Attributes audio from helper subprocesses (Chrome, Helium, Brave, Edge, Arc, and Electron apps play through a sandboxed "Audio Service" helper) back to the parent app, so they show as **Live** and are fully controllable — including picture-in-picture / popout video
+
+### Equalizer & Adaptive Mixing
+- **Per-App Equalizer**: Choose a simple 3-band curve or an advanced 8-band curve for each app
+- **EQ Presets**: Start from Flat, Voice Focus, Warm, Bass Reduce, or Treble Soften
+- **Speech Focus**: Gently lowers media while a designated voice app carries speech
+- **Loudness Balance**: Smooths large loudness differences between active apps without moving manual volume sliders
+- **Explicit Roles and Modes**: Set each app to Auto, Voice, Media, or Ignore, then choose Speech Focus, Loudness Balance, Both, or Off
 
 ### Device Management
 - **Device Auto-Restore**: Automatically re-establishes audio routes when switching output devices
@@ -59,8 +66,10 @@ the same driver-free approach, so against those Waves leads on other fronts:
   used for telemetry. macOS may still ask for audio-capture permission because
   Core Audio process taps share that privacy gate.
 
-Waves is intentionally a **mixer, not an EQ suite or recorder** — if you need a
-parametric EQ or audio capture-to-file, eqMac or Audio Hijack are better fits.
+Waves is intentionally a **focused mixer, not a plugin suite or recorder**. Its
+built-in per-app EQ covers quick mix shaping. For parametric mastering or
+audio capture-to-file, a dedicated tool such as eqMac or Audio Hijack is a
+better fit.
 
 ## System Requirements
 

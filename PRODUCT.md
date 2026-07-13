@@ -1,7 +1,7 @@
 # Product
 
 Waves is a native macOS per-app audio mixer that gives every running app its own
-volume, mute, and boost from the menu bar.
+volume, mute, boost, and equalizer, plus optional adaptive mixing across sources.
 
 ## Users
 
@@ -11,7 +11,7 @@ Their context is immediate and interruption-sensitive: a browser tab starts play
 
 ## Product Purpose
 
-Waves gives macOS the per-app mixer it should already have: native menu-bar access to app discovery, per-app mute, per-app gain, route health, profiles, and output-device awareness. Success means the user can trust the list, move a slider, hear the result, and understand when an app is monitored versus fully managed.
+Waves gives macOS the per-app mixer it should already have: native menu-bar access to app discovery, per-app mute, gain, EQ, route health, profiles, output-device awareness, and optional speech-aware or loudness-aware mixing. Success means the user can trust the list, shape a source, hear the result, and understand when an app is monitored versus fully managed.
 
 The product must be honest about macOS audio constraints. If Waves can see an app but cannot fully control it yet, the interface should say that clearly instead of pretending every row has identical capability.
 
@@ -19,7 +19,7 @@ The product must be honest about macOS audio constraints. If Waves can see an ap
 
 Native, quiet, precise.
 
-Waves should feel like a built-in macOS utility with the confidence of a best-in-class audio tool. It should borrow the immediacy of Control Center, the density discipline of Raycast, and the trust posture of a professional system utility without becoming a DAW, EQ suite, or decorative dashboard.
+Waves should feel like a built-in macOS utility with the confidence of a best-in-class audio tool. It should borrow the immediacy of Control Center, the density discipline of Raycast, and the trust posture of a professional system utility without becoming a DAW, plugin suite, or decorative dashboard.
 
 ## Anti-references
 

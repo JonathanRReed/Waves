@@ -2246,3 +2246,72 @@
 • Sources/Waves/Features/Mixer/MainWindowView.swift:386 (onKeyPress(""p"") togglePinned)","implemented","[critic gap] WIN-07 captures 'keyboard-driven control and drag-to-reorder' generically and KEY-01..03 cover the global frontmost-app hotkeys, but the in-list row-level key handlers go beyond volume/mute: 'b' cycles boost 1x->4x->1x and 'p' toggles pin on the currently selected row. Pin-via-keyboard and the in-window (non-global) boost-cycle key are not separately captured, and a UI-walk focused on buttons/shortcut-modifiers can miss bare-character onKeyPress handlers.","3 issue(s) [2M 1L]","• [MEDIUM/ux] In-list 'b' (cycle boost) and 'p' (pin) shortcuts are completely undocumented (Sources/Waves/Features/Mixer/MainWindowView.swift:385) — Verified MainWindowView.swift:381-386 attaches bare-character onKeyPress handlers to the source list: space/m (mute), =/- (nudge volume by 0.05), b (cycleBoost, MainWindowView.swift:422-425), p (togglePinned). Confirmed none appear in the Settings 'Keyboard shortcuts' section (SettingsView.swift:127-160, lists only ⌘⌥↑/↓/M) nor in HelpView's Keyboard Shortcuts list (HelpView.swift:64-103, lists only ⌘⌥↑/↓/M, ⌘R, ⌘S, ⌘,). No accessibility hint advertises them either. A user cannot discover that 'b' cycles boost or 'p' pins the selected row. | Fix: List the in-row keys (space/m mute, =/- volume, b boost, p pin) in HelpView and/or the Settings keyboard-shortcuts section, or surface them via per-row accessibility hints / a help overlay.
 • [MEDIUM/inconsistency] In-list keys ignore the 'Enable keyboard shortcuts' preference that gates the global hotkeys (Sources/Waves/Features/Mixer/MainWindowView.swift:408) — Verified the global hotkey handlers all guard on preferences.enableKeyboardShortcuts (increaseVolumeForFrontmostApp AppStore.swift:1211, decreaseVolumeForFrontmostApp AppStore.swift:1230, toggleMuteForFrontmostApp AppStore.swift:1249). The in-list handleKey helper (MainWindowView.swift:408-414) and its onKeyPress callers (MainWindowView.swift:381-386) call store.setMuted / nudgeVolume / cycleBoost / store.togglePinned with NO enableKeyboardShortcuts guard. So disabling 'Enable keyboard shortcuts' in Settings does not disable space/m/=/-/b/p on the selected row, contradicting the toggle's implied meaning. | Fix: Gate handleKey on store.preferences.enableKeyboardShortcuts (return .ignored when disabled), or clarify in copy that the toggle only governs the global ⌘⌥ hotkeys while in-list keys are always on.
 • [LOW/ux] onKeyPress intercepts b/p/m/-/=, defeating List type-select for the selected-row case (Sources/Waves/Features/Mixer/MainWindowView.swift:386) — Verified MainWindowView.swift:381-386 consume 'm', 'b', 'p', '-', '=' as command keys, returning .handled whenever a row is selected (handleKey, MainWindowView.swift:408-414). AppKit/SwiftUI lists support type-select (typing a letter jumps to the next matching row). Because these letters are swallowed when a row is selected, a user cannot type m/b/p to jump to apps starting with M/B/P; the keystroke mutes/cycles-boosts/pins the selected row instead. Note handleKey returns .ignored when no row is selected, so type-select still works before any selection — limiting the impact, hence low severity and 'likely'. | Fix: Require a modifier for the action keys, or scope these handlers so they don't shadow list type-select, or document the tradeoff clearly.","2 fixed · 1 deferred","tier2: FU-INLIST-KEYS-RESPECT-PREFERENCE","PASS"
+"WIN-10","Main Window Mixer UI & Empty State","Compact native toolbar with nonduplicated global actions","P1","As a Mac user, I want the Waves toolbar to stay compact so the mixer has more room and does not repeat controls already available in context.","• The main window uses the native unified compact toolbar style without a redundant title
+• The toolbar contains only Adaptive Mix and Refresh
+• New Profile and Recover Routes remain available in their contextual surfaces
+• Command-N remains attached to the sidebar New Profile action","• Toolbar height and controls follow compact macOS metrics
+• No duplicate New Profile or Recover Routes toolbar buttons remain
+• Refresh and Command-N remain keyboard accessible","• Sources/Waves/App/WavesApp.swift
+• Sources/Waves/Features/Mixer/MainWindowView.swift","implemented","Uses unifiedCompact window chrome and icon-only global controls.","PASS (112 tests + rendered macOS QA)","","implemented","","PASS"
+"EQ-01","Per-App Equalizer","Per-app 3-band equalizer inspector","P0","As a listener, I want a simple low, mid, and high EQ for each app so I can make voice, music, and noisy sources coexist more clearly.","• Each main mixer row exposes an Equalizer button
+• The native inspector identifies the selected app and exposes Low, Mid, and High gain controls
+• Gain is adjustable from -12 dB to +12 dB in 0.5 dB steps
+• Changing a band enables EQ and applies only to that app","• EQ settings for one app do not alter another app
+• Controls have labels, values, help, and VoiceOver descriptions
+• Excluded apps cannot be edited","• Sources/Waves/Features/Mixer/EqualizerInspectorView.swift
+• Sources/Waves/Features/Mixer/MixerRowView.swift
+• Sources/WavesAudioCore/Models/EqualizerSettings.swift","implemented","A native inspector keeps EQ controls beside the app list without expanding every mixer row.","PASS (112 tests + rendered macOS QA)","","implemented","","PASS"
+"EQ-02","Per-App Equalizer","Advanced 8-band equalizer and presets","P1","As an advanced listener, I want eight frequency bands and useful presets so I can tune difficult app mixes quickly or precisely.","• The inspector switches between independent 3-band and 8-band curves
+• The advanced curve exposes 60, 120, 250, 500, 1000, 2000, 4000, and 8000 Hz bands
+• Flat, Voice Focus, Warm, Bass Reduce, and Treble Soften presets are available in both modes
+• Manual changes mark the active curve Custom and Reset to Flat restores zero gain","• Switching modes preserves each mode's prior curve
+• Preset curves stay within the documented gain limits
+• Voice Focus reduces rumble and excess highs while supporting speech frequencies","• Sources/WavesAudioCore/Models/EqualizerSettings.swift
+• Sources/Waves/Features/Mixer/EqualizerInspectorView.swift
+• Tests/WavesTests/EqualizerSettingsTests.swift","implemented","Both modes share the same preset vocabulary while preserving separate curves.","PASS (112 tests + rendered macOS QA)","","implemented","","PASS"
+"EQ-03","Per-App Equalizer","Realtime EQ DSP, headroom, persistence, and route recovery","P0","As a listener, I want EQ changes to be smooth, saved, and restored so app audio remains reliable across playback and launch changes.","• Realtime biquad coefficients are smoothed over 20 milliseconds
+• EQ state is processed locally in the existing per-app tap and retains no audio samples
+• Positive curves reserve headroom and final output remains clamped safely
+• Settings persist per logical app ID and reapply when a supported route becomes available
+• Unsupported or inactive routes report saved but not active instead of claiming success","• Disabled EQ is a bit-identical bypass
+• Float32, Int16, and Int32 tap formats are supported
+• Malformed persisted EQ data falls back safely
+• Route recovery reapplies the saved EQ before normal playback controls","• Sources/WavesAudioCore/Audio/EqualizerDSP.swift
+• Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift
+• Sources/Waves/Stores/UserPreferences.swift
+• Sources/Waves/Stores/AppStore.swift
+• Tests/WavesTests/EqualizerDSPTests.swift","implemented","EQ runs inside the existing local process-tap render path with preallocated state.","PASS (112 tests + rendered macOS QA)","","implemented","","PASS"
+"ADAPT-01","Adaptive Mixing","Adaptive Mix modes and per-app roles","P0","As a multitasking listener, I want explicit adaptive modes and app roles so Waves can help my mix without making hidden decisions I cannot control.","• Adaptive Mix offers Off, Speech Focus, Loudness Balance, and Both
+• Each app can be Auto, Voice, Media, or Ignore
+• Auto classifies conferencing as voice and media-category apps as media while leaving neutral categories neutral
+• The global mode is available in the main toolbar and General settings","• Ignore never receives adaptive gain
+• Mode and role settings persist
+• Adaptive Mix remains off by default","• Sources/WavesAudioCore/Models/EqualizerSettings.swift
+• Sources/Waves/Settings/SettingsView.swift
+• Sources/Waves/Features/Mixer/MainWindowView.swift
+• Sources/Waves/Features/Mixer/EqualizerInspectorView.swift","implemented","Modes are explicit and reversible, with a per-app override for ambiguous categories.","PASS (112 tests + rendered macOS QA)","","implemented","","PASS"
+"ADAPT-02","Adaptive Mixing","Speech-aware media ducking","P0","As a caller who also plays music, I want media to lower smoothly only while speech is present so the call stays intelligible without stopping my other audio.","• Voice apps activate speech after two qualifying 100 millisecond analysis frames
+• Detection requires at least -42 dBFS and 55 percent voice-band energy
+• Speech state holds for 600 milliseconds after qualifying audio stops
+• Eligible media moves toward -10 dB over 120 milliseconds and restores over 900 milliseconds","• Quiet or non-voice-heavy audio does not trigger ducking
+• Voice and ignored apps are not ducked
+• The legacy full-mute call mode cannot run at the same time as speech ducking","• Sources/WavesAudioCore/Audio/AdaptiveMixing.swift
+• Sources/Waves/Stores/AppStore.swift
+• Tests/WavesTests/AdaptiveMixingTests.swift","implemented","Speech analysis uses transient RMS and filtered energy values, not retained audio.","PASS (112 tests + rendered macOS QA)","","implemented","","PASS"
+"ADAPT-03","Adaptive Mixing","Slow loudness balancing across active apps","P1","As a listener mixing several apps, I want large loudness differences smoothed gradually so one source does not dominate the others.","• Active app RMS is averaged with a three-second time constant
+• The target is -24 dBFS with correction limited from -6 dB to +3 dB
+• Downward correction is limited to 1 dB per second and upward correction to 0.5 dB per second
+• Signals below -50 dBFS are never raised","• Silence returns toward unity instead of being amplified
+• Manual per-app volume remains unchanged
+• Combined adaptive gain stays within -18 dB and +3 dB","• Sources/WavesAudioCore/Audio/AdaptiveMixing.swift
+• Sources/Waves/Stores/AppStore.swift
+• Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift
+• Tests/WavesTests/AdaptiveMixingTests.swift","implemented","The coordinator polls transient levels at 100 millisecond intervals and applies a separate temporary gain layer.","PASS (112 tests + rendered macOS QA)","","implemented","","PASS"
+"ADAPT-04","Adaptive Mixing","Local-only adaptive analysis and immediate Off restoration","P0","As a privacy-conscious listener, I want adaptive mixing to remain local and restore my exact manual mix when disabled.","• Only RMS and voice-band energy leave the realtime controller
+• No audio samples are stored, exported, or sent over the network
+• Turning Adaptive Mix off clears all temporary gains and coordinator state
+• App termination, exclusion, and shutdown remove stale adaptive state","• Off sends unity adaptive gain to every active controller
+• Manual volume, mute, boost, device routing, and EQ remain untouched
+• Cancelled coordination cannot leave a stale duck or loudness trim","• Sources/WavesAudioCore/Backend/AudioControlBackend.swift
+• Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift
+• Sources/Waves/Stores/AppStore.swift","implemented","Adaptive state is transient and separate from persisted manual mixer controls.","PASS (112 tests + rendered macOS QA)","","implemented","","PASS"
