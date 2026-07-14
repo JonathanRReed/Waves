@@ -327,6 +327,7 @@ private struct MixerRowContextMenuItems: View {
 
 struct CompactMixerRow: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.openWindow) private var openWindow
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.colorSchemeContrast) private var contrast
   let app: AudioApp
@@ -424,6 +425,23 @@ struct CompactMixerRow: View {
         .disabled(isExcluded)
 
       Button {
+        store.focusEqualizer(for: app, source: .running)
+        openWindow(id: AppSceneID.mainWindow)
+        NSApp.activate(ignoringOtherApps: true)
+      } label: {
+        Text("EQ")
+          .font(.caption2.weight(.semibold))
+          .foregroundStyle(WavesDesign.accentOrSecondary(equalizerIsEnabled))
+          .frame(width: 28, height: 22)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.borderless)
+      .help("Open equalizer for \(app.displayName)")
+      .accessibilityLabel("Open equalizer for \(app.displayName)")
+      .accessibilityValue(equalizerIsEnabled ? "On" : "Off")
+      .disabled(isExcluded)
+
+      Button {
         store.setMuted(!app.isMuted, for: app)
         if !reduceMotion { animateMuteChange.toggle() }
       } label: {
@@ -464,6 +482,7 @@ struct CompactMixerRow: View {
   }
 
   private var isExcluded: Bool { store.isExcluded(app) }
+  private var equalizerIsEnabled: Bool { store.equalizerSettings(for: app).isEnabled }
 
   private var showsLevelMeter: Bool {
     !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)

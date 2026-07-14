@@ -7,6 +7,8 @@ All notable changes to Waves are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Per-app equalizer and Adaptive Mix** with simple or advanced curves, presets,
+  app roles, and locally persisted settings.
 - **Live mixed-waveform visualizer** — a flowing header ribbon that visualizes the
   combined audio energy of everything currently playing (root-sum-of-squares mix,
   eased between samples for smooth 60fps motion). Calm when silent, alive when
@@ -60,6 +62,14 @@ All notable changes to Waves are documented here. The format follows
 - New-profile shortcut is ⌘N (replacing the old ⌘S save-preset shortcut).
 
 ### Fixed
+- Equalizer access is now visible on every menu-bar app row instead of being
+  discoverable only through the row's context menu.
+- Local release builds now carry version 1.1.0 and build 2 so macOS can clearly
+  distinguish them from the earlier 1.0.0 build during an upgrade.
+- Local packaging falls back to the compatible macOS 26 SDK when Command Line
+  Tools provides SwiftUI macro declarations without the required plugin.
+- Universal packaging keeps arm64 and x86_64 products in separate SwiftPM
+  scratch directories so one architecture cannot overwrite the other.
 - A managed app no longer drops out of the **Live** list the moment you adjust
   its volume — Live membership now follows the live-level meter, not a stale
   snapshot, so a playing app stays Live while it's still producing sound.
