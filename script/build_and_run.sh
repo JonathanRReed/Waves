@@ -5,10 +5,25 @@ MODE="${1:-run}"
 APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 MIN_SYSTEM_VERSION="14.2"
-APP_VERSION="${APP_VERSION:-1.0.0}"
-APP_BUILD="${APP_BUILD:-1}"
+APP_VERSION="${APP_VERSION:-1.1.0}"
+APP_BUILD="${APP_BUILD:-2}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+SWIFT_SDK="${SWIFT_SDK:-}"
+
+# Some Command Line Tools releases install a newer default SDK whose SwiftUI
+# interface references SwiftUIMacros without shipping that macro plugin. Prefer
+# the compatible macOS 26 SDK on those machines so local builds remain usable.
+if [ -z "$SWIFT_SDK" ] \
+  && [ ! -f /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib ] \
+  && [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk ]; then
+  SWIFT_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
+fi
+
+SWIFT_BUILD=(swift build)
+if [ -n "$SWIFT_SDK" ]; then
+  SWIFT_BUILD+=(--sdk "$SWIFT_SDK")
+fi
 
 # Validate MODE parameter
 VALID_MODES=("run" "--dmg" "--release-check" "release-check" "--publication-check" "publication-check" "--notarize" "notarize" "--debug" "debug" "--logs" "logs" "--telemetry" "telemetry" "--verify" "verify")
@@ -129,10 +144,12 @@ if ! is_publication_check_mode; then
       echo "Error: lipo is required for universal distribution builds." >&2
       exit 1
     fi
-    swift build -c release --triple arm64-apple-macosx
-    swift build -c release --triple x86_64-apple-macosx
-    ARM64_BIN_DIR="$(swift build -c release --triple arm64-apple-macosx --show-bin-path)"
-    X86_64_BIN_DIR="$(swift build -c release --triple x86_64-apple-macosx --show-bin-path)"
+    ARM64_SCRATCH="$ROOT_DIR/.build/arm64"
+    X86_64_SCRATCH="$ROOT_DIR/.build/x86_64"
+    "${SWIFT_BUILD[@]}" --scratch-path "$ARM64_SCRATCH" -c release --triple arm64-apple-macosx
+    "${SWIFT_BUILD[@]}" --scratch-path "$X86_64_SCRATCH" -c release --triple x86_64-apple-macosx
+    ARM64_BIN_DIR="$("${SWIFT_BUILD[@]}" --scratch-path "$ARM64_SCRATCH" -c release --triple arm64-apple-macosx --show-bin-path)"
+    X86_64_BIN_DIR="$("${SWIFT_BUILD[@]}" --scratch-path "$X86_64_SCRATCH" -c release --triple x86_64-apple-macosx --show-bin-path)"
     BUILD_OUTPUT_DIR="$ROOT_DIR/.build/universal/release"
     mkdir -p "$BUILD_OUTPUT_DIR"
     lipo -create "$ARM64_BIN_DIR/$APP_NAME" "$X86_64_BIN_DIR/$APP_NAME" -output "$BUILD_OUTPUT_DIR/$APP_NAME"
@@ -140,8 +157,8 @@ if ! is_publication_check_mode; then
     rm -rf "$BUILD_OUTPUT_DIR/${APP_NAME}_${APP_NAME}.bundle"
     cp -R "$ARM64_BIN_DIR/${APP_NAME}_${APP_NAME}.bundle" "$BUILD_OUTPUT_DIR/"
   else
-    BUILD_OUTPUT_DIR="$(swift build --show-bin-path)"
-    swift build
+    BUILD_OUTPUT_DIR="$("${SWIFT_BUILD[@]}" --show-bin-path)"
+    "${SWIFT_BUILD[@]}"
   fi
   BUILD_BINARY="$BUILD_OUTPUT_DIR/$APP_NAME"
 
