@@ -6,6 +6,53 @@ import Foundation
 import OSLog
 import WavesAudioCore
 
+struct CleanupStatusObservation: Hashable, Sendable {
+  let appID: String?
+  let stage: CleanupStage
+  let nativeStatus: Int32
+  let detail: String?
+
+  init(
+    appID: String? = nil,
+    stage: CleanupStage,
+    nativeStatus: Int32,
+    detail: String? = nil
+  ) {
+    self.appID = appID
+    self.stage = stage
+    self.nativeStatus = nativeStatus
+    self.detail = detail
+  }
+}
+
+func checkedCleanupDegradations(
+  from observations: [CleanupStatusObservation]
+) -> [CleanupDegradation] {
+  observations.compactMap { observation in
+    guard observation.nativeStatus != noErr else { return nil }
+    return CleanupDegradation(
+      appID: observation.appID,
+      stage: observation.stage,
+      nativeStatus: observation.nativeStatus,
+      detail: observation.detail
+    )
+  }
+}
+
+final class IdempotentCleanupResult: @unchecked Sendable {
+  private let lock = NSLock()
+  private var result: [CleanupDegradation]?
+
+  func run(_ cleanup: () -> [CleanupDegradation]) -> [CleanupDegradation] {
+    lock.lock()
+    defer { lock.unlock() }
+    if let result { return result }
+    let result = cleanup()
+    self.result = result
+    return result
+  }
+}
+
 actor WorkspaceAudioControlBackend: AudioControlBackend {
   // Start from a neutral, empty session. Using `.preview` here would seed the
   // live backend with fabricated apps, volumes, and a fake error string that
@@ -13,8 +60,19 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var snapshot: AudioSessionSnapshot = .empty
   private let currentBundleID = Bundle.main.bundleIdentifier
   private var controllers: [String: PerAppTapController] = [:]
+  private var controllerGenerationByRuntimeID: [String: UInt64] = [:]
   private var equalizerSettingsByAppID: [String: EqualizerSettings] = [:]
   private var adaptiveGainDBByAppID: [String: Float] = [:]
+  private var latestAcceptedGenerationByLogicalID: [String: UInt64] = [:]
+  private var stagedIntentByLogicalID: [String: AppRouteIntent] = [:]
+  private var legacyGeneration: UInt64 = 0
+  private var isStarted = false
+  private var isShuttingDown = false
+  private var lifecycleEpoch: UInt64 = 0
+  private var shutdownTask: Task<BackendShutdownResult, Never>?
+  private var shutdownResult: BackendShutdownResult?
+  private var didFinishDeviceChangeContinuation = false
+  private var retainedCleanupDegradations: [CleanupDegradation] = []
   private var levelUpdateTask: Task<Void, Never>?
   private var routeMaintenanceTick = 0
   private var staleRouteTicks: [String: Int] = [:]
@@ -24,7 +82,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
   private var lastKnownDefaultOutputDeviceUID: String?
-  private let logger = Logger(subsystem: "com.waves.backend", category: "AudioBackend")
+  private var outputDeviceReadinessError: String?
+  private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "AudioBackend")
+
+  typealias IntentRouteApplyOverride = @Sendable (AudioApp, EqualizerSettings) async throws -> Void
+  typealias ShutdownCleanupOverride = @Sendable () -> [CleanupDegradation]
+  private let intentRouteApplyOverride: IntentRouteApplyOverride?
+  private let shutdownCleanupOverride: ShutdownCleanupOverride?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   private nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
@@ -33,20 +97,119 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
     self.deviceChangeContinuation = continuation
+    self.intentRouteApplyOverride = nil
+    self.shutdownCleanupOverride = nil
+  }
+
+  init(
+    testingSnapshot: AudioSessionSnapshot,
+    captureAuthorization: CaptureAuthorizationResult = .undetermined,
+    intentRouteApplyOverride: @escaping IntentRouteApplyOverride,
+    shutdownCleanupOverride: ShutdownCleanupOverride? = nil
+  ) {
+    let (stream, continuation) = AsyncStream<Void>.makeStream()
+    self.deviceChangeEvents = stream
+    self.deviceChangeContinuation = continuation
+    self.snapshot = testingSnapshot
+    self.captureAuthorization = captureAuthorization
+    self.intentRouteApplyOverride = intentRouteApplyOverride
+    self.shutdownCleanupOverride = shutdownCleanupOverride
+    self.isStarted = true
   }
 
   func start() async throws {
+    try ensureAcceptingOperations()
+    guard !isStarted else { return }
     snapshot = await buildSnapshot(merging: snapshot)
+    try ensureAcceptingOperations()
     lastKnownDefaultOutputDeviceUID = try? currentDefaultOutputDeviceUID()
+    isStarted = true
     startLevelUpdateTask()
     addDeviceChangeListener()
   }
 
   func stop() async {
-    removeDeviceChangeListener()
+    _ = await shutdownWithResult()
+  }
+
+  func shutdownWithResult() async -> BackendShutdownResult {
+    if let shutdownResult { return shutdownResult }
+    if let shutdownTask { return await shutdownTask.value }
+
+    // Publish the terminal lifecycle state before creating or awaiting any task so
+    // actor reentrancy cannot admit a fresh route/device/recovery operation.
+    isShuttingDown = true
+    isStarted = false
+    lifecycleEpoch = lifecycleEpoch == .max ? 0 : lifecycleEpoch + 1
+    stagedIntentByLogicalID.removeAll()
+
+    let task = Task { [weak self] in
+      guard let self else {
+        return BackendShutdownResult(
+          checkedDegradations: [CleanupDegradation(
+            stage: .controllerDisposal,
+            detail: "The audio backend was released before cleanup could be verified."
+          )]
+        )
+      }
+      return await self.performCheckedShutdown()
+    }
+    shutdownTask = task
+    return await task.value
+  }
+
+  private func performCheckedShutdown() async -> BackendShutdownResult {
+    var degradations = retainedCleanupDegradations
+    retainedCleanupDegradations.removeAll()
+
+    let levelTask = levelUpdateTask
+    levelUpdateTask = nil
+    levelTask?.cancel()
+    if let levelTask {
+      await levelTask.value
+    }
+
+    degradations.append(contentsOf: removeDeviceChangeListener())
     lastKnownDefaultOutputDeviceUID = nil
-    stopLevelUpdateTask()
-    disposeControllers(keeping: [])
+
+    let installedControllers = controllers.sorted { $0.key < $1.key }
+    controllers.removeAll()
+    for (_, controller) in installedControllers {
+      let controllerDegradations = controller.dispose()
+      degradations.append(contentsOf: controllerDegradations)
+      if !controllerDegradations.isEmpty {
+        degradations.append(CleanupDegradation(
+          appID: controller.appID,
+          stage: .controllerDisposal,
+          detail: "Controller disposal completed with \(controllerDegradations.count) checked native cleanup failure(s)."
+        ))
+      }
+    }
+    if let shutdownCleanupOverride {
+      degradations.append(contentsOf: shutdownCleanupOverride())
+    }
+
+    controllerGenerationByRuntimeID.removeAll()
+    equalizerSettingsByAppID.removeAll()
+    adaptiveGainDBByAppID.removeAll()
+    latestAcceptedGenerationByLogicalID.removeAll()
+    stagedIntentByLogicalID.removeAll()
+    staleRouteTicks.removeAll()
+    routeMaintenanceTick = 0
+    appBundleIDByPath.removeAll()
+    audibleCache = nil
+    outputDeviceReadinessError = nil
+    snapshot = .empty
+    finishDeviceChangeContinuationIfNeeded()
+
+    let result = BackendShutdownResult(checkedDegradations: degradations)
+    shutdownResult = result
+    return result
+  }
+
+  private func finishDeviceChangeContinuationIfNeeded() {
+    guard !didFinishDeviceChangeContinuation else { return }
+    didFinishDeviceChangeContinuation = true
     deviceChangeContinuation.finish()
   }
 
@@ -54,232 +217,324 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot
   }
 
+  func audioCapabilityMode() async -> AudioCapabilityMode {
+    supportsPerAppRouting && captureAuthorization == .authorized ? .full : .limited
+  }
+
+  func captureAuthorizationResult() async -> CaptureAuthorizationResult {
+    captureAuthorization
+  }
+
   func refresh() async throws -> AudioSessionSnapshot {
-    snapshot = await buildSnapshot(merging: snapshot)
+    try ensureAcceptingOperations()
+    let rebuilt = await buildSnapshot(merging: snapshot)
+    try ensureAcceptingOperations()
+    snapshot = rebuilt
     return snapshot
   }
 
-  func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
-      throw BackendError.appNotFound(appID)
+  func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult {
+    guard !isShuttingDown else {
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .failed,
+        resultingApp: snapshot.apps.app(matchingAppKey: intent.appID),
+        backendStatus: snapshot.backendStatus,
+        detail: "The audio backend is shutting down."
+      )
+    }
+    guard let initialIndex = snapshot.apps.firstIndex(matchingAppKey: intent.appID) else {
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unavailable,
+        resultingApp: nil,
+        backendStatus: snapshot.backendStatus,
+        detail: "The app is not available in the current audio session."
+      )
     }
 
-    // Validate volume: handle NaN and infinity by treating them as 1.0, then
-    // fall through to the normal apply path so appliedVolume/routingState/notes
-    // stay consistent with desiredVolume instead of being left stale.
-    if !volume.isFinite {
-      logger.warning("Invalid volume value for \(appID): \(volume), defaulting to 1.0")
-    }
-    let target: Float = volume.isFinite ? max(0.0, min(1.0, volume)) : 1.0
-    let previousVolume = snapshot.apps[index].desiredVolume
-    snapshot.apps[index].desiredVolume = target
-
-    // On unsupported OSes (macOS < 14.2) no route can ever be established, so
-    // don't attempt one: it would throw unsupportedOperation, flash an .error
-    // chip + a generic failure toast, and only be corrected on the next
-    // snapshot rebuild. Stay calmly monitor-only with the explanatory note —
-    // matching how buildSnapshot demotes unsupported apps — and don't throw.
-    guard supportsPerAppRouting else {
-      snapshot.apps[index].routingState = .monitorOnly
-      snapshot.apps[index].notes = "Per-app route requires macOS 14.2+"
-      snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : target
-      return
+    let currentApp = snapshot.apps[initialIndex]
+    let logicalID = currentApp.logicalID
+    guard isStarted else {
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .failed,
+        resultingApp: currentApp,
+        backendStatus: snapshot.backendStatus,
+        detail: "The audio backend is not started."
+      )
     }
 
-    // applyRoute suspends (tap-retry backoff) and the actor is reentrant, so a
-    // concurrent refresh/buildSnapshot can replace `snapshot.apps` while it is
-    // awaited. Every write after the await must re-resolve the row by appID —
-    // the captured index would trap or land on the wrong app — and skip it if
-    // the row vanished. Same pattern in the other setters below.
-    //
-    // buildSnapshot's merge (see its `app.desiredVolume = previous.desiredVolume`)
-    // copies desiredVolume from whatever `previousSnapshot` it was handed — if
-    // that snapshot was captured before this call's write above, a concurrent
-    // rebuild finishing during this await clobbers `desiredVolume` back to the
-    // pre-change value even though `target` is what's actually being applied.
-    // Re-asserting `target` (the locally captured, authoritative value, not a
-    // re-read of the possibly-clobbered snapshot) after re-resolution in BOTH
-    // branches below closes that window.
-    do {
-      try await applyRoute(for: snapshot.apps[index], toVolume: target, muted: snapshot.apps[index].isMuted)
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        snapshot.apps[index].desiredVolume = target
-        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : target
-        snapshot.apps[index].routingState = .managed
-        snapshot.apps[index].notes = nil
-      }
+    if let latestGeneration = latestAcceptedGenerationByLogicalID[logicalID],
+       intent.generation < latestGeneration {
+      return supersededResult(for: intent, logicalID: logicalID)
+    }
+    latestAcceptedGenerationByLogicalID[logicalID] = intent.generation
+    stagedIntentByLogicalID[logicalID] = intent
+    legacyGeneration = max(legacyGeneration, intent.generation)
+
+    guard let acceptedIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else {
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unavailable,
+        resultingApp: nil,
+        backendStatus: snapshot.backendStatus,
+        detail: "The app left the current audio session before its intent was applied."
+      )
+    }
+
+    if intent.isExcluded {
+      excludeApp(at: acceptedIndex)
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
       refreshGlobalRouteHealth()
-    } catch {
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        // A permanently-unroutable app (no audio capability) will never apply
-        // this volume, so committing `target` would show a value the user was
-        // just told failed. Revert it. Any other failure keeps `target` (see
-        // the comment above `do`): it may be transient, and a later
-        // rebuild/retry can still pick it up.
-        if case BackendError.noAudioCapability = error {
-          snapshot.apps[index].desiredVolume = previousVolume
-        } else {
-          snapshot.apps[index].desiredVolume = target
-        }
-        markRouteError(at: index, error: error)
-        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
-      }
-      refreshGlobalRouteHealth(latestError: error.localizedDescription)
-      throw error
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .excluded,
+        resultingApp: snapshot.apps[acceptedIndex],
+        backendStatus: snapshot.backendStatus
+      )
     }
+
+    if !supportsPerAppRouting || snapshot.apps[acceptedIndex].compatibility == .unsupported {
+      let detail = supportsPerAppRouting
+        ? "This app does not support managed audio controls."
+        : "Per-app routing requires macOS 14.2 or newer."
+      snapshot.apps[acceptedIndex].routingState = .monitorOnly
+      snapshot.apps[acceptedIndex].notes = detail
+      snapshot.apps[acceptedIndex].appliedVolume = nil
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
+      refreshGlobalRouteHealth()
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unsupported,
+        resultingApp: snapshot.apps[acceptedIndex],
+        backendStatus: snapshot.backendStatus,
+        detail: detail
+      )
+    }
+
+    let previousApp = snapshot.apps[acceptedIndex]
+    let previousEqualizer = equalizerSettingsByAppID[logicalID] ?? EqualizerSettings()
+    var stagedApp = previousApp
+    stagedApp.desiredVolume = intent.desiredVolume
+    stagedApp.isMuted = intent.isMuted
+    stagedApp.volumeBoost = intent.volumeBoost
+    stagedApp.targetDeviceUID = intent.targetDeviceUID
+
+    let expectedAppliedVolume: Float = intent.isMuted ? 0 : intent.desiredVolume
+    let hasNoChanges = previousApp.desiredVolume == intent.desiredVolume
+      && previousApp.isMuted == intent.isMuted
+      && previousApp.volumeBoost == intent.volumeBoost
+      && previousApp.targetDeviceUID == intent.targetDeviceUID
+      && previousEqualizer == intent.equalizerSettings
+      && previousApp.routingState == .managed
+      && previousApp.appliedVolume == expectedAppliedVolume
+      && controllers[previousApp.id]?.isActive == true
+
+    if hasNoChanges {
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .noChange,
+        resultingApp: previousApp,
+        backendStatus: snapshot.backendStatus
+      )
+    }
+
+    let generationContext = IntentGenerationContext(
+      logicalID: logicalID,
+      generation: intent.generation,
+      lifecycleEpoch: lifecycleEpoch
+    )
+    let forceRebuild = previousApp.targetDeviceUID != intent.targetDeviceUID
+
+    do {
+      try ensureGenerationCurrent(generationContext)
+      if let intentRouteApplyOverride {
+        try await intentRouteApplyOverride(stagedApp, intent.equalizerSettings)
+        try ensureGenerationCurrent(generationContext)
+      } else {
+        try await applyRoute(
+          for: stagedApp,
+          toVolume: intent.desiredVolume,
+          muted: intent.isMuted,
+          forceRebuild: forceRebuild,
+          equalizerSettings: intent.equalizerSettings,
+          generationContext: generationContext
+        )
+      }
+      try ensureGenerationCurrent(generationContext)
+
+      guard let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else {
+        disposeControllerInstalledByGeneration(
+          runtimeID: previousApp.id,
+          generation: intent.generation
+        )
+        clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+        return AppIntentApplyResult(
+          appID: intent.appID,
+          generation: intent.generation,
+          outcome: .unavailable,
+          resultingApp: nil,
+          backendStatus: snapshot.backendStatus,
+          detail: "The app left the current audio session before its intent was committed."
+        )
+      }
+
+      snapshot.apps[currentIndex].desiredVolume = intent.desiredVolume
+      snapshot.apps[currentIndex].isMuted = intent.isMuted
+      snapshot.apps[currentIndex].volumeBoost = intent.volumeBoost
+      snapshot.apps[currentIndex].targetDeviceUID = intent.targetDeviceUID
+      snapshot.apps[currentIndex].appliedVolume = expectedAppliedVolume
+      snapshot.apps[currentIndex].routingState = .managed
+      snapshot.apps[currentIndex].hasNoAudioCapability = false
+      snapshot.apps[currentIndex].notes = nil
+      if intent.isMuted {
+        snapshot.apps[currentIndex].peakLevel = 0
+        snapshot.apps[currentIndex].rmsLevel = 0
+      }
+      equalizerSettingsByAppID[logicalID] = intent.equalizerSettings
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
+      refreshGlobalRouteHealth()
+
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .applied,
+        resultingApp: snapshot.apps[currentIndex],
+        backendStatus: snapshot.backendStatus
+      )
+    } catch is IntentSupersededError {
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      return supersededResult(for: intent, logicalID: logicalID)
+    } catch is IntentBackendStoppedError {
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .failed,
+        resultingApp: snapshot.apps.first(where: { $0.logicalID == logicalID }),
+        backendStatus: snapshot.backendStatus,
+        detail: "The audio backend stopped before the intent completed."
+      )
+    } catch {
+      guard isGenerationCurrent(generationContext) else {
+        clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+        return supersededResult(for: intent, logicalID: logicalID)
+      }
+
+      if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
+        snapshot.apps[currentIndex].desiredVolume = previousApp.desiredVolume
+        snapshot.apps[currentIndex].isMuted = previousApp.isMuted
+        snapshot.apps[currentIndex].volumeBoost = previousApp.volumeBoost
+        snapshot.apps[currentIndex].targetDeviceUID = previousApp.targetDeviceUID
+        snapshot.apps[currentIndex].appliedVolume = previousApp.appliedVolume
+        markRouteError(at: currentIndex, error: error)
+      }
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
+      refreshGlobalRouteHealth(latestError: error.localizedDescription)
+
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .failed,
+        resultingApp: snapshot.apps.first(where: { $0.logicalID == logicalID }),
+        backendStatus: snapshot.backendStatus,
+        detail: error.localizedDescription
+      )
+    }
+  }
+
+  func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws {
+    try ensureAcceptingOperations()
+    let app = try legacyApp(forAppID: appID)
+    let values = intentControlValues(for: app)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: volume,
+      isMuted: values.isMuted,
+      volumeBoost: values.volumeBoost,
+      equalizerSettings: values.equalizerSettings,
+      targetDeviceUID: values.targetDeviceUID,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   func setMuted(_ isMuted: Bool, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
-      throw BackendError.appNotFound(appID)
-    }
-
-    let previousMuted = snapshot.apps[index].isMuted
-    snapshot.apps[index].isMuted = isMuted
-
-    // Unsupported OS: Waves can't mute per-app below macOS 14.2, so don't claim
-    // a mute that isn't real — revert the flag (mirrors the apply-failure path)
-    // and stay monitor-only. Otherwise the row would show the muted glyph while
-    // the app is still audible. The store gates its success toast on .managed,
-    // so no misleading "muted" confirmation is shown.
-    guard supportsPerAppRouting else {
-      snapshot.apps[index].isMuted = previousMuted
-      snapshot.apps[index].routingState = .monitorOnly
-      snapshot.apps[index].notes = "Per-app route requires macOS 14.2+"
-      return
-    }
-
-    // Re-resolve the row after the await (see setDesiredVolume): a concurrent
-    // rebuild during applyRoute's suspension can replace `snapshot.apps`.
-    do {
-      try await applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: isMuted)
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        snapshot.apps[index].isMuted = isMuted
-        snapshot.apps[index].routingState = .managed
-        snapshot.apps[index].peakLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].peakLevel)
-        snapshot.apps[index].rmsLevel = isMuted ? 0 : max(0.0, snapshot.apps[index].rmsLevel)
-        snapshot.apps[index].appliedVolume = isMuted ? 0 : snapshot.apps[index].desiredVolume
-        snapshot.apps[index].notes = nil
-      }
-      refreshGlobalRouteHealth()
-    } catch {
-      // The mute could not be applied (no tap established), so revert the
-      // snapshot flag — otherwise the row shows the muted glyph while audio
-      // still plays at full volume. routingState=.error surfaces the failure.
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        snapshot.apps[index].isMuted = previousMuted
-        markRouteError(at: index, error: error)
-        snapshot.apps[index].peakLevel = 0
-        snapshot.apps[index].rmsLevel = 0
-        snapshot.apps[index].appliedVolume = previousMuted ? 0 : snapshot.apps[index].desiredVolume
-      }
-      refreshGlobalRouteHealth(latestError: error.localizedDescription)
-      throw error
-    }
+    try ensureAcceptingOperations()
+    let app = try legacyApp(forAppID: appID)
+    let values = intentControlValues(for: app)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: values.desiredVolume,
+      isMuted: isMuted,
+      volumeBoost: values.volumeBoost,
+      equalizerSettings: values.equalizerSettings,
+      targetDeviceUID: values.targetDeviceUID,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
-      throw BackendError.appNotFound(appID)
-    }
-
-    let clampedBoost = max(1.0, min(4.0, boost))
-    let previousBoost = snapshot.apps[index].volumeBoost
-    snapshot.apps[index].volumeBoost = clampedBoost
-
-    // Unsupported OS: stay monitor-only instead of attempting a doomed route
-    // that would throw and flash an error chip + toast (see setDesiredVolume).
-    guard supportsPerAppRouting else {
-      snapshot.apps[index].routingState = .monitorOnly
-      snapshot.apps[index].notes = "Per-app route requires macOS 14.2+"
-      return
-    }
-
-    // Re-apply the route with the new boost. applyRoute -> controller.apply
-    // already writes the updated boost together with the current volume/mute in
-    // a single queued write, so there's no need for a separate (redundant,
-    // off-queue) controller.setVolumeBoost call that could clobber a concurrent
-    // volume/mute change with a stale captured value.
-    // Re-resolve the row after the await (see setDesiredVolume): a concurrent
-    // rebuild during applyRoute's suspension can replace `snapshot.apps` — and
-    // its merge copies volumeBoost from whatever previousSnapshot it was
-    // handed, which can clobber this row's boost back to the pre-change value
-    // if that snapshot was captured before the write above. Re-assert
-    // `clampedBoost` (the locally captured, authoritative value) after
-    // re-resolution in both branches to close that window.
-    do {
-      try await applyRoute(for: snapshot.apps[index], toVolume: snapshot.apps[index].desiredVolume, muted: snapshot.apps[index].isMuted)
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        snapshot.apps[index].volumeBoost = clampedBoost
-        snapshot.apps[index].routingState = .managed
-        snapshot.apps[index].notes = nil
-      }
-      refreshGlobalRouteHealth()
-    } catch {
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        // Same reasoning as setDesiredVolume's catch: a boost that can never
-        // apply shouldn't be committed as if it had.
-        if case BackendError.noAudioCapability = error {
-          snapshot.apps[index].volumeBoost = previousBoost
-        } else {
-          snapshot.apps[index].volumeBoost = clampedBoost
-        }
-        markRouteError(at: index, error: error)
-      }
-      refreshGlobalRouteHealth(latestError: error.localizedDescription)
-      throw error
-    }
+    try ensureAcceptingOperations()
+    let app = try legacyApp(forAppID: appID)
+    let values = intentControlValues(for: app)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: values.desiredVolume,
+      isMuted: values.isMuted,
+      volumeBoost: boost,
+      equalizerSettings: values.equalizerSettings,
+      targetDeviceUID: values.targetDeviceUID,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws {
-    guard let initialIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
-      throw BackendError.appNotFound(appID)
-    }
-
-    let logicalID = snapshot.apps[initialIndex].logicalID
-    equalizerSettingsByAppID[logicalID] = settings
-
-    // A role-only change should not seize a route. Enroll only when EQ is
-    // enabled or the app is already managed by another mixer control.
-    let shouldManageRoute = settings.isEnabled
-      || snapshot.apps[initialIndex].routingState == .managed
-      || controllers[snapshot.apps[initialIndex].id]?.isActive == true
-    guard shouldManageRoute else { return }
-
-    guard supportsPerAppRouting else {
-      snapshot.apps[initialIndex].routingState = .monitorOnly
-      snapshot.apps[initialIndex].notes = "Per-app route requires macOS 14.2+"
-      return
-    }
-
-    do {
-      let app = snapshot.apps[initialIndex]
-      try await applyRoute(for: app, toVolume: app.desiredVolume, muted: app.isMuted)
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID || $0.id == appID }) {
-        snapshot.apps[index].routingState = .managed
-        snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted
-          ? 0
-          : snapshot.apps[index].desiredVolume
-        snapshot.apps[index].notes = nil
-      }
-      refreshGlobalRouteHealth()
-    } catch {
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID || $0.id == appID }) {
-        markRouteError(at: index, error: error)
-      }
-      refreshGlobalRouteHealth(latestError: error.localizedDescription)
-      throw error
-    }
+    try ensureAcceptingOperations()
+    let app = try legacyApp(forAppID: appID)
+    let values = intentControlValues(for: app)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: values.desiredVolume,
+      isMuted: values.isMuted,
+      volumeBoost: values.volumeBoost,
+      equalizerSettings: settings,
+      targetDeviceUID: values.targetDeviceUID,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels] {
-    snapshot.apps.reduce(into: [:]) { result, app in
+    guard !isShuttingDown else { return [:] }
+    return snapshot.apps.reduce(into: [:]) { result, app in
       guard let controller = controllers[app.id], controller.isActive else { return }
       result[app.logicalID] = controller.getAdaptiveAnalysis()
     }
   }
 
   func setAdaptiveGains(_ gainsDB: [String: Float]) async {
+    guard !isShuttingDown else { return }
     var normalized: [String: Float] = [:]
     normalized.reserveCapacity(gainsDB.count)
     for (appID, gainDB) in gainsDB {
@@ -297,12 +552,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func setVolumeControlMode(_ mode: VolumeControlMode, forDeviceID deviceID: String) async throws {
+    try ensureAcceptingOperations()
     if snapshot.currentDevice?.id == deviceID {
       snapshot.currentDevice?.volumeControlMode = mode
     }
   }
 
   func pinApp(_ isPinned: Bool, appID: String) async throws {
+    try ensureAcceptingOperations()
     guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
       throw BackendError.appNotFound(appID)
     }
@@ -310,54 +567,93 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].isPinned = isPinned
   }
 
-  func applyProfile(_ profile: Profile) async throws -> AudioSessionSnapshot {
-    for entry in profile.entries {
-      // Membership-only entries are pure grouping — they must never tap or alter
-      // the app's audio. Only entries that set a level establish a route.
-      guard entry.hasLevels else { continue }
-      guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) else {
+  func applyProfileWithResults(
+    _ profile: Profile,
+    generation: UInt64
+  ) async -> ProfileApplyResult {
+    guard !isShuttingDown else {
+      return ProfileApplyResult(
+        rows: profile.entries.enumerated().map { entryIndex, entry in
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .failed,
+            resultingApp: snapshot.apps.app(matchingAppKey: entry.appID),
+            detail: "The audio backend is shutting down."
+          )
+        },
+        backendStatus: snapshot.backendStatus
+      )
+    }
+    var rows: [ProfileRowApplyResult] = []
+    rows.reserveCapacity(profile.entries.count)
+
+    for (entryIndex, entry) in profile.entries.enumerated() {
+      guard entry.hasLevels else {
+        rows.append(ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: .membershipOnly,
+          resultingApp: nil
+        ))
         continue
       }
 
-      // Apply only the fields the entry sets; keep the app's current value for
-      // the rest so e.g. a mute-only entry doesn't also slam the volume to a
-      // fabricated default.
-      let targetVolume = entry.desiredVolume ?? snapshot.apps[index].desiredVolume
-      let targetMuted = entry.isMuted ?? snapshot.apps[index].isMuted
-      let targetBoost = entry.volumeBoost ?? snapshot.apps[index].volumeBoost
-      snapshot.apps[index].desiredVolume = targetVolume
-      snapshot.apps[index].isMuted = targetMuted
-      snapshot.apps[index].volumeBoost = targetBoost
-
-      // Re-resolve the row after the await (see setDesiredVolume): a concurrent
-      // rebuild during applyRoute's suspension can replace `snapshot.apps`.
-      do {
-        try await applyRoute(
-          for: snapshot.apps[index],
-          toVolume: targetVolume,
-          muted: targetMuted
-        )
-        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) {
-          snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
-          snapshot.apps[index].routingState = .managed
-          snapshot.apps[index].notes = nil
-        }
-        refreshGlobalRouteHealth()
-      } catch {
-        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) {
-          markRouteError(at: index, error: error)
-          snapshot.apps[index].appliedVolume = targetMuted ? 0 : targetVolume
-        }
-        refreshGlobalRouteHealth(latestError: error.localizedDescription)
+      guard let appIndex = snapshot.apps.firstIndex(matchingAppKey: entry.appID) else {
+        rows.append(ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: .unavailable,
+          resultingApp: nil,
+          detail: "The app is not available in the current audio session."
+        ))
+        continue
       }
+
+      let app = snapshot.apps[appIndex]
+      let values = intentControlValues(for: app)
+      let result = await applyAppIntent(AppRouteIntent(
+        appID: entry.appID,
+        desiredVolume: entry.desiredVolume ?? values.desiredVolume,
+        isMuted: entry.isMuted ?? values.isMuted,
+        volumeBoost: entry.volumeBoost ?? values.volumeBoost,
+        equalizerSettings: values.equalizerSettings,
+        targetDeviceUID: values.targetDeviceUID,
+        generation: generation,
+        reason: .profileApply
+      ))
+      rows.append(ProfileRowApplyResult(
+        entryIndex: entryIndex,
+        appID: entry.appID,
+        generation: generation,
+        outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
+        resultingApp: result.resultingApp,
+        detail: result.detail
+      ))
     }
 
-    snapshot.updatedAt = .now
+    return ProfileApplyResult(rows: rows, backendStatus: snapshot.backendStatus)
+  }
+
+  func applyProfile(_ profile: Profile) async throws -> AudioSessionSnapshot {
+    let result = await applyProfileWithResults(
+      profile,
+      generation: nextLegacyGeneration()
+    )
+    if let failure = result.rows.first(where: \.outcome.isActionableFailure) {
+      throw BackendError.managedRouteUnavailable(
+        failure.detail ?? "The profile could not be fully applied to \(failure.appID)."
+      )
+    }
     return snapshot
   }
 
   func saveCurrentProfile(named name: String) async throws -> Profile {
-    Profile(
+    try ensureAcceptingOperations()
+    return Profile(
       name: name,
       entries: snapshot.apps.map {
         ProfileEntry(
@@ -371,18 +667,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func recoverRoutes() async throws -> AudioSessionSnapshot {
+    try ensureAcceptingOperations()
     let managedLogicalIDs = Set(
       snapshot.apps
         .filter { $0.routingState == .managed || controllers[$0.id]?.isActive == true }
         .map(\.logicalID)
     )
 
-    disposeControllers(keeping: [])
+    retainCleanupDegradations(disposeControllers(keeping: []))
     // buildSnapshot (and the subsequent reattachRoutes) is the single source of
     // route-health truth here: it recomputes backendStatus from scratch, so any
     // isRouteRecoveryHealthy/lastError assignment made before it would be
     // immediately overwritten and has no observable effect.
     snapshot = await buildSnapshot(merging: snapshot)
+    try ensureAcceptingOperations()
 
     if !managedLogicalIDs.isEmpty {
       await reattachRoutes(forLogicalIDs: managedLogicalIDs)
@@ -392,14 +690,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func autoRestoreDevice() async throws -> AudioSessionSnapshot {
+    try ensureAcceptingOperations()
     let managedLogicalIDs = Set(
       snapshot.apps
         .filter { $0.routingState == .managed || controllers[$0.id]?.isActive == true }
         .map(\.logicalID)
     )
 
-    disposeControllers(keeping: [])
+    retainCleanupDegradations(disposeControllers(keeping: []))
     snapshot = await buildSnapshot(merging: snapshot)
+    try ensureAcceptingOperations()
     snapshot.updatedAt = .now
 
     if !managedLogicalIDs.isEmpty {
@@ -410,11 +710,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func diagnosticsReport() async -> DiagnosticsReport {
+    guard !isShuttingDown else {
+      return DiagnosticsReport(
+        summary: "The audio backend is shutting down.",
+        checks: []
+      )
+    }
     // Re-probe real capture authorization so opening Advanced reflects the
     // current TCC state rather than the result cached at the last refresh.
     // The probe creates and immediately destroys a private tap with no IO
     // proc, so it is side-effect-free and cheap.
     refreshCaptureAuthorization()
+    refreshGlobalRouteHealth()
 
     // A hard route failure is one where the OS and capture permission are both
     // fine yet real routes errored — that is genuinely broken, not transient or
@@ -454,9 +761,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         DiagnosticsCheck(
           title: "Route recovery",
           status: routeRecoveryStatus,
-          detail: snapshot.backendStatus.isRouteRecoveryHealthy
-            ? "Per-app routing is active and can be reapplied."
-            : "There were active route setup or control errors. Recover routes and retry."
+          detail: routeRecoveryDetail
         ),
         DiagnosticsCheck(
           title: "Support matrix",
@@ -468,33 +773,36 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private var captureAuthorizationStatus: DiagnosticsStatus {
-    switch captureAuthorization {
-    case .authorized: return .passed
-    case .notGranted: return .failed
-    case .undetermined, .unsupported: return .warning
-    }
+    CaptureAuthorizationPresentation(captureAuthorization).status
   }
 
   private var captureAuthorizationDetail: String {
-    switch captureAuthorization {
-    case .authorized:
-      return "Audio capture is granted. Waves can apply per-app volume, mute, and boost."
-    case .notGranted:
-      return "Audio capture is not granted, so per-app controls cannot take effect. Allow Waves to record audio in System Settings › Privacy & Security › Microphone, then refresh."
-    case .undetermined:
-      return "Audio capture status is not yet known. Refresh to check."
-    case .unsupported:
-      return "Per-app routing needs macOS 14.2 or newer."
+    CaptureAuthorizationPresentation(captureAuthorization).detail
+  }
+
+  private var routeRecoveryDetail: String {
+    if snapshot.backendStatus.isRouteRecoveryHealthy {
+      return "Per-app routing is active and can be reapplied."
     }
+    if let lastError = snapshot.backendStatus.lastError {
+      return lastError
+    }
+    return "Per-app routing is not ready. Refresh diagnostics, verify the output device, and retry route recovery."
   }
 
   private var recoverabilitySummary: String {
-    if snapshot.backendStatus.isAudioComponentInstalled {
-      let managed = snapshot.apps.filter { $0.routingState == .managed }.count
-      return "Per-app routing is active for this session. Managed routes currently available: \(managed)."
+    guard snapshot.backendStatus.isAudioComponentInstalled else {
+      return "Per-app routing is not available on this OS version."
+    }
+    guard captureAuthorization == .authorized else {
+      return "Per-app routing is not ready because audio capture authorization could not be confirmed."
+    }
+    guard snapshot.currentDevice != nil else {
+      return "Per-app routing is not ready because the current output device could not be identified."
     }
 
-    return "Per-app routing is not available on this OS version."
+    let managed = snapshot.apps.filter { $0.routingState == .managed }.count
+    return "Per-app routing is active for this session. Managed routes currently available: \(managed)."
   }
 
   private var supportsPerAppRouting: Bool {
@@ -509,17 +817,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     AXIsProcessTrusted()
   }
 
-  /// Whether the system has actually granted Core Audio capture (TCC). This is
-  /// distinct from OS support: a 14.2+ machine supports taps but the user may
-  /// never have granted capture, in which case routing silently does nothing.
-  private(set) var captureAuthorization: CaptureAuthorization = .undetermined
+  /// The last structured result of the Core Audio capture-capability probe.
+  /// OS support, reliable denial, and ambiguous native probe failures remain
+  /// distinct so diagnostics never mislabel an unknown failure as TCC denial.
+  private(set) var captureAuthorization: CaptureAuthorizationResult = .undetermined
 
-  /// Probes real audio-capture authorization by creating and immediately
-  /// destroying a private global process tap (no IO proc is started, so no
-  /// audio is captured). A successful create means TCC granted; a failure means
-  /// it is not currently granted. The result is cached on `captureAuthorization`.
+  /// Probes audio-capture authorization by creating and immediately destroying
+  /// a private global process tap. This codebase has no authoritative
+  /// denial-only OSStatus, so every nonzero native status remains `.probeFailed`.
   @discardableResult
-  func refreshCaptureAuthorization() -> CaptureAuthorization {
+  func refreshCaptureAuthorization() -> CaptureAuthorizationResult {
+    guard !isShuttingDown else { return captureAuthorization }
     guard #available(macOS 14.2, *) else {
       captureAuthorization = .unsupported
       return captureAuthorization
@@ -533,96 +841,293 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     var tapID: AudioObjectID = .unknown
     let status = AudioHardwareCreateProcessTap(description, &tapID)
-    if status == noErr {
-      if tapID != .unknown {
-        _ = AudioHardwareDestroyProcessTap(tapID)
-      }
-      captureAuthorization = .authorized
-    } else {
-      // Core Audio does not expose a dedicated "denied" code, so any failure to
-      // create a tap is reported as "not granted" rather than guessed-at detail.
-      logger.warning("Audio-capture permission probe failed (OSStatus: \(status))")
-      captureAuthorization = .notGranted
+    if status == noErr, tapID != .unknown {
+      let destroyStatus = AudioHardwareDestroyProcessTap(tapID)
+      retainCleanupStatus(
+        destroyStatus,
+        stage: .authorizationProbe,
+        detail: "Destroy audio-capture authorization probe tap"
+      )
+    }
+
+    captureAuthorization = CaptureAuthorizationResult.fromProbe(
+      isPlatformSupported: true,
+      nativeStatus: status
+    )
+    if case .probeFailed(let nativeStatus) = captureAuthorization {
+      logger.warning("Audio-capture authorization probe could not be verified (OSStatus: \(nativeStatus))")
     }
     return captureAuthorization
   }
 
-  private func applyRoute(for app: AudioApp, toVolume volume: Float, muted: Bool, forceRebuild: Bool = false) async throws {
+  private struct IntentGenerationContext: Sendable {
+    let logicalID: String
+    let generation: UInt64
+    let lifecycleEpoch: UInt64
+  }
+
+  private struct IntentSupersededError: Error {}
+  private struct IntentBackendStoppedError: Error {}
+
+  private func ensureAcceptingOperations() throws {
+    guard !isShuttingDown else {
+      throw BackendError.managedRouteUnavailable("The audio backend is shutting down.")
+    }
+  }
+
+  private func isGenerationCurrent(_ context: IntentGenerationContext) -> Bool {
+    context.lifecycleEpoch == lifecycleEpoch
+      && latestAcceptedGenerationByLogicalID[context.logicalID] == context.generation
+  }
+
+  private func ensureGenerationCurrent(_ context: IntentGenerationContext) throws {
+    guard isStarted, !isShuttingDown else { throw IntentBackendStoppedError() }
+    guard isGenerationCurrent(context) else { throw IntentSupersededError() }
+  }
+
+  private func supersededResult(
+    for intent: AppRouteIntent,
+    logicalID: String
+  ) -> AppIntentApplyResult {
+    AppIntentApplyResult(
+      appID: intent.appID,
+      generation: intent.generation,
+      outcome: .superseded,
+      resultingApp: snapshot.apps.first(where: { $0.logicalID == logicalID }),
+      backendStatus: snapshot.backendStatus,
+      detail: "A newer app intent has already been accepted."
+    )
+  }
+
+  private func excludeApp(at index: Int) {
+    let runtimeID = snapshot.apps[index].id
+    if let controller = controllers.removeValue(forKey: runtimeID) {
+      retainCleanupDegradations(controller.dispose())
+    }
+    controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
+    staleRouteTicks.removeValue(forKey: runtimeID)
+    snapshot.apps[index].routingState = .monitorOnly
+    snapshot.apps[index].appliedVolume = nil
+    snapshot.apps[index].peakLevel = 0
+    snapshot.apps[index].rmsLevel = 0
+    snapshot.apps[index].hasNoAudioCapability = false
+    snapshot.apps[index].notes = nil
+  }
+
+  private func disposeControllerInstalledByGeneration(
+    runtimeID: String,
+    generation: UInt64
+  ) {
+    guard controllerGenerationByRuntimeID[runtimeID] == generation else { return }
+    controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
+    if let controller = controllers.removeValue(forKey: runtimeID) {
+      retainCleanupDegradations(controller.dispose())
+    }
+    staleRouteTicks.removeValue(forKey: runtimeID)
+  }
+
+  private struct IntentControlValues {
+    let desiredVolume: Float
+    let isMuted: Bool
+    let volumeBoost: Float
+    let equalizerSettings: EqualizerSettings
+    let targetDeviceUID: String?
+  }
+
+  private func intentControlValues(for app: AudioApp) -> IntentControlValues {
+    if let stagedIntent = stagedIntentByLogicalID[app.logicalID] {
+      return IntentControlValues(
+        desiredVolume: stagedIntent.desiredVolume,
+        isMuted: stagedIntent.isMuted,
+        volumeBoost: stagedIntent.volumeBoost,
+        equalizerSettings: stagedIntent.equalizerSettings,
+        targetDeviceUID: stagedIntent.targetDeviceUID
+      )
+    }
+    return IntentControlValues(
+      desiredVolume: app.desiredVolume,
+      isMuted: app.isMuted,
+      volumeBoost: app.volumeBoost,
+      equalizerSettings: equalizerSettingsByAppID[app.logicalID] ?? EqualizerSettings(),
+      targetDeviceUID: app.targetDeviceUID
+    )
+  }
+
+  private func clearStagedIntentIfCurrent(
+    _ intent: AppRouteIntent,
+    logicalID: String
+  ) {
+    guard stagedIntentByLogicalID[logicalID] == intent else { return }
+    stagedIntentByLogicalID.removeValue(forKey: logicalID)
+  }
+
+  private func legacyApp(forAppID appID: String) throws -> AudioApp {
+    guard let app = snapshot.apps.app(matchingAppKey: appID) else {
+      throw BackendError.appNotFound(appID)
+    }
+    return app
+  }
+
+  private func nextLegacyGeneration() -> UInt64 {
+    let highestAccepted = latestAcceptedGenerationByLogicalID.values.max() ?? 0
+    let base = max(legacyGeneration, highestAccepted)
+    legacyGeneration = base == .max ? .max : base + 1
+    return legacyGeneration
+  }
+
+  private func validateLegacyApplyResult(_ result: AppIntentApplyResult) throws {
+    switch result.outcome {
+    case .applied, .noChange:
+      return
+    case .unavailable:
+      throw BackendError.appNotFound(result.appID)
+    case .unsupported:
+      throw BackendError.unsupportedOperation(
+        result.detail ?? "Managed audio controls are not supported for this app."
+      )
+    case .superseded:
+      throw BackendError.managedRouteUnavailable(
+        result.detail ?? "A newer app change superseded this request."
+      )
+    case .excluded:
+      throw BackendError.managedRouteUnavailable(
+        result.detail ?? "The app is excluded from managed audio controls."
+      )
+    case .failed:
+      throw BackendError.managedRouteUnavailable(
+        result.detail ?? "The app intent could not be applied."
+      )
+    }
+  }
+
+  private func applyRoute(
+    for app: AudioApp,
+    toVolume volume: Float,
+    muted: Bool,
+    forceRebuild: Bool = false,
+    equalizerSettings: EqualizerSettings? = nil,
+    generationContext: IntentGenerationContext? = nil
+  ) async throws {
+    try ensureAcceptingOperations()
     guard supportsPerAppRouting else {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
     }
 
+    if let generationContext {
+      try ensureGenerationCurrent(generationContext)
+    }
     let processObjectIDs = try resolveProcessObjectIDs(for: app)
+    let stagedEqualizer = equalizerSettings
+      ?? equalizerSettingsByAppID[app.logicalID]
+      ?? EqualizerSettings()
 
     // Reuse the live tap for parameter-only changes as long as it already covers
-    // every process we'd tap now. For browsers/Electron the audible-helper PID
-    // set churns (renderer/"Audio Service" PIDs spawn and die), so an exact-match
-    // guard would tear down and rebuild the whole process tap + aggregate device
-    // on every volume nudge — an audible glitch and heavy Core Audio churn. A
-    // subset check rebuilds only when a genuinely new audio-producing process
-    // appears that the current tap doesn't yet capture.
+    // every process we'd tap now. A target-device change explicitly forces a new
+    // controller, while volume/mute/boost/EQ changes stay on the current route.
     if !forceRebuild,
        let controller = controllers[app.id],
        controller.isActive,
        controller.covers(processObjectIDs) {
+      if let generationContext {
+        try ensureGenerationCurrent(generationContext)
+      }
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
-      controller.setEqualizer(equalizerSettingsByAppID[app.logicalID] ?? EqualizerSettings())
+      controller.setEqualizer(stagedEqualizer)
       controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
       return
     }
 
-    if let existing = controllers.removeValue(forKey: app.id) {
-      // Fully tear down the old route. invalidate() only stops the IO proc and
-      // would leak the aggregate device and process tap.
-      existing.dispose()
+    if let generationContext {
+      try ensureGenerationCurrent(generationContext)
     }
+    let controller = try await createControllerWithRetry(
+      for: app,
+      processObjectIDs: processObjectIDs,
+      equalizerSettings: stagedEqualizer,
+      generationContext: generationContext
+    )
 
-    let controller = try await createControllerWithRetry(for: app, processObjectIDs: processObjectIDs)
-    // The actor can suspend at the await above, so a reentrant applyRoute may
-    // have installed a controller for this app meanwhile. Dispose it before
-    // replacing, otherwise we orphan a live tap/aggregate (leak + double audio).
-    if let raced = controllers.removeValue(forKey: app.id) {
-      raced.dispose()
+    do {
+      try ensureAcceptingOperations()
+      if let generationContext {
+        try ensureGenerationCurrent(generationContext)
+        if let installedGeneration = controllerGenerationByRuntimeID[app.id],
+           installedGeneration > generationContext.generation {
+          throw IntentSupersededError()
+        }
+        // Keep this check immediately adjacent to installation. If newer work ran
+        // while controller creation was suspended, the new controller is disposed
+        // below and the currently-installed controller remains untouched.
+        try ensureGenerationCurrent(generationContext)
+      }
+
+      let replacedController = controllers.updateValue(controller, forKey: app.id)
+      if let generationContext {
+        controllerGenerationByRuntimeID[app.id] = generationContext.generation
+      } else {
+        controllerGenerationByRuntimeID.removeValue(forKey: app.id)
+      }
+      controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
+      controller.setEqualizer(stagedEqualizer)
+      controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
+      if let replacedController {
+        retainCleanupDegradations(replacedController.dispose())
+      }
+
+      // A freshly-created process tap proves capture is currently authorized.
+      captureAuthorization = .authorized
+    } catch {
+      retainCleanupDegradations(controller.dispose())
+      throw error
     }
-    controllers[app.id] = controller
-    controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
-    // A freshly-created process tap proves capture is currently authorized, so
-    // refresh the cached state. Otherwise refreshGlobalRouteHealth() (called by
-    // the per-app setters right after this) would recompute health from a stale
-    // .notGranted/.undetermined and leave route health/onboarding warning even
-    // though the route just succeeded.
-    captureAuthorization = .authorized
   }
 
-  private func createControllerWithRetry(for app: AudioApp, processObjectIDs: [AudioObjectID]) async throws -> PerAppTapController {
+  private func createControllerWithRetry(
+    for app: AudioApp,
+    processObjectIDs: [AudioObjectID],
+    equalizerSettings: EqualizerSettings,
+    generationContext: IntentGenerationContext?
+  ) async throws -> PerAppTapController {
     let maxRetries = 3
     var lastError: Error?
     var currentProcessObjectIDs = processObjectIDs
 
     for attempt in 1...maxRetries {
+      try ensureAcceptingOperations()
       do {
-        let controller = try createController(for: app, processObjectIDs: currentProcessObjectIDs)
+        if let generationContext {
+          try ensureGenerationCurrent(generationContext)
+        }
+        let controller = try createController(
+          for: app,
+          processObjectIDs: currentProcessObjectIDs,
+          equalizerSettings: equalizerSettings
+        )
         if attempt > 1 {
           logger.info("Successfully created controller for \(app.displayName) on attempt \(attempt)")
         }
         return controller
+      } catch let superseded as IntentSupersededError {
+        throw superseded
       } catch {
         lastError = error
         logger.warning("Failed to create controller for \(app.displayName) on attempt \(attempt): \(error.localizedDescription)")
 
-        // Clean up any partial state before retry
         if attempt < maxRetries {
-          // Exponential backoff: 100ms, 400ms, 1600ms
           let backoffMs = UInt64(100 * Int(pow(4.0, Double(attempt - 1))))
+          if let generationContext {
+            try ensureGenerationCurrent(generationContext)
+          }
           try await Task.sleep(nanoseconds: backoffMs * 1_000_000)
+          try ensureAcceptingOperations()
+          if let generationContext {
+            try ensureGenerationCurrent(generationContext)
+          }
 
-          // Re-resolve process object IDs in case they changed. Tolerate a
-          // transient resolution failure (e.g. the app quit or lost all
-          // audible process objects between attempts) so the loop continues to
-          // the final friendly managedRouteUnavailable message instead of
-          // letting the raw resolution error escape early.
+          // Re-resolve process object IDs after suspension. A transient resolution
+          // failure is left for the next retry to report with the friendly error.
           if let refreshedProcessObjectIDs = try? resolveProcessObjectIDs(for: app),
-            refreshedProcessObjectIDs != currentProcessObjectIDs {
+             refreshedProcessObjectIDs != currentProcessObjectIDs {
             logger.info("Process object IDs changed for \(app.displayName) during retry")
             currentProcessObjectIDs = refreshedProcessObjectIDs
           }
@@ -630,15 +1135,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
     }
 
-    // The technical cause (OSStatus, attempt count) is already logged above.
-    // Surface a plain-language, actionable message to the user.
+    if let generationContext {
+      try ensureGenerationCurrent(generationContext)
+    }
     logger.error("Giving up on managed route for \(app.displayName) after \(maxRetries) attempts: \(lastError?.localizedDescription ?? "unknown error")")
     throw BackendError.managedRouteUnavailable(
       "Waves couldn't take over audio for \(app.displayName). If this keeps happening, check that audio capture is allowed in System Settings › Privacy & Security."
     )
   }
 
-  private func createController(for app: AudioApp, processObjectIDs: [AudioObjectID]) throws -> PerAppTapController {
+  private func createController(
+    for app: AudioApp,
+    processObjectIDs: [AudioObjectID],
+    equalizerSettings: EqualizerSettings
+  ) throws -> PerAppTapController {
+    try ensureAcceptingOperations()
 
     if #available(macOS 14.2, *) {
       // Route to the app's pinned device if it has one; otherwise follow the
@@ -663,23 +1174,38 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       tapDescription.isPrivate = true
 
       var tapID: AudioObjectID = .unknown
-      do {
-        try withStatusCheck(
-          AudioHardwareCreateProcessTap(tapDescription, &tapID),
-          action: "create process tap"
-        )
-      } catch {
-        throw error
+      var aggregateID: AudioObjectID = .unknown
+      var controllerOwnsResources = false
+      defer {
+        if !controllerOwnsResources {
+          var observations: [CleanupStatusObservation] = []
+          if aggregateID != .unknown {
+            observations.append(CleanupStatusObservation(
+              appID: app.logicalID,
+              stage: .aggregateDeviceDestroy,
+              nativeStatus: AudioHardwareDestroyAggregateDevice(aggregateID),
+              detail: "Destroy partially-created aggregate device"
+            ))
+          }
+          if tapID != .unknown {
+            observations.append(CleanupStatusObservation(
+              appID: app.logicalID,
+              stage: .processTapDestroy,
+              nativeStatus: AudioHardwareDestroyProcessTap(tapID),
+              detail: "Destroy partially-created process tap"
+            ))
+          }
+          retainCleanupDegradations(checkedCleanupDegradations(from: observations))
+        }
       }
 
-      let tapUID: String
-      do {
-        tapUID = try readTapUID(tapID)
-      } catch {
-        // Destroy the tap we just created so a UID-read failure does not leak it.
-        _ = AudioHardwareDestroyProcessTap(tapID)
-        throw error
-      }
+      try withStatusCheck(
+        AudioHardwareCreateProcessTap(tapDescription, &tapID),
+        action: "create process tap"
+      )
+
+      let tapUID = try readTapUID(tapID)
+      let audioFormatPlan = try readTapFormatPlan(tapID)
       let aggregateDeviceDescription: [String: Any] = [
         kAudioAggregateDeviceNameKey: "Waves-\(app.displayName)",
         kAudioAggregateDeviceUIDKey: "com.waves.aggregate.\(UUID().uuidString)",
@@ -702,18 +1228,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         ],
       ]
 
-      var aggregateID: AudioObjectID = .unknown
-      do {
-        try withStatusCheck(
-          AudioHardwareCreateAggregateDevice(aggregateDeviceDescription as CFDictionary, &aggregateID),
-          action: "create aggregate device"
-        )
-      } catch {
-        _ = AudioHardwareDestroyProcessTap(tapID)
-        throw error
-      }
+      try withStatusCheck(
+        AudioHardwareCreateAggregateDevice(aggregateDeviceDescription as CFDictionary, &aggregateID),
+        action: "create aggregate device"
+      )
 
-      let tapFormat = readTapFormat(tapID)
       let controller = try PerAppTapController(
         appID: app.id,
         appName: app.displayName,
@@ -723,15 +1242,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         volume: app.desiredVolume,
         volumeBoost: app.volumeBoost,
         muted: app.isMuted,
-        equalizerSettings: equalizerSettingsByAppID[app.logicalID] ?? EqualizerSettings(),
+        equalizerSettings: equalizerSettings,
         adaptiveGainDB: adaptiveGainDBByAppID[app.logicalID] ?? 0,
-        tapFormat: tapFormat
+        audioFormatPlan: audioFormatPlan
       )
 
+      controllerOwnsResources = true
       do {
         try controller.start()
       } catch {
-        controller.dispose()
+        let cleanupDegradations = controller.dispose()
+        retainCleanupDegradations(cleanupDegradations)
+        if !cleanupDegradations.isEmpty {
+          logger.error(
+            "Controller creation failed for \(app.displayName, privacy: .public): \(error.localizedDescription, privacy: .public). Cleanup also reported \(cleanupDegradations.count, privacy: .public) degradation(s)."
+          )
+        }
         throw error
       }
 
@@ -841,8 +1367,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func currentDefaultOutputDeviceUID() throws -> String {
-    let deviceID = try currentDefaultOutputDeviceID()
+    try outputDeviceUID(for: currentDefaultOutputDeviceID())
+  }
 
+  private func outputDeviceUID(for deviceID: AudioObjectID) throws -> String {
     var uidAddress = AudioObjectPropertyAddress(
       mSelector: kAudioDevicePropertyDeviceUID,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -870,7 +1398,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func currentOutputDevice() throws -> AudioDevice {
     let deviceID = try currentDefaultOutputDeviceID()
-    let uid = try currentDefaultOutputDeviceUID()
+    let uid = try outputDeviceUID(for: deviceID)
     let name = (try? stringProperty(
       deviceID,
       selector: kAudioObjectPropertyName,
@@ -908,7 +1436,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func availableOutputDevices() async -> [AudioDevice] {
-    guard supportsPerAppRouting else { return [] }
+    guard !isShuttingDown, supportsPerAppRouting else { return [] }
     let currentUID = try? currentDefaultOutputDeviceUID()
     var devices: [AudioDevice] = []
     for deviceID in allDeviceIDs() where hasOutputStreams(deviceID) {
@@ -934,6 +1462,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func setDefaultOutputDevice(uid: String) async throws {
+    try ensureAcceptingOperations()
     guard let deviceID = allDeviceIDs().first(where: { deviceUID($0) == uid }) else {
       throw BackendError.managedRouteUnavailable("That output device is no longer available.")
     }
@@ -960,42 +1489,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func setOutputDevice(uid: String?, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
-      throw BackendError.appNotFound(appID)
-    }
-
-    snapshot.apps[index].targetDeviceUID = uid
-
-    // Force a rebuild so the route moves to the new device (process objects are
-    // unchanged, so applyRoute alone would reuse the existing controller).
-    if let existing = controllers.removeValue(forKey: snapshot.apps[index].id) {
-      existing.dispose()
-    }
-
-    // Only (re)establish a managed route if the app already had one; otherwise
-    // just record the preference for the next time it's managed.
-    let app = snapshot.apps[index]
-    let wasManaged = app.routingState == .managed || app.routingState == .live
-    guard wasManaged else { return }
-
-    // Re-resolve the row after the await (see setDesiredVolume): a concurrent
-    // rebuild during applyRoute's suspension can replace `snapshot.apps`.
-    do {
-      try await applyRoute(for: app, toVolume: app.desiredVolume, muted: app.isMuted)
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        snapshot.apps[index].routingState = .managed
-        snapshot.apps[index].appliedVolume =
-          snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
-        snapshot.apps[index].notes = nil
-      }
-      refreshGlobalRouteHealth()
-    } catch {
-      if let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
-        markRouteError(at: index, error: error)
-      }
-      refreshGlobalRouteHealth(latestError: error.localizedDescription)
-      throw error
-    }
+    try ensureAcceptingOperations()
+    let app = try legacyApp(forAppID: appID)
+    let values = intentControlValues(for: app)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: values.desiredVolume,
+      isMuted: values.isMuted,
+      volumeBoost: values.volumeBoost,
+      equalizerSettings: values.equalizerSettings,
+      targetDeviceUID: uid,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   private func isDeviceAvailable(uid: String) -> Bool {
@@ -1282,35 +1789,38 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return isRunningOutput != 0
   }
 
-  private func readTapFormat(_ tapID: AudioObjectID) -> TapAudioFormat {
+  private func readTapFormatPlan(_ tapID: AudioObjectID) throws -> AudioFormatPlan {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioTapPropertyFormat,
       mScope: kAudioObjectPropertyScopeGlobal,
       mElement: kAudioObjectPropertyElementMain
     )
 
-    var asbd = AudioStreamBasicDescription()
-    var asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-    let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &asbdSize, &asbd)
-
-    guard status == noErr else {
-      return .fallback
+    var streamDescription = AudioStreamBasicDescription()
+    let expectedSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+    var actualSize = expectedSize
+    try withStatusCheck(
+      AudioObjectGetPropertyData(
+        tapID,
+        &address,
+        0,
+        nil,
+        &actualSize,
+        &streamDescription
+      ),
+      action: "read process tap audio format"
+    )
+    guard actualSize == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Process tap audio format returned \(actualSize) bytes; expected \(expectedSize)."
+      )
     }
-
-    if (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && asbd.mBitsPerChannel == 32 {
-      return TapAudioFormat(streamDescription: asbd, sampleFormat: .float32)
+    guard let plan = AudioFormatPlan(nativeStreamDescription: streamDescription) else {
+      throw BackendError.managedRouteUnavailable(
+        "The process tap returned an unsupported or inconsistent linear PCM audio format."
+      )
     }
-
-    if (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 {
-      if asbd.mBitsPerChannel == 16 {
-        return TapAudioFormat(streamDescription: asbd, sampleFormat: .int16)
-      }
-      if asbd.mBitsPerChannel == 32 {
-        return TapAudioFormat(streamDescription: asbd, sampleFormat: .int32)
-      }
-    }
-
-    return TapAudioFormat(streamDescription: asbd, sampleFormat: .unknown)
+    return plan
   }
 
   private func buildSnapshot(merging previousSnapshot: AudioSessionSnapshot?) async -> AudioSessionSnapshot {
@@ -1325,6 +1835,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         audibleParentBundleIDs: audible.parentBundleIDs
       )
     }.value
+    guard !isShuttingDown else { return snapshot }
     let previousByLogicalID = dictionaryByLogicalID(previousSnapshot?.apps ?? [])
     let now = Date()
 
@@ -1407,27 +1918,34 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     let runningIDs: Set<String> = Set(mergedApps.map(\.id))
-    disposeControllers(keeping: runningIDs)
+    retainCleanupDegradations(disposeControllers(keeping: runningIDs))
 
     let hasRouteErrors = hasBlockingRouteErrors(in: mergedApps)
-    // Mirror refreshGlobalRouteHealth: carry lastError forward only while some
-    // app is still in .error, so surfaces never show a stale error message next
-    // to an otherwise healthy status.
-    let backendError = hasRouteErrors ? snapshot.backendStatus.lastError : nil
-    let currentDevice = (try? currentOutputDevice())
-      ?? previousSnapshot?.currentDevice
-      ?? AudioDevice(
-        id: "system-output",
-        name: "System Output",
-        kind: .unknown,
-        isCurrent: true,
-        isManagedRouteAvailable: supportsPerAppRouting
+    let routeError = hasRouteErrors
+      ? mergedApps.first(where: { $0.routingState == .error && $0.notes != nil })?.notes
+        ?? snapshot.backendStatus.lastError
+      : nil
+
+    let deviceReadiness: OutputDeviceReadiness
+    do {
+      deviceReadiness = OutputDeviceReadiness(
+        currentDevice: try currentOutputDevice(),
+        previousRecentDeviceIDs: previousSnapshot?.recentDeviceIDs ?? []
       )
+    } catch {
+      deviceReadiness = OutputDeviceReadiness(
+        currentDevice: nil,
+        previousRecentDeviceIDs: previousSnapshot?.recentDeviceIDs ?? [],
+        failureDetail: "Waves could not identify the current output device: \(error.localizedDescription)"
+      )
+    }
+    outputDeviceReadinessError = deviceReadiness.errorDetail
+    let backendError = combinedBackendError(routeError: routeError)
 
     return AudioSessionSnapshot(
       apps: mergedApps,
-      currentDevice: currentDevice,
-      recentDeviceIDs: Array(Set((previousSnapshot?.recentDeviceIDs ?? []) + [currentDevice.id])).sorted(),
+      currentDevice: deviceReadiness.currentDevice,
+      recentDeviceIDs: deviceReadiness.recentDeviceIDs,
       supportMatrix: SupportMatrix(
         entries: mergedApps.map {
           SupportMatrixEntry(
@@ -1441,7 +1959,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       backendStatus: BackendStatus(
         isAudioComponentInstalled: supportsPerAppRouting,
         hasRequiredPermissions: captureAuthorization == .authorized,
-        isRouteRecoveryHealthy: supportsPerAppRouting && captureAuthorization == .authorized && !hasRouteErrors,
+        isRouteRecoveryHealthy: supportsPerAppRouting
+          && captureAuthorization == .authorized
+          && deviceReadiness.isReady
+          && !hasRouteErrors,
         lastError: backendError
       ),
       updatedAt: now
@@ -1449,6 +1970,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func audioLevels() async -> [String: AudioLevels] {
+    guard !isShuttingDown else { return [:] }
     var result: [String: AudioLevels] = [:]
     for app in snapshot.apps where app.routingState == .managed || app.routingState == .live {
       result[app.logicalID] = AudioLevels(peak: app.peakLevel, rms: app.rmsLevel)
@@ -1463,6 +1985,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   // NOT clearing mute — so a user's saved manual mute survives the app quitting
   // and is not later propagated as "unmuted" by a snapshot merge.
   func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool = false) async {
+    guard !isShuttingDown else { return }
     let targetIDs = snapshot.apps.filter { app in
       (bundleID != nil && app.bundleID == bundleID) || (app.pid != nil && app.pid == pid)
     }.map(\.id)
@@ -1471,8 +1994,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     for id in targetIDs {
       if let controller = controllers.removeValue(forKey: id) {
-        controller.dispose()
+        retainCleanupDegradations(controller.dispose())
       }
+      controllerGenerationByRuntimeID.removeValue(forKey: id)
       staleRouteTicks.removeValue(forKey: id)
     }
 
@@ -1494,13 +2018,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private func disposeControllers(keeping appIDs: Set<String>) {
-    let stale = Set(controllers.keys).subtracting(appIDs)
+  private func disposeControllers(keeping appIDs: Set<String>) -> [CleanupDegradation] {
+    let stale = Set(controllers.keys).subtracting(appIDs).sorted()
+    var degradations: [CleanupDegradation] = []
     for appID in stale {
-      controllers[appID]?.dispose()
-      controllers.removeValue(forKey: appID)
+      if let controller = controllers.removeValue(forKey: appID) {
+        degradations.append(contentsOf: controller.dispose())
+      }
+      controllerGenerationByRuntimeID.removeValue(forKey: appID)
       staleRouteTicks.removeValue(forKey: appID)
     }
+    return degradations
   }
 
   private static func discoverRunningApps(
@@ -1725,23 +2253,64 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  /// Recompute the GLOBAL route-recovery health from the whole snapshot, mirroring
-  /// buildSnapshot's formula. Health is healthy only when per-app routing is
-  /// available, capture is authorized, and NO app is in `.error` — a single
-  /// successful apply/reattach must never advertise the session as healthy while
-  /// another app remains errored. `lastError` is cleared only when nothing is
-  /// errored; otherwise the most recent error is preserved.
+  private func retainCleanupStatus(
+    _ status: OSStatus,
+    appID: String? = nil,
+    stage: CleanupStage,
+    detail: String
+  ) {
+    retainCleanupDegradations(checkedCleanupDegradations(from: [
+      CleanupStatusObservation(
+        appID: appID,
+        stage: stage,
+        nativeStatus: status,
+        detail: detail
+      )
+    ]))
+  }
+
+  private func retainCleanupDegradations(_ degradations: [CleanupDegradation]) {
+    guard !degradations.isEmpty else { return }
+    retainedCleanupDegradations.append(contentsOf: degradations)
+    for degradation in degradations {
+      logger.error(
+        "Cleanup degraded at \(String(describing: degradation.stage), privacy: .public) for \(degradation.appID ?? "backend", privacy: .public): OSStatus \(degradation.nativeStatus ?? 0, privacy: .public). \(degradation.detail ?? "No detail.", privacy: .public)"
+      )
+    }
+  }
+
+  /// Recompute global route readiness from authorization, the confirmed current
+  /// output device, and every app route. A successful app apply cannot erase an
+  /// authorization/device query failure or another app's route error.
   private func refreshGlobalRouteHealth(latestError: String? = nil) {
     let hasRouteErrors = hasBlockingRouteErrors(in: snapshot.apps)
-    snapshot.backendStatus.isRouteRecoveryHealthy =
-      supportsPerAppRouting && captureAuthorization == .authorized && !hasRouteErrors
-    if hasRouteErrors {
-      // Keep an error message visible: prefer a freshly-observed one, otherwise
-      // retain whatever the badge already shows.
-      snapshot.backendStatus.lastError = latestError ?? snapshot.backendStatus.lastError
-    } else {
-      snapshot.backendStatus.lastError = nil
+    let deviceIsReady = snapshot.currentDevice != nil
+    snapshot.backendStatus.hasRequiredPermissions = captureAuthorization == .authorized
+    snapshot.backendStatus.isRouteRecoveryHealthy = supportsPerAppRouting
+      && captureAuthorization == .authorized
+      && deviceIsReady
+      && !hasRouteErrors
+
+    let routeError = hasRouteErrors
+      ? latestError
+        ?? snapshot.apps.first(where: { $0.routingState == .error && $0.notes != nil })?.notes
+        ?? snapshot.backendStatus.lastError
+      : nil
+    snapshot.backendStatus.lastError = combinedBackendError(routeError: routeError)
+  }
+
+  private func combinedBackendError(routeError: String?) -> String? {
+    var details: [String] = []
+    if let authorizationError = CaptureAuthorizationPresentation(captureAuthorization).backendErrorDetail {
+      details.append(authorizationError)
     }
+    if let outputDeviceReadinessError {
+      details.append(outputDeviceReadinessError)
+    }
+    if let routeError, !details.contains(routeError) {
+      details.append(routeError)
+    }
+    return details.isEmpty ? nil : details.joined(separator: " ")
   }
 
   // Apps with hasNoAudioCapability never had a Core Audio process object to
@@ -1775,6 +2344,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) async {
+    guard !isShuttingDown else { return }
     var lastError: String?
 
     // applyRoute suspends (tap-retry backoff) and the actor is reentrant, so a
@@ -1784,6 +2354,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // skipped.
     let targetLogicalIDs = snapshot.apps.map(\.logicalID).filter { logicalIDs.contains($0) }
     for logicalID in targetLogicalIDs {
+      guard !isShuttingDown else { return }
       guard let app = snapshot.apps.first(where: { $0.logicalID == logicalID }) else { continue }
 
       do {
@@ -1813,6 +2384,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func startLevelUpdateTask() {
+    guard !isShuttingDown else { return }
     levelUpdateTask?.cancel()
     levelUpdateTask = Task { [weak self] in
       while !Task.isCancelled {
@@ -1828,7 +2400,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func updateAudioLevels() async {
-    guard !controllers.isEmpty else { return }
+    guard !isShuttingDown, !controllers.isEmpty else { return }
 
     let appIndexMap = snapshot.apps.enumerated().reduce(into: [String: Int]()) { result, pair in
       result[pair.element.logicalID] = pair.offset
@@ -1837,6 +2409,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var routeIDsNeedingRebuild = Set<String>()
 
     for (appID, controller) in controllers {
+      if let detail = controller.takeGeometryMismatchDiagnostic() {
+        logger.error("\(detail)")
+      }
+
       guard controller.isActive else {
         routeIDsNeedingRebuild.insert(appID)
         continue
@@ -1888,6 +2464,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func maintainManagedRoutes(forceRebuildIDs: Set<String> = []) async {
+    guard !isShuttingDown else { return }
     let managedIDs = snapshot.apps
       .filter { $0.routingState == .managed || forceRebuildIDs.contains($0.logicalID) || forceRebuildIDs.contains($0.id) }
       .map(\.logicalID)
@@ -1897,6 +2474,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var lastError: String?
 
     for appID in managedIDs {
+      guard !isShuttingDown else { return }
       guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
         continue
       }
@@ -1947,6 +2525,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func addDeviceChangeListener() {
+    guard !isShuttingDown else { return }
     // Avoid registering a second listener (and leaking the previous block) if
     // start() runs more than once.
     guard deviceChangeListenerBlock == nil else { return }
@@ -1989,12 +2568,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private func removeDeviceChangeListener() {
+  private func removeDeviceChangeListener() -> [CleanupDegradation] {
     guard let listenerBlock = deviceChangeListenerBlock else {
       deviceChangeListenerSelectors.removeAll()
-      return
+      return []
     }
 
+    var observations: [CleanupStatusObservation] = []
     for selector in deviceChangeListenerSelectors {
       var address = AudioObjectPropertyAddress(
         mSelector: selector,
@@ -2002,19 +2582,25 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         mElement: kAudioObjectPropertyElementMain
       )
 
-      _ = AudioObjectRemovePropertyListenerBlock(
-        AudioObjectID(kAudioObjectSystemObject),
-        &address,
-        DispatchQueue.main,
-        listenerBlock
-      )
+      observations.append(CleanupStatusObservation(
+        stage: .listenerRemoval,
+        nativeStatus: AudioObjectRemovePropertyListenerBlock(
+          AudioObjectID(kAudioObjectSystemObject),
+          &address,
+          DispatchQueue.main,
+          listenerBlock
+        ),
+        detail: "Remove device listener selector \(selector)"
+      ))
     }
 
     deviceChangeListenerSelectors.removeAll()
     deviceChangeListenerBlock = nil
+    return checkedCleanupDegradations(from: observations)
   }
 
   private func handleDeviceChange(selectors: [AudioObjectPropertySelector]) async {
+    guard !isShuttingDown else { return }
     let currentDefaultUID = try? currentDefaultOutputDeviceUID()
     let defaultOutputChanged = selectors.contains(kAudioHardwarePropertyDefaultOutputDevice)
       || (lastKnownDefaultOutputDeviceUID != nil && currentDefaultUID != lastKnownDefaultOutputDeviceUID)
@@ -2026,14 +2612,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // should not tear down audible routes.
       do {
         _ = try await autoRestoreDevice()
+        guard !isShuttingDown else { return }
         logger.info("Output device changed, managed routes restored")
       } catch {
+        guard !isShuttingDown else { return }
         refreshGlobalRouteHealth(latestError: error.localizedDescription)
         logger.error("Output device change recovery failed: \(error.localizedDescription)")
       }
     } else {
       await reconcilePinnedRoutesAfterDeviceInventoryChange()
     }
+    guard !isShuttingDown else { return }
     // Notify observers (the store) so they can refresh UI state and restore
     // per-device volume presets, regardless of whether restoration succeeded.
     deviceChangeContinuation.yield()
@@ -2053,8 +2642,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
       if isActivelyManaged, !targetIsAvailable {
         if let controller = controllers.removeValue(forKey: app.id) {
-          controller.dispose()
+          retainCleanupDegradations(controller.dispose())
         }
+        controllerGenerationByRuntimeID.removeValue(forKey: app.id)
         staleRouteTicks.removeValue(forKey: app.logicalID)
         let error = BackendError.managedRouteUnavailable(
           "The chosen output device for \(app.displayName) is unavailable. Pick another in the app's Output Device menu."
@@ -2084,12 +2674,56 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 }
 
-/// Real Core Audio capture (TCC) authorization, as opposed to mere OS support.
-enum CaptureAuthorization {
-  case authorized
-  case notGranted
-  case undetermined
-  case unsupported
+struct CaptureAuthorizationPresentation: Hashable, Sendable {
+  let status: DiagnosticsStatus
+  let detail: String
+  let backendErrorDetail: String?
+
+  init(_ result: CaptureAuthorizationResult) {
+    switch result {
+    case .authorized:
+      status = .passed
+      detail = "Audio capture is granted. Waves can apply per-app volume, mute, and boost."
+      backendErrorDetail = nil
+    case .notGranted:
+      status = .failed
+      detail = "Audio capture is not granted, so per-app controls cannot take effect. Allow Waves to record audio in System Settings › Privacy & Security › Microphone, then refresh."
+      backendErrorDetail = detail
+    case .undetermined:
+      status = .warning
+      detail = "Audio capture status is not yet known. Refresh to check."
+      backendErrorDetail = nil
+    case .unsupported:
+      status = .warning
+      detail = "Per-app routing needs macOS 14.2 or newer."
+      backendErrorDetail = nil
+    case .probeFailed(let nativeStatus):
+      status = .failed
+      detail = "Waves could not verify audio capture authorization (OSStatus: \(nativeStatus)). Refresh to retry; if it persists, restart Waves and check the current output device."
+      backendErrorDetail = detail
+    }
+  }
+}
+
+private extension Array where Element == AudioApp {
+  func firstIndex(matchingAppKey appKey: String) -> Index? {
+    firstIndex { $0.logicalID == appKey } ?? firstIndex { $0.id == appKey }
+  }
+
+  func app(matchingAppKey appKey: String) -> AudioApp? {
+    first { $0.logicalID == appKey } ?? first { $0.id == appKey }
+  }
+}
+
+private extension ProfileRowApplyOutcome {
+  var isActionableFailure: Bool {
+    switch self {
+    case .membershipOnly, .applied, .noChange, .excluded:
+      false
+    case .superseded, .unavailable, .unsupported, .failed:
+      true
+    }
+  }
 }
 
 private extension AudioObjectID {
@@ -2105,28 +2739,7 @@ private struct TapRenderState {
   var rmsLevel: Float
   var analysisRMS: Float
   var voiceBandEnergy: Float
-}
-
-private struct TapAudioFormat {
-  var streamDescription: AudioStreamBasicDescription
-  var sampleFormat: TapSampleFormat
-
-  static var fallback: TapAudioFormat {
-    TapAudioFormat(
-      streamDescription: AudioStreamBasicDescription(
-        mSampleRate: 48_000,
-        mFormatID: kAudioFormatLinearPCM,
-        mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-        mBytesPerPacket: 8,
-        mFramesPerPacket: 1,
-        mBytesPerFrame: 8,
-        mChannelsPerFrame: 2,
-        mBitsPerChannel: 32,
-        mReserved: 0
-      ),
-      sampleFormat: .float32
-    )
-  }
+  var geometryMismatchObserved: UInt32
 }
 
 private final class TapRenderStateBox {
@@ -2140,7 +2753,8 @@ private final class TapRenderStateBox {
     peakLevel: 0,
     rmsLevel: 0,
     analysisRMS: 0,
-    voiceBandEnergy: 0
+    voiceBandEnergy: 0,
+    geometryMismatchObserved: 0
   )
 
   init(initialState: TapRenderState) {
@@ -2247,6 +2861,25 @@ private final class TapRenderStateBox {
     return analysis
   }
 
+  func flagGeometryMismatch() {
+    // The realtime callback must never wait for diagnostics state. Missing a flag
+    // during contention is acceptable because a persistent mismatch is observed
+    // again on the next callback.
+    guard stateLock.try() else { return }
+    state.pointee.geometryMismatchObserved = 1
+    stateBox.geometryMismatchObserved = 1
+    stateLock.unlock()
+  }
+
+  func consumeGeometryMismatch() -> Bool {
+    stateLock.lock()
+    let wasObserved = state.pointee.geometryMismatchObserved != 0
+    state.pointee.geometryMismatchObserved = 0
+    stateBox.geometryMismatchObserved = 0
+    stateLock.unlock()
+    return wasObserved
+  }
+
   func setInactive() {
     stateLock.lock()
     state.pointee.isActive = 0
@@ -2263,14 +2896,17 @@ private final class PerAppTapController: @unchecked Sendable {
   let aggregateDeviceID: AudioObjectID
 
   private let stateBox: TapRenderStateBox
-  private let tapFormat: TapAudioFormat
+  private let audioFormatPlan: AudioFormatPlan
   private let equalizerDSP: EqualizerDSP
   private let voiceBandAnalyzer: VoiceBandEnergyAnalyzer
   private let callbackQueue: DispatchQueue
   private let callbackQueueKey = DispatchSpecificKey<UUID>()
   private let callbackQueueToken = UUID()
   private var ioProcID: AudioDeviceIOProcID?
-  private var didDispose = false
+  private var didStartIOProc = false
+  private let disposeOnce = IdempotentCleanupResult()
+  private var retainedCleanupDegradations: [CleanupDegradation] = []
+  private var didReportGeometryMismatch = false
   private var equalizerHeadroomGain: Float
   private var adaptiveGain: Float
 
@@ -2285,24 +2921,22 @@ private final class PerAppTapController: @unchecked Sendable {
     muted: Bool,
     equalizerSettings: EqualizerSettings,
     adaptiveGainDB: Float,
-    tapFormat: TapAudioFormat
+    audioFormatPlan: AudioFormatPlan
   ) throws {
     self.appID = appID
     self.appName = appName
     self.targetProcessObjectIDs = targetProcessObjectIDs
     self.tapID = tapID
     self.aggregateDeviceID = aggregateDeviceID
-    self.tapFormat = tapFormat
-    let sampleRate = tapFormat.streamDescription.mSampleRate
-    let channelCount = max(1, Int(tapFormat.streamDescription.mChannelsPerFrame))
+    self.audioFormatPlan = audioFormatPlan
     self.equalizerDSP = EqualizerDSP(
-      sampleRate: sampleRate,
-      channelCount: channelCount,
+      sampleRate: audioFormatPlan.sampleRate,
+      channelCount: audioFormatPlan.channelCount,
       settings: equalizerSettings
     )
     self.voiceBandAnalyzer = VoiceBandEnergyAnalyzer(
-      sampleRate: sampleRate,
-      channelCount: channelCount
+      sampleRate: audioFormatPlan.sampleRate,
+      channelCount: audioFormatPlan.channelCount
     )
     self.equalizerHeadroomGain = equalizerSettings.isEnabled
       ? Float(pow(10, Double(equalizerSettings.headroomCompensationDB) / 20))
@@ -2318,7 +2952,8 @@ private final class PerAppTapController: @unchecked Sendable {
       peakLevel: 0,
       rmsLevel: 0,
       analysisRMS: 0,
-      voiceBandEnergy: 0
+      voiceBandEnergy: 0,
+      geometryMismatchObserved: 0
     )
     self.stateBox = TapRenderStateBox(initialState: initialState)
     self.callbackQueue.setSpecific(key: callbackQueueKey, value: callbackQueueToken)
@@ -2387,15 +3022,27 @@ private final class PerAppTapController: @unchecked Sendable {
     stateBox.readAdaptiveAnalysis()
   }
 
+  func takeGeometryMismatchDiagnostic() -> String? {
+    guard stateBox.consumeGeometryMismatch(), !didReportGeometryMismatch else { return nil }
+    didReportGeometryMismatch = true
+    let layout = audioFormatPlan.isInterleaved ? "interleaved" : "noninterleaved"
+    return "Silenced \(appName) because Core Audio callback geometry did not match the validated \(layout) \(audioFormatPlan.channelCount)-channel \(audioFormatPlan.sampleFormat) plan."
+  }
+
   func start() throws {
     var procID: AudioDeviceIOProcID?
-    let sampleFormat = tapFormat.sampleFormat
 
     let status = AudioDeviceCreateIOProcIDWithBlock(
       &procID,
       aggregateDeviceID,
       callbackQueue
     ) { _, inputData, _, outOutputData, _ in
+      guard self.validatesCallbackGeometry(inputData, outputData: outOutputData) else {
+        self.stateBox.flagGeometryMismatch()
+        self.zeroOutput(outOutputData)
+        return
+      }
+
       guard let currentState = self.stateBox.tryRead() else {
         self.zeroOutput(outOutputData)
         return
@@ -2424,13 +3071,22 @@ private final class PerAppTapController: @unchecked Sendable {
       self.renderTappedAudio(
         inputData,
         to: outOutputData,
-        sampleFormat: sampleFormat,
         volume: volume,
         volumeBoost: volumeBoost
       )
     }
 
     if status != noErr {
+      if let procID {
+        retainedCleanupDegradations.append(contentsOf: checkedCleanupDegradations(from: [
+          CleanupStatusObservation(
+            appID: appID,
+            stage: .ioProcDestroy,
+            nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
+            detail: "Destroy IO proc returned by a failed create call"
+          )
+        ]))
+      }
       throw BackendError.managedRouteUnavailable(
         "Failed to create IO proc for \(appName) (OSStatus: \(status))."
       )
@@ -2448,12 +3104,21 @@ private final class PerAppTapController: @unchecked Sendable {
 
     let startStatus = AudioDeviceStart(aggregateDeviceID, procID)
     if startStatus != noErr {
-      _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
+      stateBox.setInactive()
+      retainedCleanupDegradations.append(contentsOf: checkedCleanupDegradations(from: [
+        CleanupStatusObservation(
+          appID: appID,
+          stage: .ioProcDestroy,
+          nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
+          detail: "Destroy IO proc after aggregate-device start failure"
+        )
+      ]))
       ioProcID = nil
       throw BackendError.managedRouteUnavailable(
         "Failed to start aggregate device for \(appName) (OSStatus: \(startStatus))."
       )
     }
+    didStartIOProc = true
   }
 
   private func configureStreamUsage(for procID: AudioDeviceIOProcID) throws {
@@ -2549,54 +3214,136 @@ private final class PerAppTapController: @unchecked Sendable {
     return UInt32(UnsafeMutableAudioBufferListPointer(audioBufferList).count)
   }
 
-  func invalidate() {
-    guard ioProcID != nil else { return }
-
-    guard aggregateDeviceID != .unknown else {
+  @discardableResult
+  func invalidate() -> [CleanupDegradation] {
+    guard let procID = ioProcID, aggregateDeviceID != .unknown else {
       ioProcID = nil
-      return
+      didStartIOProc = false
+      stateBox.setInactive()
+      return []
     }
 
-    guard let procID = ioProcID else { return }
-
-    _ = AudioDeviceStop(aggregateDeviceID, procID)
-    _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
-    ioProcID = nil
+    stateBox.setInactive()
+    var observations: [CleanupStatusObservation] = []
+    if didStartIOProc {
+      observations.append(CleanupStatusObservation(
+        appID: appID,
+        stage: .ioProcStop,
+        nativeStatus: AudioDeviceStop(aggregateDeviceID, procID),
+        detail: "Stop controller IO proc during invalidation"
+      ))
+    }
+    didStartIOProc = false
     drainCallbackQueue()
+    observations.append(CleanupStatusObservation(
+      appID: appID,
+      stage: .ioProcDestroy,
+      nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
+      detail: "Destroy controller IO proc during invalidation"
+    ))
+    ioProcID = nil
+    return checkedCleanupDegradations(from: observations)
   }
 
-  func dispose() {
-    guard !didDispose else { return }
-    didDispose = true
-
-    if let procID = ioProcID {
-      _ = AudioDeviceStop(aggregateDeviceID, procID)
-      _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
-    }
-
-    ioProcID = nil
-    stateBox.setInactive()
-    drainCallbackQueue()
-
-    if aggregateDeviceID != .unknown {
-      _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-    }
-
-    if #available(macOS 14.2, *) {
-      if tapID != .unknown {
-        _ = AudioHardwareDestroyProcessTap(tapID)
+  @discardableResult
+  func dispose() -> [CleanupDegradation] {
+    disposeOnce.run { [self] in
+      stateBox.setInactive()
+      var observations: [CleanupStatusObservation] = []
+      if let procID = ioProcID, aggregateDeviceID != .unknown {
+        if didStartIOProc {
+          observations.append(CleanupStatusObservation(
+            appID: appID,
+            stage: .ioProcStop,
+            nativeStatus: AudioDeviceStop(aggregateDeviceID, procID),
+            detail: "Stop controller IO proc"
+          ))
+        }
+        didStartIOProc = false
+        drainCallbackQueue()
+        observations.append(CleanupStatusObservation(
+          appID: appID,
+          stage: .ioProcDestroy,
+          nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
+          detail: "Destroy controller IO proc"
+        ))
+      } else {
+        didStartIOProc = false
+        drainCallbackQueue()
       }
+      ioProcID = nil
+
+      if aggregateDeviceID != .unknown {
+        observations.append(CleanupStatusObservation(
+          appID: appID,
+          stage: .aggregateDeviceDestroy,
+          nativeStatus: AudioHardwareDestroyAggregateDevice(aggregateDeviceID),
+          detail: "Destroy controller aggregate device"
+        ))
+      }
+
+      if #available(macOS 14.2, *), tapID != .unknown {
+        observations.append(CleanupStatusObservation(
+          appID: appID,
+          stage: .processTapDestroy,
+          nativeStatus: AudioHardwareDestroyProcessTap(tapID),
+          detail: "Destroy controller process tap"
+        ))
+      }
+
+      let result = retainedCleanupDegradations
+        + checkedCleanupDegradations(from: observations)
+      retainedCleanupDegradations.removeAll()
+      return result
     }
   }
 
   deinit {
-    dispose()
+    _ = dispose()
+  }
+
+  private func validatesCallbackGeometry(
+    _ inputData: UnsafePointer<AudioBufferList>?,
+    outputData: UnsafeMutablePointer<AudioBufferList>
+  ) -> Bool {
+    guard let inputData else { return false }
+    let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+    let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
+    let expectedBufferCount = audioFormatPlan.isInterleaved ? 1 : audioFormatPlan.channelCount
+    guard inputBuffers.count == expectedBufferCount,
+          outputBuffers.count == expectedBufferCount else {
+      return false
+    }
+
+    var expectedByteCount: Int?
+    for index in 0..<expectedBufferCount {
+      let inputBuffer = inputBuffers[index]
+      let outputBuffer = outputBuffers[index]
+      let expectedChannels = audioFormatPlan.isInterleaved
+        ? audioFormatPlan.channelCount
+        : 1
+      let inputByteCount = Int(inputBuffer.mDataByteSize)
+      let outputByteCount = Int(outputBuffer.mDataByteSize)
+      guard Int(inputBuffer.mNumberChannels) == expectedChannels,
+            Int(outputBuffer.mNumberChannels) == expectedChannels,
+            inputByteCount == outputByteCount,
+            inputByteCount.isMultiple(of: audioFormatPlan.bytesPerFrame),
+            inputByteCount == 0 || (inputBuffer.mData != nil && outputBuffer.mData != nil) else {
+        return false
+      }
+
+      if let expectedByteCount {
+        guard inputByteCount == expectedByteCount else { return false }
+      } else {
+        expectedByteCount = inputByteCount
+      }
+    }
+    return true
   }
 
   private func renderTappedAudio(
     _ inputData: UnsafePointer<AudioBufferList>?,
     to outputData: UnsafeMutablePointer<AudioBufferList>,
-    sampleFormat: TapSampleFormat,
     volume: Float,
     volumeBoost: Float
   ) {
@@ -2617,7 +3364,7 @@ private final class PerAppTapController: @unchecked Sendable {
     var finalSampleCount: UInt32 = 0
     var channelOffset = 0
 
-    let manualGain = volume * volumeBoost * equalizerHeadroomGain
+    let manualGain = volume * volumeBoost
 
     for index in outputBuffers.indices {
       let outputBuffer = outputBuffers[index]
@@ -2645,40 +3392,42 @@ private final class PerAppTapController: @unchecked Sendable {
         memset(outputPointer.advanced(by: copyByteCount), 0, outputByteCount - copyByteCount)
       }
 
-      equalizerDSP.process(
+      TapDSP.processEqualized(
         outputPointer,
         byteCount: copyByteCount,
-        format: sampleFormat,
+        format: audioFormatPlan.sampleFormat,
+        equalizer: equalizerDSP,
+        equalizerHeadroomGain: equalizerHeadroomGain,
+        manualGain: manualGain,
         bufferChannelCount: bufferChannelCount,
         channelOffset: currentChannelOffset
       )
-      TapDSP.scale(outputPointer, byteCount: copyByteCount, format: sampleFormat, gain: manualGain)
 
       // Adaptive analysis observes the user's EQ and manual controls, but not
       // its own temporary correction, so it cannot chase itself.
       let (_, preAdaptiveSum, preAdaptiveSamples) = TapDSP.levels(
         from: outputPointer,
         byteCount: copyByteCount,
-        format: sampleFormat
+        format: audioFormatPlan.sampleFormat
       )
       analysisSum += preAdaptiveSum
       analysisSampleCount += preAdaptiveSamples
       let voice = voiceBandAnalyzer.analyze(
         UnsafeRawPointer(outputPointer),
         byteCount: copyByteCount,
-        format: sampleFormat,
+        format: audioFormatPlan.sampleFormat,
         bufferChannelCount: bufferChannelCount,
         channelOffset: currentChannelOffset
       )
       voiceEnergySum += voice.energySum
       voiceSampleCount += voice.sampleCount
 
-      TapDSP.scale(outputPointer, byteCount: copyByteCount, format: sampleFormat, gain: adaptiveGain)
+      TapDSP.scale(outputPointer, byteCount: copyByteCount, format: audioFormatPlan.sampleFormat, gain: adaptiveGain)
 
       let (bufferPeak, bufferSum, bufferSamples) = TapDSP.levels(
         from: outputPointer,
         byteCount: copyByteCount,
-        format: sampleFormat
+        format: audioFormatPlan.sampleFormat
       )
       finalPeak = max(finalPeak, bufferPeak)
       finalSum += bufferSum

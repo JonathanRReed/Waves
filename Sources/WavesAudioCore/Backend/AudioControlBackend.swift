@@ -45,6 +45,78 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   /// Current per-app output levels keyed by logical ID, for live meters. Cheap
   /// to call; intended to be polled only while a UI surface is visible.
   func audioLevels() async -> [String: AudioLevels]
+
+  /// Applies one complete app intent. The default adapter preserves legacy
+  /// conformers until they implement backend-owned generation checks.
+  func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult
+
+  /// Applies a profile and reports one ordered result per source entry.
+  func applyProfileWithResults(_ profile: Profile, generation: UInt64) async -> ProfileApplyResult
+
+  /// Coarse operating capability used while legacy backends expose only boolean
+  /// component/permission status.
+  func audioCapabilityMode() async -> AudioCapabilityMode
+
+  /// Structured capture-authorization result. Legacy backends map an ambiguous
+  /// false permission boolean to `.undetermined`, never a guessed denial.
+  func captureAuthorizationResult() async -> CaptureAuthorizationResult
+
+  /// Stops the backend and reports cleanup confidence.
+  func shutdownWithResult() async -> BackendShutdownResult
+}
+
+public extension AudioControlBackend {
+  func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult {
+    let snapshot = await currentSnapshot()
+    return AppIntentApplyResult(
+      appID: intent.appID,
+      generation: intent.generation,
+      outcome: .unsupported,
+      resultingApp: snapshot.apps.app(matchingAppKey: intent.appID),
+      backendStatus: snapshot.backendStatus,
+      detail: "This backend does not implement generation-aware complete-intent application."
+    )
+  }
+
+  func applyProfileWithResults(_ profile: Profile, generation: UInt64) async -> ProfileApplyResult {
+    let snapshot = await currentSnapshot()
+    let rows = profile.entries.enumerated().map { entryIndex, entry in
+      ProfileRowApplyResult(
+        entryIndex: entryIndex,
+        appID: entry.appID,
+        generation: generation,
+        outcome: entry.hasLevels ? .unsupported : .membershipOnly,
+        resultingApp: nil,
+        detail: entry.hasLevels
+          ? "This backend does not implement generation-aware profile application."
+          : nil
+      )
+    }
+    return ProfileApplyResult(rows: rows, backendStatus: snapshot.backendStatus)
+  }
+
+  func audioCapabilityMode() async -> AudioCapabilityMode {
+    let status = await currentSnapshot().backendStatus
+    return status.isAudioComponentInstalled && status.hasRequiredPermissions ? .full : .limited
+  }
+
+  func captureAuthorizationResult() async -> CaptureAuthorizationResult {
+    let status = await currentSnapshot().backendStatus
+    guard status.isAudioComponentInstalled else { return .unsupported }
+    return status.hasRequiredPermissions ? .authorized : .undetermined
+  }
+
+  func shutdownWithResult() async -> BackendShutdownResult {
+    await stop()
+    return BackendShutdownResult(completion: .unverified)
+  }
+
+}
+
+private extension Array where Element == AudioApp {
+  func app(matchingAppKey appKey: String) -> AudioApp? {
+    first { $0.logicalID == appKey } ?? first { $0.id == appKey }
+  }
 }
 
 public struct AudioLevels: Hashable, Sendable {

@@ -1,12 +1,11 @@
-# Homebrew cask for Waves.
+# Homebrew cask template for Waves.
 #
-# To publish: copy this into a tap (e.g. JonathanRReed/homebrew-tap) and, on each
-# release, set `version` to the tag and `sha256` to the notarized DMG's checksum
-# (`shasum -a 256 Waves.dmg`). With Sparkle handling in-app updates you may also
-# set `auto_updates true`.
+# The release workflow validates `version`, replaces the intentionally invalid
+# checksum placeholder in a generated dist/waves.rb, and publishes that generated
+# file as a release artifact. It does not mutate this repository template.
 cask "waves" do
-  version "1.0.0"
-  sha256 :no_check # replace with the released Waves.dmg checksum
+  version "1.1.0"
+  sha256 "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
 
   url "https://github.com/JonathanRReed/Waves/releases/download/v#{version}/Waves.dmg",
       verified: "github.com/JonathanRReed/Waves/"
@@ -26,6 +25,7 @@ cask "waves" do
   app "Waves.app"
 
   zap trash: [
+    "~/.Waves",
     "~/Library/Application Support/Waves",
     "~/Library/Preferences/com.jonathanreed.Waves.plist",
   ]

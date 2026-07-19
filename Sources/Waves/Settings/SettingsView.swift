@@ -205,6 +205,7 @@ private struct GeneralSettingsView: View {
             Text(mode.displayName).tag(mode)
           }
         }
+        .disabled(!store.isAudioRunning)
         Text(adaptiveMixDescription)
           .font(.caption)
           .foregroundStyle(.secondary)
@@ -216,10 +217,12 @@ private struct GeneralSettingsView: View {
           Text("Pause media during video calls")
           Text("Mutes media apps while a known video-call app is frontmost. A heuristic — browser calls aren't detected.")
         }
+        .disabled(!store.isAudioRunning)
         Toggle(isOn: pref(\.enablePerDeviceVolumePresets)) {
           Text("Per-device volume presets")
           Text("Remember a separate volume for each output device.")
         }
+        .disabled(!store.isAudioRunning)
         .help("Restoring a remembered level when you switch devices also requires “Auto-restore device” to be on. Turning this off stops recording new levels but leaves any already-stored device settings in place.")
         Toggle(isOn: Binding(
           get: { store.preferences.autoRestoreDevice },
@@ -228,6 +231,7 @@ private struct GeneralSettingsView: View {
           Text("Auto-restore device")
           Text("Apply the remembered volume automatically when you switch output devices.")
         }
+        .disabled(!store.isAudioRunning)
       }
 
       Section("Keyboard Shortcuts") {
@@ -238,6 +242,7 @@ private struct GeneralSettingsView: View {
           Text("Enable keyboard shortcuts")
           Text("Installs a system-wide key listener only while enabled; Waves ignores everything except its ⌘⌥ shortcuts.")
         }
+        .disabled(!store.isAudioRunning)
         if store.preferences.enableKeyboardShortcuts {
           shortcutRow("Increase volume", "⌘⌥↑")
           shortcutRow("Decrease volume", "⌘⌥↓")
@@ -257,6 +262,7 @@ private struct GeneralSettingsView: View {
           Text("URL scheme automation")
           Text("Lets other apps, browsers, and links send supported waves:// commands to Waves.")
         }
+        .disabled(!store.isAudioRunning)
       } header: {
         Text("Automation")
       } footer: {
@@ -321,7 +327,7 @@ private struct AudioSettingsView: View {
         } label: {
           Label("Recover Routes", systemImage: "arrow.clockwise")
         }
-        .disabled(store.isRecovering)
+        .disabled(!store.isAudioRunning || store.isRecovering)
       } header: {
         Text("Managed Routing")
       } footer: {
@@ -529,7 +535,7 @@ private struct DiagnosticsSettingsView: View {
       // auto-refresh the first time there's nothing to show yet; don't redo
       // the backend snapshot rebuild + capture-permission re-probe on every
       // tab click.
-      if store.diagnostics == nil {
+      if store.isAudioRunning, store.diagnostics == nil {
         store.refreshDiagnostics()
       }
     }
@@ -581,6 +587,7 @@ private struct DiagnosticsUnavailableView: View {
           Label("Refresh Diagnostics", systemImage: "arrow.clockwise")
         }
         .wavesGlassProminentButton()
+        .disabled(!store.isAudioRunning)
 
         Button {
           store.recoverRoutes()
@@ -588,6 +595,7 @@ private struct DiagnosticsUnavailableView: View {
           Label("Recover Routes", systemImage: "waveform.path")
         }
         .buttonStyle(.bordered)
+        .disabled(!store.isAudioRunning || store.isRecovering)
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)

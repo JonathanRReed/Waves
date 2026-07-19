@@ -3,34 +3,55 @@ import OSLog
 
 final class PreferencesStore: @unchecked Sendable {
   private let url: URL
-  private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
-  private let logger = Logger(subsystem: "com.waves.preferences", category: "Persistence")
+  private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
   private let maxFileSize: Int64 = 10 * 1024 * 1024 // 10MB
-  private let queue = DispatchQueue(label: "com.waves.preferences.store", qos: .userInitiated)
+  private let queue: DispatchQueue
+  private let writer: CoalescingPersistenceWriter<UserPreferences>
 
-  init(fileManager: FileManager = .default) {
-    guard let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+  convenience init(fileManager: FileManager = .default) {
+    let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
+    let url: URL
+    if let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+      let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
+      do {
+        try PersistenceSecurity.preparePrivateDirectory(directory, fileManager: fileManager)
+      } catch {
+        logger.error("Failed to create preferences directory: \(error.localizedDescription)")
+      }
+      url = directory.appendingPathComponent("preferences.json")
+    } else {
       logger.error("Failed to get application support directory")
       let fallbackDirectory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves", isDirectory: true)
       try? PersistenceSecurity.preparePrivateDirectory(fallbackDirectory, fileManager: fileManager)
       url = fallbackDirectory.appendingPathComponent("preferences.json")
-      return
     }
-    let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
-    do {
-      try PersistenceSecurity.preparePrivateDirectory(directory, fileManager: fileManager)
-    } catch {
-      logger.error("Failed to create preferences directory: \(error.localizedDescription)")
-    }
-    url = directory.appendingPathComponent("preferences.json")
+    self.init(url: url, writeData: PrivateAtomicPersistenceFile.write)
   }
 
   /// Test-only entry point: keeps the store's file inside `directory` instead
-  /// of the real Application Support location.
-  init(directory: URL) {
+  /// of the real Application Support location. `writeData` is injectable so
+  /// focused tests can verify that asynchronous write failures reach callers.
+  convenience init(
+    directory: URL,
+    writeData: @escaping PersistenceDataWrite = PrivateAtomicPersistenceFile.write
+  ) {
     try? PersistenceSecurity.preparePrivateDirectory(directory)
-    url = directory.appendingPathComponent("preferences.json")
+    self.init(
+      url: directory.appendingPathComponent("preferences.json"),
+      writeData: writeData
+    )
+  }
+
+  private init(url: URL, writeData: @escaping PersistenceDataWrite) {
+    self.url = url
+    let queue = DispatchQueue(label: "com.waves.preferences.store", qos: .userInitiated)
+    self.queue = queue
+    self.writer = CoalescingPersistenceWriter(queue: queue) { preferences in
+      let encoder = JSONEncoder()
+      let data = try PersistedSchema.encode(preferences, using: encoder)
+      try writeData(data, url)
+    }
   }
 
   /// Set to true the moment `load()` has to back up and discard an unreadable
@@ -40,7 +61,7 @@ final class PreferencesStore: @unchecked Sendable {
   private(set) var didRecoverFromCorruptFile = false
 
   func load() -> UserPreferences {
-    return queue.sync {
+    queue.sync {
       // A missing file is the normal first-launch case: return defaults without
       // writing anything yet.
       guard FileManager.default.fileExists(atPath: url.path) else {
@@ -68,8 +89,7 @@ final class PreferencesStore: @unchecked Sendable {
           didRecoverFromCorruptFile = true
           return UserPreferences()
         }
-        let preferences = try PersistedSchema.decode(UserPreferences.self, from: data, using: decoder)
-        return preferences
+        return try PersistedSchema.decode(UserPreferences.self, from: data, using: decoder)
       } catch {
         // Preserve the unreadable file for recovery instead of silently
         // overwriting the user's saved preferences with defaults.
@@ -103,23 +123,21 @@ final class PreferencesStore: @unchecked Sendable {
     }
   }
 
-  func save(_ preferences: UserPreferences) {
-    queue.async { [weak self] in
-      guard let self else { return }
-      do {
-        let data = try PersistedSchema.encode(preferences, using: self.encoder)
-        try data.write(to: self.url, options: .atomic)
-        try PersistenceSecurity.setPrivateFilePermissions(self.url)
-      } catch {
-        self.logger.error("Failed to save preferences: \(error.localizedDescription)")
-      }
+  func save(_ preferences: UserPreferences) async throws {
+    do {
+      try await writer.save(preferences)
+    } catch {
+      logger.error("Failed to save preferences: \(error.localizedDescription)")
+      throw error
     }
   }
 
-  /// Blocks until every write already queued by `save` has completed. For app
-  /// termination only — a change made in the same instant as quit would
-  /// otherwise be lost when the process exits mid-queue.
-  func flush() {
-    queue.sync {}
+  func flush() async throws {
+    do {
+      try await writer.flush()
+    } catch {
+      logger.error("Failed to flush preferences: \(error.localizedDescription)")
+      throw error
+    }
   }
 }

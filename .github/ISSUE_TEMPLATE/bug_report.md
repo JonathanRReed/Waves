@@ -18,9 +18,10 @@ A clear description of the bug and what you expected instead.
 
 ## Diagnostics
 
-Paste the output of **Waves › Settings › Diagnostics › Copy Diagnostics** (it
-includes your macOS version, output device, and per-app route states — no audio
-or personal data):
+Paste the output of **Waves › Settings › Diagnostics › Copy Diagnostics**.
+Diagnostics contain no audio samples, but may include app and device names,
+identifiers, route states, and errors. Review and redact the output before
+posting if it contains information you do not want to share publicly.
 
 ```
 <paste here>
