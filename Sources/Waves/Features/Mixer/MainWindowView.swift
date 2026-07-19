@@ -11,7 +11,8 @@ struct MainWindowView: View {
 
   var body: some View {
     ZStack(alignment: .top) {
-      NavigationSplitView {
+      if store.privacySetupPresentationState == .hidden {
+        NavigationSplitView {
         SidebarView(selection: $selection, onNewProfile: presentNewProfile, onEditProfile: presentEditProfile)
           .navigationSplitViewColumnWidth(min: 220, ideal: 248, max: 300)
       } detail: {
@@ -68,12 +69,15 @@ struct MainWindowView: View {
           .keyboardShortcut("r", modifiers: [.command])
         }
       }
+      } else {
+        PrivacySetupSurface()
+      }
 
       AppToastStack()
         .padding(.top, 12)
         .frame(maxWidth: .infinity, alignment: .topTrailing)
 
-      if store.isLoading {
+      if store.isLoading && store.privacySetupPresentationState == .hidden {
         HStack(spacing: 10) {
           ProgressView()
             .controlSize(.small)

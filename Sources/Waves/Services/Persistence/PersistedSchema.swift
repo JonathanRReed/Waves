@@ -25,20 +25,24 @@ enum PersistedSchema {
     from data: Data,
     using decoder: JSONDecoder
   ) throws -> Payload {
-    if let envelope = try? decoder.decode(VersionedPayload<Payload>.self, from: data) {
-      // A file written by a newer build than this one may have an incompatible
-      // payload shape. Refuse it (the caller backs it up and uses defaults)
-      // rather than loading data we don't understand.
-      guard envelope.schemaVersion <= current else {
+    let json = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+    if let object = json as? [String: Any],
+       object.keys.contains("schemaVersion") || object.keys.contains("payload") {
+      // Once either envelope key appears, decode strictly as an envelope. Falling
+      // back to a legacy payload here can turn a damaged wrapper into valid-looking
+      // defaults and overwrite the only recoverable copy on the next save.
+      let envelope = try decoder.decode(VersionedPayload<Payload>.self, from: data)
+      guard envelope.schemaVersion >= 1, envelope.schemaVersion <= current else {
         throw DecodingError.dataCorrupted(
           DecodingError.Context(
             codingPath: [],
-            debugDescription: "Unsupported schema version \(envelope.schemaVersion) (this build supports \(current))."
+            debugDescription: "Unsupported schema version \(envelope.schemaVersion) (this build supports 1...\(current))."
           )
         )
       }
       return migrate(envelope.payload, from: envelope.schemaVersion)
     }
+
     // Legacy file: a bare payload with no envelope (treated as schema 0).
     return try decoder.decode(Payload.self, from: data)
   }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Sample format of a Core Audio tap buffer.
-public enum TapSampleFormat: Sendable {
+public enum TapSampleFormat: Hashable, Sendable {
   case float32
   case int16
   case int32
@@ -63,6 +63,35 @@ public enum TapDSP {
     case .unknown:
       break
     }
+  }
+
+  /// Applies the fixed manual DSP order. Headroom must attenuate the source
+  /// before a boosting EQ can saturate its typed-sample output; user volume and
+  /// boost remain after EQ so their existing semantics are unchanged.
+  public static func processEqualized(
+    _ data: UnsafeMutableRawPointer,
+    byteCount: Int,
+    format: TapSampleFormat,
+    equalizer: EqualizerDSP,
+    equalizerHeadroomGain: Float,
+    manualGain: Float,
+    bufferChannelCount: Int,
+    channelOffset: Int = 0
+  ) {
+    scale(
+      data,
+      byteCount: byteCount,
+      format: format,
+      gain: equalizerHeadroomGain
+    )
+    equalizer.process(
+      data,
+      byteCount: byteCount,
+      format: format,
+      bufferChannelCount: bufferChannelCount,
+      channelOffset: channelOffset
+    )
+    scale(data, byteCount: byteCount, format: format, gain: manualGain)
   }
 
   /// Computes peak magnitude, sum-of-squares, and sample count over a buffer,

@@ -12,14 +12,11 @@ struct WavesApp: App {
   @State private var store: AppStore
 
   init() {
-    let store = AppStore(
-      backend: WorkspaceAudioControlBackend(),
-      preferencesStore: PreferencesStore(),
-      profileStore: ProfileStore(),
-      sessionStore: SessionStore(),
-      loginItemService: LoginItemService(),
-      deviceVolumePresetsStore: DeviceVolumePresetsStore()
-    )
+    self.init(composition: .live)
+  }
+
+  init(composition: WavesComposition) {
+    let store = composition.makeStore()
     _store = State(initialValue: store)
     AppDelegate.bootstrapStore = store
   }
@@ -53,6 +50,7 @@ struct WavesApp: App {
         Button("Refresh") {
           store.refresh()
         }
+        .disabled(!store.isAudioRunning || store.isRefreshing)
         .keyboardShortcut("r", modifiers: .command)
       }
 
@@ -98,6 +96,9 @@ struct WavesApp: App {
   /// drive `store.menuBarIconName` (muted / playing / idle) so the icon-only
   /// status is perceivable without sight.
   private var menuBarAccessibilityLabel: String {
+    if !store.isAudioRunning {
+      return "Waves — finish setup"
+    }
     if store.visibleApps.contains(where: \.isMuted) {
       return "Waves — muted"
     }
@@ -110,6 +111,114 @@ struct WavesApp: App {
   }
 }
 
+enum AppTerminationOutcome: Hashable, Sendable {
+  case clean(AppShutdownResult)
+  case degraded(AppShutdownResult)
+  case timedOut
+}
+
+enum AppTerminationRequestDecision: Hashable, Sendable {
+  case terminateNow
+  case terminateLater
+}
+
+private actor FirstTerminationOutcome {
+  private var outcome: AppTerminationOutcome?
+  private var waiters: [CheckedContinuation<AppTerminationOutcome, Never>] = []
+
+  func resolve(_ outcome: AppTerminationOutcome) {
+    guard self.outcome == nil else { return }
+    self.outcome = outcome
+    let waiters = waiters
+    self.waiters.removeAll()
+    for waiter in waiters {
+      waiter.resume(returning: outcome)
+    }
+  }
+
+  func value() async -> AppTerminationOutcome {
+    if let outcome { return outcome }
+    return await withCheckedContinuation { continuation in
+      waiters.append(continuation)
+    }
+  }
+}
+
+enum AppTerminationTimeoutDecision {
+  static func awaitShutdown(
+    timeout: Duration,
+    operation: @escaping @MainActor @Sendable () async -> AppShutdownResult
+  ) async -> AppTerminationOutcome {
+    let firstOutcome = FirstTerminationOutcome()
+
+    Task { @MainActor in
+      let result = await operation()
+      await firstOutcome.resolve(
+        result.completion == .clean ? .clean(result) : .degraded(result)
+      )
+    }
+    Task {
+      do {
+        try await Task.sleep(for: timeout)
+      } catch {
+        return
+      }
+      await firstOutcome.resolve(.timedOut)
+    }
+
+    return await firstOutcome.value()
+  }
+}
+
+@MainActor
+final class AppTerminationCoordinator {
+  private enum State {
+    case idle
+    case running
+    case completed(AppTerminationOutcome)
+  }
+
+  private let timeout: Duration
+  private var state: State = .idle
+  private var terminationTask: Task<Void, Never>?
+
+  init(timeout: Duration = .seconds(5)) {
+    self.timeout = timeout
+  }
+
+  var completedOutcome: AppTerminationOutcome? {
+    guard case let .completed(outcome) = state else { return nil }
+    return outcome
+  }
+
+  func requestTermination(
+    shutdown: @escaping @MainActor @Sendable () async -> AppShutdownResult,
+    report: @escaping @MainActor @Sendable (AppTerminationOutcome) -> Void,
+    reply: @escaping @MainActor @Sendable (Bool) -> Void
+  ) -> AppTerminationRequestDecision {
+    switch state {
+    case .running:
+      return .terminateLater
+    case .completed:
+      return .terminateNow
+    case .idle:
+      state = .running
+      terminationTask = Task { @MainActor [self] in
+        let outcome = await AppTerminationTimeoutDecision.awaitShutdown(
+          timeout: timeout,
+          operation: shutdown
+        )
+        guard case .running = state else { return }
+        state = .completed(outcome)
+        report(outcome)
+        reply(true)
+        terminationTask = nil
+      }
+      return .terminateLater
+    }
+  }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   static var bootstrapStore: AppStore?
@@ -117,8 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var store: AppStore?
   private var eventMonitor: Any?
   private var localEventMonitor: Any?
+  private let terminationCoordinator = AppTerminationCoordinator()
 
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "URLScheme")
+  private let lifecycleLogger = Logger(subsystem: "com.jonathanreed.Waves", category: "Lifecycle")
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     store = Self.bootstrapStore
@@ -168,10 +279,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     self.store = store
   }
 
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    removeGlobalHotkeys()
+    removeURLSchemeHandler()
+
+    guard let store else { return .terminateNow }
+    if store.shutdownResult != nil { return .terminateNow }
+
+    let decision = terminationCoordinator.requestTermination(
+      shutdown: { await store.shutdown() },
+      report: { [lifecycleLogger] outcome in
+        switch outcome {
+        case .clean:
+          lifecycleLogger.info("Termination cleanup completed cleanly")
+        case let .degraded(result):
+          lifecycleLogger.error(
+            "Termination cleanup degraded: \(result.persistenceDegradations.count, privacy: .public) persistence issue(s), backend \(String(describing: result.backendResult?.completion), privacy: .public)"
+          )
+        case .timedOut:
+          lifecycleLogger.error("Termination cleanup timed out after the bounded wait; termination will proceed")
+        }
+      },
+      reply: { shouldTerminate in
+        NSApp.reply(toApplicationShouldTerminate: shouldTerminate)
+      }
+    )
+
+    switch decision {
+    case .terminateNow:
+      return .terminateNow
+    case .terminateLater:
+      return .terminateLater
+    }
+  }
+
+  /// Synchronous, idempotent last-chance removal only. Async cleanup starts from
+  /// applicationShouldTerminate so AppKit can hold and later release termination.
   func applicationWillTerminate(_ notification: Notification) {
     removeGlobalHotkeys()
     removeURLSchemeHandler()
-    store?.shutdown()
   }
 
   private func setupURLSchemeHandler() {
@@ -246,21 +392,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let isCmdOption = modifiers.contains(.command) && modifiers.contains(.option)
       && !modifiers.contains(.control) && !modifiers.contains(.shift)
 
-    guard isCmdOption else { return false }
+    guard isCmdOption, [126, 125, 46].contains(event.keyCode) else { return false }
+    guard store.isAudioRunning else {
+      store.promptToFinishSetup()
+      presentSetupWindowIfAvailable()
+      return true
+    }
 
     switch event.keyCode {
     case 126: // Up arrow
       store.increaseVolumeForFrontmostApp()
-      return true
     case 125: // Down arrow
       store.decreaseVolumeForFrontmostApp()
-      return true
     case 46: // M key
       store.toggleMuteForFrontmostApp()
-      return true
     default:
-      return false
+      break
     }
+    return true
   }
 
   // URL-scheme delivery is handled authoritatively by the manual kAEGetURL
@@ -269,8 +418,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   // point would be unreachable for `waves://` invocations, so it is omitted.
 
   private func handleURLScheme(_ url: URL) {
-    guard url.scheme == "waves" else { return }
-    store?.handleURLScheme(url)
+    guard url.scheme == "waves", let store else { return }
+    guard store.isAudioRunning else {
+      store.promptToFinishSetup()
+      presentSetupWindowIfAvailable()
+      return
+    }
+    store.handleURLScheme(url)
+  }
+
+  private func presentSetupWindowIfAvailable() {
+    NSApp.activate(ignoringOtherApps: true)
+    let window = NSApp.windows.first { $0.title == "Waves" }
+    window?.makeKeyAndOrderFront(nil)
   }
 
 }

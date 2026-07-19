@@ -15,6 +15,7 @@ struct MenuBarMixerView: View {
   var body: some View {
     ZStack(alignment: .topTrailing) {
       VStack(alignment: .leading, spacing: 14) {
+        if store.privacySetupPresentationState == .hidden {
         // Pinned chrome — header, the live waves band, and the output/profile
         // pickers stay put while only the app sections below scroll.
         MenuBarHeader()
@@ -62,6 +63,13 @@ struct MenuBarMixerView: View {
         Divider()
 
         footer
+        } else {
+          PrivacySetupSurface(style: .compact)
+
+          Divider()
+
+          footer
+        }
       }
       .padding(14)
 

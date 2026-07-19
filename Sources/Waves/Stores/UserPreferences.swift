@@ -29,8 +29,18 @@ struct UserPreferences: Codable, Sendable {
   /// here (rather than only on the per-app session row) so a pin survives the
   /// app quitting and relaunching, and a full relaunch of Waves.
   var pinnedAppIDs: [String] = []
-  /// Persistent per-app tone and adaptive-role settings keyed by logical app ID.
+  /// Legacy EQ-only map retained for one release during the additive schema-1
+  /// app-intent rollout.
   var appEqualizerSettings: [String: EqualizerSettings] = [:]
+  /// Durable audio intent keyed by logical app ID, independent of whether the app
+  /// is running when Waves launches.
+  var appAudioIntents: [String: PersistedAppAudioIntent] = [:]
+  /// One-time migration version for folding legacy session and EQ state into
+  /// `appAudioIntents`. New installs start after the migration.
+  var appAudioIntentMigrationVersion = 1
+  /// New installs see the privacy explanation before the first capture request.
+  /// Existing preference files missing this key decode it as already completed.
+  var hasCompletedPrivacySetup = false
   /// Global adaptive processing mode. Temporary gains themselves are never persisted.
   var adaptiveMixMode: AdaptiveMixMode = .off
 
@@ -52,37 +62,43 @@ struct UserPreferences: Codable, Sendable {
     case excludedAppIDs
     case pinnedAppIDs
     case appEqualizerSettings
+    case appAudioIntents
+    case appAudioIntentMigrationVersion
+    case hasCompletedPrivacySetup
     case adaptiveMixMode
   }
 
-  // Decode each field independently so a preferences file written by an older
-  // build (missing keys added in a later version) loads cleanly instead of
-  // throwing and wiping every saved setting on the first launch after an update.
+  // Missing fields use backward-compatible defaults. A present field with the
+  // wrong type remains a decoding error so the store can preserve the damaged
+  // file instead of silently replacing it with defaults.
   init(from decoder: Decoder) throws {
     let defaults = UserPreferences()
-    guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
-      self = defaults
-      return
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) throws -> T {
+      guard container.contains(key) else { return fallback }
+      return try container.decodeIfPresent(T.self, forKey: key) ?? fallback
     }
-    func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
-      (try? container.decodeIfPresent(T.self, forKey: key)) ?? nil ?? fallback
-    }
-    launchAtLoginEnabled = value(.launchAtLoginEnabled, defaults.launchAtLoginEnabled)
-    showRecentApps = value(.showRecentApps, defaults.showRecentApps)
-    liveListLinger = value(.liveListLinger, defaults.liveListLinger)
-    showSystemProcesses = value(.showSystemProcesses, defaults.showSystemProcesses)
-    sortMode = value(.sortMode, defaults.sortMode)
-    customAppOrder = value(.customAppOrder, defaults.customAppOrder)
-    autoPauseMusicForConferencing = value(.autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
-    enableKeyboardShortcuts = value(.enableKeyboardShortcuts, defaults.enableKeyboardShortcuts)
-    enablePerDeviceVolumePresets = value(.enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
-    autoRestoreDevice = value(.autoRestoreDevice, defaults.autoRestoreDevice)
-    enableURLScheme = value(.enableURLScheme, defaults.enableURLScheme)
-    urlSchemeAutomationAcknowledged = value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
-    excludedAppIDs = value(.excludedAppIDs, defaults.excludedAppIDs)
-    pinnedAppIDs = value(.pinnedAppIDs, defaults.pinnedAppIDs)
-    appEqualizerSettings = value(.appEqualizerSettings, defaults.appEqualizerSettings)
-    adaptiveMixMode = value(.adaptiveMixMode, defaults.adaptiveMixMode)
+    launchAtLoginEnabled = try value(.launchAtLoginEnabled, defaults.launchAtLoginEnabled)
+    showRecentApps = try value(.showRecentApps, defaults.showRecentApps)
+    liveListLinger = try value(.liveListLinger, defaults.liveListLinger)
+    showSystemProcesses = try value(.showSystemProcesses, defaults.showSystemProcesses)
+    sortMode = try value(.sortMode, defaults.sortMode)
+    customAppOrder = try value(.customAppOrder, defaults.customAppOrder)
+    autoPauseMusicForConferencing = try value(.autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
+    enableKeyboardShortcuts = try value(.enableKeyboardShortcuts, defaults.enableKeyboardShortcuts)
+    enablePerDeviceVolumePresets = try value(.enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
+    autoRestoreDevice = try value(.autoRestoreDevice, defaults.autoRestoreDevice)
+    enableURLScheme = try value(.enableURLScheme, defaults.enableURLScheme)
+    urlSchemeAutomationAcknowledged = try value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
+    excludedAppIDs = try value(.excludedAppIDs, defaults.excludedAppIDs)
+    pinnedAppIDs = try value(.pinnedAppIDs, defaults.pinnedAppIDs)
+    appEqualizerSettings = try value(.appEqualizerSettings, defaults.appEqualizerSettings)
+    appAudioIntents = try value(.appAudioIntents, defaults.appAudioIntents)
+    // Preference files predating durable app intents must run the migration once.
+    appAudioIntentMigrationVersion = try value(.appAudioIntentMigrationVersion, 0)
+    // A preference file predating guided setup belongs to an existing install.
+    hasCompletedPrivacySetup = try value(.hasCompletedPrivacySetup, true)
+    adaptiveMixMode = try value(.adaptiveMixMode, defaults.adaptiveMixMode)
   }
 }
 

@@ -7,33 +7,62 @@ final class ProfileStore: @unchecked Sendable {
   /// Legacy location from when profiles were called "presets". Migrated on first
   /// load so existing users keep their saved mixes.
   private let legacyURL: URL
-  private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
-  private let logger = Logger(subsystem: "com.waves.profiles", category: "Persistence")
+  private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
   private let maxFileSize: Int64 = 10 * 1024 * 1024 // 10MB
-  private let queue = DispatchQueue(label: "com.waves.profiles.store", qos: .userInitiated)
+  private let queue: DispatchQueue
+  private let writeData: PersistenceDataWrite
+  private let writer: CoalescingPersistenceWriter<[Profile]>
 
-  init(fileManager: FileManager = .default) {
-    guard let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+  convenience init(fileManager: FileManager = .default) {
+    let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
+    let directory: URL
+    if let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+      directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
+      do {
+        try PersistenceSecurity.preparePrivateDirectory(directory, fileManager: fileManager)
+      } catch {
+        logger.error("Failed to create profiles directory: \(error.localizedDescription)")
+      }
+    } else {
       logger.error("Failed to get application support directory")
-      let fallbackDirectory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves", isDirectory: true)
-      try? PersistenceSecurity.preparePrivateDirectory(fallbackDirectory, fileManager: fileManager)
-      url = fallbackDirectory.appendingPathComponent("profiles.json")
-      legacyURL = fallbackDirectory.appendingPathComponent("presets.json")
-      PersistenceSecurity.secureExistingFile(at: url, fileManager: fileManager)
-      PersistenceSecurity.secureExistingFile(at: legacyURL, fileManager: fileManager)
-      return
+      directory = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Waves", isDirectory: true)
+      try? PersistenceSecurity.preparePrivateDirectory(directory, fileManager: fileManager)
     }
-    let directory = supportDirectory.appendingPathComponent("Waves", isDirectory: true)
-    do {
-      try PersistenceSecurity.preparePrivateDirectory(directory, fileManager: fileManager)
-    } catch {
-      logger.error("Failed to create profiles directory: \(error.localizedDescription)")
-    }
-    url = directory.appendingPathComponent("profiles.json")
-    legacyURL = directory.appendingPathComponent("presets.json")
+    self.init(directory: directory, writeData: PrivateAtomicPersistenceFile.write)
     PersistenceSecurity.secureExistingFile(at: url, fileManager: fileManager)
     PersistenceSecurity.secureExistingFile(at: legacyURL, fileManager: fileManager)
+  }
+
+  /// Test-only entry point: keeps current and legacy profile files inside
+  /// `directory` and permits an injected failing write operation.
+  convenience init(
+    directory: URL,
+    writeData: @escaping PersistenceDataWrite = PrivateAtomicPersistenceFile.write
+  ) {
+    try? PersistenceSecurity.preparePrivateDirectory(directory)
+    self.init(
+      url: directory.appendingPathComponent("profiles.json"),
+      legacyURL: directory.appendingPathComponent("presets.json"),
+      writeData: writeData
+    )
+    PersistenceSecurity.secureExistingFile(at: url)
+    PersistenceSecurity.secureExistingFile(at: legacyURL)
+  }
+
+  private init(
+    url: URL,
+    legacyURL: URL,
+    writeData: @escaping PersistenceDataWrite
+  ) {
+    self.url = url
+    self.legacyURL = legacyURL
+    self.writeData = writeData
+    let queue = DispatchQueue(label: "com.waves.profiles.store", qos: .userInitiated)
+    self.queue = queue
+    self.writer = CoalescingPersistenceWriter(queue: queue) { profiles in
+      try Self.write(profiles, to: url, using: writeData)
+    }
   }
 
   /// Set to true the moment `load()` has to back up and discard an unreadable
@@ -43,7 +72,7 @@ final class ProfileStore: @unchecked Sendable {
   private(set) var didRecoverFromCorruptFile = false
 
   func load(defaults: [Profile]) -> [Profile] {
-    return queue.sync {
+    queue.sync {
       let fileManager = FileManager.default
 
       // First launch after the Presets→Profiles rename: adopt the old file if a
@@ -51,21 +80,13 @@ final class ProfileStore: @unchecked Sendable {
       if !fileManager.fileExists(atPath: url.path),
          fileManager.fileExists(atPath: legacyURL.path) {
         if let migrated = loadFile(at: legacyURL) {
-          // Written synchronously (we already hold the queue — an enqueued
-          // save couldn't run until load() returns) and the legacy file is
-          // retired only AFTER the new file is durably on disk: otherwise a
-          // crash between the rename and the deferred write would leave
-          // neither file, silently losing every saved profile. Retired =
-          // renamed rather than deleted, so a future corrupt profiles.json
-          // can't silently resurrect stale pre-rename data as current while
-          // the contents stay recoverable by hand.
+          // Persist synchronously while this queue is serialized, and retire the
+          // legacy file only after the new atomic write succeeds. A failed write
+          // leaves presets.json in place so migration retries next launch.
           do {
-            let data = try PersistedSchema.encode(migrated, using: encoder)
-            try data.write(to: url, options: .atomic)
-            try PersistenceSecurity.setPrivateFilePermissions(url)
+            try Self.write(migrated, to: url, using: writeData)
             retireLegacyFile()
           } catch {
-            // Leave presets.json in place so migration retries next launch.
             logger.error("Failed to persist migrated profiles: \(error.localizedDescription)")
           }
           return migrated
@@ -74,7 +95,11 @@ final class ProfileStore: @unchecked Sendable {
 
       // A missing file is the normal first-launch case: seed defaults on disk.
       guard fileManager.fileExists(atPath: url.path) else {
-        save(defaults)
+        do {
+          try Self.write(defaults, to: url, using: writeData)
+        } catch {
+          logger.error("Failed to seed default profiles: \(error.localizedDescription)")
+        }
         return defaults
       }
 
@@ -138,23 +163,31 @@ final class ProfileStore: @unchecked Sendable {
     }
   }
 
-  func save(_ profiles: [Profile]) {
-    queue.async { [weak self] in
-      guard let self else { return }
-      do {
-        let data = try PersistedSchema.encode(profiles, using: self.encoder)
-        try data.write(to: self.url, options: .atomic)
-        try PersistenceSecurity.setPrivateFilePermissions(self.url)
-      } catch {
-        self.logger.error("Failed to save profiles: \(error.localizedDescription)")
-      }
+  func save(_ profiles: [Profile]) async throws {
+    do {
+      try await writer.save(profiles)
+    } catch {
+      logger.error("Failed to save profiles: \(error.localizedDescription)")
+      throw error
     }
   }
 
-  /// Blocks until every write already queued by `save` has completed. For app
-  /// termination only — a change made in the same instant as quit would
-  /// otherwise be lost when the process exits mid-queue.
-  func flush() {
-    queue.sync {}
+  func flush() async throws {
+    do {
+      try await writer.flush()
+    } catch {
+      logger.error("Failed to flush profiles: \(error.localizedDescription)")
+      throw error
+    }
+  }
+
+  private static func write(
+    _ profiles: [Profile],
+    to url: URL,
+    using writeData: PersistenceDataWrite
+  ) throws {
+    let encoder = JSONEncoder()
+    let data = try PersistedSchema.encode(profiles, using: encoder)
+    try writeData(data, url)
   }
 }

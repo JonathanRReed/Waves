@@ -6,6 +6,8 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-18
+
 ### Added
 - **Per-app equalizer and Adaptive Mix** with simple or advanced curves, presets,
   app roles, and locally persisted settings.
@@ -53,6 +55,19 @@ All notable changes to Waves are documented here. The format follows
 - MIT license.
 
 ### Changed
+- First-run privacy setup now records explicit local consent before the audio
+  backend starts or attempts any Core Audio capture.
+- Per-app changes now use generation-safe complete intents, so superseded async
+  work cannot overwrite a newer volume, mute, EQ, boost, exclusion, or route.
+- Per-app intent state remains durable while apps are offline, and profile applies
+  retain one truthful ordered result for every source row.
+- Preferences, profiles, sessions, and device presets now use bounded coalesced
+  persistence with surfaced write failures and explicit flush boundaries.
+- Release packaging and CI now gate both arm64 and x86_64 slices, matching dSYM
+  UUIDs, the macOS 14.2 floor, bundle metadata, privacy assets, and package layout.
+- Copied diagnostics now report truthful version/OS, structured authorization,
+  device/readiness, route/backend, persistence, and checked-cleanup state in a
+  bounded privacy-labelled format with no audio samples.
 - App pinned to a dark appearance (matches the design charter; fixes light-mode
   readability).
 - Menu-bar icon reflects live state instead of average volume.
@@ -62,6 +77,11 @@ All notable changes to Waves are documented here. The format follows
 - New-profile shortcut is ⌘N (replacing the old ⌘S save-preset shortcut).
 
 ### Fixed
+- Unsupported or inconsistent native audio formats and missing current-output
+  device queries now fail closed instead of fabricating a usable route.
+- App termination now performs bounded, checked shutdown: pending mutations and
+  persistence settle before native route cleanup, with degraded/timed-out results
+  reported rather than silently assumed clean.
 - Equalizer access is now visible on every menu-bar app row instead of being
   discoverable only through the row's context menu.
 - Local release builds now carry version 1.1.0 and build 2 so macOS can clearly

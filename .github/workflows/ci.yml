@@ -46,5 +46,32 @@ jobs:
       - name: Build release
         run: swift build -c release
 
-      - name: Build and validate signed app bundle + DMG
-        run: ./script/build_and_run.sh --release-check
+      - name: Build fresh universal app, dSYM, and DMG
+        run: |
+          set -o pipefail
+          mkdir -p dist
+          ./script/build_and_run.sh --release-check 2>&1 | tee dist/package-build.log
+
+      - name: Validate existing unsigned package without rebuilding
+        run: |
+          set -o pipefail
+          ./script/build_and_run.sh --verify 2>&1 | tee dist/package-validation.log
+
+      - name: Smoke-test app from packaged DMG
+        env:
+          SMOKE_LOG_PATH: ${{ github.workspace }}/dist/package-smoke-process.log
+        run: |
+          set -o pipefail
+          ./script/build_and_run.sh --package-smoke 2>&1 | tee dist/package-smoke.log
+
+      - name: Upload package artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: waves-ci-package-${{ github.run_number }}
+          path: |
+            dist/Waves.dmg
+            dist/Waves.app.dSYM
+            dist/package-*.log
+          if-no-files-found: warn
+          retention-days: 14

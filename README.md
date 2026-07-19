@@ -121,11 +121,15 @@ See `docs/RELEASE.md` for the full release checklist.
 
 ### Quick Start
 
-1. Launch Waves. It will automatically detect manageable running apps and audio-active processes when Core Audio exposes them.
-2. Adjust volume sliders for individual apps
-3. Use the boost menu when an app is too quiet
-4. Use the mute button to silence specific applications
-5. Pin important apps to keep them easily accessible
+1. Launch Waves and review the first-run privacy setup. Waves records your local
+   consent before starting its audio backend or attempting Core Audio capture;
+   macOS may then present its audio-capture permission prompt.
+2. After setup, Waves detects manageable running apps and audio-active processes
+   when Core Audio exposes them.
+3. Adjust volume sliders for individual apps.
+4. Use the boost menu when an app is too quiet.
+5. Use the mute button to silence specific applications.
+6. Pin important apps to keep them easily accessible.
 
 ### Keyboard Shortcuts
 
@@ -257,8 +261,11 @@ swift build
 ## Privacy
 
 Waves processes audio locally and never records or transmits it, has no
-analytics, and makes no network requests. See [`PRIVACY.md`](PRIVACY.md) for
-details, and [`SECURITY.md`](SECURITY.md) to report a vulnerability.
+analytics, and makes no network requests. `Copy Diagnostics` contains no audio
+samples, but it can include version/OS metadata, structured permission and route
+state, app and device names or identifiers, and bounded error text; review it
+before sharing. See [`PRIVACY.md`](PRIVACY.md) for details, and
+[`SECURITY.md`](SECURITY.md) to report a vulnerability.
 
 ## Contributing
 

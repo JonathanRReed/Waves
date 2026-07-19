@@ -6,11 +6,13 @@ no account, no analytics, and no servers.
 ## What Waves accesses
 
 - **App audio (Core Audio process taps).** To apply per-app volume, mute, boost,
-  EQ, and adaptive mixing, Waves taps the audio of apps you choose and replays it to your output
-  device. **Audio is processed locally and in real time on your Mac. It is never
-  recorded, stored, or transmitted.** macOS asks for audio-capture permission
-  the first time Waves needs it. Adaptive Mix retains only transient loudness
-  and voice-band energy values, never audio samples.
+  EQ, and adaptive mixing, Waves taps the audio of apps you choose and replays it
+  to your output device. **Audio is processed locally and in real time on your
+  Mac. It is never recorded, stored, or transmitted.** On first run, Waves shows
+  its local privacy setup and does not start the audio backend or attempt capture
+  until you consent. macOS may then ask for audio-capture permission when the
+  process-tap capability is first used. Adaptive Mix retains only transient
+  loudness and voice-band energy values, never audio samples.
 - **Running applications.** Waves lists your running apps (names and icons) so it
   can show them in the mixer.
 - **Audio output devices.** Waves reads available output devices to show the
@@ -31,9 +33,12 @@ These can include app names, bundle identifiers, route state, selected output
 device identifiers, diagnostic notes, and your volume/mute/boost choices. They
 never leave your Mac.
 
-`Copy Diagnostics` places the current diagnostic report on the general
-pasteboard. That report can include app names, device names, routing state, and
-recent error text; only copy it when you intend to share it.
+`Copy Diagnostics` places a bounded current report on the general pasteboard.
+It contains no audio samples, but can include the Waves version/build, macOS
+version, structured capture-authorization state, app and device names or
+identifiers, route states, persistence/cleanup status, and bounded error text.
+Fields with potentially identifying values are labelled in the report. Review
+and redact it before sharing.
 
 ## What Waves does **not** do
 

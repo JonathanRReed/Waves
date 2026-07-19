@@ -4,7 +4,7 @@ import Testing
 @testable import Waves
 import WavesAudioCore
 
-@Test func versionedEnvelopeRoundTrips() throws {
+@Test func schemaOneEnvelopeRoundTrips() throws {
   var prefs = UserPreferences()
   prefs.enableURLScheme = true
   prefs.sortMode = .category
@@ -12,6 +12,7 @@ import WavesAudioCore
   let data = try PersistedSchema.encode(prefs, using: JSONEncoder())
   let decoded = try PersistedSchema.decode(UserPreferences.self, from: data, using: JSONDecoder())
 
+  #expect(PersistedSchema.current == 1)
   #expect(decoded.enableURLScheme == true)
   #expect(decoded.sortMode == .category)
 }
@@ -19,8 +20,43 @@ import WavesAudioCore
 @Test func encodedPayloadCarriesSchemaVersion() throws {
   let data = try PersistedSchema.encode(UserPreferences(), using: JSONEncoder())
   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-  #expect(json?["schemaVersion"] as? Int == PersistedSchema.current)
+  #expect(json?["schemaVersion"] as? Int == 1)
   #expect(json?["payload"] != nil)
+}
+
+@Test func schemaOneDecodesAdditivePreferenceFields() throws {
+  var prefs = UserPreferences()
+  prefs.appAudioIntents["com.example.player"] = PersistedAppAudioIntent(
+    appID: "com.example.player",
+    desiredVolume: 0.42,
+    isMuted: true,
+    volumeBoost: 2,
+    targetDeviceUID: "device.external"
+  )
+  prefs.appAudioIntentMigrationVersion = 1
+  prefs.hasCompletedPrivacySetup = true
+
+  let data = try JSONEncoder().encode(VersionedPayload(schemaVersion: 1, payload: prefs))
+  let decoded = try PersistedSchema.decode(UserPreferences.self, from: data, using: JSONDecoder())
+
+  #expect(decoded.appAudioIntents["com.example.player"]?.desiredVolume == 0.42)
+  #expect(decoded.appAudioIntents["com.example.player"]?.isMuted == true)
+  #expect(decoded.appAudioIntentMigrationVersion == 1)
+  #expect(decoded.hasCompletedPrivacySetup == true)
+}
+
+@Test func decodeRejectsPartialEnvelopeKeys() {
+  #expect(preferencesSchemaDecodeFails("{\"schemaVersion\":1}"))
+  #expect(preferencesSchemaDecodeFails("{\"payload\":{}}"))
+}
+
+@Test func decodeRejectsSchemaZeroEnvelope() {
+  #expect(preferencesSchemaDecodeFails("{\"schemaVersion\":0,\"payload\":{}}"))
+}
+
+@Test func decodeRejectsSchemaTwoAndFutureEnvelopes() {
+  #expect(preferencesSchemaDecodeFails("{\"schemaVersion\":2,\"payload\":{}}"))
+  #expect(preferencesSchemaDecodeFails("{\"schemaVersion\":99,\"payload\":{}}"))
 }
 
 @Test func decodeAcceptsLegacyUnversionedFile() throws {
@@ -39,6 +75,19 @@ import WavesAudioCore
   let legacy = Data("[]".utf8)
   let decoded = try PersistedSchema.decode([Profile].self, from: legacy, using: JSONDecoder())
   #expect(decoded.isEmpty)
+}
+
+private func preferencesSchemaDecodeFails(_ json: String) -> Bool {
+  do {
+    _ = try PersistedSchema.decode(
+      UserPreferences.self,
+      from: Data(json.utf8),
+      using: JSONDecoder()
+    )
+    return false
+  } catch {
+    return true
+  }
 }
 
 // MARK: - Store corrupt-file recovery
