@@ -415,11 +415,7 @@ build_app_bundle() {
   fi
 
   if [ -f "$LOGO_RESOURCE" ]; then
-    if ! cp "$LOGO_RESOURCE" "$APP_RESOURCES/waves-logo.png"; then
-      echo "Warning: Failed to copy logo resource" >&2
-    else
-      source_logo="$LOGO_RESOURCE"
-    fi
+    source_logo="$LOGO_RESOURCE"
   elif is_distribution_build_mode; then
     echo "Error: App icon source is missing at $LOGO_RESOURCE" >&2
     exit 1

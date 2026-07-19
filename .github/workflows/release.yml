@@ -22,6 +22,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # Bump per release; must match script/build_and_run.sh's APP_BUILD default.
+  RELEASE_BUILD: "2"
+
 jobs:
   release:
     name: Build, notarize, publish
@@ -53,8 +57,9 @@ jobs:
             echo "::error::The checked-out commit does not match the commit named by $GITHUB_REF_NAME."
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main; then
-            echo "::error::$GITHUB_REF_NAME points to $TAG_COMMIT, which is not reachable from origin/main. Refusing to use release credentials."
+          MAIN_COMMIT="$(git rev-parse refs/remotes/origin/main)"
+          if [ "$TAG_COMMIT" != "$MAIN_COMMIT" ]; then
+            echo "::error::$GITHUB_REF_NAME points to $TAG_COMMIT, but origin/main is $MAIN_COMMIT. The release tag must exactly match origin/main."
             exit 1
           fi
 
@@ -106,7 +111,7 @@ jobs:
       - name: Build and validate unsigned universal package before credentials
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ github.run_number }}
+          APP_BUILD: ${{ env.RELEASE_BUILD }}
         run: |
           set -o pipefail
           mkdir -p dist
@@ -116,7 +121,7 @@ jobs:
       - name: Smoke-test unsigned packaged app before credentials
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ github.run_number }}
+          APP_BUILD: ${{ env.RELEASE_BUILD }}
           SMOKE_LOG_PATH: ${{ github.workspace }}/dist/unsigned-package-smoke-process.log
         run: |
           set -o pipefail
@@ -164,7 +169,7 @@ jobs:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
           NOTARY_PROFILE: waves-notary
           APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ github.run_number }}
+          APP_BUILD: ${{ env.RELEASE_BUILD }}
         run: |
           set -o pipefail
           ./script/build_and_run.sh --notarize 2>&1 | tee dist/signed-package-build.log
@@ -172,7 +177,7 @@ jobs:
       - name: Run strict publication validation
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ github.run_number }}
+          APP_BUILD: ${{ env.RELEASE_BUILD }}
         run: |
           set -o pipefail
           ./script/build_and_run.sh --publication-check 2>&1 | tee dist/publication-check.log
@@ -180,7 +185,7 @@ jobs:
       - name: Smoke-test signed packaged app
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ github.run_number }}
+          APP_BUILD: ${{ env.RELEASE_BUILD }}
           SMOKE_LOG_PATH: ${{ github.workspace }}/dist/signed-package-smoke-process.log
         run: |
           set -o pipefail
@@ -229,7 +234,48 @@ jobs:
             dist/publication-check.log
           if-no-files-found: error
 
-      - name: Publish GitHub Release
+      - name: Extract curated release notes
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          awk -v version="$RELEASE_VERSION" '
+            BEGIN { heading = "## [" version "]" }
+            $0 == heading || index($0, heading " - ") == 1 {
+              in_section = 1
+              found = 1
+              next
+            }
+            in_section && /^## \[/ { exit }
+            in_section {
+              lines[++count] = $0
+              if ($0 !~ /^[[:space:]]*$/) {
+                last_nonempty = count
+              }
+            }
+            END {
+              if (!found || last_nonempty == 0) {
+                exit 1
+              }
+              first_nonempty = 1
+              while (first_nonempty <= last_nonempty && lines[first_nonempty] ~ /^[[:space:]]*$/) {
+                first_nonempty++
+              }
+              for (i = first_nonempty; i <= last_nonempty; i++) {
+                print lines[i]
+              }
+            }
+          ' CHANGELOG.md > dist/release-notes.md || {
+            echo "::error::CHANGELOG.md has no non-empty release notes section for $RELEASE_VERSION."
+            exit 1
+          }
+          if [ ! -s dist/release-notes.md ]; then
+            echo "::error::Extracted release notes are empty for $RELEASE_VERSION."
+            exit 1
+          fi
+
+      - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -237,4 +283,5 @@ jobs:
             dist/Waves.dmg.sha256
             dist/Waves.app.dSYM.zip
             dist/waves.rb
-          generate_release_notes: true
+          draft: true
+          body_path: dist/release-notes.md

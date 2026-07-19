@@ -7,6 +7,7 @@ waves_logo_assets/
 
 # Internal agent/tooling config — not part of the published product
 .codex/
+.claude/
 
 *.xcuserstate
 xcuserdata/
@@ -15,7 +16,6 @@ xcuserdata/
 __pycache__/
 *.pyc
 
-# Intermediate feature-audit working data (regenerable; canonical outputs are
-# FEATURE_STATUS.csv + docs/feature-status.json)
+# Intermediate feature-audit working data (internal, regenerable)
 docs/fix-plan.json
 docs/phase4-followups.json

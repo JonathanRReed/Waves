@@ -63,10 +63,10 @@ final class WaveEngine {
     /// Cyan/teal family only, per DESIGN.md's Signal Rarity Rule — the voices
     /// differ in temperature within the signal hue, never in hue family.
     static let palette: [Color] = [
-      Color(red: 0.62, green: 0.97, blue: 1.00),
-      Color(red: 0.20, green: 0.87, blue: 0.95),
-      Color(red: 0.05, green: 0.72, blue: 0.78),
-      Color(red: 0.00, green: 0.58, blue: 0.66),
+      Color(red: 158.0 / 255.0, green: 247.0 / 255.0, blue: 1.0),
+      Color(red: 51.0 / 255.0, green: 222.0 / 255.0, blue: 242.0 / 255.0),
+      Color(red: 13.0 / 255.0, green: 184.0 / 255.0, blue: 199.0 / 255.0),
+      Color(red: 0.0, green: 148.0 / 255.0, blue: 168.0 / 255.0),
     ]
   }
 
@@ -296,8 +296,8 @@ struct MixedWaveformView: View {
     let increased = contrast == .increased
 
     // Per-voice displacement at horizontal position u (0...1), in points.
-    // Components render smaller than the band (0.55×) so the sum — which can
-    // constructively exceed any one of them — visibly towers over its parts.
+    // Components render smaller than the band (0.72×, level-scaled) so the sum
+    // constructively exceeds any one of them and visibly towers over its parts.
     func displacement(_ voice: WaveEngine.Voice, _ u: Double) -> Double {
       let amp = maxAmp * 0.72 * (0.24 + 0.76 * voice.eased)
       var wave = 0.0
@@ -366,12 +366,12 @@ struct MixedWaveformView: View {
       let restPath = smoothPath(through: restPoints)
       context.drawLayer { layer in
         layer.addFilter(.blur(radius: 4))
-        layer.opacity = 0.20 * restMix
-        layer.stroke(restPath, with: coreGradient, lineWidth: 3)
+        layer.opacity = 0.20 * restMix * Self.glow
+        layer.stroke(restPath, with: coreGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
       }
       context.drawLayer { layer in
         layer.opacity = (increased ? 0.85 : 0.55) * restMix
-        layer.stroke(restPath, with: coreGradient, style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+        layer.stroke(restPath, with: coreGradient, style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
       }
     }
 
@@ -386,7 +386,7 @@ struct MixedWaveformView: View {
     fillPath.addLine(to: CGPoint(x: 0, y: midY))
     fillPath.closeSubpath()
     context.drawLayer { layer in
-      layer.opacity = (0.05 + 0.09 * energy) * liveMix
+      layer.opacity = (0.05 + 0.09 * energy) * liveMix * Self.glow
       layer.fill(fillPath, with: .color(Self.mid))
     }
 
@@ -399,12 +399,12 @@ struct MixedWaveformView: View {
       let path = smoothPath(through: componentPoints[index])
       context.drawLayer { layer in
         layer.addFilter(.blur(radius: 2.5))
-        layer.opacity = (0.16 + 0.22 * voice.eased) * liveMix
-        layer.stroke(path, with: .color(voice.color), lineWidth: 2.4)
+        layer.opacity = (0.16 + 0.22 * voice.eased) * liveMix * Self.glow
+        layer.stroke(path, with: .color(voice.color), style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
       }
       context.drawLayer { layer in
         layer.opacity = (0.32 + 0.38 * voice.eased) * liveMix
-        layer.stroke(path, with: .color(voice.color), style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+        layer.stroke(path, with: .color(voice.color), style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
       }
     }
 
@@ -413,13 +413,13 @@ struct MixedWaveformView: View {
     // a plotted line.
     context.drawLayer { layer in
       layer.addFilter(.blur(radius: 8 + 5 * energy))
-      layer.opacity = (0.12 + 0.30 * energy) * liveMix
-      layer.stroke(sumPath, with: coreGradient, lineWidth: 6)
+      layer.opacity = (0.12 + 0.30 * energy) * liveMix * Self.glow
+      layer.stroke(sumPath, with: coreGradient, style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
     }
     context.drawLayer { layer in
       layer.addFilter(.blur(radius: 2.5))
-      layer.opacity = (0.28 + 0.42 * energy) * liveMix
-      layer.stroke(sumPath, with: coreGradient, lineWidth: 3)
+      layer.opacity = (0.28 + 0.42 * energy) * liveMix * Self.glow
+      layer.stroke(sumPath, with: coreGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
     }
     context.drawLayer { layer in
       layer.addFilter(.blur(radius: 0.4))
@@ -461,8 +461,9 @@ struct MixedWaveformView: View {
     return path
   }
 
-  private static let core = Color(red: 0.55, green: 0.97, blue: 1.0)
-  private static let mid = Color(red: 0.0, green: 0.85, blue: 0.90)
+  private static let core = Color(red: 140.0 / 255.0, green: 247.0 / 255.0, blue: 1.0)
+  private static let mid = Color(red: 0.0, green: 217.0 / 255.0, blue: 230.0 / 255.0)
+  private static let glow = 1.0
 }
 
 // MARK: - Store adapter

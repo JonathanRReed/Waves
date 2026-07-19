@@ -1,5 +1,7 @@
 # Waves
 
+[![CI](https://github.com/JonathanRReed/Waves/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JonathanRReed/Waves/actions/workflows/ci.yml)
+
 Waves is a native macOS per-app audio mixer. It uses local Core Audio process taps on macOS 14.2 or newer to route selected app audio through per-app volume, mute, boost, equalizer, and adaptive mixing controls before playback.
 
 ## Features
@@ -19,6 +21,8 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 - **Explicit Roles and Modes**: Set each app to Auto, Voice, Media, or Ignore, then choose Speech Focus, Loudness Balance, Both, or Off
 
 ### Device Management
+- **Per-App Output Routing**: Send each app to a chosen output device
+- **Global Output Switching**: Change the system output device from the menu-bar panel
 - **Device Auto-Restore**: Automatically re-establishes audio routes when switching output devices
 - **Per-Device Volume Memory**: Remember volume settings for each app across different audio devices
 
@@ -56,8 +60,8 @@ the same driver-free approach, so against those Waves leads on other fronts:
 - **Broad reach** — macOS 14.2+ **and Intel**, where comparable driver-free
   tools require macOS 15+.
 - **Honest routing** — every app shows whether it's visible, monitored, managed,
-  or errored, with an in-app diagnostics export. No other tool surfaces tap
-  health this clearly.
+  or errored, with an in-app diagnostics export, so you always know exactly what
+  Waves is (and isn't) controlling.
 - **Accessibility** — full keyboard operation and VoiceOver rotors.
 - **Reliability escape hatch** — any app that dislikes being tapped (DAWs,
   conferencing/echo-cancellation apps, other audio tools) can be excluded in one
@@ -78,6 +82,20 @@ better fit.
 - Audio capture permission when macOS prompts for Core Audio process taps
 
 ## Installation
+
+### Download (recommended)
+
+Download the latest signed and notarized `Waves.dmg` from
+[GitHub Releases](https://github.com/JonathanRReed/Waves/releases/latest), open
+it, and drag **Waves** to **Applications**.
+
+### Homebrew
+
+```bash
+brew install --cask jonathanrreed/tap/waves
+```
+
+The cask lives in [`JonathanRReed/homebrew-tap`](https://github.com/JonathanRReed/homebrew-tap).
 
 ### Building from Source
 
@@ -279,4 +297,7 @@ Waves is released under the MIT License. See [`LICENSE`](LICENSE).
 
 ## Support
 
-For issues and questions, please refer to the in-app diagnostics panel or check the troubleshooting section above.
+Check the troubleshooting section above first. For bugs and questions, open an
+issue at [github.com/JonathanRReed/Waves/issues](https://github.com/JonathanRReed/Waves/issues) —
+the bug template asks for a `Copy Diagnostics` export (Waves › Settings ›
+Diagnostics), which contains no audio samples.

@@ -18,8 +18,8 @@ Before creating a tag:
 - Confirm the intended release commit is the current `origin/main` commit.
 
 The workflow accepts only tags that exactly match `vX.Y.Z` with numeric
-components and no leading zeroes. It verifies the tagged commit is the fetched
-`origin/main` commit before reading any signing or notarization secret.
+components and no leading zeroes. It requires the tagged commit to equal the
+fetched `origin/main` commit before reading any signing or notarization secret.
 
 ## Unsigned or Ad Hoc Local Validation
 
@@ -109,14 +109,17 @@ requires:
 
 The tag-driven workflow performs tests and unsigned checks before importing
 credentials. After notarization it runs publication validation and package
-smoke, then produces and uploads these workflow artifacts before the GitHub
-release publication step:
+smoke, then produces and uploads these workflow artifacts:
 
 - `Waves.dmg`
 - `Waves.dmg.sha256`
 - `Waves.app.dSYM.zip`
 - `waves.rb`, generated from `Casks/waves.rb` with the final checksum
 - package, smoke, and publication logs
+
+The workflow creates the GitHub release as a draft with the matching curated
+`CHANGELOG.md` section as its body. A maintainer reviews the draft notes and
+assets, then clicks **Publish release** manually.
 
 The generated cask is a release artifact; the workflow does not replace the
 checksum placeholder in the repository. Audit the generated file before

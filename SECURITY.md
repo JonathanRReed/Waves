@@ -4,8 +4,7 @@
 
 Please report security issues **privately** rather than opening a public issue.
 
-- Use GitHub's [private vulnerability reporting](https://github.com/JonathanRReed/Waves/security/advisories/new) for this repository, or
-- Email the maintainer listed on the GitHub profile.
+- Use GitHub's [private vulnerability reporting](https://github.com/JonathanRReed/Waves/security/advisories/new) for this repository.
 
 Please include:
 
