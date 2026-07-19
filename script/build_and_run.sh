@@ -709,8 +709,8 @@ validate_mounted_layout_and_identity() {
     exit 1
   fi
 
-  built_cdhash="$(codesign -dvvv "$APP_BUNDLE" 2>&1 | while IFS= read -r line; do case "$line" in CDHash=*) printf '%s\n' "${line#CDHash=}"; break ;; esac; done)"
-  mounted_cdhash="$(codesign -dvvv "$mounted_app" 2>&1 | while IFS= read -r line; do case "$line" in CDHash=*) printf '%s\n' "${line#CDHash=}"; break ;; esac; done)"
+  built_cdhash="$(codesign -dvvv "$APP_BUNDLE" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
+  mounted_cdhash="$(codesign -dvvv "$mounted_app" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
   if [ -z "$built_cdhash" ] || [ "$built_cdhash" != "$mounted_cdhash" ]; then
     echo "Error: The mounted app code identity does not match $APP_BUNDLE." >&2
     exit 1
