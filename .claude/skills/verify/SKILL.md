@@ -1,6 +1,6 @@
 ---
 name: verify
-summary: Runtime verification recipe for the packaged Waves macOS app
+description: Verify the packaged Waves macOS app at its real GUI surface with isolated persistence and exact-process checks.
 ---
 
 # Verify Waves at the GUI surface
