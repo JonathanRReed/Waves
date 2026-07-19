@@ -45,6 +45,28 @@ import WavesAudioCore
 
 // MARK: - Forward/backward-compatible decoding
 
+@Test func newUserPreferencesStartWithAppAudioIntentMigrationComplete() {
+  #expect(UserPreferences().appAudioIntentMigrationVersion == 1)
+}
+
+@Test func oldUserPreferencesMissingMigrationMarkerDecodeAsVersionZero() throws {
+  let data = Data("{\"showRecentApps\":false}".utf8)
+  let prefs = try JSONDecoder().decode(UserPreferences.self, from: data)
+
+  #expect(prefs.showRecentApps == false)
+  #expect(prefs.appAudioIntentMigrationVersion == 0)
+}
+
+@Test func appAudioIntentMigrationMarkerRoundTrips() throws {
+  var prefs = UserPreferences()
+  prefs.appAudioIntentMigrationVersion = 1
+
+  let data = try JSONEncoder().encode(prefs)
+  let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
+
+  #expect(decoded.appAudioIntentMigrationVersion == 1)
+}
+
 @Test func userPreferencesDecodesFromEmptyObjectUsingDefaults() throws {
   // A preferences file from before any keys existed must still load as defaults
   // rather than throwing (which previously wiped all settings on upgrade).
@@ -56,6 +78,8 @@ import WavesAudioCore
   #expect(prefs.enableURLScheme == false)
   #expect(prefs.sortMode == .name)
   #expect(prefs.appEqualizerSettings.isEmpty)
+  #expect(prefs.appAudioIntents.isEmpty)
+  #expect(prefs.appAudioIntentMigrationVersion == 0)
   #expect(prefs.adaptiveMixMode == .off)
 }
 
@@ -110,7 +134,7 @@ import WavesAudioCore
   #expect(decoded.excludedAppIDs.isEmpty)
 }
 
-@Test func preferencesStoreWritesPrivatePermissions() throws {
+@Test func preferencesStoreWritesPrivatePermissions() async throws {
   let directory = FileManager.default.temporaryDirectory
     .appendingPathComponent("waves-preferences-\(UUID().uuidString)", isDirectory: true)
   defer { try? FileManager.default.removeItem(at: directory) }
@@ -118,8 +142,8 @@ import WavesAudioCore
   let store = PreferencesStore(directory: directory)
   var prefs = UserPreferences()
   prefs.showRecentApps = false
-  store.save(prefs)
-  store.flush()
+  try await store.save(prefs)
+  try await store.flush()
 
   let file = directory.appendingPathComponent("preferences.json")
   let directoryMode = try permissions(at: directory)

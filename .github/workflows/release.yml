@@ -1,9 +1,11 @@
 name: Release
 
-# Build, notarize, and publish a DMG when a version tag is pushed (e.g. v1.0.0).
+# Build, notarize, and publish a DMG when a strict vX.Y.Z tag is pushed.
+# This workflow never creates or pushes the tag; a maintainer must do that.
 #
 # Requires these repository secrets (the signing assets only the maintainer can
-# provide). Without them the job fails fast with a clear message — by design.
+# provide). They are not read until tag, branch, metadata, test, build, package,
+# and unsigned smoke checks have passed.
 #   DEVELOPER_ID_CERT_P12       base64 of a Developer ID Application .p12
 #   DEVELOPER_ID_CERT_PASSWORD  password for that .p12
 #   SIGN_IDENTITY               e.g. "Developer ID Application: Name (TEAMID)"
@@ -29,7 +31,58 @@ jobs:
     # build-machine OS) is what enforces the macOS 14.2 minimum.
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out tagged repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate strict tag and origin/main ancestry
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Release tags must exactly match vX.Y.Z with numeric components and no leading zeroes."
+            exit 1
+          fi
+
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          TAG_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          CHECKED_OUT_COMMIT="$(git rev-parse HEAD)"
+          if [ "$TAG_COMMIT" != "$CHECKED_OUT_COMMIT" ]; then
+            echo "::error::The checked-out commit does not match the commit named by $GITHUB_REF_NAME."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main; then
+            echo "::error::$GITHUB_REF_NAME points to $TAG_COMMIT, which is not reachable from origin/main. Refusing to use release credentials."
+            exit 1
+          fi
+
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate changelog and cask template metadata
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ruby -c Casks/waves.rb
+          ruby <<'RUBY'
+          version = ENV.fetch("RELEASE_VERSION")
+          changelog = File.read("CHANGELOG.md")
+          heading = /^## \[#{Regexp.escape(version)}\](?: - \d{4}-\d{2}-\d{2})?$/
+          matches = changelog.lines.grep(heading)
+          abort "CHANGELOG.md must contain exactly one release heading for #{version}" unless matches.length == 1
+
+          cask = File.read("Casks/waves.rb")
+          versions = cask.scan(/^\s*version\s+"([^"]+)"\s*$/).flatten
+          abort "Casks/waves.rb must declare exactly version #{version}" unless versions == [version]
+
+          placeholder = "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
+          checksums = cask.scan(/^\s*sha256\s+"([^"]+)"\s*$/).flatten
+          abort "Casks/waves.rb must contain the release checksum placeholder exactly once" unless checksums == [placeholder]
+          abort "Casks/waves.rb must not use sha256 :no_check" if cask.include?("sha256 :no_check")
+          abort "Casks/waves.rb release URL must remain tag-templated" unless cask.include?('/releases/download/v#{version}/Waves.dmg')
+          RUBY
 
       # Belt-and-suspenders: pick the newest Xcode actually on the runner
       # rather than trusting the image's default selection. See ci.yml.
@@ -44,9 +97,30 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE"
           swift --version
 
-      - name: Derive version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Run tests before credentials
+        run: swift test
+
+      - name: Build release before credentials
+        run: swift build -c release
+
+      - name: Build and validate unsigned universal package before credentials
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          APP_BUILD: ${{ github.run_number }}
+        run: |
+          set -o pipefail
+          mkdir -p dist
+          ./script/build_and_run.sh --release-check 2>&1 | tee dist/unsigned-package-build.log
+          ./script/build_and_run.sh --verify 2>&1 | tee dist/unsigned-package-validation.log
+
+      - name: Smoke-test unsigned packaged app before credentials
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          APP_BUILD: ${{ github.run_number }}
+          SMOKE_LOG_PATH: ${{ github.workspace }}/dist/unsigned-package-smoke-process.log
+        run: |
+          set -o pipefail
+          ./script/build_and_run.sh --package-smoke 2>&1 | tee dist/unsigned-package-smoke.log
 
       - name: Import Developer ID certificate
         env:
@@ -54,7 +128,8 @@ jobs:
           CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
-          if [ -z "$CERT_P12" ]; then
+          set -euo pipefail
+          if [ -z "$CERT_P12" ] || [ -z "$CERT_PASSWORD" ] || [ -z "$KEYCHAIN_PASSWORD" ]; then
             echo "::error::Signing secrets are not configured. See .github/workflows/release.yml for the required secrets."
             exit 1
           fi
@@ -62,10 +137,11 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
 
       - name: Store notarytool credentials
         env:
@@ -73,21 +149,85 @@ jobs:
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
           NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
         run: |
+          set -euo pipefail
+          if [ -z "$NOTARY_APPLE_ID" ] || [ -z "$NOTARY_TEAM_ID" ] || [ -z "$NOTARY_PASSWORD" ]; then
+            echo "::error::Notarization secrets are not configured. See .github/workflows/release.yml for the required secrets."
+            exit 1
+          fi
           xcrun notarytool store-credentials waves-notary \
             --apple-id "$NOTARY_APPLE_ID" \
             --team-id "$NOTARY_TEAM_ID" \
             --password "$NOTARY_PASSWORD"
 
-      - name: Build, sign, notarize, staple
+      - name: Build, sign, notarize, and staple
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
           NOTARY_PROFILE: waves-notary
           APP_VERSION: ${{ steps.version.outputs.version }}
           APP_BUILD: ${{ github.run_number }}
-        run: ./script/build_and_run.sh --notarize
+        run: |
+          set -o pipefail
+          ./script/build_and_run.sh --notarize 2>&1 | tee dist/signed-package-build.log
 
-      - name: Checksum
-        run: shasum -a 256 dist/Waves.dmg | tee dist/Waves.dmg.sha256
+      - name: Run strict publication validation
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          APP_BUILD: ${{ github.run_number }}
+        run: |
+          set -o pipefail
+          ./script/build_and_run.sh --publication-check 2>&1 | tee dist/publication-check.log
+
+      - name: Smoke-test signed packaged app
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          APP_BUILD: ${{ github.run_number }}
+          SMOKE_LOG_PATH: ${{ github.workspace }}/dist/signed-package-smoke-process.log
+        run: |
+          set -o pipefail
+          ./script/build_and_run.sh --package-smoke 2>&1 | tee dist/signed-package-smoke.log
+
+      - name: Produce checksum, dSYM archive, and final cask
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -d dist/Waves.app.dSYM
+          (
+            cd dist
+            shasum -a 256 Waves.dmg > Waves.dmg.sha256
+          )
+          ditto -c -k --sequesterRsrc --keepParent dist/Waves.app.dSYM dist/Waves.app.dSYM.zip
+
+          RELEASE_SHA256="$(shasum -a 256 dist/Waves.dmg | cut -d ' ' -f 1)"
+          export RELEASE_SHA256
+          ruby <<'RUBY'
+          version = ENV.fetch("RELEASE_VERSION")
+          checksum = ENV.fetch("RELEASE_SHA256")
+          abort "Invalid SHA-256" unless checksum.match?(/\A[0-9a-f]{64}\z/)
+
+          placeholder = "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
+          template = File.read("Casks/waves.rb")
+          abort "Cask version changed after validation" unless template.scan(/^\s*version\s+"([^"]+)"\s*$/).flatten == [version]
+          abort "Cask checksum placeholder is missing or duplicated" unless template.scan(placeholder).length == 1
+
+          rendered = template.sub(%(sha256 "#{placeholder}"), %(sha256 "#{checksum}"))
+          abort "Generated cask still contains the checksum placeholder" if rendered.include?(placeholder)
+          File.write("dist/waves.rb", rendered)
+          RUBY
+          ruby -c dist/waves.rb
+
+      - name: Upload final release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: waves-${{ steps.version.outputs.version }}-release
+          path: |
+            dist/Waves.dmg
+            dist/Waves.dmg.sha256
+            dist/Waves.app.dSYM.zip
+            dist/waves.rb
+            dist/*package*.log
+            dist/publication-check.log
+          if-no-files-found: error
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -95,4 +235,6 @@ jobs:
           files: |
             dist/Waves.dmg
             dist/Waves.dmg.sha256
+            dist/Waves.app.dSYM.zip
+            dist/waves.rb
           generate_release_notes: true

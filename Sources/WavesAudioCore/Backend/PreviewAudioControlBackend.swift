@@ -5,6 +5,9 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
   private var profiles: [Profile]
   private var equalizerSettings: [String: EqualizerSettings] = [:]
   private var adaptiveGainsDB: [String: Float] = [:]
+  private var latestAcceptedGenerationByLogicalID: [String: UInt64] = [:]
+  private var legacyGeneration: UInt64 = 0
+  private var isStopped = false
 
   // The preview backend has no real audio hardware, so it never reports device
   // changes. An immediately-finishing stream lets observers attach harmlessly.
@@ -20,9 +23,18 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     self.profiles = profiles
   }
 
-  public func start() async throws {}
+  public func start() async throws {
+    isStopped = false
+  }
 
-  public func stop() async {}
+  public func stop() async {
+    isStopped = true
+  }
+
+  public func shutdownWithResult() async -> BackendShutdownResult {
+    await stop()
+    return BackendShutdownResult(completion: .clean)
+  }
 
   public func currentSnapshot() async -> AudioSessionSnapshot {
     snapshot
@@ -45,52 +57,63 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
   }
 
   public func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
-      throw BackendError.appNotFound(appID)
-    }
-
-    snapshot.apps[index].desiredVolume = max(0, min(1, volume))
-    snapshot.apps[index].appliedVolume =
-      snapshot.apps[index].compatibility == .supported ? snapshot.apps[index].desiredVolume : nil
-    snapshot.apps[index].routingState =
-      snapshot.apps[index].compatibility == .supported ? .managed : .monitorOnly
+    let app = try legacyApp(forAppID: appID)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: volume,
+      isMuted: app.isMuted,
+      volumeBoost: app.volumeBoost,
+      equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+      targetDeviceUID: app.targetDeviceUID,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   public func setMuted(_ isMuted: Bool, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
-      throw BackendError.appNotFound(appID)
-    }
-
-    snapshot.apps[index].isMuted = isMuted
-    if isMuted {
-      snapshot.apps[index].peakLevel = 0
-      snapshot.apps[index].rmsLevel = 0
-    }
+    let app = try legacyApp(forAppID: appID)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: app.desiredVolume,
+      isMuted: isMuted,
+      volumeBoost: app.volumeBoost,
+      equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+      targetDeviceUID: app.targetDeviceUID,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   public func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
-      throw BackendError.appNotFound(appID)
-    }
-
-    let clampedBoost = max(1.0, min(4.0, boost))
-    snapshot.apps[index].volumeBoost = clampedBoost
+    let app = try legacyApp(forAppID: appID)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: app.desiredVolume,
+      isMuted: app.isMuted,
+      volumeBoost: boost,
+      equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+      targetDeviceUID: app.targetDeviceUID,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   public func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws {
-    guard let index = snapshot.apps.firstIndex(matchingAppKey: appID) else {
-      throw BackendError.appNotFound(appID)
-    }
-
-    equalizerSettings[snapshot.apps[index].logicalID] = settings
-    if snapshot.apps[index].compatibility == .supported {
-      snapshot.apps[index].routingState = .managed
-      snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted
-        ? 0
-        : snapshot.apps[index].desiredVolume
-    } else {
-      snapshot.apps[index].routingState = .monitorOnly
-    }
+    let app = try legacyApp(forAppID: appID)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: app.desiredVolume,
+      isMuted: app.isMuted,
+      volumeBoost: app.volumeBoost,
+      equalizerSettings: settings,
+      targetDeviceUID: app.targetDeviceUID,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   public func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels] {
@@ -125,27 +148,184 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].isPinned = isPinned
   }
 
-  public func applyProfile(_ profile: Profile) async throws -> AudioSessionSnapshot {
-    for entry in profile.entries {
-      // Membership-only entries are pure grouping — leave the app's audio alone.
-      guard entry.hasLevels else { continue }
-      guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == entry.appID }) else {
+  public func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult {
+    guard let initialIndex = snapshot.apps.firstIndex(matchingAppKey: intent.appID) else {
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unavailable,
+        resultingApp: nil,
+        backendStatus: snapshot.backendStatus,
+        detail: "The app is not available in the current audio session."
+      )
+    }
+
+    let logicalID = snapshot.apps[initialIndex].logicalID
+    guard !isStopped else {
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .failed,
+        resultingApp: snapshot.apps[initialIndex],
+        backendStatus: snapshot.backendStatus,
+        detail: "The preview audio backend is stopped."
+      )
+    }
+
+    if let latestGeneration = latestAcceptedGenerationByLogicalID[logicalID],
+       intent.generation < latestGeneration {
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .superseded,
+        resultingApp: snapshot.apps[initialIndex],
+        backendStatus: snapshot.backendStatus,
+        detail: "A newer app intent has already been accepted."
+      )
+    }
+    latestAcceptedGenerationByLogicalID[logicalID] = intent.generation
+    legacyGeneration = max(legacyGeneration, intent.generation)
+
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else {
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unavailable,
+        resultingApp: nil,
+        backendStatus: snapshot.backendStatus,
+        detail: "The app left the current audio session before its intent was applied."
+      )
+    }
+
+    if intent.isExcluded {
+      snapshot.apps[index].routingState = .monitorOnly
+      snapshot.apps[index].appliedVolume = nil
+      snapshot.apps[index].peakLevel = 0
+      snapshot.apps[index].rmsLevel = 0
+      snapshot.apps[index].notes = nil
+      snapshot.updatedAt = .now
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .excluded,
+        resultingApp: snapshot.apps[index],
+        backendStatus: snapshot.backendStatus
+      )
+    }
+
+    guard snapshot.apps[index].compatibility != .unsupported else {
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unsupported,
+        resultingApp: snapshot.apps[index],
+        backendStatus: snapshot.backendStatus,
+        detail: "This preview app does not support managed audio controls."
+      )
+    }
+
+    let previousEqualizer = equalizerSettings[logicalID] ?? EqualizerSettings()
+    let hasNoChanges = snapshot.apps[index].desiredVolume == intent.desiredVolume
+      && snapshot.apps[index].isMuted == intent.isMuted
+      && snapshot.apps[index].volumeBoost == intent.volumeBoost
+      && snapshot.apps[index].targetDeviceUID == intent.targetDeviceUID
+      && previousEqualizer == intent.equalizerSettings
+      && snapshot.apps[index].routingState == .managed
+      && snapshot.apps[index].appliedVolume == (intent.isMuted ? 0 : intent.desiredVolume)
+
+    snapshot.apps[index].desiredVolume = intent.desiredVolume
+    snapshot.apps[index].isMuted = intent.isMuted
+    snapshot.apps[index].volumeBoost = intent.volumeBoost
+    snapshot.apps[index].targetDeviceUID = intent.targetDeviceUID
+    snapshot.apps[index].appliedVolume = intent.isMuted ? 0 : intent.desiredVolume
+    snapshot.apps[index].routingState = .managed
+    snapshot.apps[index].notes = nil
+    if intent.isMuted {
+      snapshot.apps[index].peakLevel = 0
+      snapshot.apps[index].rmsLevel = 0
+    }
+    equalizerSettings[logicalID] = intent.equalizerSettings
+    snapshot.updatedAt = .now
+
+    return AppIntentApplyResult(
+      appID: intent.appID,
+      generation: intent.generation,
+      outcome: hasNoChanges ? .noChange : .applied,
+      resultingApp: snapshot.apps[index],
+      backendStatus: snapshot.backendStatus
+    )
+  }
+
+  public func applyProfileWithResults(
+    _ profile: Profile,
+    generation: UInt64
+  ) async -> ProfileApplyResult {
+    var rows: [ProfileRowApplyResult] = []
+    rows.reserveCapacity(profile.entries.count)
+
+    for (entryIndex, entry) in profile.entries.enumerated() {
+      guard entry.hasLevels else {
+        rows.append(ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: .membershipOnly,
+          resultingApp: nil
+        ))
         continue
       }
 
-      // Apply only the fields the entry actually sets; fall back to the app's
-      // current value for the rest so a volume-only entry doesn't reset mute.
-      let targetVolume = entry.desiredVolume ?? snapshot.apps[index].desiredVolume
-      let targetMuted = entry.isMuted ?? snapshot.apps[index].isMuted
-      let targetBoost = entry.volumeBoost ?? snapshot.apps[index].volumeBoost
-      snapshot.apps[index].desiredVolume = targetVolume
-      snapshot.apps[index].isMuted = targetMuted
-      snapshot.apps[index].volumeBoost = targetBoost
-      snapshot.apps[index].appliedVolume =
-        snapshot.apps[index].compatibility == .supported ? (targetMuted ? 0 : targetVolume) : nil
+      guard let appIndex = snapshot.apps.firstIndex(matchingAppKey: entry.appID) else {
+        rows.append(ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: .unavailable,
+          resultingApp: nil,
+          detail: "The app is not available in the current audio session."
+        ))
+        continue
+      }
+
+      let app = snapshot.apps[appIndex]
+      let result = await applyAppIntent(AppRouteIntent(
+        appID: entry.appID,
+        desiredVolume: entry.desiredVolume ?? app.desiredVolume,
+        isMuted: entry.isMuted ?? app.isMuted,
+        volumeBoost: entry.volumeBoost ?? app.volumeBoost,
+        equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+        targetDeviceUID: app.targetDeviceUID,
+        generation: generation,
+        reason: .profileApply
+      ))
+      rows.append(ProfileRowApplyResult(
+        entryIndex: entryIndex,
+        appID: entry.appID,
+        generation: generation,
+        outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
+        resultingApp: result.resultingApp,
+        detail: result.detail
+      ))
     }
 
-    snapshot.updatedAt = .now
+    return ProfileApplyResult(rows: rows, backendStatus: snapshot.backendStatus)
+  }
+
+  public func applyProfile(_ profile: Profile) async throws -> AudioSessionSnapshot {
+    let generation = nextLegacyGeneration()
+    let result = await applyProfileWithResults(profile, generation: generation)
+    if let failure = result.rows.first(where: { row in
+      switch row.outcome {
+      case .membershipOnly, .applied, .noChange, .excluded:
+        false
+      case .superseded, .unavailable, .unsupported, .failed:
+        true
+      }
+    }) {
+      throw BackendError.managedRouteUnavailable(
+        failure.detail ?? "The profile could not be fully applied to \(failure.appID)."
+      )
+    }
     return snapshot
   }
 
@@ -192,15 +372,63 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
   }
 
   public func setOutputDevice(uid: String?, forAppID appID: String) async throws {
-    if let index = snapshot.apps.firstIndex(matchingAppKey: appID) {
-      snapshot.apps[index].targetDeviceUID = uid
-    }
+    let app = try legacyApp(forAppID: appID)
+    let result = await applyAppIntent(AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: app.desiredVolume,
+      isMuted: app.isMuted,
+      volumeBoost: app.volumeBoost,
+      equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+      targetDeviceUID: uid,
+      generation: nextLegacyGeneration(),
+      reason: .userEdit
+    ))
+    try validateLegacyApplyResult(result)
   }
 
   public func audioLevels() async -> [String: AudioLevels] {
     snapshot.apps.reduce(into: [:]) { result, app in
       result[app.logicalID] = AudioLevels(peak: app.peakLevel, rms: app.rmsLevel)
     }
+  }
+
+  private func legacyApp(forAppID appID: String) throws -> AudioApp {
+    guard let app = snapshot.apps.app(matchingAppKey: appID) else {
+      throw BackendError.appNotFound(appID)
+    }
+    return app
+  }
+
+  private func validateLegacyApplyResult(_ result: AppIntentApplyResult) throws {
+    switch result.outcome {
+    case .applied, .noChange:
+      return
+    case .unavailable:
+      throw BackendError.appNotFound(result.appID)
+    case .unsupported:
+      throw BackendError.unsupportedOperation(
+        result.detail ?? "Managed audio controls are not supported for this app."
+      )
+    case .superseded:
+      throw BackendError.managedRouteUnavailable(
+        result.detail ?? "A newer app change superseded this request."
+      )
+    case .excluded:
+      throw BackendError.managedRouteUnavailable(
+        result.detail ?? "The app is excluded from managed audio controls."
+      )
+    case .failed:
+      throw BackendError.managedRouteUnavailable(
+        result.detail ?? "The app intent could not be applied."
+      )
+    }
+  }
+
+  private func nextLegacyGeneration() -> UInt64 {
+    let highestAccepted = latestAcceptedGenerationByLogicalID.values.max() ?? 0
+    let base = max(legacyGeneration, highestAccepted)
+    legacyGeneration = base == .max ? .max : base + 1
+    return legacyGeneration
   }
 
   public func diagnosticsReport() async -> DiagnosticsReport {
@@ -234,6 +462,10 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
 
 private extension Array where Element == AudioApp {
   func firstIndex(matchingAppKey appKey: String) -> Index? {
-    firstIndex { $0.id == appKey || $0.logicalID == appKey }
+    firstIndex { $0.logicalID == appKey } ?? firstIndex { $0.id == appKey }
+  }
+
+  func app(matchingAppKey appKey: String) -> AudioApp? {
+    first { $0.logicalID == appKey } ?? first { $0.id == appKey }
   }
 }
