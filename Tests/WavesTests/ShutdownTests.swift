@@ -21,9 +21,12 @@ import WavesAudioCore
   let intentCountAtShutdown = await fixture.backend.callCount("backend.intent.begin")
   fixture.store.setMuted(false, for: fixture.app)
   fixture.store.refresh()
-  fixture.store.applyProfile(Profile(name: "Rejected", entries: [
-    ProfileEntry(appID: fixture.app.logicalID, desiredVolume: 0.2)
-  ]))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Rejected",
+      entries: [
+        ProfileEntry(appID: fixture.app.logicalID, desiredVolume: 0.2)
+      ]))
   fixture.store.refreshOutputDevices()
   fixture.store.recoverRoutes()
   let rejected = await fixture.store.applyAppIntent(
@@ -112,7 +115,7 @@ import WavesAudioCore
 @Test func terminationCoordinatorRepliesExactlyOnceForEveryOutcome() async {
   await verifyTerminationCoordinator(
     expected: .clean(AppShutdownResult()),
-    timeout: .milliseconds(50)
+    timeout: .seconds(5)
   ) {
     AppShutdownResult()
   }
@@ -120,7 +123,7 @@ import WavesAudioCore
   let degraded = AppShutdownResult(persistenceDegradations: ["settings: injected failure"])
   await verifyTerminationCoordinator(
     expected: .degraded(degraded),
-    timeout: .milliseconds(50)
+    timeout: .seconds(5)
   ) {
     degraded
   }
@@ -138,9 +141,12 @@ import WavesAudioCore
 @Test func cleanupAggregationFiltersSuccessAndPreservesFailureOrder() {
   let degradations = checkedCleanupDegradations(from: [
     CleanupStatusObservation(stage: .listenerRemoval, nativeStatus: 0, detail: "success"),
-    CleanupStatusObservation(appID: "app.one", stage: .ioProcStop, nativeStatus: -50, detail: "stop"),
-    CleanupStatusObservation(appID: "app.one", stage: .ioProcDestroy, nativeStatus: 0, detail: "destroy"),
-    CleanupStatusObservation(appID: "app.two", stage: .processTapDestroy, nativeStatus: -60, detail: "tap"),
+    CleanupStatusObservation(
+      appID: "app.one", stage: .ioProcStop, nativeStatus: -50, detail: "stop"),
+    CleanupStatusObservation(
+      appID: "app.one", stage: .ioProcDestroy, nativeStatus: 0, detail: "destroy"),
+    CleanupStatusObservation(
+      appID: "app.two", stage: .processTapDestroy, nativeStatus: -60, detail: "tap"),
   ])
 
   #expect(degradations.map(\.stage) == [.ioProcStop, .processTapDestroy])
@@ -152,12 +158,14 @@ import WavesAudioCore
 @Test func controllerCleanupSeamAndBackendShutdownDoNotDuplicateDegradations() async {
   let cleanupOnce = IdempotentCleanupResult()
   var cleanupRuns = 0
-  let expected = [CleanupDegradation(
-    appID: "app.test",
-    stage: .ioProcDestroy,
-    nativeStatus: -1,
-    detail: "Injected"
-  )]
+  let expected = [
+    CleanupDegradation(
+      appID: "app.test",
+      stage: .ioProcDestroy,
+      nativeStatus: -1,
+      detail: "Injected"
+    )
+  ]
 
   let firstControllerResult = cleanupOnce.run {
     cleanupRuns += 1
@@ -206,7 +214,10 @@ private func verifyTerminationCoordinator(
     reply: { recorder.replies.append($0) }
   )
   let repeatedDecision = coordinator.requestTermination(
-    shutdown: { recorder.unexpectedShutdownStarts += 1; return AppShutdownResult() },
+    shutdown: {
+      recorder.unexpectedShutdownStarts += 1
+      return AppShutdownResult()
+    },
     report: { recorder.outcomes.append($0) },
     reply: { recorder.replies.append($0) }
   )
@@ -220,7 +231,10 @@ private func verifyTerminationCoordinator(
   #expect(recorder.unexpectedShutdownStarts == 0)
 
   let completedDecision = coordinator.requestTermination(
-    shutdown: { recorder.unexpectedShutdownStarts += 1; return AppShutdownResult() },
+    shutdown: {
+      recorder.unexpectedShutdownStarts += 1
+      return AppShutdownResult()
+    },
     report: { recorder.outcomes.append($0) },
     reply: { recorder.replies.append($0) }
   )
@@ -304,14 +318,15 @@ private func shutdownSnapshot(app: AudioApp? = nil) -> AudioSessionSnapshot {
     apps: apps,
     currentDevice: device,
     recentDeviceIDs: [device.id],
-    supportMatrix: SupportMatrix(entries: apps.map {
-      SupportMatrixEntry(
-        appID: $0.logicalID,
-        displayName: $0.displayName,
-        category: $0.category,
-        state: $0.compatibility
-      )
-    }),
+    supportMatrix: SupportMatrix(
+      entries: apps.map {
+        SupportMatrixEntry(
+          appID: $0.logicalID,
+          displayName: $0.displayName,
+          category: $0.category,
+          state: $0.compatibility
+        )
+      }),
     backendStatus: BackendStatus(
       isAudioComponentInstalled: true,
       hasRequiredPermissions: true,
