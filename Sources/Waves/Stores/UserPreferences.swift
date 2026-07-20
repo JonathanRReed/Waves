@@ -41,8 +41,23 @@ struct UserPreferences: Codable, Sendable {
   /// New installs see the privacy explanation before the first capture request.
   /// Existing preference files missing this key decode it as already completed.
   var hasCompletedPrivacySetup = false
+  /// New installs continue through readiness and personalization after consent.
+  /// Existing preference files skip the new walkthrough and can reopen it from Setup & Repair.
+  var hasCompletedGuidedSetup = false
   /// Global adaptive processing mode. Temporary gains themselves are never persisted.
   var adaptiveMixMode: AdaptiveMixMode = .off
+  /// Curated starting point for app content and priority policies.
+  var adaptiveStrategy: AdaptiveStrategy = .balanced
+  /// How audible frontmost apps interact with explicit adaptive priorities.
+  var adaptiveFocusMode: AdaptiveFocusMode = .smartHybrid
+  /// Explicit or migrated adaptive policy keyed by stable logical app ID.
+  var adaptiveAppPolicies: [String: AdaptiveAppPolicy] = [:]
+  /// The app's visual palette, independent from the selected light or dark appearance.
+  var palette: WavesPalette = .waves
+  /// Whether Waves follows macOS or forces a light or dark appearance.
+  var appearance: WavesAppearance = .system
+  /// Equalization applied to every stream currently managed by Waves.
+  var managedAudioEqualizer = GlobalEqualizerSettings()
 
   init() {}
 
@@ -65,7 +80,14 @@ struct UserPreferences: Codable, Sendable {
     case appAudioIntents
     case appAudioIntentMigrationVersion
     case hasCompletedPrivacySetup
+    case hasCompletedGuidedSetup
     case adaptiveMixMode
+    case adaptiveStrategy
+    case adaptiveFocusMode
+    case adaptiveAppPolicies
+    case palette
+    case appearance
+    case managedAudioEqualizer
   }
 
   // Missing fields use backward-compatible defaults. A present field with the
@@ -84,12 +106,15 @@ struct UserPreferences: Codable, Sendable {
     showSystemProcesses = try value(.showSystemProcesses, defaults.showSystemProcesses)
     sortMode = try value(.sortMode, defaults.sortMode)
     customAppOrder = try value(.customAppOrder, defaults.customAppOrder)
-    autoPauseMusicForConferencing = try value(.autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
+    autoPauseMusicForConferencing = try value(
+      .autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
     enableKeyboardShortcuts = try value(.enableKeyboardShortcuts, defaults.enableKeyboardShortcuts)
-    enablePerDeviceVolumePresets = try value(.enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
+    enablePerDeviceVolumePresets = try value(
+      .enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
     autoRestoreDevice = try value(.autoRestoreDevice, defaults.autoRestoreDevice)
     enableURLScheme = try value(.enableURLScheme, defaults.enableURLScheme)
-    urlSchemeAutomationAcknowledged = try value(.urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
+    urlSchemeAutomationAcknowledged = try value(
+      .urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
     excludedAppIDs = try value(.excludedAppIDs, defaults.excludedAppIDs)
     pinnedAppIDs = try value(.pinnedAppIDs, defaults.pinnedAppIDs)
     appEqualizerSettings = try value(.appEqualizerSettings, defaults.appEqualizerSettings)
@@ -98,7 +123,14 @@ struct UserPreferences: Codable, Sendable {
     appAudioIntentMigrationVersion = try value(.appAudioIntentMigrationVersion, 0)
     // A preference file predating guided setup belongs to an existing install.
     hasCompletedPrivacySetup = try value(.hasCompletedPrivacySetup, true)
+    hasCompletedGuidedSetup = try value(.hasCompletedGuidedSetup, true)
     adaptiveMixMode = try value(.adaptiveMixMode, defaults.adaptiveMixMode)
+    adaptiveStrategy = try value(.adaptiveStrategy, defaults.adaptiveStrategy)
+    adaptiveFocusMode = try value(.adaptiveFocusMode, defaults.adaptiveFocusMode)
+    adaptiveAppPolicies = try value(.adaptiveAppPolicies, defaults.adaptiveAppPolicies)
+    palette = try value(.palette, defaults.palette)
+    appearance = try value(.appearance, defaults.appearance)
+    managedAudioEqualizer = try value(.managedAudioEqualizer, defaults.managedAudioEqualizer)
   }
 }
 
@@ -168,7 +200,8 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
 struct DeviceVolumePresets: Codable, Sendable {
   var deviceVolumes: [String: [String: AppVolumeSettings]] = [:]
 
-  mutating func saveVolumeSettings(for appID: String, deviceID: String, settings: AppVolumeSettings) {
+  mutating func saveVolumeSettings(for appID: String, deviceID: String, settings: AppVolumeSettings)
+  {
     if deviceVolumes[deviceID] == nil {
       deviceVolumes[deviceID] = [:]
     }

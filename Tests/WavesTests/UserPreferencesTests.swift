@@ -43,6 +43,24 @@ import WavesAudioCore
   #expect(decoded?.first?.name == "Solo")
 }
 
+@Test func decodeImportedProfilesRejectsCollectionsOverTheProfileLimit() throws {
+  let profiles = (0...ProfilePayloadDecoder.maxProfiles).map {
+    Profile(name: "Profile \($0)", entries: [])
+  }
+  let data = try PersistedSchema.encode(profiles, using: JSONEncoder())
+
+  #expect(AppStore.decodeImportedProfiles(from: data) == nil)
+}
+
+@Test func wavesURLPolicyRejectsPayloadBeforeFoundationURLParsing() {
+  #expect(WavesURLPolicy.parse("waves://refresh")?.scheme == "waves")
+
+  let oversized =
+    "waves://refresh?padding="
+    + String(repeating: "a", count: WavesURLPolicy.maxPayloadBytes)
+  #expect(WavesURLPolicy.parse(oversized) == nil)
+}
+
 // MARK: - Forward/backward-compatible decoding
 
 @Test func newUserPreferencesStartWithAppAudioIntentMigrationComplete() {
@@ -81,19 +99,26 @@ import WavesAudioCore
   #expect(prefs.appAudioIntents.isEmpty)
   #expect(prefs.appAudioIntentMigrationVersion == 0)
   #expect(prefs.adaptiveMixMode == .off)
+  #expect(prefs.adaptiveStrategy == .balanced)
+  #expect(prefs.adaptiveFocusMode == .smartHybrid)
+  #expect(prefs.adaptiveAppPolicies.isEmpty)
+  #expect(prefs.palette == .waves)
+  #expect(prefs.appearance == .system)
+  #expect(prefs.managedAudioEqualizer == GlobalEqualizerSettings())
+  #expect(prefs.hasCompletedGuidedSetup == true)
 }
 
 @Test func userPreferencesPreservesKnownKeysAndDefaultsMissingOnes() throws {
   // Simulates an older file that predates the `enablePerDeviceVolumePresets`
   // key: the present key is honored, the missing one falls back to its default.
   let json = """
-  { "enableKeyboardShortcuts": false, "sortMode": "activity" }
-  """
+    { "enableKeyboardShortcuts": false, "sortMode": "activity" }
+    """
   let prefs = try JSONDecoder().decode(UserPreferences.self, from: Data(json.utf8))
   #expect(prefs.enableKeyboardShortcuts == false)
   #expect(prefs.sortMode == .activity)
   #expect(prefs.liveListLinger == .standard)
-  #expect(prefs.enablePerDeviceVolumePresets == true) // default preserved
+  #expect(prefs.enablePerDeviceVolumePresets == true)  // default preserved
 }
 
 @Test func userPreferencesRoundTripsThroughCodable() throws {
@@ -108,6 +133,17 @@ import WavesAudioCore
   equalizer.applyPreset(.warm)
   prefs.appEqualizerSettings = ["com.spotify.client": equalizer]
   prefs.adaptiveMixMode = .both
+  prefs.adaptiveStrategy = .lectureFocus
+  prefs.adaptiveFocusMode = .followFrontApp
+  prefs.adaptiveAppPolicies = [
+    "com.spotify.client": AdaptiveAppPolicy(contentType: .music, priority: .background)
+  ]
+  prefs.palette = .graphite
+  prefs.appearance = .dark
+  var managedEqualizer = GlobalEqualizerSettings()
+  managedEqualizer.isEnabled = true
+  managedEqualizer.applyPreset(.voiceFocus)
+  prefs.managedAudioEqualizer = managedEqualizer
 
   let data = try JSONEncoder().encode(prefs)
   let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
@@ -120,6 +156,15 @@ import WavesAudioCore
   #expect(decoded.pinnedAppIDs == ["com.spotify.client", "com.hnc.Discord"])
   #expect(decoded.appEqualizerSettings["com.spotify.client"] == equalizer)
   #expect(decoded.adaptiveMixMode == .both)
+  #expect(decoded.adaptiveStrategy == .lectureFocus)
+  #expect(decoded.adaptiveFocusMode == .followFrontApp)
+  #expect(
+    decoded.adaptiveAppPolicies["com.spotify.client"]
+      == AdaptiveAppPolicy(contentType: .music, priority: .background)
+  )
+  #expect(decoded.palette == .graphite)
+  #expect(decoded.appearance == .dark)
+  #expect(decoded.managedAudioEqualizer == managedEqualizer)
 }
 
 @Test func userPreferencesDefaultsPinsEmptyForLegacyFile() throws {
@@ -170,6 +215,7 @@ import WavesAudioCore
 }
 
 private func permissions(at url: URL) throws -> Int {
-  let raw = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+  let raw =
+    try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
   return raw?.intValue ?? -1
 }

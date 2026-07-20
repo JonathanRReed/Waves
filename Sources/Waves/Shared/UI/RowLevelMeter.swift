@@ -51,6 +51,7 @@ final class LevelMeterModel {
 /// eases out instead of snapping; under Reduce Motion it binds straight to the
 /// target with no clock. Purely decorative: hit-testing off, hidden from VoiceOver.
 struct RowLevelMeter: View {
+  @Environment(\.wavesTheme) private var theme
   /// Linear amplitudes (0…1) straight from the level poll. The bar tracks `rms`
   /// (steady body); the peak-hold tick tracks `peak` (transients).
   let rms: Float
@@ -124,18 +125,18 @@ struct RowLevelMeter: View {
   private func shapes(width: CGFloat, bar: Double, peak: Double) -> some View {
     ZStack(alignment: .bottomLeading) {
       Capsule()
-        .fill(WavesDesign.accentGradient)
+        .fill(theme.accentGradient)
         .frame(width: max(0, width * CGFloat(bar)), height: Self.height)
         // Glow swells with the signal: barely-there when quiet, a brighter bloom
         // when hot, so a glance reads how loud the app is, not just that it plays.
-        .shadow(color: WavesDesign.accent.opacity(0.30 + 0.40 * bar), radius: 2 + 3 * bar, y: 0)
+        .shadow(color: theme.accent.opacity(0.30 + 0.40 * bar), radius: 2 + 3 * bar, y: 0)
 
       // Peak-hold tick — only once there's a meaningful transient to mark.
       if peak > 0.02 {
         Capsule()
           .fill(Self.tickColor)
           .frame(width: Self.tickWidth, height: Self.height)
-          .shadow(color: WavesDesign.accent.opacity(0.6), radius: 2, y: 0)
+          .shadow(color: theme.accent.opacity(0.6), radius: 2, y: 0)
           .offset(x: max(0, min(width - Self.tickWidth, width * CGFloat(peak) - Self.tickWidth / 2)))
       }
     }

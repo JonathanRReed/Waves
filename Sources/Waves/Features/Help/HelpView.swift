@@ -7,6 +7,7 @@ struct HelpView: View {
       VStack(alignment: .leading, spacing: 24) {
         headerSection
         quickStartSection
+        soundSection
         keyboardShortcutsSection
         urlSchemeSection
         profilesSection
@@ -15,6 +16,36 @@ struct HelpView: View {
       .padding(20)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+  }
+
+  private var soundSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Sound, EQ, and Sidechain Focus")
+        .font(.headline)
+
+      VStack(alignment: .leading, spacing: 8) {
+        bullet(
+          "Open Sound in the sidebar to tune Managed Audio EQ for every stream routed through Waves"
+        )
+        bullet("Use an app row's EQ control when only that app needs a different curve")
+        bullet(
+          "Classify apps by content type, then assign Foreground, Normal, Background, or Never Adjust"
+        )
+        bullet(
+          "Smart Hybrid promotes an audible frontmost app by one tier while keeping your assigned priorities as guardrails"
+        )
+        bullet("Follow Front App promotes an audible frontmost app directly to Foreground")
+        bullet("Voice and meeting apps must contain speech before they trigger ducking")
+      }
+
+      Text(
+        "Adaptive Mix only changes temporary gain. It never pauses or mutes an app, and your manual levels remain intact."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
+    .padding(16)
+    .wavesCard(cornerRadius: 12)
   }
 
   private var headerSection: some View {
@@ -106,9 +137,11 @@ struct HelpView: View {
       }
       .font(.system(.body, design: .monospaced))
 
-      Text("⌘N and ⌘R work while the mixer window is focused; ⌘, opens Settings from any Waves window.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      Text(
+        "⌘N and ⌘R work while the mixer window is focused; ⌘, opens Settings from any Waves window."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
     }
     .padding(16)
     .wavesCard(cornerRadius: 12)
@@ -164,9 +197,11 @@ struct HelpView: View {
         bullet("Switch profiles from the menu bar, and export/import them as JSON")
       }
 
-      Text("Membership-only profiles just group apps; capture levels to also save each app’s volume, mute, and boost.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      Text(
+        "Membership-only profiles just group apps; capture levels to also save each app’s volume, mute, and boost."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
     }
     .padding(16)
     .wavesCard(cornerRadius: 12)
@@ -184,19 +219,23 @@ struct HelpView: View {
         )
         troubleshootingItem(
           issue: "Volume changes not applying",
-          solution: "Use 'Recover Routes' in the toolbar or Audio settings, then check Diagnostics in Advanced settings"
+          solution:
+            "Use 'Recover Routes' in the toolbar or Audio settings, then check Diagnostics in Advanced settings"
         )
         troubleshootingItem(
           issue: "An app shows a red Core Audio error",
-          solution: "Some apps never produce sound (menu-bar utilities, CLI tools) and can't be managed — right-click the row and choose 'Exclude from Waves' to stop the warning"
+          solution:
+            "Some apps never produce sound (menu-bar utilities, CLI tools) and can't be managed — right-click the row and choose 'Exclude from Waves' to stop the warning"
         )
         troubleshootingItem(
           issue: "Keyboard shortcuts not working",
-          solution: "Enable in Settings, check accessibility permissions, verify no conflicts"
+          solution:
+            "Open Setup & Repair, then use Open Accessibility to reach the matching macOS permission pane"
         )
         troubleshootingItem(
           issue: "Device switching issues",
-          solution: "Routes restore automatically; if needed, manually recover routes and check device connection"
+          solution:
+            "Open Setup & Repair to check the output, rebuild managed routes, or open the matching Sound pane"
         )
       }
     }

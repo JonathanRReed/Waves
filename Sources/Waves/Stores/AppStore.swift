@@ -303,6 +303,7 @@ final class AppStore {
   private var speechDetectionStates: [String: SpeechDetectionState] = [:]
   private var speechDuckingStates: [String: SpeechDuckingState] = [:]
   private var loudnessTrimStates: [String: LoudnessTrimState] = [:]
+  private var adaptivePolicyEngine = AdaptivePolicyEngine()
   private var liveLevelsRefcount = 0
   private var isRunningSessionMaintenance = false
   // Per-app one-shot tasks that drop an app out of the lingering-live set once it
@@ -711,6 +712,13 @@ final class AppStore {
     presentFinishSetupMessage()
   }
 
+  func completeGuidedSetup() {
+    guard startupState != .shuttingDown else { return }
+    guard !preferences.hasCompletedGuidedSetup else { return }
+    preferences.hasCompletedGuidedSetup = true
+    persistPreferences()
+  }
+
   private func performSafeBootstrapIfNeeded() {
     guard !isSafeBootstrapComplete else { return }
     isSafeBootstrapComplete = true
@@ -782,6 +790,8 @@ final class AppStore {
       // Even if shutdown began while backend.start() was suspended, record the
       // successful native start so the checked shutdown path tears it back down.
       hasStartedAudioBackend = true
+      guard !Task.isCancelled, startupState != .shuttingDown else { return }
+      await backend.setManagedAudioEqualizer(preferences.managedAudioEqualizer)
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       let built = await backend.currentSnapshot()
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
@@ -984,6 +994,11 @@ final class AppStore {
     guard requireAudioRunning() else { return }
     guard preferences.enableURLScheme else {
       logger.warning("URL scheme invocation rejected because URL schemes are disabled")
+      return
+    }
+
+    guard url.absoluteString.utf8.count <= WavesURLPolicy.maxPayloadBytes else {
+      logger.warning("URL scheme invocation rejected because the payload exceeded the size limit")
       return
     }
 
@@ -1747,10 +1762,104 @@ final class AppStore {
     }
   }
 
+  func setManagedAudioEqualizerEnabled(_ enabled: Bool) {
+    updateManagedAudioEqualizer { settings in
+      settings.isEnabled = enabled
+    }
+  }
+
+  func setManagedAudioEqualizerMode(_ mode: EqualizerMode) {
+    updateManagedAudioEqualizer { settings in
+      settings.mode = mode
+    }
+  }
+
+  func setManagedAudioEqualizerGain(_ gainDB: Float, at index: Int) {
+    updateManagedAudioEqualizer { settings in
+      settings.isEnabled = true
+      settings.setGain(gainDB, at: index)
+    }
+  }
+
+  func applyManagedAudioEqualizerPreset(_ preset: EqualizerPreset) {
+    updateManagedAudioEqualizer { settings in
+      settings.isEnabled = true
+      settings.applyPreset(preset)
+    }
+  }
+
+  func resetManagedAudioEqualizer() {
+    updateManagedAudioEqualizer { settings in
+      settings.resetActiveMode()
+    }
+  }
+
+  private func updateManagedAudioEqualizer(
+    mutation: (inout GlobalEqualizerSettings) -> Void
+  ) {
+    guard requireAudioRunning() else { return }
+    mutation(&preferences.managedAudioEqualizer)
+    let settings = preferences.managedAudioEqualizer
+    persistPreferences()
+    startOwnedOperation { store in
+      await store.backend.setManagedAudioEqualizer(settings)
+    }
+  }
+
   func setAdaptiveRole(_ role: AdaptiveAppRole, for app: AudioApp) {
     updateEqualizerSettings(for: app) { settings in
       settings.adaptiveRole = role
     }
+  }
+
+  func adaptivePolicy(for app: AudioApp) -> AdaptiveAppPolicy {
+    if let policy = preferences.adaptiveAppPolicies[app.logicalID] {
+      return policy
+    }
+    let migrated = AdaptiveAppPolicy.migrating(
+      legacyRole: equalizerSettings(for: app).adaptiveRole,
+      category: app.category,
+      bundleIdentifier: app.bundleID,
+      displayName: app.displayName
+    )
+    preferences.adaptiveAppPolicies[app.logicalID] = migrated
+    persistPreferences()
+    return migrated
+  }
+
+  func setAdaptiveContentType(_ contentType: AdaptiveContentType, for app: AudioApp) {
+    var policy = adaptivePolicy(for: app)
+    policy.contentType = contentType
+    setAdaptivePolicy(policy, for: app)
+  }
+
+  func setAdaptivePriority(_ priority: AdaptivePriority, for app: AudioApp) {
+    var policy = adaptivePolicy(for: app)
+    policy.priority = priority
+    setAdaptivePolicy(policy, for: app)
+  }
+
+  func applyAdaptiveStrategy(_ strategy: AdaptiveStrategy) {
+    guard requireAudioRunning() else { return }
+    for app in visibleApps {
+      let current = adaptivePolicy(for: app)
+      preferences.adaptiveAppPolicies[app.logicalID] = AdaptiveMixing.policy(
+        for: strategy,
+        contentType: current.contentType,
+        existingPolicy: current
+      )
+    }
+    preferences.adaptiveStrategy = strategy
+    persistPreferences()
+    restartAdaptiveMixing()
+  }
+
+  private func setAdaptivePolicy(_ policy: AdaptiveAppPolicy, for app: AudioApp) {
+    guard requireAudioRunning() else { return }
+    preferences.adaptiveAppPolicies[app.logicalID] = policy
+    preferences.adaptiveStrategy = .custom
+    persistPreferences()
+    restartAdaptiveMixing()
   }
 
   func setAdaptiveMixMode(_ mode: AdaptiveMixMode) {
@@ -1770,6 +1879,20 @@ final class AppStore {
       title: "Adaptive Mix",
       detail: mode.displayName,
       kind: mode == .off ? .info : .success,
+      duration: .seconds(1.4)
+    )
+  }
+
+  func setAdaptiveFocusMode(_ mode: AdaptiveFocusMode) {
+    guard requireAudioRunning() else { return }
+    guard preferences.adaptiveFocusMode != mode else { return }
+    preferences.adaptiveFocusMode = mode
+    persistPreferences()
+    restartAdaptiveMixing()
+    showToast(
+      title: "Sidechain Focus",
+      detail: mode.displayName,
+      kind: .success,
       duration: .seconds(1.4)
     )
   }
@@ -1823,6 +1946,7 @@ final class AppStore {
       speechDetectionStates.removeAll()
       speechDuckingStates.removeAll()
       loudnessTrimStates.removeAll()
+      adaptivePolicyEngine.reset()
       startOwnedOperation { store in
         await store.backend.setAdaptiveGains([:])
       }
@@ -1847,66 +1971,22 @@ final class AppStore {
 
     let mode = preferences.adaptiveMixMode
     let apps = visibleApps
-    let liveIDs = Set(apps.map(\.logicalID))
-    speechDetectionStates = speechDetectionStates.filter { liveIDs.contains($0.key) }
-    speechDuckingStates = speechDuckingStates.filter { liveIDs.contains($0.key) }
-    loudnessTrimStates = loudnessTrimStates.filter { liveIDs.contains($0.key) }
-
-    var speechIsActive = false
-    if mode.usesSpeechFocus {
-      for app in apps {
-        let settings = equalizerSettings(for: app)
-        guard AdaptiveMixing.resolvedRole(settings.adaptiveRole, category: app.category) == .voice,
-              let levels = analysis[app.logicalID],
-              !app.isMuted else { continue }
-        var state = speechDetectionStates[app.logicalID] ?? SpeechDetectionState()
-        let isActive = state.update(
-          fullBandRMS: Double(levels.rms),
-          voiceBandEnergy: Double(levels.voiceBandEnergy),
-          elapsed: elapsed
-        )
-        speechDetectionStates[app.logicalID] = state
-        speechIsActive = speechIsActive || isActive
-      }
-    } else {
-      speechDetectionStates.removeAll()
-    }
-
-    var gainsDB: [String: Float] = [:]
-    gainsDB.reserveCapacity(apps.count)
-    for app in apps {
-      let settings = equalizerSettings(for: app)
+    adaptivePolicyEngine.usesLoudnessCorrection = mode.usesLoudnessBalance
+    adaptivePolicyEngine.focusMode = preferences.adaptiveFocusMode
+    let frontmostAppID = frontmostManagedAppIDForAdaptiveMix(in: apps)
+    let inputs = apps.map { app in
       let levels = analysis[app.logicalID]
-      let routeIsActive = app.routingState == .managed && levels != nil && !app.isMuted
-
-      var duck = speechDuckingStates[app.logicalID] ?? SpeechDuckingState()
-      let duckGain = duck.update(
-        isSpeechActive: speechIsActive,
-        isEligible: mode.usesSpeechFocus
-          && routeIsActive
-          && AdaptiveMixing.isSpeechDuckEligible(role: settings.adaptiveRole, category: app.category),
-        elapsed: elapsed
+      return AdaptiveMixInput(
+        appID: app.logicalID,
+        policy: adaptivePolicy(for: app),
+        isManaged: app.routingState == .managed && levels != nil,
+        isMuted: app.isMuted,
+        rms: levels?.rms ?? 0,
+        voiceBandEnergy: levels?.voiceBandEnergy ?? 0,
+        isFrontmost: app.logicalID == frontmostAppID
       )
-      speechDuckingStates[app.logicalID] = duck
-
-      var loudness = loudnessTrimStates[app.logicalID] ?? LoudnessTrimState()
-      let loudnessGain = loudness.update(
-        rms: Double(levels?.rms ?? 0),
-        isEligible: mode.usesLoudnessBalance
-          && routeIsActive
-          && AdaptiveMixing.isLoudnessBalanceEligible(role: settings.adaptiveRole, category: app.category),
-        elapsed: elapsed
-      )
-      loudnessTrimStates[app.logicalID] = loudness
-
-      gainsDB[app.logicalID] = Float(AdaptiveMixing.combinedGainDB(
-        mode: mode,
-        role: settings.adaptiveRole,
-        category: app.category,
-        speechDuckDB: duckGain,
-        loudnessTrimDB: loudnessGain
-      ))
     }
+    let gainsDB = adaptivePolicyEngine.update(inputs: inputs, elapsed: elapsed)
 
     guard !Task.isCancelled, startupState == .running,
           preferences.adaptiveMixMode == mode else { return }
@@ -2534,7 +2614,9 @@ final class AppStore {
     isFinalizingShutdownPersistence = true
     enqueuePreferencesPersistence(preferences)
     enqueueProfilesPersistence(profiles)
-    enqueueSessionPersistence(session)
+    if preferences.hasCompletedPrivacySetup {
+      enqueueSessionPersistence(session)
+    }
     enqueueDevicePresetsPersistence(deviceVolumePresets)
     do {
       try await drainAndFlushPersistence()
@@ -3682,13 +3764,13 @@ final class AppStore {
               return
             }
 
-            if trimmedName.count > 100 {
-              showToast(title: "Import failed", detail: "Profile name exceeds 100 characters.", kind: .error)
+            if trimmedName.count > Profile.maxNameLength {
+              showToast(title: "Import failed", detail: "Profile name exceeds \(Profile.maxNameLength) characters.", kind: .error)
               return
             }
 
-            if profile.entries.count > 1000 {
-              showToast(title: "Import failed", detail: "Profile has too many entries (max 1000).", kind: .error)
+            if profile.entries.count > Profile.maxEntries {
+              showToast(title: "Import failed", detail: "Profile has too many entries (max \(Profile.maxEntries)).", kind: .error)
               return
             }
 
@@ -3738,18 +3820,9 @@ final class AppStore {
   /// profiles. Returns nil when the data matches none of these.
   nonisolated static func decodeImportedProfiles(from data: Data) -> [Profile]? {
     let decoder = JSONDecoder()
-    // PersistedSchema.decode handles both the versioned envelope and a legacy
-    // bare [Profile] array written before envelopes existed. Distinguish a valid
-    // (possibly empty) array from a decode failure so an empty backup is accepted
-    // rather than mistaken for a single-Profile file.
-    do {
-      return try PersistedSchema.decode([Profile].self, from: data, using: decoder)
-    } catch {
-      if let profile = try? decoder.decode(Profile.self, from: data) {
-        return [profile]
-      }
-      return nil
-    }
+    // The bounded decoder accepts the versioned envelope, legacy arrays, and a
+    // single export while stopping before an oversized collection is decoded.
+    return try? ProfilePayloadDecoder.decodeImportedProfiles(from: data, using: decoder)
   }
 
   func recoverRoutes() {
@@ -3880,6 +3953,22 @@ final class AppStore {
       }
     }
     return activeApps.first ?? visibleApps.first
+  }
+
+  /// Sidechain focus must represent the actual foreground application. Unlike
+  /// keyboard shortcuts, it must not fall back to an arbitrary active row when
+  /// the foreground process is unmanaged or Waves itself.
+  private func frontmostManagedAppIDForAdaptiveMix(in apps: [AudioApp]) -> String? {
+    guard let frontmost = NSWorkspace.shared.frontmostApplication,
+          frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier
+    else {
+      return nil
+    }
+    let bundleID = frontmost.bundleIdentifier
+    let pid = frontmost.processIdentifier
+    return apps.first(where: { app in
+      (bundleID != nil && app.bundleID == bundleID) || app.pid == pid
+    })?.logicalID
   }
 
   func increaseVolumeForFrontmostApp(step: Float = 0.1) {
@@ -4471,7 +4560,9 @@ final class AppStore {
   }
 
   private func persistSessionSnapshot() {
-    enqueueSessionPersistence(session)
+    if preferences.hasCompletedPrivacySetup {
+      enqueueSessionPersistence(session)
+    }
   }
 
   private func showToast(

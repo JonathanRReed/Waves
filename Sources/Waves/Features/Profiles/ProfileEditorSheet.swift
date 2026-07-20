@@ -15,6 +15,7 @@ struct ProfileEditorContext: Identifiable {
 /// grouping.
 struct ProfileEditorSheet: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @Environment(\.dismiss) private var dismiss
   @Environment(\.colorSchemeContrast) private var contrast
 
@@ -63,7 +64,7 @@ struct ProfileEditorSheet: View {
     HStack(spacing: 12) {
       Image(systemName: "rectangle.stack.badge.plus")
         .font(.title2)
-        .foregroundStyle(WavesDesign.accent)
+        .foregroundStyle(theme.accent)
       VStack(alignment: .leading, spacing: 2) {
         Text(context.profile == nil ? "New Profile" : "Edit Profile")
           .font(.title3.weight(.semibold))
@@ -89,7 +90,7 @@ struct ProfileEditorSheet: View {
         .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
           RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .strokeBorder(WavesDesign.hairline(increasedContrast: contrast == .increased))
+            .strokeBorder(theme.hairline(increasedContrast: contrast == .increased))
         )
       if isTooLong {
         Text("Name too long (max \(Self.maxNameLength) characters)")
@@ -333,6 +334,7 @@ private enum FriendlyNameCache {
 }
 
 private struct AppCheckRow: View {
+  @Environment(\.wavesTheme) private var theme
   let title: String
   let subtitle: String?
   let iconApp: AudioApp?
@@ -379,7 +381,7 @@ private struct AppCheckRow: View {
         Spacer()
 
         Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-          .foregroundStyle(WavesDesign.accentOrTertiary(isOn))
+          .foregroundStyle(theme.accentOrTertiary(isOn))
           .font(.title3)
       }
       .padding(.horizontal, 12)

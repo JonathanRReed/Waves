@@ -119,7 +119,7 @@ final class ProfileStore: @unchecked Sendable {
       }
 
       let data = try Data(contentsOf: fileURL)
-      return try PersistedSchema.decode([Profile].self, from: data, using: decoder)
+      return try ProfilePayloadDecoder.decodePersistedProfiles(from: data, using: decoder)
     } catch {
       // Preserve the unreadable file for recovery instead of destroying the
       // user's saved profiles.

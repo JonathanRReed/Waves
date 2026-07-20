@@ -4,6 +4,7 @@ import WavesAudioCore
 
 struct MixerRowView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.colorSchemeContrast) private var contrast
   let app: AudioApp
@@ -71,7 +72,7 @@ struct MixerRowView: View {
           }
         )
         .controlSize(.small)
-        .tint(WavesDesign.accent)
+        .tint(theme.accent)
         .frame(minWidth: 150, idealWidth: 210, maxWidth: 250)
         .help(sliderHelp)
         .accessibilityLabel("Volume for \(app.displayName)")
@@ -99,7 +100,7 @@ struct MixerRowView: View {
           store.focusEqualizer(for: app)
         } label: {
           Image(systemName: "slider.horizontal.3")
-            .foregroundStyle(WavesDesign.accentOrSecondary(equalizerIsEnabled))
+            .foregroundStyle(theme.accentOrSecondary(equalizerIsEnabled))
             .frame(width: 28, height: 28)
             .contentShape(Rectangle())
         }
@@ -150,7 +151,7 @@ struct MixerRowView: View {
     // native list feel — without shifting layout (background, not scale).
     .background(
       RoundedRectangle(cornerRadius: WavesDesign.chipCornerRadius, style: .continuous)
-        .fill(Color.white.opacity(isHovering ? 0.05 : 0))
+        .fill(isHovering ? theme.selectionFill : Color.clear)
     )
     .onHover { isHovering = $0 }
     .animation(reduceMotion ? nil : .smooth(duration: 0.15), value: isHovering)
@@ -327,6 +328,7 @@ private struct MixerRowContextMenuItems: View {
 
 struct CompactMixerRow: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @Environment(\.openWindow) private var openWindow
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.colorSchemeContrast) private var contrast
@@ -340,7 +342,7 @@ struct CompactMixerRow: View {
       } label: {
         Image(systemName: app.isPinned ? "pin.fill" : "pin")
           .font(.caption)
-          .foregroundStyle(WavesDesign.accentOrTertiary(app.isPinned))
+          .foregroundStyle(theme.accentOrTertiary(app.isPinned))
           .frame(width: 22, height: 22)
           .contentShape(Rectangle())
       }
@@ -399,7 +401,7 @@ struct CompactMixerRow: View {
         }
       )
       .controlSize(.small)
-      .tint(WavesDesign.accent)
+      .tint(theme.accent)
       .frame(width: 104)
       .padding(.trailing, 2)
       .help(sliderHelp)
@@ -431,7 +433,7 @@ struct CompactMixerRow: View {
       } label: {
         Text("EQ")
           .font(.caption2.weight(.semibold))
-          .foregroundStyle(WavesDesign.accentOrSecondary(equalizerIsEnabled))
+          .foregroundStyle(theme.accentOrSecondary(equalizerIsEnabled))
           .frame(width: 28, height: 22)
           .contentShape(Rectangle())
       }
@@ -523,6 +525,7 @@ struct CompactMixerRow: View {
 
 private struct BoostMenu: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   let app: AudioApp
   let compact: Bool
 
@@ -546,7 +549,7 @@ private struct BoostMenu: View {
       // the app is actually boosted, so a glance finds the boosted rows.
       Text("\(Int(app.volumeBoost))x")
         .font(.caption.monospacedDigit().weight(isBoosted ? .semibold : (compact ? .regular : .medium)))
-        .foregroundStyle(WavesDesign.accentOrTertiary(isBoosted))
+        .foregroundStyle(theme.accentOrTertiary(isBoosted))
         .lineLimit(1)
         .minimumScaleFactor(0.7)
         // Match the adjacent mute/pin buttons' 22pt minimum compact tap target —
@@ -566,12 +569,12 @@ private struct BoostMenu: View {
 }
 
 private extension RoutingState {
-  var indicatorColor: Color {
+  func indicatorColor(accent: Color) -> Color {
     switch self {
     case .managed:
       .green
     case .live:
-      WavesDesign.accent
+      accent
     case .monitorOnly:
       .secondary
     case .recent:
@@ -585,6 +588,7 @@ private extension RoutingState {
 private struct RoutingStateIndicator: View {
   @Environment(\.colorSchemeContrast) private var contrast
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.wavesTheme) private var theme
   let state: RoutingState
 
   @ViewBuilder
@@ -620,7 +624,7 @@ private struct RoutingStateIndicator: View {
     }
   }
 
-  private var color: Color { state.indicatorColor }
+  private var color: Color { state.indicatorColor(accent: theme.accent) }
 
   private var backgroundOpacity: Double {
     if contrast == .increased { return 0.28 }
@@ -664,6 +668,7 @@ private struct RoutingStateIndicator: View {
 }
 
 private struct RoutingStateDot: View {
+  @Environment(\.wavesTheme) private var theme
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let state: RoutingState
   // When the route errored, the failure reason is otherwise visible only in
@@ -694,7 +699,7 @@ private struct RoutingStateDot: View {
     return state.displayName
   }
 
-  private var color: Color { state.indicatorColor }
+  private var color: Color { state.indicatorColor(accent: theme.accent) }
 
   private var symbolName: String {
     switch state {

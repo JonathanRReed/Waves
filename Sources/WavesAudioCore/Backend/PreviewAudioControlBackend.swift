@@ -4,6 +4,7 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
   private var snapshot: AudioSessionSnapshot
   private var profiles: [Profile]
   private var equalizerSettings: [String: EqualizerSettings] = [:]
+  private var managedAudioEqualizerSettings = GlobalEqualizerSettings()
   private var adaptiveGainsDB: [String: Float] = [:]
   private var latestAcceptedGenerationByLogicalID: [String: UInt64] = [:]
   private var legacyGeneration: UInt64 = 0
@@ -114,6 +115,14 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
       reason: .userEdit
     ))
     try validateLegacyApplyResult(result)
+  }
+
+  public func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async {
+    managedAudioEqualizerSettings = settings
+  }
+
+  func managedAudioEqualizerSettingsForTesting() -> GlobalEqualizerSettings {
+    managedAudioEqualizerSettings
   }
 
   public func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels] {

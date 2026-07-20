@@ -9,6 +9,7 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func setMuted(_ isMuted: Bool, forAppID appID: String) async throws
   func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws
   func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws
+  func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async
   func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels]
   func setAdaptiveGains(_ gainsDB: [String: Float]) async
   func setVolumeControlMode(_ mode: VolumeControlMode, forDeviceID deviceID: String) async throws
@@ -66,6 +67,11 @@ public protocol AudioControlBackend: AnyObject, Sendable {
 }
 
 public extension AudioControlBackend {
+  func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async {
+    // Legacy and test backends remain source-compatible. Backends that own
+    // managed routes override this to propagate the shared EQ to live streams.
+  }
+
   func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult {
     let snapshot = await currentSnapshot()
     return AppIntentApplyResult(

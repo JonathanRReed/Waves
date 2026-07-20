@@ -1,5 +1,181 @@
 import Foundation
 
+public enum AdaptiveContentType: String, Codable, CaseIterable, Hashable, Sendable {
+  case lectureOrVoice
+  case meeting
+  case music
+  case videoOrMedia
+  case game
+  case other
+
+  public var displayName: String {
+    switch self {
+    case .lectureOrVoice: "Lecture or Voice"
+    case .meeting: "Meeting"
+    case .music: "Music"
+    case .videoOrMedia: "Video or Media"
+    case .game: "Game"
+    case .other: "Other"
+    }
+  }
+
+  public var usesSpeechActivation: Bool {
+    self == .lectureOrVoice || self == .meeting
+  }
+}
+
+public enum AdaptivePriority: String, Codable, CaseIterable, Hashable, Sendable {
+  case foreground
+  case normal
+  case background
+  case neverAdjust
+
+  public var displayName: String {
+    switch self {
+    case .foreground: "Foreground"
+    case .normal: "Normal"
+    case .background: "Background"
+    case .neverAdjust: "Never Adjust"
+    }
+  }
+
+  /// Ordered focus tier. Never Adjust has no tier because it does not
+  /// participate in adaptive gain decisions.
+  public var focusRank: Int? {
+    switch self {
+    case .foreground: 2
+    case .normal: 1
+    case .background: 0
+    case .neverAdjust: nil
+    }
+  }
+}
+
+public enum AdaptiveStrategy: String, Codable, CaseIterable, Hashable, Sendable {
+  case lectureFocus
+  case mediaFirst
+  case balanced
+  case custom
+
+  public var displayName: String {
+    switch self {
+    case .lectureFocus: "Lecture Focus"
+    case .mediaFirst: "Media First"
+    case .balanced: "Balanced"
+    case .custom: "Custom"
+    }
+  }
+}
+
+public enum AdaptiveFocusMode: String, Codable, CaseIterable, Hashable, Sendable {
+  case assignedPriorities
+  case followFrontApp
+  case smartHybrid
+
+  public var displayName: String {
+    switch self {
+    case .assignedPriorities: "Assigned Priorities"
+    case .followFrontApp: "Follow Front App"
+    case .smartHybrid: "Smart Hybrid"
+    }
+  }
+}
+
+public struct AdaptiveAppPolicy: Codable, Hashable, Sendable {
+  public var contentType: AdaptiveContentType
+  public var priority: AdaptivePriority
+
+  public init(
+    contentType: AdaptiveContentType = .other,
+    priority: AdaptivePriority = .normal
+  ) {
+    self.contentType = contentType
+    self.priority = priority
+  }
+
+  public static func migrating(
+    legacyRole: AdaptiveAppRole,
+    category: AppCategory,
+    bundleIdentifier: String? = nil,
+    displayName: String? = nil
+  ) -> AdaptiveAppPolicy {
+    switch legacyRole {
+    case .auto:
+      AdaptiveAppPolicy(
+        contentType: AdaptiveMixing.inferredContentType(
+          category: category,
+          bundleIdentifier: bundleIdentifier,
+          displayName: displayName
+        ),
+        priority: .normal
+      )
+    case .voice:
+      AdaptiveAppPolicy(contentType: .lectureOrVoice, priority: .normal)
+    case .media:
+      AdaptiveAppPolicy(
+        contentType: AdaptiveMixing.inferredMediaContentType(
+          bundleIdentifier: bundleIdentifier,
+          displayName: displayName
+        ),
+        priority: .background
+      )
+    case .ignore:
+      AdaptiveAppPolicy(contentType: .other, priority: .neverAdjust)
+    }
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case contentType
+    case priority
+  }
+
+  public init(from decoder: Decoder) throws {
+    let defaults = AdaptiveAppPolicy()
+    guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+      self = defaults
+      return
+    }
+    self.contentType =
+      (try? container.decodeIfPresent(
+        AdaptiveContentType.self,
+        forKey: .contentType
+      )) ?? nil ?? defaults.contentType
+    self.priority =
+      (try? container.decodeIfPresent(
+        AdaptivePriority.self,
+        forKey: .priority
+      )) ?? nil ?? defaults.priority
+  }
+}
+
+public struct AdaptiveMixInput: Hashable, Sendable {
+  public var appID: String
+  public var policy: AdaptiveAppPolicy
+  public var isManaged: Bool
+  public var isMuted: Bool
+  public var rms: Float
+  public var voiceBandEnergy: Float
+  public var isFrontmost: Bool
+
+  public init(
+    appID: String,
+    policy: AdaptiveAppPolicy,
+    isManaged: Bool,
+    isMuted: Bool,
+    rms: Float,
+    voiceBandEnergy: Float,
+    isFrontmost: Bool = false
+  ) {
+    self.appID = appID
+    self.policy = policy
+    self.isManaged = isManaged
+    self.isMuted = isMuted
+    self.rms = rms.isFinite ? max(0, rms) : 0
+    self.voiceBandEnergy = voiceBandEnergy.isFinite ? max(0, voiceBandEnergy) : 0
+    self.isFrontmost = isFrontmost
+  }
+}
+
 /// Product constants and pure calculations shared by the adaptive coordinator.
 public enum AdaptiveMixing {
   public static let speechThresholdDBFS = -42.0
@@ -21,6 +197,125 @@ public enum AdaptiveMixing {
 
   public static let minimumCombinedGainDB = -18.0
   public static let maximumCombinedGainDB = 3.0
+
+  public static let activityThresholdDBFS = -50.0
+  public static let gentlePriorityReductionDB = -4.0
+  public static let moderatePriorityReductionDB = -6.0
+  public static let strongPriorityReductionDB = -10.0
+
+  public static func inferredContentType(
+    category: AppCategory,
+    bundleIdentifier: String? = nil,
+    displayName: String? = nil
+  ) -> AdaptiveContentType {
+    switch category {
+    case .conferencing, .communication:
+      return .meeting
+    case .media:
+      return inferredMediaContentType(
+        bundleIdentifier: bundleIdentifier,
+        displayName: displayName
+      )
+    case .browser, .system, .unknown:
+      return .other
+    }
+  }
+
+  public static func inferredMediaContentType(
+    bundleIdentifier: String? = nil,
+    displayName: String? = nil
+  ) -> AdaptiveContentType {
+    let identity = [bundleIdentifier, displayName]
+      .compactMap { $0?.lowercased() }
+      .joined(separator: " ")
+    let musicMarkers = [
+      "spotify", "music", "tidal", "deezer", "qobuz", "pandora",
+    ]
+    return musicMarkers.contains(where: identity.contains) ? .music : .videoOrMedia
+  }
+
+  public static func policy(
+    for strategy: AdaptiveStrategy,
+    contentType: AdaptiveContentType,
+    existingPolicy: AdaptiveAppPolicy? = nil
+  ) -> AdaptiveAppPolicy {
+    switch strategy {
+    case .lectureFocus:
+      let priority: AdaptivePriority
+      switch contentType {
+      case .lectureOrVoice:
+        priority = .foreground
+      case .music:
+        priority = .background
+      case .meeting, .videoOrMedia, .game, .other:
+        priority = .normal
+      }
+      return AdaptiveAppPolicy(contentType: contentType, priority: priority)
+    case .mediaFirst:
+      let priority: AdaptivePriority
+      switch contentType {
+      case .music, .videoOrMedia:
+        priority = .foreground
+      case .meeting:
+        priority = .background
+      case .lectureOrVoice, .game, .other:
+        priority = .normal
+      }
+      return AdaptiveAppPolicy(contentType: contentType, priority: priority)
+    case .balanced:
+      return AdaptiveAppPolicy(contentType: contentType, priority: .normal)
+    case .custom:
+      return existingPolicy
+        ?? AdaptiveAppPolicy(contentType: contentType, priority: .normal)
+    }
+  }
+
+  public static func priorityAttenuationDB(
+    focus: AdaptivePriority?,
+    app: AdaptivePriority
+  ) -> Double {
+    guard let focus, app != .neverAdjust else { return 0 }
+    switch (focus, app) {
+    case (.foreground, .normal):
+      return gentlePriorityReductionDB
+    case (.foreground, .background):
+      return strongPriorityReductionDB
+    case (.normal, .background):
+      return moderatePriorityReductionDB
+    case (.foreground, .foreground),
+      (.normal, .foreground),
+      (.normal, .normal),
+      (.background, .foreground),
+      (.background, .normal),
+      (.background, .background),
+      (.foreground, .neverAdjust),
+      (.normal, .neverAdjust),
+      (.background, .neverAdjust),
+      (.neverAdjust, _):
+      return 0
+    }
+  }
+
+  /// Loudness can deepen a required priority reduction, but it cannot raise a
+  /// lower-priority stream above the attenuation selected by the matrix.
+  public static func combinedPolicyGainDB(
+    priorityAttenuationDB: Double,
+    loudnessTrimDB: Double
+  ) -> Double {
+    let safePriority =
+      priorityAttenuationDB.isFinite
+      ? min(0, max(minimumCombinedGainDB, priorityAttenuationDB))
+      : 0
+    let safeTrim =
+      loudnessTrimDB.isFinite
+      ? min(maximumLoudnessTrimDB, max(minimumLoudnessTrimDB, loudnessTrimDB))
+      : 0
+    let allowedTrim = safePriority < 0 ? min(0, safeTrim) : safeTrim
+    return min(
+      maximumCombinedGainDB,
+      max(minimumCombinedGainDB, safePriority + allowedTrim)
+    )
+  }
 
   /// Converts a linear RMS amplitude to dBFS. Invalid or silent input is silence.
   public static func decibels(forAmplitude amplitude: Double) -> Double {
@@ -158,7 +453,8 @@ public struct SpeechDetectionState: Hashable, Sendable {
       fullBandRMS: fullBandRMS,
       voiceBandEnergy: voiceBandEnergy
     )
-    let qualifies = fullBandRMS.isFinite
+    let qualifies =
+      fullBandRMS.isFinite
       && fullBandRMS >= thresholdRMS
       && voiceRatio >= AdaptiveMixing.minimumVoiceBandEnergyRatio
 
@@ -210,7 +506,8 @@ public struct SpeechDuckingState: Hashable, Sendable {
     let duration = AdaptiveMixing.elapsedDuration(elapsed)
 
     if target < currentGainDB {
-      let rate = abs(AdaptiveMixing.speechDuckDB)
+      let rate =
+        abs(AdaptiveMixing.speechDuckDB)
         / AdaptiveMixing.speechDuckAttackDuration
       currentGainDB = AdaptiveMixing.move(
         currentGainDB,
@@ -218,7 +515,8 @@ public struct SpeechDuckingState: Hashable, Sendable {
         maximumChange: rate * duration
       )
     } else {
-      let rate = abs(AdaptiveMixing.speechDuckDB)
+      let rate =
+        abs(AdaptiveMixing.speechDuckDB)
         / AdaptiveMixing.speechDuckReleaseDuration
       currentGainDB = AdaptiveMixing.move(
         currentGainDB,
@@ -286,7 +584,8 @@ public struct LoudnessTrimState: Hashable, Sendable {
       )
     }
 
-    let rate = target < currentGainDB
+    let rate =
+      target < currentGainDB
       ? AdaptiveMixing.downwardCorrectionDBPerSecond
       : AdaptiveMixing.upwardCorrectionDBPerSecond
     currentGainDB = AdaptiveMixing.move(
@@ -295,6 +594,200 @@ public struct LoudnessTrimState: Hashable, Sendable {
       maximumChange: rate * duration
     )
     return currentGainDB
+  }
+}
+
+/// Smooths arbitrary adaptive-policy targets while preserving the established
+/// 120 ms attack and 900 ms release behavior.
+public struct AdaptivePolicyGainState: Hashable, Sendable {
+  public private(set) var currentGainDB: Double
+  private var transitionTargetGainDB: Double
+  private var transitionRateDBPerSecond: Double
+
+  public init(currentGainDB: Double = 0) {
+    let safeGain = currentGainDB.isFinite ? currentGainDB : 0
+    let clamped = min(
+      AdaptiveMixing.maximumCombinedGainDB,
+      max(AdaptiveMixing.minimumCombinedGainDB, safeGain)
+    )
+    self.currentGainDB = clamped
+    self.transitionTargetGainDB = clamped
+    self.transitionRateDBPerSecond = 0
+  }
+
+  @discardableResult
+  public mutating func update(
+    targetGainDB: Double,
+    elapsed: TimeInterval
+  ) -> Double {
+    let safeTarget = targetGainDB.isFinite ? targetGainDB : 0
+    let target = min(
+      AdaptiveMixing.maximumCombinedGainDB,
+      max(AdaptiveMixing.minimumCombinedGainDB, safeTarget)
+    )
+    if target != transitionTargetGainDB {
+      transitionTargetGainDB = target
+      let duration =
+        target < currentGainDB
+        ? AdaptiveMixing.speechDuckAttackDuration
+        : AdaptiveMixing.speechDuckReleaseDuration
+      transitionRateDBPerSecond = abs(target - currentGainDB) / duration
+    }
+
+    currentGainDB = AdaptiveMixing.move(
+      currentGainDB,
+      toward: target,
+      maximumChange: transitionRateDBPerSecond
+        * AdaptiveMixing.elapsedDuration(elapsed)
+    )
+    return currentGainDB
+  }
+}
+
+/// Stateful, deterministic coordinator for the 1.2 content and priority model.
+/// Audio samples never enter this value. It consumes only transient RMS and
+/// voice-band energy measurements and emits temporary per-app gain values.
+public struct AdaptivePolicyEngine: Sendable {
+  public var usesLoudnessCorrection: Bool
+  public var focusMode: AdaptiveFocusMode
+  private var speechDetectionStates: [String: SpeechDetectionState] = [:]
+  private var loudnessTrimStates: [String: LoudnessTrimState] = [:]
+  private var gainStates: [String: AdaptivePolicyGainState] = [:]
+
+  public init(
+    usesLoudnessCorrection: Bool = true,
+    focusMode: AdaptiveFocusMode = .smartHybrid
+  ) {
+    self.usesLoudnessCorrection = usesLoudnessCorrection
+    self.focusMode = focusMode
+  }
+
+  public mutating func reset() {
+    speechDetectionStates.removeAll()
+    loudnessTrimStates.removeAll()
+    gainStates.removeAll()
+  }
+
+  public mutating func update(
+    inputs: [AdaptiveMixInput],
+    elapsed: TimeInterval
+  ) -> [String: Float] {
+    let liveIDs = Set(inputs.map(\.appID))
+    speechDetectionStates = speechDetectionStates.filter { liveIDs.contains($0.key) }
+    loudnessTrimStates = loudnessTrimStates.filter { liveIDs.contains($0.key) }
+    gainStates = gainStates.filter { liveIDs.contains($0.key) }
+
+    var activePriorityRanks: [Int] = []
+    activePriorityRanks.reserveCapacity(inputs.count)
+    var effectivePriorities: [String: AdaptivePriority] = [:]
+    effectivePriorities.reserveCapacity(inputs.count)
+
+    for input in inputs {
+      let routeIsEligible = input.isManaged && !input.isMuted
+      let isActive: Bool
+      if input.policy.contentType.usesSpeechActivation {
+        var state = speechDetectionStates[input.appID] ?? SpeechDetectionState()
+        let detected = state.update(
+          fullBandRMS: routeIsEligible ? Double(input.rms) : 0,
+          voiceBandEnergy: routeIsEligible ? Double(input.voiceBandEnergy) : 0,
+          elapsed: elapsed
+        )
+        speechDetectionStates[input.appID] = state
+        isActive = routeIsEligible && detected
+      } else {
+        isActive =
+          routeIsEligible
+          && AdaptiveMixing.decibels(forAmplitude: Double(input.rms))
+            >= AdaptiveMixing.activityThresholdDBFS
+      }
+
+      let effectivePriority = effectivePriority(for: input, isActive: isActive)
+      effectivePriorities[input.appID] = effectivePriority
+      if isActive, let focusRank = effectivePriority.focusRank {
+        activePriorityRanks.append(focusRank)
+      }
+    }
+
+    let focusPriority: AdaptivePriority?
+    switch activePriorityRanks.max() {
+    case 2: focusPriority = .foreground
+    case 1: focusPriority = .normal
+    case 0: focusPriority = .background
+    default: focusPriority = nil
+    }
+
+    var result: [String: Float] = [:]
+    result.reserveCapacity(inputs.count)
+    for input in inputs {
+      if input.policy.priority == .neverAdjust {
+        loudnessTrimStates.removeValue(forKey: input.appID)
+        gainStates.removeValue(forKey: input.appID)
+        result[input.appID] = 0
+        continue
+      }
+
+      let routeIsEligible = input.isManaged && !input.isMuted
+      let priorityGain =
+        routeIsEligible
+        ? AdaptiveMixing.priorityAttenuationDB(
+          focus: focusPriority,
+          app: effectivePriorities[input.appID] ?? input.policy.priority
+        )
+        : 0
+
+      let loudnessGain: Double
+      if usesLoudnessCorrection {
+        var state = loudnessTrimStates[input.appID] ?? LoudnessTrimState()
+        loudnessGain = state.update(
+          rms: Double(input.rms),
+          isEligible: routeIsEligible,
+          elapsed: elapsed
+        )
+        loudnessTrimStates[input.appID] = state
+      } else {
+        loudnessTrimStates.removeValue(forKey: input.appID)
+        loudnessGain = 0
+      }
+
+      let targetGain = AdaptiveMixing.combinedPolicyGainDB(
+        priorityAttenuationDB: priorityGain,
+        loudnessTrimDB: loudnessGain
+      )
+      var gainState = gainStates[input.appID] ?? AdaptivePolicyGainState()
+      let gain = gainState.update(targetGainDB: targetGain, elapsed: elapsed)
+      gainStates[input.appID] = gainState
+      result[input.appID] = Float(gain)
+    }
+    return result
+  }
+
+  private func effectivePriority(
+    for input: AdaptiveMixInput,
+    isActive: Bool
+  ) -> AdaptivePriority {
+    let assignedPriority = input.policy.priority
+    guard input.isFrontmost,
+      isActive,
+      assignedPriority != .neverAdjust
+    else {
+      return assignedPriority
+    }
+
+    switch focusMode {
+    case .assignedPriorities:
+      return assignedPriority
+    case .followFrontApp:
+      return .foreground
+    case .smartHybrid:
+      switch assignedPriority {
+      case .background:
+        return .normal
+      case .normal, .foreground:
+        return .foreground
+      case .neverAdjust:
+        return .neverAdjust
+      }
+    }
   }
 }
 
@@ -343,8 +836,9 @@ public final class VoiceBandEnergyAnalyzer {
   ) -> (energySum: Float, sampleCount: UInt32) {
     let localChannelCount = max(1, bufferChannelCount)
     guard byteCount > 0,
-          channelOffset >= 0,
-          channelOffset + localChannelCount <= channelCount else {
+      channelOffset >= 0,
+      channelOffset + localChannelCount <= channelCount
+    else {
       return (0, 0)
     }
 
@@ -398,9 +892,11 @@ public final class VoiceBandEnergyAnalyzer {
         let input = read(sampleIndex)
         let safeInput = input.isFinite ? input : 0
         var state = states[channel]
-        let highPassed = highPassAlpha
+        let highPassed =
+          highPassAlpha
           * (state.highPassOutput + safeInput - state.previousInput)
-        let bandPassed = state.lowPassOutput + lowPassAlpha
+        let bandPassed =
+          state.lowPassOutput + lowPassAlpha
           * (highPassed - state.lowPassOutput)
         state.previousInput = safeInput
         state.highPassOutput = highPassed

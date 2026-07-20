@@ -6,6 +6,58 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-20
+
+### Added
+- Add a dedicated Sound workspace with Managed Audio EQ for every stream routed
+  through Waves, including Simple and Advanced bands, presets, and combined
+  clipping protection when per-app and managed equalizers are stacked.
+- Add content-aware app policies for Lecture or Voice, Meeting, Music, Video or
+  Media, Game, and Other, with Foreground, Normal, Background, and Never Adjust
+  priorities.
+- Add Sidechain Focus with Assigned Priorities, Follow Front App, and Smart
+  Hybrid modes. Smart Hybrid promotes an audible frontmost app by one priority
+  tier while preserving explicit priorities as guardrails.
+- Add Lecture Focus, Media First, Balanced, and Custom adaptive strategies for
+  common mixes such as a clear lecture over background music or media over a
+  low-priority meeting.
+- Add independent Waves and Graphite palettes, each available in System, Light,
+  and Dark appearance modes.
+- Add a four-stage guided setup for privacy, audio readiness, common preferences,
+  and a final configuration summary.
+- Add Setup & Repair with live checks, direct links to the matching macOS privacy,
+  Accessibility, Login Items, and Sound panes, route recovery, and a non-destructive
+  Redo Guided Setup flow.
+
+### Changed
+- Replace the app icon with the new cyan wave identity across the app bundle,
+  Finder, Dock, and distribution image.
+- Redesign the mixer, inspector, settings, menu bar, and shared surfaces around a
+  quieter native visual system with consistent themed fills, strokes, selection,
+  and status colors.
+- Replace the single legacy adaptive role with independent content type and
+  priority policies while migrating existing Auto, Voice, Media, and Ignore
+  choices.
+- Process adaptive focus from transient local activity and speech measurements.
+  Waves never records or exports audio samples and never pauses or mutes apps for
+  Sidechain Focus.
+- Treat persisted backend capability status as unprobed until the live backend
+  refreshes it, preventing stale permission and route-health claims at launch.
+
+### Fixed
+- Reserve combined EQ headroom before processing so stacked boosts do not clip
+  full-scale managed audio.
+- Require audible activity before front-app focus can trigger, require detected
+  speech for lecture and meeting sources, and keep Never Adjust immune to
+  adaptive gain.
+- Keep a Background meeting from leapfrogging explicitly Foreground media in
+  Smart Hybrid mode.
+- Keep first-run setup non-mutating until the user explicitly chooses Continue,
+  including Settings navigation and application shutdown.
+- Reject oversized URL-scheme payloads before Foundation URL parsing.
+- Bound decoded profile counts, entry counts, and names for both persisted
+  libraries and imported backups.
+
 ## [1.1.0] - 2026-07-18
 
 ### Added

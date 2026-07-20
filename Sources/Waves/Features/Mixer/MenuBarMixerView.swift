@@ -4,6 +4,7 @@ import WavesAudioCore
 
 struct MenuBarMixerView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @Environment(\.openWindow) private var openWindow
   @Environment(\.openSettings) private var openSettings
   // Seed at the cap so the scroller measures DOWN to fit on the first preference
@@ -35,7 +36,7 @@ struct MenuBarMixerView: View {
           )
           .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-              .strokeBorder(WavesDesign.stroke)
+              .strokeBorder(theme.stroke)
           )
 
         // Output device and profile pickers are the two most-used quick
@@ -205,6 +206,7 @@ private struct SectionsHeightKey: PreferenceKey {
 /// is live), a live-state status line, and a refresh control.
 private struct MenuBarHeader: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @Environment(\.colorSchemeContrast) private var contrast
 
   var body: some View {
@@ -220,7 +222,7 @@ private struct MenuBarHeader: View {
           // fall back to primary text there (mirrors RoutingStateIndicator).
           .foregroundStyle(
             store.hasLiveAudio
-              ? (contrast == .increased ? Color.primary : WavesDesign.accent)
+              ? (contrast == .increased ? Color.primary : theme.accent)
               : Color.secondary
           )
           .lineLimit(1)

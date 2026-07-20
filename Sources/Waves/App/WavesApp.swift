@@ -1,8 +1,17 @@
 import AppKit
 import Carbon
+import OSLog
 import SwiftUI
 import WavesAudioCore
-import OSLog
+
+enum WavesURLPolicy {
+  static let maxPayloadBytes = 8 * 1_024
+
+  static func parse(_ value: String) -> URL? {
+    guard value.utf8.count <= maxPayloadBytes else { return nil }
+    return URL(string: value)
+  }
+}
 
 @main
 @MainActor
@@ -30,14 +39,10 @@ struct WavesApp: App {
         .environment(store)
         .environment(updaterService)
         .frame(minWidth: 980, minHeight: 620)
-        // Applied at the scene root (above NavigationSplitView's sidebar list and
-        // any toolbar/segmented chrome) so Waves' cyan signal accent wins over the
-        // user's *system* accent-color preference everywhere AppKit auto-tints
-        // "selectable" chrome (sidebar icons, toolbar item highlights). Without
-        // this, a non-blue system accent (e.g. Red) bleeds into sidebar icons that
-        // are explicitly styled `.secondary` in SwiftUI — the system accent wins
-        // at the AppKit bridging layer for that one specific effect.
-        .tint(WavesDesign.accent)
+        .wavesTheme(
+          palette: store.preferences.palette,
+          appearance: store.preferences.appearance
+        )
         .task {
           appDelegate.setStore(store)
           store.start()
@@ -85,6 +90,10 @@ struct WavesApp: App {
         // meaningfully more per screen (closer to System Settings' own
         // proportions) while still fitting comfortably on a 13" display.
         .frame(minWidth: 720, minHeight: 640)
+        .wavesTheme(
+          palette: store.preferences.palette,
+          appearance: store.preferences.appearance
+        )
     }
 
     MenuBarExtra(isInserted: $showMenuBarExtra) {
@@ -92,7 +101,10 @@ struct WavesApp: App {
         .environment(store)
         .environment(updaterService)
         .frame(width: WavesDesign.menuBarPanelWidth)
-        .tint(WavesDesign.accent)
+        .wavesTheme(
+          palette: store.preferences.palette,
+          appearance: store.preferences.appearance
+        )
     } label: {
       // The accessibility label must live on the status-item label itself —
       // VoiceOver reads this view for the menu-bar item, not the popover
@@ -198,7 +210,7 @@ final class AppTerminationCoordinator {
   }
 
   var completedOutcome: AppTerminationOutcome? {
-    guard case let .completed(outcome) = state else { return nil }
+    guard case .completed(let outcome) = state else { return nil }
     return outcome
   }
 
@@ -246,11 +258,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     store = Self.bootstrapStore
     store?.start()
     NSApp.setActivationPolicy(.regular)
-    // Waves' visual language is a dark audio-console surface (see DESIGN.md).
-    // Pin the app to a dark appearance so custom dark gradients never sit under
-    // light-mode (near-black) system label colors, which would render the
-    // Settings, Help, and Onboarding text effectively invisible in light mode.
-    NSApp.appearance = NSAppearance(named: .darkAqua)
     setupURLSchemeHandler()
     updateGlobalHotkeysState()
     NotificationCenter.default.addObserver(
@@ -303,12 +310,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch outcome {
         case .clean:
           lifecycleLogger.info("Termination cleanup completed cleanly")
-        case let .degraded(result):
+        case .degraded(let result):
           lifecycleLogger.error(
             "Termination cleanup degraded: \(result.persistenceDegradations.count, privacy: .public) persistence issue(s), backend \(String(describing: result.backendResult?.completion), privacy: .public)"
           )
         case .timedOut:
-          lifecycleLogger.error("Termination cleanup timed out after the bounded wait; termination will proceed")
+          lifecycleLogger.error(
+            "Termination cleanup timed out after the bounded wait; termination will proceed")
         }
       },
       reply: { shouldTerminate in
@@ -347,9 +355,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
   }
 
-  @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
+  @objc private func handleGetURLEvent(
+    _ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor
+  ) {
     guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
-          let url = URL(string: urlString) else {
+      let url = WavesURLPolicy.parse(urlString)
+    else {
       logger.warning("URL scheme invocation rejected: Missing URL payload")
       return
     }
@@ -366,7 +377,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // local monitor covers the hotkeys with the mixer/Settings focused.
     // Returning nil consumes a handled event, keeping ⌘⌥M from also firing
     // the Window menu's "Minimize All".
-    localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+    localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) {
+      [weak self] event in
       if self?.handleGlobalKeyEvent(event) == true {
         return nil
       }
@@ -388,11 +400,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// Returns `true` when the event matched a Waves hotkey and was acted on.
   private func handleGlobalKeyEvent(_ event: NSEvent) -> Bool {
     guard let store = store,
-          store.preferences.enableKeyboardShortcuts else { return false }
+      store.preferences.enableKeyboardShortcuts
+    else { return false }
 
     // Check if user is typing in a text field
     if let focusedElement = NSApp.keyWindow?.firstResponder,
-       focusedElement.isKind(of: NSTextView.self) || focusedElement.isKind(of: NSTextField.self) {
+      focusedElement.isKind(of: NSTextView.self) || focusedElement.isKind(of: NSTextField.self)
+    {
       return false
     }
 
@@ -400,7 +414,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // `contains` (not equality) because the arrow keys carry .function/
     // .numericPad flags; .control/.shift are excluded so third-party chords
     // like ⌃⌥⌘↓ don't also trigger Waves.
-    let isCmdOption = modifiers.contains(.command) && modifiers.contains(.option)
+    let isCmdOption =
+      modifiers.contains(.command) && modifiers.contains(.option)
       && !modifiers.contains(.control) && !modifiers.contains(.shift)
 
     guard isCmdOption, [126, 125, 46].contains(event.keyCode) else { return false }
@@ -411,11 +426,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     switch event.keyCode {
-    case 126: // Up arrow
+    case 126:  // Up arrow
       store.increaseVolumeForFrontmostApp()
-    case 125: // Down arrow
+    case 125:  // Down arrow
       store.decreaseVolumeForFrontmostApp()
-    case 46: // M key
+    case 46:  // M key
       store.toggleMuteForFrontmostApp()
     default:
       break

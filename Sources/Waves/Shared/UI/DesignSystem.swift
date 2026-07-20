@@ -1,41 +1,27 @@
+import AppKit
 import SwiftUI
 import WavesAudioCore
 
 // MARK: - Design tokens
 //
-// Waves' visual language (see DESIGN.md): a quiet dark audio-console surface,
-// macOS Liquid Glass via system materials, and a single signal-cyan accent that
-// only appears where audio is live or a control is primary. These tokens are the
-// single source of truth so spacing, radii, and color stay consistent across the
-// menu bar, main window, settings, and onboarding.
+// Shared structural tokens and compatibility colors. Theme-aware views should
+// read `wavesTheme` from the environment; the static color aliases below retain
+// the original Waves-dark values while remaining call sites migrate.
 
 enum WavesDesign {
   // MARK: Backdrops
 
-  static let windowGradient = LinearGradient(
-    colors: [
-      Color(red: 0.03, green: 0.06, blue: 0.11),
-      Color(red: 0.02, green: 0.03, blue: 0.06),
-      Color(red: 0.01, green: 0.015, blue: 0.03),
-    ],
-    startPoint: .topLeading,
-    endPoint: .bottomTrailing
-  )
+  private static let compatibilityTheme = WavesTheme(palette: .waves, colorScheme: .dark)
+
+  static let windowGradient = compatibilityTheme.windowGradient
 
   // MARK: Signal & status
 
-  static let accent = Color.cyan
+  static let accent = compatibilityTheme.accent
 
   /// A slightly richer cyan→teal sweep for fills and the wave mark, so the
   /// signal reads as a crafted gradient rather than flat neon.
-  static let accentGradient = LinearGradient(
-    colors: [
-      Color(red: 0.45, green: 0.95, blue: 1.0),
-      Color(red: 0.0, green: 0.80, blue: 0.92),
-    ],
-    startPoint: .topLeading,
-    endPoint: .bottomTrailing
-  )
+  static let accentGradient = compatibilityTheme.accentGradient
 
   static let warning = Color.orange
   static let error = Color.red
@@ -77,7 +63,7 @@ enum WavesDesign {
 
   // MARK: Strokes
 
-  static let stroke = Color.white.opacity(0.09)
+  static let stroke = compatibilityTheme.stroke
 
   // MARK: Radii
 
@@ -99,97 +85,35 @@ enum WavesDesign {
   }
 }
 
-// MARK: - Wave motif
+// MARK: - Brand mark
 
-/// A smooth sine wave path — the literal namesake motif, used as a quiet accent
-/// in headers, empty states, and onboarding. `amplitude` is a fraction of the
-/// rect's half-height; `waves` is how many full cycles span the width.
-struct WaveShape: Shape {
-  var amplitude: CGFloat = 0.6
-  var waves: CGFloat = 1.6
-  var phase: CGFloat = 0
-
-  var animatableData: CGFloat {
-    get { phase }
-    set { phase = newValue }
-  }
-
-  func path(in rect: CGRect) -> Path {
-    var path = Path()
-    let midY = rect.midY
-    let amp = (rect.height / 2) * amplitude
-    let steps = max(2, Int(rect.width / 2))
-    for index in 0...steps {
-      let t = CGFloat(index) / CGFloat(steps)
-      let x = rect.minX + rect.width * t
-      let y = midY + sin(t * waves * 2 * .pi + phase) * amp
-      if index == 0 {
-        path.move(to: CGPoint(x: x, y: y))
-      } else {
-        path.addLine(to: CGPoint(x: x, y: y))
-      }
-    }
-    return path
-  }
-}
-
-/// The Waves brand mark: a rounded tile with three nested cyan waves. Drawn in
-/// code so it scales crisply at any size and can gently animate when audio is
-/// live (honoring Reduce Motion). Falls back to the bundled logo asset nowhere —
-/// this *is* the in-app mark; the bundled PNG is only used for the Dock/app icon.
+/// The supplied Waves identity is the single source for both the app icon and
+/// in-app branding. Live audio adds a restrained cyan glow without altering the
+/// artwork, so the mark remains consistent at every size.
 struct WavesMark: View {
+  private static let image: NSImage? = {
+    guard let url = Bundle.module.url(forResource: "waves-logo", withExtension: "png") else {
+      return nil
+    }
+    return NSImage(contentsOf: url)
+  }()
+
   var size: CGFloat = 20
   var live: Bool = false
 
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @State private var phase: CGFloat = 0
+  @Environment(\.wavesTheme) private var theme
 
   var body: some View {
-    ZStack {
-      RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
-        .fill(
-          LinearGradient(
-            colors: [Color(red: 0.06, green: 0.12, blue: 0.20), Color(red: 0.02, green: 0.04, blue: 0.08)],
-            startPoint: .top,
-            endPoint: .bottom
-          )
-        )
-        .overlay(
-          RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
-            .strokeBorder(Color.white.opacity(0.12), lineWidth: max(0.5, size * 0.03))
-        )
-
-      ForEach(0..<3, id: \.self) { index in
-        WaveShape(
-          amplitude: 0.42 - CGFloat(index) * 0.06,
-          waves: 1.4,
-          phase: phase + CGFloat(index) * (.pi / 2.4)
-        )
-        .stroke(
-          WavesDesign.accent.opacity(1.0 - Double(index) * 0.32),
-          style: StrokeStyle(lineWidth: max(1, size * 0.07), lineCap: .round)
-        )
-        .frame(width: size * 0.64, height: size * 0.5)
-      }
-    }
-    .frame(width: size, height: size)
-    .accessibilityHidden(true)
-    .onAppear { updateAnimation(live) }
-    .onChange(of: live) { _, isLive in updateAnimation(isLive) }
-  }
-
-  /// Starts the gentle wave drift while live, and halts it (without animating the
-  /// reset) when audio stops or Reduce Motion is on.
-  private func updateAnimation(_ isLive: Bool) {
-    guard isLive, !reduceMotion else {
-      var transaction = Transaction()
-      transaction.disablesAnimations = true
-      withTransaction(transaction) { phase = 0 }
-      return
-    }
-    withAnimation(.linear(duration: 2.4).repeatForever(autoreverses: false)) {
-      phase = .pi * 2
-    }
+    Image(nsImage: Self.image ?? NSImage())
+      .resizable()
+      .interpolation(.high)
+      .aspectRatio(contentMode: .fit)
+      .shadow(
+        color: theme.accent.opacity(live ? 0.28 : 0),
+        radius: live ? size * 0.16 : 0
+      )
+      .frame(width: size, height: size)
+      .accessibilityHidden(true)
   }
 }
 
@@ -212,13 +136,14 @@ extension View {
 private struct WavesContentCardModifier: ViewModifier {
   let cornerRadius: CGFloat
   @Environment(\.colorSchemeContrast) private var contrast
+  @Environment(\.wavesTheme) private var theme
 
   func body(content: Content) -> some View {
     let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
     content
-      .background(Color.white.opacity(0.04), in: shape)
+      .background(theme.contentFill, in: shape)
       .overlay(
-        shape.strokeBorder(WavesDesign.hairline(increasedContrast: contrast == .increased), lineWidth: 1)
+        shape.strokeBorder(theme.hairline(increasedContrast: contrast == .increased), lineWidth: 1)
       )
   }
 }

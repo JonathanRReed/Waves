@@ -106,20 +106,30 @@ public struct EqualizerBandDefinition: Identifiable, Codable, Hashable, Sendable
 
 public enum EqualizerBandCatalog {
   public static let simple: [EqualizerBandDefinition] = [
-    EqualizerBandDefinition(id: "low", label: "Low", frequency: 120, q: 0.707, filterKind: .lowShelf),
-    EqualizerBandDefinition(id: "mid", label: "Mid", frequency: 1_500, q: 0.9, filterKind: .peaking),
-    EqualizerBandDefinition(id: "high", label: "High", frequency: 6_000, q: 0.707, filterKind: .highShelf),
+    EqualizerBandDefinition(
+      id: "low", label: "Low", frequency: 120, q: 0.707, filterKind: .lowShelf),
+    EqualizerBandDefinition(
+      id: "mid", label: "Mid", frequency: 1_500, q: 0.9, filterKind: .peaking),
+    EqualizerBandDefinition(
+      id: "high", label: "High", frequency: 6_000, q: 0.707, filterKind: .highShelf),
   ]
 
   public static let advanced: [EqualizerBandDefinition] = [
     EqualizerBandDefinition(id: "60", label: "60 Hz", frequency: 60, q: 1.0, filterKind: .peaking),
-    EqualizerBandDefinition(id: "120", label: "120 Hz", frequency: 120, q: 1.0, filterKind: .peaking),
-    EqualizerBandDefinition(id: "250", label: "250 Hz", frequency: 250, q: 1.0, filterKind: .peaking),
-    EqualizerBandDefinition(id: "500", label: "500 Hz", frequency: 500, q: 1.0, filterKind: .peaking),
-    EqualizerBandDefinition(id: "1000", label: "1 kHz", frequency: 1_000, q: 1.0, filterKind: .peaking),
-    EqualizerBandDefinition(id: "2000", label: "2 kHz", frequency: 2_000, q: 1.0, filterKind: .peaking),
-    EqualizerBandDefinition(id: "4000", label: "4 kHz", frequency: 4_000, q: 1.0, filterKind: .peaking),
-    EqualizerBandDefinition(id: "8000", label: "8 kHz", frequency: 8_000, q: 1.0, filterKind: .peaking),
+    EqualizerBandDefinition(
+      id: "120", label: "120 Hz", frequency: 120, q: 1.0, filterKind: .peaking),
+    EqualizerBandDefinition(
+      id: "250", label: "250 Hz", frequency: 250, q: 1.0, filterKind: .peaking),
+    EqualizerBandDefinition(
+      id: "500", label: "500 Hz", frequency: 500, q: 1.0, filterKind: .peaking),
+    EqualizerBandDefinition(
+      id: "1000", label: "1 kHz", frequency: 1_000, q: 1.0, filterKind: .peaking),
+    EqualizerBandDefinition(
+      id: "2000", label: "2 kHz", frequency: 2_000, q: 1.0, filterKind: .peaking),
+    EqualizerBandDefinition(
+      id: "4000", label: "4 kHz", frequency: 4_000, q: 1.0, filterKind: .peaking),
+    EqualizerBandDefinition(
+      id: "8000", label: "8 kHz", frequency: 8_000, q: 1.0, filterKind: .peaking),
   ]
 
   public static func bands(for mode: EqualizerMode) -> [EqualizerBandDefinition] {
@@ -192,7 +202,9 @@ public struct EqualizerSettings: Codable, Hashable, Sendable {
     }
   }
 
-  public mutating func setGain(_ gainDB: Float, at index: Int, mode targetMode: EqualizerMode? = nil) {
+  public mutating func setGain(
+    _ gainDB: Float, at index: Int, mode targetMode: EqualizerMode? = nil
+  ) {
     let targetMode = targetMode ?? mode
     switch targetMode {
     case .simple:
@@ -206,7 +218,8 @@ public struct EqualizerSettings: Codable, Hashable, Sendable {
     }
   }
 
-  public mutating func applyPreset(_ preset: EqualizerPreset, mode targetMode: EqualizerMode? = nil) {
+  public mutating func applyPreset(_ preset: EqualizerPreset, mode targetMode: EqualizerMode? = nil)
+  {
     guard preset != .custom else { return }
     let targetMode = targetMode ?? mode
     let curve = Self.curve(for: preset, mode: targetMode)
@@ -290,5 +303,157 @@ public struct EqualizerSettings: Codable, Hashable, Sendable {
   private static func clamped(_ value: Float) -> Float {
     guard value.isFinite else { return 0 }
     return min(maximumGainDB, max(minimumGainDB, value))
+  }
+}
+
+/// The shared EQ applied to every stream routed through Waves managed audio.
+///
+/// This intentionally exposes the same editing surface as the per-app EQ while
+/// omitting per-app adaptive policy. Its custom Codable representation is flat,
+/// so persisted settings remain readable and additive without serializing an
+/// implementation-only nested `EqualizerSettings` value.
+public struct GlobalEqualizerSettings: Codable, Hashable, Sendable {
+  private var storage: EqualizerSettings
+
+  public var isEnabled: Bool {
+    get { storage.isEnabled }
+    set { storage.isEnabled = newValue }
+  }
+
+  public var mode: EqualizerMode {
+    get { storage.mode }
+    set { storage.mode = newValue }
+  }
+
+  public var simpleGainsDB: [Float] { storage.simpleGainsDB }
+  public var advancedGainsDB: [Float] { storage.advancedGainsDB }
+  public var simplePreset: EqualizerPreset { storage.simplePreset }
+  public var advancedPreset: EqualizerPreset { storage.advancedPreset }
+  public var activeGainsDB: [Float] { storage.activeGainsDB }
+  public var selectedPreset: EqualizerPreset { storage.selectedPreset }
+  public var headroomCompensationDB: Float { storage.headroomCompensationDB }
+
+  /// A per-app-compatible value for the realtime EQ processor.
+  public var equalizerSettings: EqualizerSettings { storage }
+
+  public init(
+    isEnabled: Bool = false,
+    mode: EqualizerMode = .simple,
+    simpleGainsDB: [Float] = [],
+    advancedGainsDB: [Float] = [],
+    simplePreset: EqualizerPreset = .flat,
+    advancedPreset: EqualizerPreset = .flat
+  ) {
+    self.storage = EqualizerSettings(
+      isEnabled: isEnabled,
+      mode: mode,
+      simpleGainsDB: simpleGainsDB,
+      advancedGainsDB: advancedGainsDB,
+      simplePreset: simplePreset,
+      advancedPreset: advancedPreset
+    )
+  }
+
+  public init(equalizerSettings: EqualizerSettings) {
+    self.init(
+      isEnabled: equalizerSettings.isEnabled,
+      mode: equalizerSettings.mode,
+      simpleGainsDB: equalizerSettings.simpleGainsDB,
+      advancedGainsDB: equalizerSettings.advancedGainsDB,
+      simplePreset: equalizerSettings.simplePreset,
+      advancedPreset: equalizerSettings.advancedPreset
+    )
+  }
+
+  public func gains(for mode: EqualizerMode) -> [Float] {
+    storage.gains(for: mode)
+  }
+
+  public func preset(for mode: EqualizerMode) -> EqualizerPreset {
+    storage.preset(for: mode)
+  }
+
+  public mutating func setGain(
+    _ gainDB: Float,
+    at index: Int,
+    mode targetMode: EqualizerMode? = nil
+  ) {
+    storage.setGain(gainDB, at: index, mode: targetMode)
+  }
+
+  public mutating func applyPreset(
+    _ preset: EqualizerPreset,
+    mode targetMode: EqualizerMode? = nil
+  ) {
+    storage.applyPreset(preset, mode: targetMode)
+  }
+
+  public mutating func resetActiveMode() {
+    storage.resetActiveMode()
+  }
+
+  /// Conservative headroom for two serial EQ layers. Each layer can realize
+  /// its largest boost at the same frequency, so their positive maxima add.
+  public static func combinedHeadroomCompensationDB(
+    perApp: EqualizerSettings,
+    managedAudio: GlobalEqualizerSettings
+  ) -> Float {
+    let perAppCompensation = perApp.isEnabled ? perApp.headroomCompensationDB : 0
+    let managedCompensation =
+      managedAudio.isEnabled
+      ? managedAudio.headroomCompensationDB
+      : 0
+    return perAppCompensation + managedCompensation
+  }
+
+  public static func combinedHeadroomGain(
+    perApp: EqualizerSettings,
+    managedAudio: GlobalEqualizerSettings
+  ) -> Float {
+    let compensation = combinedHeadroomCompensationDB(
+      perApp: perApp,
+      managedAudio: managedAudio
+    )
+    return Float(pow(10, Double(compensation) / 20))
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case isEnabled
+    case mode
+    case simpleGainsDB
+    case advancedGainsDB
+    case simplePreset
+    case advancedPreset
+  }
+
+  public init(from decoder: Decoder) throws {
+    let defaults = GlobalEqualizerSettings()
+    guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+      self = defaults
+      return
+    }
+
+    func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+      (try? container.decodeIfPresent(T.self, forKey: key)) ?? nil ?? fallback
+    }
+
+    self.init(
+      isEnabled: value(.isEnabled, defaults.isEnabled),
+      mode: value(.mode, defaults.mode),
+      simpleGainsDB: value(.simpleGainsDB, defaults.simpleGainsDB),
+      advancedGainsDB: value(.advancedGainsDB, defaults.advancedGainsDB),
+      simplePreset: value(.simplePreset, defaults.simplePreset),
+      advancedPreset: value(.advancedPreset, defaults.advancedPreset)
+    )
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(isEnabled, forKey: .isEnabled)
+    try container.encode(mode, forKey: .mode)
+    try container.encode(simpleGainsDB, forKey: .simpleGainsDB)
+    try container.encode(advancedGainsDB, forKey: .advancedGainsDB)
+    try container.encode(simplePreset, forKey: .simplePreset)
+    try container.encode(advancedPreset, forKey: .advancedPreset)
   }
 }

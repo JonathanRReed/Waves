@@ -8,6 +8,7 @@ enum PrivacySetupSurfaceStyle: Equatable {
 struct PrivacySetupSurface: View {
   @Environment(AppStore.self) private var store
   @Environment(\.colorSchemeContrast) private var contrast
+  @Environment(\.wavesTheme) private var theme
   let style: PrivacySetupSurfaceStyle
 
   init(style: PrivacySetupSurfaceStyle = .full) {
@@ -156,7 +157,7 @@ struct PrivacySetupSurface: View {
       )
       .strokeBorder(
         isProgressing
-          ? WavesDesign.accent.opacity(contrast == .increased ? 0.65 : 0.3)
+          ? theme.accent.opacity(contrast == .increased ? 0.65 : 0.3)
           : WavesDesign.error.opacity(contrast == .increased ? 0.75 : 0.4)
       )
     )
@@ -196,7 +197,6 @@ struct PrivacySetupSurface: View {
       .wavesGlassProminentButton()
       .controlSize(style == .full ? .large : .regular)
       .disabled(isProgressing)
-      .keyboardShortcut(.defaultAction)
       .accessibilityLabel(actionAccessibilityLabel)
       .accessibilityHint(actionAccessibilityHint)
 
@@ -220,7 +220,7 @@ struct PrivacySetupSurface: View {
     HStack(alignment: .top, spacing: 12) {
       Image(systemName: systemImage)
         .font(.body.weight(.semibold))
-        .foregroundStyle(WavesDesign.accent)
+        .foregroundStyle(theme.accent)
         .frame(width: 24)
         .accessibilityHidden(true)
 

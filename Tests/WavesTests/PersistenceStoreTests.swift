@@ -102,6 +102,41 @@ import WavesAudioCore
   #expect(!store.consumeDidRecoverFromCorruptFile())
 }
 
+@Test func profileStoreRejectsCollectionsOverTheProfileLimitBeforeMaterializingEveryProfile() throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let profilesURL = directory.appendingPathComponent("profiles.json")
+  let profiles = (0...ProfilePayloadDecoder.maxProfiles).map {
+    Profile(name: "Profile \($0)", entries: [])
+  }
+  try PersistedSchema.encode(profiles, using: JSONEncoder()).write(to: profilesURL)
+  let fallback = [Profile(name: "Fallback", entries: [])]
+
+  let store = ProfileStore(directory: directory)
+
+  #expect(store.load(defaults: fallback) == fallback)
+  #expect(!FileManager.default.fileExists(atPath: profilesURL.path))
+  #expect(FileManager.default.fileExists(atPath: profilesURL.appendingPathExtension("corrupt").path))
+}
+
+@Test func sessionStoreNormalizesPersistedBackendCapabilityStateOnLoad() async throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let store = SessionStore(directory: directory)
+  var snapshot = AudioSessionSnapshot.empty
+  snapshot.backendStatus = BackendStatus(
+    isAudioComponentInstalled: true,
+    hasRequiredPermissions: true,
+    isRouteRecoveryHealthy: true,
+    lastError: String(repeating: "x", count: 2_000)
+  )
+  try await store.save(snapshot)
+
+  let loaded = try #require(store.load())
+
+  #expect(loaded.backendStatus == .unprobed)
+}
+
 @Test func everyPersistenceStoreSaveSurfacesInjectedWriteFailure() async throws {
   let directory = try makePersistenceStoreDirectory()
   defer { try? FileManager.default.removeItem(at: directory) }

@@ -45,6 +45,45 @@ import Testing
   #expect(focus?.carriesLevels == true)
 }
 
+@Test func profileDecodingRejectsOversizedStructure() throws {
+  let longName = String(repeating: "n", count: Profile.maxNameLength + 1)
+  let longNameData = try JSONSerialization.data(withJSONObject: [
+    "id": UUID().uuidString,
+    "name": longName,
+    "entries": [],
+    "createdAt": 0,
+    "updatedAt": 0,
+  ])
+  #expect(throws: DecodingError.self) {
+    try JSONDecoder().decode(Profile.self, from: longNameData)
+  }
+
+  let entries = (0...Profile.maxEntries).map { ["appID": "app.\($0)"] }
+  let tooManyEntriesData = try JSONSerialization.data(withJSONObject: [
+    "id": UUID().uuidString,
+    "name": "Too many entries",
+    "entries": entries,
+    "createdAt": 0,
+    "updatedAt": 0,
+  ])
+  #expect(throws: DecodingError.self) {
+    try JSONDecoder().decode(Profile.self, from: tooManyEntriesData)
+  }
+}
+
+@Test func backendStatusDecodeUsesTheBoundedInitializer() throws {
+  let data = try JSONSerialization.data(withJSONObject: [
+    "isAudioComponentInstalled": true,
+    "hasRequiredPermissions": true,
+    "isRouteRecoveryHealthy": true,
+    "lastError": String(repeating: "x", count: BackendStatus.maxErrorLength + 500),
+  ])
+
+  let decoded = try JSONDecoder().decode(BackendStatus.self, from: data)
+
+  #expect(decoded.lastError?.count == BackendStatus.maxErrorLength)
+}
+
 @Test func previewSnapshotIncludesCurrentDeviceAndApps() {
   let snapshot = AudioSessionSnapshot.preview
 

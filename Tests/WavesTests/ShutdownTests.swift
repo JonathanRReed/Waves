@@ -79,6 +79,7 @@ import WavesAudioCore
   #expect(await fixture.backend.callCount("backend.adaptive.reset") == 0)
   #expect(await fixture.backend.callCount("backend.shutdown") == 0)
   #expect(fixture.preferencesStore.value.hasCompletedPrivacySetup == false)
+  #expect(!fixture.recorder.events().contains("session.save"))
 }
 
 @MainActor

@@ -62,6 +62,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var controllers: [String: PerAppTapController] = [:]
   private var controllerGenerationByRuntimeID: [String: UInt64] = [:]
   private var equalizerSettingsByAppID: [String: EqualizerSettings] = [:]
+  private var managedAudioEqualizerSettings = GlobalEqualizerSettings()
   private var adaptiveGainDBByAppID: [String: Float] = [:]
   private var latestAcceptedGenerationByLogicalID: [String: UInt64] = [:]
   private var stagedIntentByLogicalID: [String: AppRouteIntent] = [:]
@@ -523,6 +524,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       reason: .userEdit
     ))
     try validateLegacyApplyResult(result)
+  }
+
+  func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async {
+    guard !isShuttingDown else { return }
+    managedAudioEqualizerSettings = settings
+    for controller in controllers.values {
+      controller.setManagedAudioEqualizer(settings)
+    }
+  }
+
+  func managedAudioEqualizerSettingsForTesting() -> GlobalEqualizerSettings {
+    managedAudioEqualizerSettings
   }
 
   func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels] {
@@ -1033,6 +1046,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       controller.setEqualizer(stagedEqualizer)
+      controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
       controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
       return
     }
@@ -1069,6 +1083,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       controller.setEqualizer(stagedEqualizer)
+      controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
       controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
       if let replacedController {
         retainCleanupDegradations(replacedController.dispose())
@@ -1243,6 +1258,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         volumeBoost: app.volumeBoost,
         muted: app.isMuted,
         equalizerSettings: equalizerSettings,
+        managedAudioEqualizerSettings: managedAudioEqualizerSettings,
         adaptiveGainDB: adaptiveGainDBByAppID[app.logicalID] ?? 0,
         audioFormatPlan: audioFormatPlan
       )
@@ -2898,6 +2914,7 @@ private final class PerAppTapController: @unchecked Sendable {
   private let stateBox: TapRenderStateBox
   private let audioFormatPlan: AudioFormatPlan
   private let equalizerDSP: EqualizerDSP
+  private let managedAudioEqualizerDSP: EqualizerDSP
   private let voiceBandAnalyzer: VoiceBandEnergyAnalyzer
   private let callbackQueue: DispatchQueue
   private let callbackQueueKey = DispatchSpecificKey<UUID>()
@@ -2907,6 +2924,8 @@ private final class PerAppTapController: @unchecked Sendable {
   private let disposeOnce = IdempotentCleanupResult()
   private var retainedCleanupDegradations: [CleanupDegradation] = []
   private var didReportGeometryMismatch = false
+  private var equalizerSettings: EqualizerSettings
+  private var managedAudioEqualizerSettings: GlobalEqualizerSettings
   private var equalizerHeadroomGain: Float
   private var adaptiveGain: Float
 
@@ -2920,6 +2939,7 @@ private final class PerAppTapController: @unchecked Sendable {
     volumeBoost: Float,
     muted: Bool,
     equalizerSettings: EqualizerSettings,
+    managedAudioEqualizerSettings: GlobalEqualizerSettings,
     adaptiveGainDB: Float,
     audioFormatPlan: AudioFormatPlan
   ) throws {
@@ -2934,13 +2954,21 @@ private final class PerAppTapController: @unchecked Sendable {
       channelCount: audioFormatPlan.channelCount,
       settings: equalizerSettings
     )
+    self.managedAudioEqualizerDSP = EqualizerDSP(
+      sampleRate: audioFormatPlan.sampleRate,
+      channelCount: audioFormatPlan.channelCount,
+      settings: managedAudioEqualizerSettings.equalizerSettings
+    )
     self.voiceBandAnalyzer = VoiceBandEnergyAnalyzer(
       sampleRate: audioFormatPlan.sampleRate,
       channelCount: audioFormatPlan.channelCount
     )
-    self.equalizerHeadroomGain = equalizerSettings.isEnabled
-      ? Float(pow(10, Double(equalizerSettings.headroomCompensationDB) / 20))
-      : 1
+    self.equalizerSettings = equalizerSettings
+    self.managedAudioEqualizerSettings = managedAudioEqualizerSettings
+    self.equalizerHeadroomGain = GlobalEqualizerSettings.combinedHeadroomGain(
+      perApp: equalizerSettings,
+      managedAudio: managedAudioEqualizerSettings
+    )
     let safeAdaptiveGainDB = adaptiveGainDB.isFinite ? min(3, max(-18, adaptiveGainDB)) : 0
     self.adaptiveGain = Float(pow(10, Double(safeAdaptiveGainDB) / 20))
     self.callbackQueue = DispatchQueue(label: "com.waves.backend.tap.\(appID)", qos: .userInitiated)
@@ -3000,11 +3028,26 @@ private final class PerAppTapController: @unchecked Sendable {
   func setEqualizer(_ settings: EqualizerSettings) {
     callbackQueue.async { [weak self] in
       guard let self else { return }
+      self.equalizerSettings = settings
       self.equalizerDSP.update(settings: settings)
-      self.equalizerHeadroomGain = settings.isEnabled
-        ? Float(pow(10, Double(settings.headroomCompensationDB) / 20))
-        : 1
+      self.updateEqualizerHeadroomGain()
     }
+  }
+
+  func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) {
+    callbackQueue.async { [weak self] in
+      guard let self else { return }
+      self.managedAudioEqualizerSettings = settings
+      self.managedAudioEqualizerDSP.update(settings: settings.equalizerSettings)
+      self.updateEqualizerHeadroomGain()
+    }
+  }
+
+  private func updateEqualizerHeadroomGain() {
+    equalizerHeadroomGain = GlobalEqualizerSettings.combinedHeadroomGain(
+      perApp: equalizerSettings,
+      managedAudio: managedAudioEqualizerSettings
+    )
   }
 
   func setAdaptiveGainDB(_ gainDB: Float) {
@@ -3392,15 +3435,34 @@ private final class PerAppTapController: @unchecked Sendable {
         memset(outputPointer.advanced(by: copyByteCount), 0, outputByteCount - copyByteCount)
       }
 
-      TapDSP.processEqualized(
+      // Apply the combined compensation before either filter. EqualizerDSP
+      // clamps typed samples to their valid range, so pre-attenuation is the
+      // realtime-safe way to prevent stacked boosts from clipping internally.
+      TapDSP.scale(
         outputPointer,
         byteCount: copyByteCount,
         format: audioFormatPlan.sampleFormat,
-        equalizer: equalizerDSP,
-        equalizerHeadroomGain: equalizerHeadroomGain,
-        manualGain: manualGain,
+        gain: equalizerHeadroomGain
+      )
+      equalizerDSP.process(
+        outputPointer,
+        byteCount: copyByteCount,
+        format: audioFormatPlan.sampleFormat,
         bufferChannelCount: bufferChannelCount,
         channelOffset: currentChannelOffset
+      )
+      managedAudioEqualizerDSP.process(
+        outputPointer,
+        byteCount: copyByteCount,
+        format: audioFormatPlan.sampleFormat,
+        bufferChannelCount: bufferChannelCount,
+        channelOffset: currentChannelOffset
+      )
+      TapDSP.scale(
+        outputPointer,
+        byteCount: copyByteCount,
+        format: audioFormatPlan.sampleFormat,
+        gain: manualGain
       )
 
       // Adaptive analysis observes the user's EQ and manual controls, but not

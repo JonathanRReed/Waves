@@ -4,6 +4,7 @@ import WavesAudioCore
 
 struct EqualizerInspectorView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   let app: AudioApp
   let onClose: () -> Void
 
@@ -13,91 +14,143 @@ struct EqualizerInspectorView: View {
 
       Divider()
 
-      Form {
-        Section {
-          Toggle("Equalizer", isOn: Binding(
-            get: { settings.isEnabled },
-            set: { store.setEqualizerEnabled($0, for: app) }
-          ))
-          .help("Apply this curve only to \(app.displayName).")
+      ScrollView {
+        VStack(alignment: .leading, spacing: 14) {
+          VStack(alignment: .leading, spacing: 14) {
+            HStack {
+              Text("App Equalizer")
+                .font(.headline)
+              Spacer()
+              Toggle(
+                "Equalizer",
+                isOn: Binding(
+                  get: { settings.isEnabled },
+                  set: { store.setEqualizerEnabled($0, for: app) }
+                )
+              )
+              .labelsHidden()
+            }
 
-          Picker("Bands", selection: Binding(
-            get: { settings.mode },
-            set: { store.setEqualizerMode($0, for: app) }
-          )) {
-            ForEach(EqualizerMode.allCases, id: \.self) { mode in
-              Text(mode.displayName).tag(mode)
-            }
-          }
-          .pickerStyle(.segmented)
-
-          Picker("Preset", selection: Binding(
-            get: { settings.selectedPreset },
-            set: { preset in
-              guard preset != .custom else { return }
-              store.applyEqualizerPreset(preset, for: app)
-            }
-          )) {
-            ForEach(EqualizerPreset.selectablePresets, id: \.self) { preset in
-              Text(preset.displayName).tag(preset)
-            }
-            if settings.selectedPreset == .custom {
-              Text(EqualizerPreset.custom.displayName).tag(EqualizerPreset.custom)
-            }
-          }
-        } footer: {
-          Text("Voice Focus removes low rumble and softens distracting highs while preserving speech.")
-        }
-
-        Section {
-          ForEach(Array(activeBands.enumerated()), id: \.element.id) { index, band in
-            EqualizerBandRow(
-              band: band,
-              gainDB: activeGain(at: index),
-              onChange: { store.setEqualizerGain($0, at: index, for: app) }
+            Text(
+              "This curve affects only \(app.displayName). The Managed Audio EQ in Sound is applied afterward."
             )
-          }
-
-          Button("Reset to Flat") {
-            store.resetEqualizer(for: app)
-          }
-          .disabled(settings.selectedPreset == .flat)
-        } header: {
-          Text(settings.mode == .simple ? "3-Band EQ" : "8-Band EQ")
-        } footer: {
-          if settings.headroomCompensationDB < 0 {
-            Text("Waves reserves \(formatGain(-settings.headroomCompensationDB)) of headroom to prevent clipping.")
-          }
-        }
-
-        Section("Adaptive Mix") {
-          Picker("App role", selection: Binding(
-            get: { settings.adaptiveRole },
-            set: { store.setAdaptiveRole($0, for: app) }
-          )) {
-            ForEach(AdaptiveAppRole.allCases, id: \.self) { role in
-              Text(role.displayName).tag(role)
-            }
-          }
-
-          Text(adaptiveRoleDescription)
             .font(.caption)
             .foregroundStyle(.secondary)
-        }
+            .fixedSize(horizontal: false, vertical: true)
 
-        if let routeMessage {
-          Section {
+            Picker(
+              "Bands",
+              selection: Binding(
+                get: { settings.mode },
+                set: { store.setEqualizerMode($0, for: app) }
+              )
+            ) {
+              ForEach(EqualizerMode.allCases, id: \.self) { mode in
+                Text(mode.displayName).tag(mode)
+              }
+            }
+            .pickerStyle(.segmented)
+
+            Picker(
+              "Preset",
+              selection: Binding(
+                get: { settings.selectedPreset },
+                set: { preset in
+                  guard preset != .custom else { return }
+                  store.applyEqualizerPreset(preset, for: app)
+                }
+              )
+            ) {
+              ForEach(EqualizerPreset.selectablePresets, id: \.self) { preset in
+                Text(preset.displayName).tag(preset)
+              }
+              if settings.selectedPreset == .custom {
+                Text(EqualizerPreset.custom.displayName).tag(EqualizerPreset.custom)
+              }
+            }
+
+            Divider()
+
+            ForEach(Array(activeBands.enumerated()), id: \.element.id) { index, band in
+              EqualizerBandRow(
+                band: band,
+                gainDB: activeGain(at: index),
+                onChange: { store.setEqualizerGain($0, at: index, for: app) }
+              )
+            }
+
+            HStack {
+              Button("Reset to Flat") {
+                store.resetEqualizer(for: app)
+              }
+              .disabled(settings.selectedPreset == .flat)
+
+              Spacer()
+
+              if settings.headroomCompensationDB < 0 {
+                Label(
+                  "\(formatGain(-settings.headroomCompensationDB)) headroom",
+                  systemImage: "shield.lefthalf.filled"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+              }
+            }
+          }
+          .padding(14)
+          .wavesCard(cornerRadius: 12)
+
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Adaptive Mix")
+              .font(.headline)
+
+            Picker(
+              "Content type",
+              selection: Binding(
+                get: { adaptivePolicy.contentType },
+                set: { store.setAdaptiveContentType($0, for: app) }
+              )
+            ) {
+              ForEach(AdaptiveContentType.allCases, id: \.self) { type in
+                Text(type.displayName).tag(type)
+              }
+            }
+
+            Picker(
+              "Priority",
+              selection: Binding(
+                get: { adaptivePolicy.priority },
+                set: { store.setAdaptivePriority($0, for: app) }
+              )
+            ) {
+              ForEach(AdaptivePriority.allCases, id: \.self) { priority in
+                Text(priority.displayName).tag(priority)
+              }
+            }
+
+            Text(adaptivePolicyDescription)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+          .padding(14)
+          .wavesCard(cornerRadius: 12)
+
+          if let routeMessage {
             Label(routeMessage.text, systemImage: routeMessage.symbol)
               .font(.caption)
-              .foregroundStyle(routeMessage.isWarning ? WavesDesign.warning : Color.secondary)
+              .foregroundStyle(routeMessage.isWarning ? theme.warning : Color.secondary)
+              .padding(12)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .background(
+                theme.subtleFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
           }
         }
+        .padding(14)
       }
-      .formStyle(.grouped)
-      .scrollContentBackground(.hidden)
       .disabled(store.isExcluded(app))
     }
-    .background(Color(nsColor: .windowBackgroundColor))
+    .background(WavesBackground())
     .accessibilityElement(children: .contain)
   }
 
@@ -126,10 +179,15 @@ struct EqualizerInspectorView: View {
       .accessibilityLabel("Close equalizer")
     }
     .padding(16)
+    .background(theme.subtleFill)
   }
 
   private var settings: EqualizerSettings {
     store.equalizerSettings(for: app)
+  }
+
+  private var adaptivePolicy: AdaptiveAppPolicy {
+    store.adaptivePolicy(for: app)
   }
 
   private var activeBands: [EqualizerBandDefinition] {
@@ -143,20 +201,31 @@ struct EqualizerInspectorView: View {
 
   private var headerSubtitle: String {
     if store.isExcluded(app) { return "Excluded from Waves" }
-    if settings.isEnabled && app.routingState != .managed { return "EQ saved, waiting for audio route" }
+    if settings.isEnabled && app.routingState != .managed {
+      return "EQ saved, waiting for audio route"
+    }
     return settings.isEnabled ? "EQ active" : "EQ off"
   }
 
-  private var adaptiveRoleDescription: String {
-    switch settings.adaptiveRole {
-    case .auto:
-      "Waves classifies conferencing apps as voice and music or video apps as media."
-    case .voice:
-      "Speech in this app can lower media apps when Speech Focus is active."
-    case .media:
-      "This app can be gently lowered while another app carries speech."
-    case .ignore:
-      "Adaptive Mix leaves this app unchanged. Its manual volume and EQ still apply."
+  private var adaptivePolicyDescription: String {
+    if adaptivePolicy.priority == .neverAdjust {
+      return
+        "Adaptive Mix leaves this app unchanged. Manual volume and both equalizers still apply."
+    }
+    switch adaptivePolicy.contentType {
+    case .lectureOrVoice:
+      return "Speech activity can establish focus while this app is audible."
+    case .meeting:
+      return
+        "Meeting speech follows the selected priority and cannot duck a higher-priority media app."
+    case .music:
+      return "Music stays audible while higher-priority speech or media moves forward."
+    case .videoOrMedia:
+      return "Video and media use audible activity to establish their focus tier."
+    case .game:
+      return "Game audio uses audible activity and the selected priority."
+    case .other:
+      return "Waves uses audible activity and the selected priority for this app."
     }
   }
 
@@ -180,6 +249,7 @@ struct EqualizerInspectorView: View {
 }
 
 private struct EqualizerBandRow: View {
+  @Environment(\.wavesTheme) private var theme
   let band: EqualizerBandDefinition
   let gainDB: Float
   let onChange: (Float) -> Void
@@ -204,7 +274,7 @@ private struct EqualizerBandRow: View {
         in: Double(EqualizerSettings.minimumGainDB)...Double(EqualizerSettings.maximumGainDB),
         step: 0.5
       )
-      .tint(WavesDesign.accent)
+      .tint(theme.accent)
       .accessibilityLabel("\(band.label) gain")
       .accessibilityValue(formattedGain)
     }

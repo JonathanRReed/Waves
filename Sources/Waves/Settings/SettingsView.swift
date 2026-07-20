@@ -47,6 +47,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
 /// system preference.
 struct SettingsView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @State private var selection: SettingsPane = .general
 
   var body: some View {
@@ -62,7 +63,7 @@ struct SettingsView: View {
     // One cyan accent everywhere — toggles, pickers, sidebar selection, primary
     // buttons — so the Settings chrome matches the app instead of rendering in
     // the user's (often clashing) system accent.
-    .tint(WavesDesign.accent)
+    .tint(theme.accent)
     .background(WavesBackground())
     .onDisappear {
       store.persistPreferences()
@@ -73,10 +74,10 @@ struct SettingsView: View {
   private var paneContent: some View {
     switch selection {
     case .general: GeneralSettingsView()
-    case .setup: OnboardingView()
+    case .setup: SetupRepairView()
     case .audio: AudioSettingsView()
     case .profiles: ProfileSettingsView()
-    case .advanced: DiagnosticsSettingsView()
+    case .advanced: DiagnosticsSettingsView(onOpenSetup: { selection = .setup })
     case .help: HelpView()
     }
   }
@@ -108,6 +109,7 @@ private struct SettingsSidebar: View {
 }
 
 private struct SettingsSidebarRow: View {
+  @Environment(\.wavesTheme) private var theme
   let pane: SettingsPane
   let isSelected: Bool
 
@@ -117,7 +119,7 @@ private struct SettingsSidebarRow: View {
         .foregroundStyle(isSelected ? Color.primary : Color.secondary)
     } icon: {
       Image(systemName: pane.symbol)
-        .foregroundStyle(WavesDesign.accentOrSecondary(isSelected))
+        .foregroundStyle(theme.accentOrSecondary(isSelected))
     }
     .accessibilityLabel("\(pane.title) settings")
   }
@@ -143,23 +145,42 @@ private struct GeneralSettingsView: View {
 
   var body: some View {
     SettingsForm {
+      Section("Appearance") {
+        Picker("Appearance", selection: pref(\.appearance)) {
+          ForEach(WavesAppearance.allCases) { appearance in
+            Text(appearance.displayName).tag(appearance)
+          }
+        }
+
+        Picker("Palette", selection: pref(\.palette)) {
+          ForEach(WavesPalette.allCases) { palette in
+            Text(palette.displayName).tag(palette)
+          }
+        }
+      }
+
       Section("Menu Bar") {
         Toggle(isOn: $showMenuBarExtra) {
           Text("Show Waves in the menu bar")
           Text("Waves keeps running either way — reopen this window from the Dock.")
         }
-        Toggle(isOn: Binding(
-          get: { store.launchAtLoginEnabled },
-          set: { store.launchAtLoginEnabled = $0 }
-        )) {
+        Toggle(
+          isOn: Binding(
+            get: { store.launchAtLoginEnabled },
+            set: { store.launchAtLoginEnabled = $0 }
+          )
+        ) {
           Text("Launch at login")
           Text("Start Waves automatically when you log in.")
         }
         if store.launchAtLoginRequiresApproval {
           HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Label("Needs approval in System Settings > General > Login Items.", systemImage: "exclamationmark.triangle.fill")
-              .font(.caption)
-              .foregroundStyle(WavesDesign.warning)
+            Label(
+              "Needs approval in System Settings > General > Login Items.",
+              systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(WavesDesign.warning)
             Button("Open Login Items") {
               store.openLoginItemsSettings()
             }
@@ -178,17 +199,21 @@ private struct GeneralSettingsView: View {
           .disabled(!updaterService.canCheckForUpdates)
         }
 
-        Toggle(isOn: Binding(
-          get: { updaterService.automaticallyChecksForUpdates },
-          set: { updaterService.automaticallyChecksForUpdates = $0 }
-        )) {
+        Toggle(
+          isOn: Binding(
+            get: { updaterService.automaticallyChecksForUpdates },
+            set: { updaterService.automaticallyChecksForUpdates = $0 }
+          )
+        ) {
           Text("Automatically check for updates")
           Text("Sparkle asks before the first automatic check.")
         }
       } header: {
         Text("Updates")
       } footer: {
-        Text("Update checks fetch the signed appcast from waves.jonathanrreed.com. You can turn them off at any time.")
+        Text(
+          "Update checks fetch the signed appcast from waves.jonathanrreed.com. You can turn them off at any time."
+        )
       }
 
       Section {
@@ -196,10 +221,13 @@ private struct GeneralSettingsView: View {
           Text("Show recent apps")
           Text("Include apps that recently played, not just the live ones.")
         }
-        Picker("Keep quiet apps in Live", selection: Binding(
-          get: { store.preferences.liveListLinger },
-          set: { store.setLiveListLinger($0) }
-        )) {
+        Picker(
+          "Keep quiet apps in Live",
+          selection: Binding(
+            get: { store.preferences.liveListLinger },
+            set: { store.setLiveListLinger($0) }
+          )
+        ) {
           ForEach(LiveListLinger.allCases) { option in
             Text(option.displayName).tag(option)
           }
@@ -217,14 +245,19 @@ private struct GeneralSettingsView: View {
       } header: {
         Text("App List")
       } footer: {
-        Text("Use Brief if Live feels sticky. Use Relaxed if apps disappear during pauses or track changes.")
+        Text(
+          "Use Brief if Live feels sticky. Use Relaxed if apps disappear during pauses or track changes."
+        )
       }
 
       Section("Playback") {
-        Picker("Adaptive Mix", selection: Binding(
-          get: { store.preferences.adaptiveMixMode },
-          set: { store.setAdaptiveMixMode($0) }
-        )) {
+        Picker(
+          "Adaptive Mix",
+          selection: Binding(
+            get: { store.preferences.adaptiveMixMode },
+            set: { store.setAdaptiveMixMode($0) }
+          )
+        ) {
           ForEach(AdaptiveMixMode.allCases, id: \.self) { mode in
             Text(mode.displayName).tag(mode)
           }
@@ -234,12 +267,32 @@ private struct GeneralSettingsView: View {
           .font(.caption)
           .foregroundStyle(.secondary)
 
-        Toggle(isOn: Binding(
-          get: { store.preferences.autoPauseMusicForConferencing },
-          set: { store.setAutoPauseMusicEnabled($0) }
-        )) {
+        Picker(
+          "Sidechain focus",
+          selection: Binding(
+            get: { store.preferences.adaptiveFocusMode },
+            set: { store.setAdaptiveFocusMode($0) }
+          )
+        ) {
+          ForEach(AdaptiveFocusMode.allCases, id: \.self) { mode in
+            Text(mode.displayName).tag(mode)
+          }
+        }
+        .disabled(!store.isAudioRunning || store.preferences.adaptiveMixMode == .off)
+        Text(adaptiveFocusDescription)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
+        Toggle(
+          isOn: Binding(
+            get: { store.preferences.autoPauseMusicForConferencing },
+            set: { store.setAutoPauseMusicEnabled($0) }
+          )
+        ) {
           Text("Pause media during video calls")
-          Text("Mutes media apps while a known video-call app is frontmost. A heuristic — browser calls aren't detected.")
+          Text(
+            "Mutes media apps while a known video-call app is frontmost. A heuristic — browser calls aren't detected."
+          )
         }
         .disabled(!store.isAudioRunning)
         Toggle(isOn: pref(\.enablePerDeviceVolumePresets)) {
@@ -247,11 +300,15 @@ private struct GeneralSettingsView: View {
           Text("Remember a separate volume for each output device.")
         }
         .disabled(!store.isAudioRunning)
-        .help("Restoring a remembered level when you switch devices also requires “Auto-restore device” to be on. Turning this off stops recording new levels but leaves any already-stored device settings in place.")
-        Toggle(isOn: Binding(
-          get: { store.preferences.autoRestoreDevice },
-          set: { store.setAutoRestoreDeviceEnabled($0) }
-        )) {
+        .help(
+          "Restoring a remembered level when you switch devices also requires “Auto-restore device” to be on. Turning this off stops recording new levels but leaves any already-stored device settings in place."
+        )
+        Toggle(
+          isOn: Binding(
+            get: { store.preferences.autoRestoreDevice },
+            set: { store.setAutoRestoreDeviceEnabled($0) }
+          )
+        ) {
           Text("Auto-restore device")
           Text("Apply the remembered volume automatically when you switch output devices.")
         }
@@ -259,12 +316,16 @@ private struct GeneralSettingsView: View {
       }
 
       Section("Keyboard Shortcuts") {
-        Toggle(isOn: Binding(
-          get: { store.preferences.enableKeyboardShortcuts },
-          set: { store.setKeyboardShortcutsEnabled($0) }
-        )) {
+        Toggle(
+          isOn: Binding(
+            get: { store.preferences.enableKeyboardShortcuts },
+            set: { store.setKeyboardShortcutsEnabled($0) }
+          )
+        ) {
           Text("Enable keyboard shortcuts")
-          Text("Installs a system-wide key listener only while enabled; Waves ignores everything except its ⌘⌥ shortcuts.")
+          Text(
+            "Installs a system-wide key listener only while enabled; Waves ignores everything except its ⌘⌥ shortcuts."
+          )
         }
         .disabled(!store.isAudioRunning)
         if store.preferences.enableKeyboardShortcuts {
@@ -275,14 +336,16 @@ private struct GeneralSettingsView: View {
       }
 
       Section {
-        Toggle(isOn: Binding(
-          get: { store.preferences.enableURLScheme },
-          set: {
-            store.preferences.enableURLScheme = $0
-            store.preferences.urlSchemeAutomationAcknowledged = true
-            store.persistPreferences()
-          }
-        )) {
+        Toggle(
+          isOn: Binding(
+            get: { store.preferences.enableURLScheme },
+            set: {
+              store.preferences.enableURLScheme = $0
+              store.preferences.urlSchemeAutomationAcknowledged = true
+              store.persistPreferences()
+            }
+          )
+        ) {
           Text("URL scheme automation")
           Text("Lets other apps, browsers, and links send supported waves:// commands to Waves.")
         }
@@ -290,13 +353,16 @@ private struct GeneralSettingsView: View {
       } header: {
         Text("Automation")
       } footer: {
-        Text("Off by default. Enable only for automation you trust, then turn it off when you no longer need it.")
+        Text(
+          "Off by default. Enable only for automation you trust, then turn it off when you no longer need it."
+        )
       }
     }
   }
 
   private var currentVersion: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+      ?? "Development"
   }
 
   private func shortcutRow(_ title: String, _ keys: String) -> some View {
@@ -317,6 +383,17 @@ private struct GeneralSettingsView: View {
       "Smooths large loudness differences between active apps."
     case .both:
       "Balances active apps, then makes room for speech when needed."
+    }
+  }
+
+  private var adaptiveFocusDescription: String {
+    switch store.preferences.adaptiveFocusMode {
+    case .assignedPriorities:
+      "Ducks only from the priorities assigned in Sound."
+    case .followFrontApp:
+      "Promotes an audible frontmost app to Foreground."
+    case .smartHybrid:
+      "Promotes an audible frontmost app by one tier while respecting assigned priorities."
     }
   }
 
@@ -346,9 +423,11 @@ private struct AudioSettingsView: View {
       }
 
       Section {
-        Text("Managed routes use Core Audio process taps to capture selected app audio, apply volume, mute, and boost, then play it back to the current output device. Audio is processed locally on this Mac.")
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
+        Text(
+          "Managed routes use Core Audio process taps to capture selected app audio, apply volume, mute, and boost, then play it back to the current output device. Audio is processed locally on this Mac."
+        )
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
 
         Button {
           store.recoverRoutes()
@@ -359,11 +438,15 @@ private struct AudioSettingsView: View {
       } header: {
         Text("Managed Routing")
       } footer: {
-        Text("Boost is set per row in the mixer. Use 1× for transparent playback; reserve 2×–4× for quiet apps to avoid clipping.")
+        Text(
+          "Boost is set per row in the mixer. Use 1× for transparent playback; reserve 2×–4× for quiet apps to avoid clipping."
+        )
       }
 
       Section {
-        LabeledContent("Saved for this device", value: "\(currentDevicePresetCount) \(currentDevicePresetCount == 1 ? "app" : "apps")")
+        LabeledContent(
+          "Saved for this device",
+          value: "\(currentDevicePresetCount) \(currentDevicePresetCount == 1 ? "app" : "apps")")
         LabeledContent("Devices with saved levels", value: "\(devicesWithPresetsCount)")
 
         Button("Clear All Saved Levels…", role: .destructive) {
@@ -380,12 +463,16 @@ private struct AudioSettingsView: View {
           }
           Button("Cancel", role: .cancel) {}
         } message: {
-          Text("Removes the remembered volume, mute, and boost per app for every output device. This can't be undone.")
+          Text(
+            "Removes the remembered volume, mute, and boost per app for every output device. This can't be undone."
+          )
         }
       } header: {
         Text("Per-Device Volume Presets")
       } footer: {
-        Text("When \"Per-device volume presets\" is on (General), Waves remembers each app's level per output device and reapplies it when you switch back.")
+        Text(
+          "When \"Per-device volume presets\" is on (General), Waves remembers each app's level per output device and reapplies it when you switch back."
+        )
       }
     }
   }
@@ -455,7 +542,8 @@ private struct ProfileSettingsView: View {
   private func presentNewProfile() {
     // Mirrors MainWindowView.presentNewProfile: seed with whatever is
     // currently playing, the most common starting set.
-    editorContext = ProfileEditorContext(profile: nil, preselectedAppIDs: store.liveApps.map(\.logicalID))
+    editorContext = ProfileEditorContext(
+      profile: nil, preselectedAppIDs: store.liveApps.map(\.logicalID))
   }
 
   private func presentEditProfile(_ profile: Profile) {
@@ -465,6 +553,7 @@ private struct ProfileSettingsView: View {
 
 private struct ProfileRow: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   let profile: Profile
   let onEdit: () -> Void
   // Deleting a profile discards a hand-tuned captured mix with no undo, so the
@@ -473,9 +562,12 @@ private struct ProfileRow: View {
 
   var body: some View {
     HStack(spacing: 10) {
-      Image(systemName: profile.carriesLevels ? "slider.horizontal.below.square.filled.and.square" : "square.grid.2x2")
-        .foregroundStyle(WavesDesign.accent)
-        .frame(width: 22)
+      Image(
+        systemName: profile.carriesLevels
+          ? "slider.horizontal.below.square.filled.and.square" : "square.grid.2x2"
+      )
+      .foregroundStyle(theme.accent)
+      .frame(width: 22)
 
       VStack(alignment: .leading, spacing: 2) {
         Text(profile.name)
@@ -514,7 +606,9 @@ private struct ProfileRow: View {
         }
         Button("Cancel", role: .cancel) {}
       } message: {
-        Text("This removes \(profile.name)\(profile.carriesLevels ? " and its saved levels" : "") from your profiles. This can't be undone.")
+        Text(
+          "This removes \(profile.name)\(profile.carriesLevels ? " and its saved levels" : "") from your profiles. This can't be undone."
+        )
       }
     }
   }
@@ -528,11 +622,17 @@ private struct ProfileRow: View {
 
 private struct DiagnosticsSettingsView: View {
   @Environment(AppStore.self) private var store
+  let onOpenSetup: () -> Void
 
   var body: some View {
     SettingsForm {
       Section {
         LabeledContent("Running apps", value: store.sourceInventorySummary)
+        Button {
+          onOpenSetup()
+        } label: {
+          Label("Open Setup & Repair", systemImage: "wrench.and.screwdriver")
+        }
         Button {
           store.copyDiagnosticsToPasteboard()
         } label: {
@@ -604,9 +704,12 @@ private struct DiagnosticsUnavailableView: View {
       Label("Diagnostics are not loaded", systemImage: "waveform.path.ecg")
         .font(.headline)
 
-      Text(store.session.backendStatus.lastError ?? "Refresh diagnostics to inspect permissions, route recovery, and support coverage.")
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
+      Text(
+        store.session.backendStatus.lastError
+          ?? "Refresh diagnostics to inspect permissions, route recovery, and support coverage."
+      )
+      .foregroundStyle(.secondary)
+      .fixedSize(horizontal: false, vertical: true)
 
       HStack(spacing: 10) {
         Button {
