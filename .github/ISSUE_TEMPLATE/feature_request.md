@@ -17,4 +17,5 @@ What would you like Waves to do?
 ## Charter fit
 
 Waves aims to stay a native, quiet per-app mixer (not a DAW or EQ suite). How
-does this fit that scope? See `PRODUCT.md` / `DESIGN.md`.
+does this fit that scope? See [`docs/PRODUCT.md`](../../docs/PRODUCT.md) /
+[`docs/DESIGN.md`](../../docs/DESIGN.md).

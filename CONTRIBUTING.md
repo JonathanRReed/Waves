@@ -33,7 +33,8 @@ mixer built with Swift 6 and SwiftUI, using Core Audio process taps.
 ## Design principles
 
 Waves aims to feel like a built-in macOS utility. Please keep changes aligned
-with `DESIGN.md` and `PRODUCT.md`:
+with [`docs/DESIGN.md`](docs/DESIGN.md) and
+[`docs/PRODUCT.md`](docs/PRODUCT.md):
 
 - **Native and quiet.** Prefer standard controls and system materials over
   custom chrome; reserve the cyan accent for live signal and actions.

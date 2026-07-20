@@ -7,7 +7,8 @@ waves_logo_assets/
 
 # Internal agent/tooling config — not part of the published product
 .codex/
-.claude/
+.claude/*
+!.claude/skills/
 
 *.xcuserstate
 xcuserdata/
