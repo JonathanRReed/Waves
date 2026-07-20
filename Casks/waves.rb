@@ -19,8 +19,10 @@ cask "waves" do
   end
 
   # Per-app routing requires Core Audio process taps — macOS 14.2 is the floor
-  # (matches LSMinimumSystemVersion). 14.0/14.1 would hit the unsupported-OS path.
-  depends_on macos: ">= 14.2"
+  # (matches LSMinimumSystemVersion). Homebrew's depends_on only understands
+  # major versions, so gate on Sonoma here; the app itself refuses 14.0/14.1
+  # with its unsupported-OS path.
+  depends_on macos: :sonoma
 
   app "Waves.app"
 
