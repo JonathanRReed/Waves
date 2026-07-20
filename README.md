@@ -194,6 +194,7 @@ When switching audio devices:
 - **Enable keyboard shortcuts**: Use global hotkeys for volume control
 - **Per-device volume memory**: Remember volumes per audio device
 - **URL scheme automation**: Allow local `waves://` automation commands after explicit opt-in
+- **Automatic update checks**: Let Sparkle check after you approve its consent prompt
 - **Sort apps by**: Choose sorting method (Activity, Name, Category, Manual)
 
 ### Audio Settings
@@ -283,11 +284,15 @@ swift build
 
 ## Privacy
 
-Waves processes audio locally and never records or transmits it, has no
-analytics, and makes no network requests. `Copy Diagnostics` contains no audio
-samples, but it can include version/OS metadata, structured permission and route
-state, app and device names or identifiers, and bounded error text; review it
-before sharing. See [`PRIVACY.md`](PRIVACY.md) for details, and
+Waves processes audio locally and never records or transmits it. It has no
+analytics or telemetry. Waves makes no network request before you start an
+update check or allow automatic checks. An allowed check fetches the signed
+appcast from `https://waves.jonathanrreed.com/appcast.xml` without sending an
+account, device identifier, audio, diagnostics, or telemetry. Turn automatic
+checks off in General Settings at any time. `Copy Diagnostics` contains no audio
+samples, but it can include version and OS metadata, permission and route state,
+app and device names or identifiers, and bounded error text. Review it before
+sharing. See [`PRIVACY.md`](PRIVACY.md) for details, and
 [`SECURITY.md`](SECURITY.md) to report a vulnerability.
 
 ## Contributing

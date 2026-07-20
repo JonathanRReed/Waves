@@ -138,6 +138,7 @@ private struct SettingsForm<Content: View>: View {
 
 private struct GeneralSettingsView: View {
   @Environment(AppStore.self) private var store
+  @Environment(UpdaterService.self) private var updaterService
   @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
 
   var body: some View {
@@ -165,6 +166,29 @@ private struct GeneralSettingsView: View {
             .font(.caption)
           }
         }
+      }
+
+      Section {
+        HStack {
+          Text("Version \(currentVersion)")
+          Spacer()
+          Button("Check for Updates…") {
+            updaterService.checkForUpdates()
+          }
+          .disabled(!updaterService.canCheckForUpdates)
+        }
+
+        Toggle(isOn: Binding(
+          get: { updaterService.automaticallyChecksForUpdates },
+          set: { updaterService.automaticallyChecksForUpdates = $0 }
+        )) {
+          Text("Automatically check for updates")
+          Text("Sparkle asks before the first automatic check.")
+        }
+      } header: {
+        Text("Updates")
+      } footer: {
+        Text("Update checks fetch the signed appcast from waves.jonathanrreed.com. You can turn them off at any time.")
       }
 
       Section {
@@ -269,6 +293,10 @@ private struct GeneralSettingsView: View {
         Text("Off by default. Enable only for automation you trust, then turn it off when you no longer need it.")
       }
     }
+  }
+
+  private var currentVersion: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development"
   }
 
   private func shortcutRow(_ title: String, _ keys: String) -> some View {

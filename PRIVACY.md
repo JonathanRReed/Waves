@@ -1,7 +1,7 @@
 # Privacy
 
-Waves is designed to be private by default. It is a local macOS utility — it has
-no account, no analytics, and no servers.
+Waves is designed to be private by default. It is a local macOS utility. It has
+no account, analytics, or telemetry.
 
 ## What Waves accesses
 
@@ -40,11 +40,19 @@ identifiers, route states, persistence/cleanup status, and bounded error text.
 Fields with potentially identifying values are labelled in the report. Review
 and redact it before sharing.
 
+## Update checks
+
+Waves makes no network request before you start an update check or allow
+automatic checks. An allowed check fetches the signed appcast from
+`https://waves.jonathanrreed.com/appcast.xml`. The request sends no account,
+device identifier, audio, diagnostics, or telemetry. If you accept an update,
+Sparkle downloads the signed update listed in that appcast. Automatic checks can
+be turned off in General Settings.
+
 ## What Waves does **not** do
 
 - No telemetry, analytics, crash reporting, or tracking.
-- No network requests. (If a future release adds opt-in update checks, that will
-  be clearly disclosed here.)
+- No network requests except update checks and update downloads you request.
 - No recording or transmission of any audio.
 
 ## Permissions summary

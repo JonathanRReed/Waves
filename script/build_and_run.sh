@@ -72,6 +72,23 @@ require_command() {
   fi
 }
 
+sign_runtime_item() {
+  local target="$1"
+  local entitlements="${2:-}"
+  local identity="-"
+  local args=(--force)
+
+  if [ -n "$SIGN_IDENTITY" ]; then
+    identity="$SIGN_IDENTITY"
+    args+=(--options runtime --timestamp)
+  fi
+  if [ -n "$entitlements" ]; then
+    args+=(--entitlements "$entitlements")
+  fi
+
+  codesign "${args[@]}" --sign "$identity" "$target"
+}
+
 if is_notarize_mode; then
   if [ -z "$SIGN_IDENTITY" ]; then
     echo "Error: SIGN_IDENTITY must be set to a Developer ID Application identity for notarization." >&2
@@ -97,7 +114,10 @@ APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
+APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
+SPARKLE_FRAMEWORK_NAME="Sparkle.framework"
+SPARKLE_FRAMEWORK="$APP_FRAMEWORKS/$SPARKLE_FRAMEWORK_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 DSYM_BUNDLE="$DIST_DIR/$APP_NAME.app.dSYM"
@@ -361,6 +381,7 @@ build_app_bundle() {
   local build_output_dir
   local build_binary
   local resource_bundle
+  local sparkle_framework_source
   local source_logo=""
   local privacy_manifest="$ROOT_DIR/PrivacyInfo.xcprivacy"
   local entitlements="${APP_BUNDLE}.entitlements"
@@ -386,23 +407,41 @@ build_app_bundle() {
     mkdir -p "$build_output_dir"
     lipo -create "$arm64_bin_dir/$APP_NAME" "$x86_64_bin_dir/$APP_NAME" -output "$build_output_dir/$APP_NAME"
 
-    # Bundle.module resources are architecture-independent; use the arm64 copy.
-    rm -rf "$build_output_dir/$RESOURCE_BUNDLE_NAME"
+    # Bundle.module resources are architecture-independent, and Sparkle's macOS
+    # XCFramework slice is already universal. Use the arm64 build output copies.
+    rm -rf "$build_output_dir/$RESOURCE_BUNDLE_NAME" "$build_output_dir/$SPARKLE_FRAMEWORK_NAME"
     cp -R "$arm64_bin_dir/$RESOURCE_BUNDLE_NAME" "$build_output_dir/"
+    cp -R "$arm64_bin_dir/$SPARKLE_FRAMEWORK_NAME" "$build_output_dir/"
   else
     build_output_dir="$("${SWIFT_BUILD[@]}" --show-bin-path)"
     "${SWIFT_BUILD[@]}"
   fi
   build_binary="$build_output_dir/$APP_NAME"
+  sparkle_framework_source="$build_output_dir/$SPARKLE_FRAMEWORK_NAME"
 
   rm -rf "$APP_BUNDLE"
-  mkdir -p "$APP_MACOS" "$APP_RESOURCES"
+  mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS"
 
   if ! cp "$build_binary" "$APP_BINARY"; then
     echo "Error: Failed to copy binary to $APP_BINARY" >&2
     exit 1
   fi
   chmod +x "$APP_BINARY"
+
+  if [ ! -d "$sparkle_framework_source" ]; then
+    echo "Error: Sparkle framework not found at $sparkle_framework_source" >&2
+    exit 1
+  fi
+  if ! cp -R "$sparkle_framework_source" "$APP_FRAMEWORKS/"; then
+    echo "Error: Failed to copy Sparkle framework to $APP_FRAMEWORKS" >&2
+    exit 1
+  fi
+
+  require_command otool "to inspect the Waves runtime search paths"
+  require_command install_name_tool "to add the embedded-framework runtime search path"
+  if [[ "$(otool -l "$APP_BINARY")" != *"path @executable_path/../Frameworks "* ]]; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BINARY"
+  fi
 
   resource_bundle="$build_output_dir/$RESOURCE_BUNDLE_NAME"
   if [ ! -d "$resource_bundle" ]; then
@@ -474,6 +513,10 @@ build_app_bundle() {
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
   <string>$APP_BUILD</string>
+  <key>SUFeedURL</key>
+  <string>https://waves.jonathanrreed.com/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg=</string>
   <key>CFBundleIconFile</key>
   <string>$APP_ICON_NAME</string>
   <key>CFBundleURLTypes</key>
@@ -540,11 +583,24 @@ PLIST
 ENTITLEMENTS_PLIST
 
   if command -v codesign >/dev/null 2>&1; then
-    if [ -n "$SIGN_IDENTITY" ]; then
-      codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
-    elif ! codesign --force --entitlements "$entitlements" --sign - "$APP_BUNDLE" >/dev/null 2>&1; then
-      echo "Warning: Failed to ad hoc sign app bundle" >&2
-    fi
+    local sparkle_version="$SPARKLE_FRAMEWORK/Versions/Current"
+    local nested_item
+    local nested_items=(
+      "$sparkle_version/XPCServices/Downloader.xpc"
+      "$sparkle_version/XPCServices/Installer.xpc"
+      "$sparkle_version/Autoupdate"
+      "$sparkle_version/Updater.app"
+    )
+
+    for nested_item in "${nested_items[@]}"; do
+      if [ ! -e "$nested_item" ]; then
+        echo "Error: Sparkle nested code is missing at $nested_item" >&2
+        exit 1
+      fi
+      sign_runtime_item "$nested_item"
+    done
+    sign_runtime_item "$SPARKLE_FRAMEWORK"
+    sign_runtime_item "$APP_BUNDLE" "$entitlements"
   else
     echo "Warning: codesign not found, skipping code signing" >&2
   fi
@@ -562,9 +618,12 @@ validate_app_bundle() {
   local contents="$bundle_path/Contents"
   local binary="$contents/MacOS/$APP_NAME"
   local resources="$contents/Resources"
+  local frameworks="$contents/Frameworks"
+  local sparkle_framework="$frameworks/$SPARKLE_FRAMEWORK_NAME"
   local info_plist="$contents/Info.plist"
   local entitlement_file
   local entitlement_value
+  local nested_item
 
   require_command plutil "to validate $label metadata"
   require_command codesign "to validate $label entitlements"
@@ -586,6 +645,8 @@ validate_app_bundle() {
   require_plist_value "$info_plist" CFBundleVersion "$APP_BUILD" "$label"
   require_plist_value "$info_plist" LSMinimumSystemVersion "$MIN_SYSTEM_VERSION" "$label"
   require_plist_value "$info_plist" CFBundleIconFile "$APP_ICON_NAME" "$label"
+  require_plist_value "$info_plist" SUFeedURL "https://waves.jonathanrreed.com/appcast.xml" "$label"
+  require_plist_value "$info_plist" SUPublicEDKey "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg=" "$label"
 
   if [ ! -f "$resources/$APP_ICON_NAME.icns" ]; then
     echo "Error: $label is missing $resources/$APP_ICON_NAME.icns." >&2
@@ -605,8 +666,32 @@ validate_app_bundle() {
     exit 1
   fi
 
+  if [ ! -d "$sparkle_framework" ]; then
+    echo "Error: $label is missing $sparkle_framework." >&2
+    exit 1
+  fi
+  for nested_item in \
+    "$sparkle_framework/Versions/Current/XPCServices/Downloader.xpc" \
+    "$sparkle_framework/Versions/Current/XPCServices/Installer.xpc" \
+    "$sparkle_framework/Versions/Current/Autoupdate" \
+    "$sparkle_framework/Versions/Current/Updater.app"; do
+    if [ ! -e "$nested_item" ]; then
+      echo "Error: $label is missing Sparkle nested code at $nested_item." >&2
+      exit 1
+    fi
+  done
+
   require_universal_binary "$binary" "$label executable"
+  require_universal_binary "$sparkle_framework/Versions/Current/Sparkle" "$label Sparkle framework"
   validate_minimum_os "$binary" "$label executable"
+  if [[ "$(otool -L "$binary")" != *"@rpath/Sparkle.framework/Versions/B/Sparkle"* ]]; then
+    echo "Error: $label executable is not linked to the embedded Sparkle framework." >&2
+    exit 1
+  fi
+  if [[ "$(otool -l "$binary")" != *"path @executable_path/../Frameworks "* ]]; then
+    echo "Error: $label executable is missing its Frameworks runtime search path." >&2
+    exit 1
+  fi
   codesign --verify --deep --strict "$bundle_path"
 
   entitlement_file="$(mktemp)"
@@ -626,6 +711,44 @@ validate_app_bundle() {
     echo "Error: $label has an invalid audio-input entitlement value: $entitlement_value." >&2
     exit 1
   fi
+}
+
+bundle_tree_manifest() {
+  local root="$1"
+  local entry
+  local relative
+  local checksum
+
+  while IFS= read -r -d '' entry; do
+    relative="${entry#"$root"/}"
+    if [ -L "$entry" ]; then
+      printf 'link\t%s\t%s\n' "$relative" "$(readlink "$entry")"
+    elif [ -d "$entry" ]; then
+      printf 'directory\t%s\n' "$relative"
+    elif [ -f "$entry" ]; then
+      checksum="$(shasum -a 256 "$entry")"
+      printf 'file\t%s\t%s\n' "$relative" "${checksum%% *}"
+    else
+      printf 'other\t%s\n' "$relative"
+    fi
+  done < <(find -P "$root" -mindepth 1 -print0)
+}
+
+bundle_trees_match() {
+  local left="$1"
+  local right="$2"
+  local left_manifest
+  local right_manifest
+  local result=0
+
+  require_command shasum "to compare packaged bundle contents"
+  left_manifest="$(mktemp)"
+  right_manifest="$(mktemp)"
+  bundle_tree_manifest "$left" | LC_ALL=C sort >"$left_manifest"
+  bundle_tree_manifest "$right" | LC_ALL=C sort >"$right_manifest"
+  cmp -s "$left_manifest" "$right_manifest" || result=$?
+  rm -f "$left_manifest" "$right_manifest"
+  return "$result"
 }
 
 mount_dmg() {
@@ -700,7 +823,7 @@ validate_mounted_layout_and_identity() {
     echo "Error: The mounted app Info.plist does not match $INFO_PLIST." >&2
     exit 1
   fi
-  if ! diff -qr "$APP_BUNDLE" "$mounted_app" >/dev/null; then
+  if ! bundle_trees_match "$APP_BUNDLE" "$mounted_app"; then
     echo "Error: The app in $DMG_PATH does not exactly match $APP_BUNDLE." >&2
     exit 1
   fi

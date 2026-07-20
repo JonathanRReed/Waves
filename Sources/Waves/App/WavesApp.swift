@@ -10,6 +10,7 @@ struct WavesApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
   @State private var store: AppStore
+  @State private var updaterService = UpdaterService()
 
   init() {
     self.init(composition: .live)
@@ -27,6 +28,7 @@ struct WavesApp: App {
     Window("Waves", id: AppSceneID.mainWindow) {
       MainWindowView()
         .environment(store)
+        .environment(updaterService)
         .frame(minWidth: 980, minHeight: 620)
         // Applied at the scene root (above NavigationSplitView's sidebar list and
         // any toolbar/segmented chrome) so Waves' cyan signal accent wins over the
@@ -44,6 +46,13 @@ struct WavesApp: App {
     .defaultSize(width: 1100, height: 680)
     .windowToolbarStyle(.unifiedCompact(showsTitle: false))
     .commands {
+      CommandGroup(after: .appInfo) {
+        Button("Check for Updates…") {
+          updaterService.checkForUpdates()
+        }
+        .disabled(!updaterService.canCheckForUpdates)
+      }
+
       // The Settings scene below already provides the standard "Settings…"
       // item (⌘,) in the app menu, so no custom command is needed here.
       CommandGroup(after: .toolbar) {
@@ -68,6 +77,7 @@ struct WavesApp: App {
     Settings {
       SettingsView()
         .environment(store)
+        .environment(updaterService)
         // 500pt was tall enough to satisfy the constraint but not the
         // content — Help and the longer Audio/Advanced panes opened needing
         // 4-5 scroll gestures just to read top to bottom, which reads as
@@ -80,6 +90,7 @@ struct WavesApp: App {
     MenuBarExtra(isInserted: $showMenuBarExtra) {
       MenuBarMixerView()
         .environment(store)
+        .environment(updaterService)
         .frame(width: WavesDesign.menuBarPanelWidth)
         .tint(WavesDesign.accent)
     } label: {

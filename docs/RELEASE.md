@@ -67,6 +67,12 @@ signature or the DMG lacks notarization. It is not approval for publication.
 
 ## Credential-Dependent Publication Validation
 
+The release workflow currently has no signing secrets configured. A tag-driven
+run will fail at the signing gate until all seven repository secrets are added:
+`DEVELOPER_ID_CERT_P12`, `DEVELOPER_ID_CERT_PASSWORD`, `SIGN_IDENTITY`,
+`KEYCHAIN_PASSWORD`, `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, and
+`NOTARY_PASSWORD`.
+
 Public builds must be signed with a Developer ID Application certificate and
 notarized. Confirm credentials are installed:
 
@@ -135,6 +141,18 @@ Homebrew cask cannot download that authenticated artifact. Do not publish the
 cask to a public tap until the release asset has an intentionally public,
 stable URL; this checklist does not change repository visibility or distribution
 policy.
+
+## Publish the Appcast
+
+After the GitHub release is public, generate the signed appcast and copy it to
+the site repository:
+
+```bash
+./script/make_appcast.sh X.Y.Z
+cp dist/appcast.xml ../Waves-site/public/appcast.xml
+```
+
+Review the site change, then deploy the site through its normal release process.
 
 ## Rollback and Recovery
 
