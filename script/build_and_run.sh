@@ -6,8 +6,8 @@ APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 LOG_SUBSYSTEM="com.jonathanreed.Waves"
 MIN_SYSTEM_VERSION="14.2"
-APP_VERSION="${APP_VERSION:-1.2.0}"
-APP_BUILD="${APP_BUILD:-4}"
+APP_VERSION="${APP_VERSION:-1.2.1}"
+APP_BUILD="${APP_BUILD:-5}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 SWIFT_SDK="${SWIFT_SDK:-}"
@@ -656,6 +656,14 @@ validate_app_bundle() {
     echo "Error: $label is missing its SwiftPM resource bundle at $resources/$RESOURCE_BUNDLE_NAME." >&2
     exit 1
   fi
+  if [ ! -f "$resources/$RESOURCE_BUNDLE_NAME/waves-logo.png" ]; then
+    echo "Error: $label is missing its packaged logo resource." >&2
+    exit 1
+  fi
+  if ! cmp -s "$LOGO_RESOURCE" "$resources/$RESOURCE_BUNDLE_NAME/waves-logo.png"; then
+    echo "Error: $label contains an unexpected packaged logo resource." >&2
+    exit 1
+  fi
   if [ ! -f "$resources/PrivacyInfo.xcprivacy" ]; then
     echo "Error: $label is missing PrivacyInfo.xcprivacy." >&2
     exit 1
@@ -959,6 +967,7 @@ package_smoke() {
   local smoke_iterations
   local smoke_home
   local smoke_session
+  local smoke_profile
 
   if [[ ! "$SMOKE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     echo "Error: SMOKE_SECONDS must be a positive integer." >&2
@@ -966,6 +975,7 @@ package_smoke() {
   fi
 
   validate_unsigned_package
+  require_command sandbox-exec "to isolate the package smoke test from local build artifacts"
   mount_dmg
   mounted_app="$ACTIVE_MOUNT_DIR/$APP_NAME.app"
   mounted_binary="$mounted_app/Contents/MacOS/$APP_NAME"
@@ -976,8 +986,10 @@ package_smoke() {
   smoke_home="$ACTIVE_SMOKE_HOME/home"
   mkdir -m 700 "$smoke_home"
   smoke_session="$smoke_home/Library/Application Support/Waves/session.json"
+  smoke_profile="(version 1) (allow default) (deny file-read* (subpath \"$ROOT_DIR/.build\"))"
 
   HOME="$smoke_home" CFFIXED_USER_HOME="$smoke_home" \
+    /usr/bin/sandbox-exec -p "$smoke_profile" \
     "$mounted_binary" >>"$SMOKE_LOG_PATH" 2>&1 &
   smoke_pid=$!
   SMOKE_PID="$smoke_pid"

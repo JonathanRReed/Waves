@@ -87,12 +87,58 @@ enum WavesDesign {
 
 // MARK: - Brand mark
 
+enum WavesBrandAssetLocator {
+  static let resourceBundleName = "Waves_Waves.bundle"
+  static let logoFilename = "waves-logo.png"
+
+  static func logoURL(in bundle: Bundle = .main) -> URL? {
+    logoURL(
+      bundleURL: bundle.bundleURL,
+      resourceURL: bundle.resourceURL,
+      executableURL: bundle.executableURL
+    )
+  }
+
+  static func logoURL(
+    bundleURL: URL,
+    resourceURL: URL?,
+    executableURL: URL?,
+    fileManager: FileManager = .default
+  ) -> URL? {
+    var containers: [URL] = []
+    if let resourceURL {
+      containers.append(resourceURL)
+    }
+    containers.append(bundleURL)
+    if bundleURL.pathExtension != "app" {
+      containers.append(bundleURL.deletingLastPathComponent())
+      if let executableURL {
+        containers.append(executableURL.deletingLastPathComponent())
+      }
+    }
+
+    for container in containers {
+      let candidate =
+        container
+        .appendingPathComponent(resourceBundleName, isDirectory: true)
+        .appendingPathComponent(logoFilename, isDirectory: false)
+      var isDirectory: ObjCBool = false
+      if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+        !isDirectory.boolValue
+      {
+        return candidate
+      }
+    }
+    return nil
+  }
+}
+
 /// The supplied Waves identity is the single source for both the app icon and
 /// in-app branding. Live audio adds a restrained cyan glow without altering the
 /// artwork, so the mark remains consistent at every size.
 struct WavesMark: View {
   private static let image: NSImage? = {
-    guard let url = Bundle.module.url(forResource: "waves-logo", withExtension: "png") else {
+    guard let url = WavesBrandAssetLocator.logoURL() else {
       return nil
     }
     return NSImage(contentsOf: url)
@@ -104,7 +150,7 @@ struct WavesMark: View {
   @Environment(\.wavesTheme) private var theme
 
   var body: some View {
-    Image(nsImage: Self.image ?? NSImage())
+    markImage
       .resizable()
       .interpolation(.high)
       .aspectRatio(contentMode: .fit)
@@ -114,6 +160,13 @@ struct WavesMark: View {
       )
       .frame(width: size, height: size)
       .accessibilityHidden(true)
+  }
+
+  private var markImage: Image {
+    if let image = Self.image {
+      return Image(nsImage: image)
+    }
+    return Image(systemName: "waveform.path")
   }
 }
 

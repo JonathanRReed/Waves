@@ -6,6 +6,15 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-20
+
+### Fixed
+- Load the in-app logo from the packaged application resources without relying
+  on SwiftPM's build-directory fallback. Fresh downloads now launch correctly
+  on Macs that do not have the Waves source checkout.
+- Run packaged-app smoke tests with access to local Swift build artifacts
+  denied, preventing clean-machine resource failures from passing release QA.
+
 ## [1.2.0] - 2026-07-20
 
 ### Added
