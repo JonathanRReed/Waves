@@ -747,6 +747,13 @@ create_dmg() {
   hdiutil create -volname "$APP_NAME" -srcfolder "$ACTIVE_STAGING_DIR" -ov -format UDZO "$DMG_PATH"
   hdiutil imageinfo "$DMG_PATH" >/dev/null
 
+  # The disk image needs its own Developer ID signature: Gatekeeper's
+  # primary-signature assessment of the DMG (and the publication check below)
+  # rejects an unsigned image even when the app inside is notarized.
+  if [ -n "$SIGN_IDENTITY" ] && command -v codesign >/dev/null 2>&1; then
+    codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+  fi
+
   rm -rf "$ACTIVE_STAGING_DIR"
   ACTIVE_STAGING_DIR=""
 }
