@@ -20,3 +20,6 @@ __pycache__/
 # Intermediate feature-audit working data (internal, regenerable)
 docs/fix-plan.json
 docs/phase4-followups.json
+
+# Mirror of .claude/skills for other agent runtimes — machine-local
+.agents/
