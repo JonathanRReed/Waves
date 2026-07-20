@@ -1,6 +1,11 @@
 # Waves
 
 [![CI](https://github.com/JonathanRReed/Waves/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JonathanRReed/Waves/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/JonathanRReed/Waves?label=release)](https://github.com/JonathanRReed/Waves/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/JonathanRReed/Waves/total)](https://github.com/JonathanRReed/Waves/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![macOS 14.2+](https://img.shields.io/badge/macOS-14.2%2B-black)
+![Signed & Notarized](https://img.shields.io/badge/signed-Developer%20ID%20%C2%B7%20notarized-success)
 
 Waves is a native macOS per-app audio mixer. It uses local Core Audio process taps on macOS 14.2 or newer to route selected app audio through per-app volume, mute, boost, equalizer, and adaptive mixing controls before playback.
 
