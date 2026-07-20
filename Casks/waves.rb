@@ -10,7 +10,7 @@ cask "waves" do
   url "https://github.com/JonathanRReed/Waves/releases/download/v#{version}/Waves.dmg",
       verified: "github.com/JonathanRReed/Waves/"
   name "Waves"
-  desc "Native macOS per-app audio mixer"
+  desc "Native per-app audio mixer"
   homepage "https://github.com/JonathanRReed/Waves"
 
   livecheck do
