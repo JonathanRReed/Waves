@@ -216,13 +216,13 @@ struct MixerRowView: View {
   private var sliderHelp: Text {
     canControlAudio
       ? Text("Adjust \(app.displayName) volume")
-      : Text("Adjust to enroll \(app.displayName) in managed routing.")
+      : Text("Move the slider and Waves starts managing \(app.displayName).")
   }
 
   private var muteHelp: Text {
     canControlAudio
       ? Text(app.isMuted ? "Unmute" : "Mute")
-      : Text("Mute to enroll \(app.displayName) in managed routing.")
+      : Text("Mute it and Waves starts managing \(app.displayName).")
   }
 
   private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
@@ -251,13 +251,13 @@ private struct MixerRowHelpers {
   static func sliderHelp(for app: AudioApp) -> Text {
     canControlAudio(app)
       ? Text("Adjust \(app.displayName) volume")
-      : Text("Adjust to enroll \(app.displayName) in managed routing.")
+      : Text("Move the slider and Waves starts managing \(app.displayName).")
   }
 
   static func muteHelp(for app: AudioApp) -> Text {
     canControlAudio(app)
       ? Text(app.isMuted ? "Unmute" : "Mute")
-      : Text("Mute to enroll \(app.displayName) in managed routing.")
+      : Text("Mute it and Waves starts managing \(app.displayName).")
   }
 }
 
