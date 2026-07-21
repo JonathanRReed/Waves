@@ -1,17 +1,28 @@
 import SwiftUI
 import WavesAudioCore
 
+/// Which stream the Sound workspace's equalizer card is editing: the shared
+/// managed-audio EQ, or one app's own EQ. One card, one set of controls —
+/// replacing the old split between this workspace and a per-app side panel,
+/// which presented two disconnected EQs and clipped over the app list when
+/// the window was small.
+private enum EqualizerScope: Hashable {
+  case managedAudio
+  case app(String)
+}
+
 struct SoundWorkspaceView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.wavesTheme) private var theme
   @State private var pendingStrategy: AdaptiveStrategy?
+  @State private var eqScope: EqualizerScope = .managedAudio
 
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 22) {
         header
 
-        managedEqualizerSection
+        equalizerSection
         adaptiveMixSection
         appPoliciesSection
       }
@@ -21,6 +32,17 @@ struct SoundWorkspaceView: View {
       .frame(maxWidth: .infinity, alignment: .top)
     }
     .background(WavesBackground())
+    .onAppear { consumeEqualizerFocusRequestIfAny() }
+    .onChange(of: store.equalizerFocusToken) { _, _ in
+      consumeEqualizerFocusRequestIfAny()
+    }
+    .onChange(of: store.visibleApps.map(\.logicalID)) { _, _ in
+      // The selected app can quit; fall back to the shared EQ instead of
+      // stranding the card on a stream that no longer exists.
+      if case .app(let id) = eqScope, resolvedApp(for: id) == nil {
+        eqScope = .managedAudio
+      }
+    }
     .confirmationDialog(
       "Apply \(pendingStrategy?.displayName ?? "this strategy")?",
       isPresented: Binding(
@@ -37,9 +59,16 @@ struct SoundWorkspaceView: View {
       Button("Cancel", role: .cancel) { pendingStrategy = nil }
     } message: { strategy in
       Text(
-        "This updates the content-aware priority for visible apps. Manual volume, routing, and equalizer settings stay unchanged."
+        "This updates the content type and priority for the apps listed below. Volumes, routing, and equalizers stay as they are."
       )
     }
+  }
+
+  /// An EQ button anywhere in the app (mixer row, menu bar, context menu)
+  /// lands here with the app preselected.
+  private func consumeEqualizerFocusRequestIfAny() {
+    guard let request = store.consumeEqualizerFocusRequest() else { return }
+    eqScope = .app(request.appID)
   }
 
   private var header: some View {
@@ -53,7 +82,7 @@ struct SoundWorkspaceView: View {
       VStack(alignment: .leading, spacing: 5) {
         Text("Sound")
           .font(.title2.weight(.semibold))
-        Text("Shape every stream managed by Waves, then decide which apps should stay in front.")
+        Text("Shape how each app sounds, and decide which apps stay in front when several play at once.")
           .foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)
       }
@@ -66,33 +95,46 @@ struct SoundWorkspaceView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(theme.subtleFill, in: Capsule())
+        .help("Apps whose audio currently runs through Waves.")
     }
   }
 
-  private var managedEqualizerSection: some View {
+  // MARK: - Equalizer (one card for the shared EQ and every app's EQ)
+
+  private var equalizerSection: some View {
     VStack(alignment: .leading, spacing: 16) {
       sectionHeader(
-        "Managed Audio EQ",
-        detail:
-          "Applies after each app's own EQ to streams currently routed through Waves. Excluded and unsupported audio is not affected."
+        "Equalizer",
+        detail: equalizerScopeDetail
       ) {
         Toggle(
-          "Managed Audio EQ",
+          "Equalizer",
           isOn: Binding(
-            get: { equalizer.isEnabled },
-            set: { store.setManagedAudioEqualizerEnabled($0) }
+            get: { scopeIsEnabled },
+            set: { setScopeEnabled($0) }
           )
         )
         .labelsHidden()
-        .help("Enable or bypass the shared equalizer for managed audio.")
+        .disabled(scopeIsUnavailable)
+      }
+
+      scopePicker
+
+      if let note = scopeNote {
+        Label(note.text, systemImage: note.symbol)
+          .font(.caption)
+          .foregroundStyle(note.isWarning ? theme.warning : Color.secondary)
+          .padding(10)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .background(theme.subtleFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
       }
 
       HStack(alignment: .firstTextBaseline, spacing: 14) {
         Picker(
           "Bands",
           selection: Binding(
-            get: { equalizer.mode },
-            set: { store.setManagedAudioEqualizerMode($0) }
+            get: { scopeSettings.mode },
+            set: { setScopeMode($0) }
           )
         ) {
           ForEach(EqualizerMode.allCases, id: \.self) { mode in
@@ -105,17 +147,17 @@ struct SoundWorkspaceView: View {
         Picker(
           "Preset",
           selection: Binding(
-            get: { equalizer.selectedPreset },
+            get: { scopeSettings.selectedPreset },
             set: { preset in
               guard preset != .custom else { return }
-              store.applyManagedAudioEqualizerPreset(preset)
+              applyScopePreset(preset)
             }
           )
         ) {
           ForEach(EqualizerPreset.selectablePresets, id: \.self) { preset in
             Text(preset.displayName).tag(preset)
           }
-          if equalizer.selectedPreset == .custom {
+          if scopeSettings.selectedPreset == .custom {
             Text(EqualizerPreset.custom.displayName).tag(EqualizerPreset.custom)
           }
         }
@@ -123,10 +165,10 @@ struct SoundWorkspaceView: View {
 
         Spacer()
 
-        Button("Reset to Flat") { store.resetManagedAudioEqualizer() }
+        Button("Reset to Flat") { resetScope() }
           .buttonStyle(.bordered)
           .controlSize(.small)
-          .disabled(equalizer.selectedPreset == .flat)
+          .disabled(scopeSettings.selectedPreset == .flat)
       }
 
       LazyVGrid(
@@ -134,12 +176,12 @@ struct SoundWorkspaceView: View {
         alignment: .leading,
         spacing: 14
       ) {
-        ForEach(Array(activeBands.enumerated()), id: \.element.id) { index, band in
+        ForEach(Array(scopeBands.enumerated()), id: \.element.id) { index, band in
           SoundEQBandControl(
             band: band,
-            gainDB: activeGain(at: index),
+            gainDB: scopeGain(at: index),
             accent: theme.accent,
-            onChange: { store.setManagedAudioEqualizerGain($0, at: index) }
+            onChange: { setScopeGain($0, at: index) }
           )
         }
       }
@@ -155,15 +197,152 @@ struct SoundWorkspaceView: View {
     }
     .padding(18)
     .wavesCard()
-    .disabled(!store.isAudioRunning)
+    .disabled(!store.isAudioRunning || scopeIsUnavailable)
   }
+
+  /// One chip per stream: the shared EQ first, then every app that can carry
+  /// its own curve. A horizontal scroller (not a dropdown) so switching between
+  /// streams while tuning is one click, and the active stream stays visible.
+  private var scopePicker: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 8) {
+        EQScopeChip(
+          title: "All Managed Audio",
+          icon: "waveform",
+          isSelected: eqScope == .managedAudio,
+          isEnabled: store.preferences.managedAudioEqualizer.isEnabled
+        ) {
+          eqScope = .managedAudio
+        }
+
+        ForEach(equalizerApps) { app in
+          EQScopeChip(
+            title: app.displayName,
+            iconApp: app,
+            isSelected: eqScope == .app(app.logicalID),
+            isEnabled: store.equalizerSettings(for: app).isEnabled
+          ) {
+            eqScope = .app(app.logicalID)
+          }
+        }
+      }
+      .padding(.vertical, 2)
+    }
+  }
+
+  // MARK: Scope plumbing
+
+  private var scopeApp: AudioApp? {
+    guard case .app(let id) = eqScope else { return nil }
+    return resolvedApp(for: id)
+  }
+
+  private func resolvedApp(for id: String) -> AudioApp? {
+    store.visibleApps.first { $0.logicalID == id }
+  }
+
+  /// Apps offered in the scope picker: everything the mixer shows.
+  private var equalizerApps: [AudioApp] {
+    store.visibleApps.filter { !store.isExcluded($0) }
+  }
+
+  private var scopeSettings: EqualizerSettings {
+    if let app = scopeApp {
+      return store.equalizerSettings(for: app)
+    }
+    return store.preferences.managedAudioEqualizer.equalizerSettings
+  }
+
+  private var scopeIsEnabled: Bool {
+    if let app = scopeApp {
+      return store.equalizerSettings(for: app).isEnabled
+    }
+    return store.preferences.managedAudioEqualizer.isEnabled
+  }
+
+  private var scopeIsUnavailable: Bool {
+    if case .app(let id) = eqScope { return resolvedApp(for: id) == nil }
+    return false
+  }
+
+  private var scopeBands: [EqualizerBandDefinition] {
+    EqualizerBandCatalog.bands(for: scopeSettings.mode)
+  }
+
+  private func scopeGain(at index: Int) -> Float {
+    let gains = scopeSettings.activeGainsDB
+    return gains.indices.contains(index) ? gains[index] : 0
+  }
+
+  private func setScopeEnabled(_ enabled: Bool) {
+    if let app = scopeApp {
+      store.setEqualizerEnabled(enabled, for: app)
+    } else {
+      store.setManagedAudioEqualizerEnabled(enabled)
+    }
+  }
+
+  private func setScopeMode(_ mode: EqualizerMode) {
+    if let app = scopeApp {
+      store.setEqualizerMode(mode, for: app)
+    } else {
+      store.setManagedAudioEqualizerMode(mode)
+    }
+  }
+
+  private func applyScopePreset(_ preset: EqualizerPreset) {
+    if let app = scopeApp {
+      store.applyEqualizerPreset(preset, for: app)
+    } else {
+      store.applyManagedAudioEqualizerPreset(preset)
+    }
+  }
+
+  private func setScopeGain(_ gainDB: Float, at index: Int) {
+    if let app = scopeApp {
+      store.setEqualizerGain(gainDB, at: index, for: app)
+    } else {
+      store.setManagedAudioEqualizerGain(gainDB, at: index)
+    }
+  }
+
+  private func resetScope() {
+    if let app = scopeApp {
+      store.resetEqualizer(for: app)
+    } else {
+      store.resetManagedAudioEqualizer()
+    }
+  }
+
+  private var equalizerScopeDetail: String {
+    if let app = scopeApp {
+      return "This curve shapes only \(app.displayName). The shared All Managed Audio curve is applied after it."
+    }
+    return "One shared curve for every app routed through Waves. Pick an app below to shape just that app."
+  }
+
+  /// Status note for the selected app's stream, mirroring what the old side
+  /// panel explained: saved-but-waiting routes and muted streams.
+  private var scopeNote: (text: String, symbol: String, isWarning: Bool)? {
+    guard let app = scopeApp else { return nil }
+    if scopeSettings.isEnabled && app.routingState != .managed {
+      return (
+        "Saved. Waves applies this curve as soon as \(app.displayName) has a managed audio route.",
+        "clock.arrow.circlepath",
+        false
+      )
+    }
+    return nil
+  }
+
+  // MARK: - Adaptive Mix
 
   private var adaptiveMixSection: some View {
     VStack(alignment: .leading, spacing: 16) {
       sectionHeader(
         "Adaptive Mix",
         detail:
-          "Uses activity, content type, and priority to create space. It only attenuates, it never pauses or mutes lower-priority apps."
+          "Turns apps down, never off, so the app you care about stays in front. Nothing is paused or muted."
       ) {
         Toggle(
           "Adaptive Mix",
@@ -205,7 +384,7 @@ struct SoundWorkspaceView: View {
         VStack(alignment: .leading, spacing: 4) {
           Text("Sidechain Focus")
             .font(.callout.weight(.semibold))
-          Text("Choose what becomes the foreground source when multiple apps are audible.")
+          Text("Decides which app counts as the foreground when several are audible.")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -237,19 +416,21 @@ struct SoundWorkspaceView: View {
     .disabled(!store.isAudioRunning)
   }
 
+  // MARK: - App priorities
+
   private var appPoliciesSection: some View {
     VStack(alignment: .leading, spacing: 14) {
       sectionHeader(
         "App Priorities",
         detail:
-          "Classify what each app carries, then choose where it belongs in the mix. Never Adjust disables adaptive gain only."
+          "Tell Waves what each app plays and how important it is. Never Adjust means Adaptive Mix leaves that app alone."
       ) { EmptyView() }
 
       if policyApps.isEmpty {
         ContentUnavailableView(
           "No Audio Apps Yet",
           systemImage: "speaker.slash",
-          description: Text("Start playback in an app, then refresh Waves.")
+          description: Text("Play audio in an app and it appears here.")
         )
         .frame(maxWidth: .infinity, minHeight: 150)
       } else {
@@ -296,18 +477,6 @@ struct SoundWorkspaceView: View {
     }
   }
 
-  private var equalizer: GlobalEqualizerSettings {
-    store.preferences.managedAudioEqualizer
-  }
-
-  private var activeBands: [EqualizerBandDefinition] {
-    EqualizerBandCatalog.bands(for: equalizer.mode)
-  }
-
-  private func activeGain(at index: Int) -> Float {
-    equalizer.activeGainsDB.indices.contains(index) ? equalizer.activeGainsDB[index] : 0
-  }
-
   private var policyApps: [AudioApp] {
     store.visibleApps.filter { app in
       app.routingState == .managed || app.routingState == .live || app.isActive
@@ -322,42 +491,93 @@ struct SoundWorkspaceView: View {
     let values = store.visibleApps.map { app in
       GlobalEqualizerSettings.combinedHeadroomCompensationDB(
         perApp: store.equalizerSettings(for: app),
-        managedAudio: equalizer
+        managedAudio: store.preferences.managedAudioEqualizer
       )
     }
-    return values.min() ?? equalizer.headroomCompensationDB
+    return values.min() ?? store.preferences.managedAudioEqualizer.headroomCompensationDB
   }
 
   private var headroomDescription: String {
     if combinedHeadroomDB < 0 {
       return
-        "Clipping protection reserves up to \(String(format: "%.1f", -combinedHeadroomDB)) dB for stacked app and managed EQ boosts."
+        "Waves reserves \(String(format: "%.1f", -combinedHeadroomDB)) dB so boosted EQ curves can't clip."
     }
-    return "No extra headroom is needed for the current EQ curves."
+    return "No headroom needed for the current curves."
   }
 
   private var strategyDescription: String {
     switch store.preferences.adaptiveStrategy {
     case .lectureFocus:
-      "Lecture and voice are foreground, while music remains audible in the background."
+      "Speech stays in front. Music and video keep playing quietly behind it."
     case .mediaFirst:
-      "Music and video stay foreground, while meetings move behind them."
+      "Music and video stay in front. Meetings drop into the background."
     case .balanced:
-      "Visible apps start at Normal priority and remain close to their manual levels."
+      "Every app starts at Normal priority, close to its manual level."
     case .custom:
-      "Waves uses the content type and priority shown below for each app."
+      "Waves follows the content type and priority set per app below."
     }
   }
 
   private var focusModeDescription: String {
     switch store.preferences.adaptiveFocusMode {
     case .assignedPriorities:
-      "Uses only the priorities you assign. The frontmost app receives no automatic promotion."
+      "Only the priorities below matter. The app in front gets no special treatment."
     case .followFrontApp:
-      "An audible frontmost app becomes Foreground. Voice and meeting apps must contain speech before they take focus."
+      "The app in front becomes the foreground while it's audible. Voice and meeting apps need actual speech first."
     case .smartHybrid:
-      "Promotes an audible frontmost app by one tier while keeping explicit priorities as guardrails."
+      "The app in front moves up one priority tier while it's audible. Your assigned priorities still set the limits."
     }
+  }
+}
+
+/// One selectable stream in the equalizer card's scope row: the shared EQ or
+/// a single app. A small dot marks streams whose EQ is currently on, so you
+/// can see at a glance where shaping is active without visiting each one.
+private struct EQScopeChip: View {
+  @Environment(\.wavesTheme) private var theme
+  let title: String
+  var icon: String? = nil
+  var iconApp: AudioApp? = nil
+  let isSelected: Bool
+  let isEnabled: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 6) {
+        if let iconApp {
+          AppIconView(app: iconApp)
+            .frame(width: 16, height: 16)
+        } else if let icon {
+          Image(systemName: icon)
+            .font(.caption)
+            .foregroundStyle(isSelected ? theme.accent : Color.secondary)
+        }
+        Text(title)
+          .font(.caption.weight(isSelected ? .semibold : .regular))
+          .lineLimit(1)
+        if isEnabled {
+          Circle()
+            .fill(theme.accent)
+            .frame(width: 5, height: 5)
+            .accessibilityHidden(true)
+        }
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .background(
+        isSelected ? theme.selectionFill : theme.subtleFill,
+        in: Capsule()
+      )
+      .overlay(
+        Capsule().strokeBorder(isSelected ? theme.accent.opacity(0.5) : Color.clear)
+      )
+      .contentShape(Capsule())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel("\(title) equalizer")
+    .accessibilityValue(isEnabled ? "On" : "Off")
+    .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
   }
 }
 
@@ -454,7 +674,7 @@ private struct SoundEQBandControl: View {
         step: 0.5
       )
       .tint(accent)
-      .accessibilityLabel("Managed audio \(band.label) gain")
+      .accessibilityLabel("\(band.label) gain")
       .accessibilityValue(formattedGain)
     }
   }

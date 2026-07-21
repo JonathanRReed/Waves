@@ -8,7 +8,6 @@ struct MainWindowView: View {
   // Restored across launches so the user returns to the scope they left.
   @SceneStorage("waves.selectedScope") private var selection: MixerScope = .source(.running)
   @State private var editorContext: ProfileEditorContext?
-  @State private var equalizerAppID: String?
 
   var body: some View {
     ZStack(alignment: .top) {
@@ -41,30 +40,6 @@ struct MainWindowView: View {
     .sheet(item: $editorContext) { context in
       ProfileEditorSheet(context: context)
         .environment(store)
-    }
-    .inspector(
-      isPresented: Binding(
-        get: { equalizerAppID != nil },
-        set: { isPresented in
-          if !isPresented { equalizerAppID = nil }
-        }
-      )
-    ) {
-      if let equalizerApp {
-        EqualizerInspectorView(
-          app: equalizerApp,
-          onClose: { equalizerAppID = nil }
-        )
-          .environment(store)
-          .inspectorColumnWidth(min: 290, ideal: 330, max: 390)
-      } else {
-        ContentUnavailableView(
-          "App Unavailable",
-          systemImage: "waveform.slash",
-          description: Text("Close the equalizer and choose a running app.")
-        )
-        .inspectorColumnWidth(min: 290, ideal: 330, max: 390)
-      }
     }
     .onOpenURL { url in
       store.handleURLScheme(url)
@@ -207,22 +182,17 @@ struct MainWindowView: View {
     }
   }
 
-  private var equalizerApp: AudioApp? {
-    guard let equalizerAppID else { return nil }
-    return store.visibleApps.first { $0.logicalID == equalizerAppID }
-  }
-
   private var resetMixHelp: String {
     guard let restorePoint = store.mixRestorePoint else { return "Reset mix" }
     return "Put every app back to how it was before \(restorePoint.profileName)."
   }
 
+  /// Per-app EQ lives in the Sound workspace now (one EQ surface, no side
+  /// panel), so an equalizer request just switches this window there — the
+  /// workspace itself consumes the request to select the right app.
   private func handleEqualizerFocusRequest() {
-    guard let request = store.consumeEqualizerFocusRequest() else { return }
-    if let source = request.source {
-      selection = .source(source)
-    }
-    equalizerAppID = request.appID
+    guard store.equalizerFocusRequest != nil else { return }
+    selection = .sound
   }
 
   /// A persisted scope can become invalid: a `.recent` source after the user
