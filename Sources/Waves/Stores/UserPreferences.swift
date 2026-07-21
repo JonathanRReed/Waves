@@ -58,6 +58,9 @@ struct UserPreferences: Codable, Sendable {
   var appearance: WavesAppearance = .system
   /// Equalization applied to every stream currently managed by Waves.
   var managedAudioEqualizer = GlobalEqualizerSettings()
+  /// The profile Waves applies automatically when audio starts, so the user's
+  /// baseline mix is in place without a manual apply. Nil means no default.
+  var defaultProfileID: UUID?
 
   init() {}
 
@@ -88,6 +91,7 @@ struct UserPreferences: Codable, Sendable {
     case palette
     case appearance
     case managedAudioEqualizer
+    case defaultProfileID
   }
 
   // Missing fields use backward-compatible defaults. A present field with the
@@ -131,6 +135,7 @@ struct UserPreferences: Codable, Sendable {
     palette = try value(.palette, defaults.palette)
     appearance = try value(.appearance, defaults.appearance)
     managedAudioEqualizer = try value(.managedAudioEqualizer, defaults.managedAudioEqualizer)
+    defaultProfileID = try container.decodeIfPresent(UUID.self, forKey: .defaultProfileID)
   }
 }
 

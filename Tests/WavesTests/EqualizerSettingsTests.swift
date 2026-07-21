@@ -59,13 +59,17 @@ import Testing
   #expect(settings.advancedGainsDB == advanced)
 }
 
-@Test func equalizerHeadroomOffsetsLargestPositiveBand() {
+@Test func equalizerHeadroomCoversTheCascadePeak() {
   var settings = EqualizerSettings(isEnabled: true)
   settings.setGain(2, at: 0)
   settings.setGain(6, at: 1)
   settings.setGain(-4, at: 2)
 
-  #expect(settings.headroomCompensationDB == -6)
+  // At least the largest band (+6), at most that plus overlap and the sweep's
+  // safety margin — the reservation covers the real cascade peak now, not
+  // just the biggest single band.
+  #expect(settings.headroomCompensationDB <= -6)
+  #expect(settings.headroomCompensationDB > -9)
 }
 
 @Test func equalizerSettingsDecodesLegacyEmptyObject() throws {

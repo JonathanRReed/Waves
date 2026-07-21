@@ -28,28 +28,57 @@ import Testing
   var managed = GlobalEqualizerSettings(isEnabled: true)
   managed.setGain(4, at: 2)
 
-  #expect(
-    GlobalEqualizerSettings.combinedHeadroomCompensationDB(
-      perApp: perApp,
-      managedAudio: managed
-    ) == -10
+  // The reservation must cover at least the nominal band boosts (6 + 4 dB) —
+  // the cascade sweep may reserve slightly more (shelf/peak overlap + margin),
+  // never less.
+  let combined = GlobalEqualizerSettings.combinedHeadroomCompensationDB(
+    perApp: perApp,
+    managedAudio: managed
   )
+  #expect(combined <= -10)
+  #expect(combined > -13)
   #expect(
     abs(
       GlobalEqualizerSettings.combinedHeadroomGain(
         perApp: perApp,
         managedAudio: managed
-      ) - Float(pow(10, -10.0 / 20))
-    ) < 0.000_001
+      ) - Float(pow(10, Double(combined) / 20))
+    ) < 0.000_1
   )
 
   managed.isEnabled = false
-  #expect(
-    GlobalEqualizerSettings.combinedHeadroomCompensationDB(
-      perApp: perApp,
-      managedAudio: managed
-    ) == -6
+  let perAppOnly = GlobalEqualizerSettings.combinedHeadroomCompensationDB(
+    perApp: perApp,
+    managedAudio: managed
   )
+  #expect(perAppOnly <= -6)
+  #expect(perAppOnly > -8)
+}
+
+@Test func headroomCoversOverlappingMultibandBoosts() {
+  // Eight adjacent +12 dB peaking bands stack to ~+22 dB near 500 Hz — the
+  // reservation must cover the real cascade peak, not the single-band max.
+  let allUp = Array(repeating: Float(12), count: 8)
+  let peak = EqualizerHeadroom.peakBoostDB(mode: .advanced, gainsDB: allUp)
+  #expect(peak > 20)
+  #expect(peak < 26)
+
+  var settings = EqualizerSettings(isEnabled: true, mode: .advanced)
+  for index in 0..<8 { settings.setGain(12, at: index) }
+  #expect(settings.headroomCompensationDB <= -peak + 0.001)
+
+  // Flat and cut-only curves need no reservation.
+  #expect(EqualizerHeadroom.peakBoostDB(mode: .advanced, gainsDB: Array(repeating: 0, count: 8)) == 0)
+  #expect(EqualizerHeadroom.peakBoostDB(mode: .simple, gainsDB: [-6, -3, 0]) == 0)
+
+  // A single isolated boost stays near its nominal value (within overlap + margin).
+  let single = EqualizerHeadroom.peakBoostDB(mode: .simple, gainsDB: [0, 6, 0])
+  #expect(single >= 6)
+  #expect(single < 8.5)
+
+  // A disabled EQ reserves nothing regardless of its stored curve.
+  settings.isEnabled = false
+  #expect(settings.headroomCompensationDB == 0)
 }
 
 @Test func globalEqualizerConvertsToDSPSettingsWithoutAdaptiveState() {

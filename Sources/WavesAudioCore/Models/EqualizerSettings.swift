@@ -104,6 +104,92 @@ public struct EqualizerBandDefinition: Identifiable, Codable, Hashable, Sendable
   }
 }
 
+/// Computes the true worst-case boost of an EQ's serial filter cascade.
+///
+/// Reserving only the single largest band gain is not a safe bound: adjacent
+/// peaking filters overlap, so eight +12 dB bands can stack to ~+22 dB near
+/// 500 Hz. This sweeps the actual cascade magnitude response over a log-spaced
+/// frequency grid (plus each band's center frequency) and returns the peak
+/// boost in dB. Runs off the realtime path — settings changes and UI only.
+public enum EqualizerHeadroom {
+  /// Nominal rate for response estimation. The realized response at other
+  /// hardware rates differs by fractions of a dB inside the audible band,
+  /// which `safetyMarginDB` absorbs.
+  private static let nominalSampleRate: Double = 48_000
+  /// Covers rate variation and the grid's finite resolution.
+  private static let safetyMarginDB: Float = 0.5
+  private static let gridPointCount = 96
+
+  /// Sweep results memoized because `headroomCompensationDB` is read from
+  /// SwiftUI bodies on every level tick. Bounded; distinct curves per session
+  /// are few (presets + the user's current drag).
+  private struct CacheKey: Hashable {
+    let mode: EqualizerMode
+    let gainsDB: [Float]
+  }
+  private static let cacheLock = NSLock()
+  nonisolated(unsafe) private static var cache: [CacheKey: Float] = [:]
+  private static let cacheLimit = 256
+
+  /// Peak positive cascade gain in dB (0 when the curve never exceeds unity).
+  public static func peakBoostDB(mode: EqualizerMode, gainsDB: [Float]) -> Float {
+    guard gainsDB.contains(where: { $0 > 0 }) else { return 0 }
+
+    let key = CacheKey(mode: mode, gainsDB: gainsDB)
+    cacheLock.lock()
+    let cached = cache[key]
+    cacheLock.unlock()
+    if let cached { return cached }
+
+    let computed = computePeakBoostDB(mode: mode, gainsDB: gainsDB)
+    cacheLock.lock()
+    if cache.count >= cacheLimit { cache.removeAll(keepingCapacity: true) }
+    cache[key] = computed
+    cacheLock.unlock()
+    return computed
+  }
+
+  private static func computePeakBoostDB(mode: EqualizerMode, gainsDB: [Float]) -> Float {
+    let bands = EqualizerBandCatalog.bands(for: mode)
+
+    let coefficients = bands.enumerated().map { index, band in
+      EqualizerCoefficientFactory.coefficients(
+        for: band,
+        gainDB: index < gainsDB.count ? gainsDB[index] : 0,
+        sampleRate: nominalSampleRate
+      )
+    }
+
+    var frequencies = logSpacedGrid()
+    frequencies.append(contentsOf: bands.map(\.frequency))
+
+    var peakMagnitude = 1.0
+    for frequency in frequencies {
+      var magnitude = 1.0
+      for section in coefficients {
+        magnitude *= EqualizerCoefficientFactory.responseMagnitude(
+          section,
+          frequency: frequency,
+          sampleRate: nominalSampleRate
+        )
+      }
+      peakMagnitude = max(peakMagnitude, magnitude)
+    }
+
+    guard peakMagnitude > 1 else { return 0 }
+    let peakDB = Float(20 * log10(peakMagnitude))
+    return peakDB + safetyMarginDB
+  }
+
+  private static func logSpacedGrid() -> [Double] {
+    let low = log10(20.0)
+    let high = log10(20_000.0)
+    return (0..<gridPointCount).map { index in
+      pow(10, low + (high - low) * Double(index) / Double(gridPointCount - 1))
+    }
+  }
+}
+
 public enum EqualizerBandCatalog {
   public static let simple: [EqualizerBandDefinition] = [
     EqualizerBandDefinition(
@@ -185,7 +271,8 @@ public struct EqualizerSettings: Codable, Hashable, Sendable {
   }
 
   public var headroomCompensationDB: Float {
-    -max(0, activeGainsDB.max() ?? 0)
+    guard isEnabled else { return 0 }
+    return -EqualizerHeadroom.peakBoostDB(mode: mode, gainsDB: activeGainsDB)
   }
 
   public func gains(for mode: EqualizerMode) -> [Float] {

@@ -25,6 +25,45 @@ import Testing
   #expect(EqualizerCoefficientFactory.responseMagnitude(cut, frequency: band.frequency, sampleRate: 48_000) < 0.6)
 }
 
+@Test func peakingFilterProcessesCenterFrequencyAtRequestedGain() {
+  let sampleRate = 48_000.0
+  let frequency = 1_000.0
+  var settings = EqualizerSettings(isEnabled: true, mode: .advanced)
+  settings.setGain(6, at: 4)
+  let processor = EqualizerDSP(
+    sampleRate: sampleRate,
+    channelCount: 1,
+    settings: settings
+  )
+  let input = (0..<48_000).map { frame in
+    Float(0.01 * sin(2 * Double.pi * frequency * Double(frame) / sampleRate))
+  }
+  var output = input
+
+  output.withUnsafeMutableBytes { bytes in
+    processor.process(
+      bytes.baseAddress!,
+      byteCount: bytes.count,
+      format: .float32,
+      bufferChannelCount: 1
+    )
+  }
+
+  let settledInput = input.dropFirst(4_096)
+  let settledOutput = output.dropFirst(4_096)
+  let inputRMS = sqrt(
+    settledInput.reduce(0.0) { $0 + Double($1 * $1) }
+      / Double(settledInput.count)
+  )
+  let outputRMS = sqrt(
+    settledOutput.reduce(0.0) { $0 + Double($1 * $1) }
+      / Double(settledOutput.count)
+  )
+  let measuredGainDB = 20 * log10(outputRMS / inputRMS)
+
+  #expect(abs(measuredGainDB - 6) < 0.05)
+}
+
 @Test func shelfFiltersFavorTheirNamedFrequencyRegion() {
   let low = EqualizerCoefficientFactory.coefficients(
     for: EqualizerBandCatalog.simple[0],

@@ -79,6 +79,35 @@ private func focusInput(
   #expect(gains["normal"] == Float(AdaptiveMixing.gentlePriorityReductionDB))
 }
 
+@Test func followFrontAppRequiresDetectedSpeechBeforeMeetingTakesFocus() {
+  var engine = AdaptivePolicyEngine(
+    usesLoudnessCorrection: false,
+    focusMode: .followFrontApp
+  )
+  let frontmostMeeting = focusInput(
+    "meeting",
+    contentType: .meeting,
+    priority: .normal,
+    rmsDBFS: -24,
+    voiceRatio: 0.8,
+    isFrontmost: true
+  )
+  let background = focusInput("background", priority: .background)
+
+  let firstFrame = engine.update(
+    inputs: [frontmostMeeting, background],
+    elapsed: 0.12
+  )
+  let secondFrame = engine.update(
+    inputs: [frontmostMeeting, background],
+    elapsed: 0.12
+  )
+
+  #expect(firstFrame["background"] == 0)
+  #expect(secondFrame["meeting"] == 0)
+  #expect(secondFrame["background"] == Float(AdaptiveMixing.strongPriorityReductionDB))
+}
+
 @Test func smartHybridPromotesAudibleFrontmostSourceExactlyOneTier() {
   var engine = AdaptivePolicyEngine(
     usesLoudnessCorrection: false,

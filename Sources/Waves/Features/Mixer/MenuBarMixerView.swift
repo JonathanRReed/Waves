@@ -325,6 +325,15 @@ private struct ProfileQuickPicker: View {
       if store.profiles.isEmpty {
         Text("No profiles yet").foregroundStyle(.secondary)
       }
+      if let restorePoint = store.mixRestorePoint {
+        Divider()
+        Button {
+          store.resetMix()
+        } label: {
+          Label("Reset Mix", systemImage: "arrow.uturn.backward.circle")
+        }
+        .help("Put every app back to how it was before \(restorePoint.profileName).")
+      }
     } label: {
       HStack(spacing: 6) {
         Image(systemName: "rectangle.stack")

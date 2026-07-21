@@ -156,6 +156,20 @@ struct MainWindowView: View {
   @ToolbarContentBuilder
   private var mixerToolbar: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
+      // Appears only while there's a mix to go back to: after a profile with
+      // saved levels is applied, one click returns every app to its
+      // pre-profile volume, mute, and boost.
+      if store.mixRestorePoint != nil {
+        Button {
+          store.resetMix()
+        } label: {
+          Label("Reset Mix", systemImage: "arrow.uturn.backward.circle")
+        }
+        .help(resetMixHelp)
+        .accessibilityLabel("Reset mix")
+        .accessibilityHint("Returns every app to the levels it had before the last profile.")
+      }
+
       Menu {
         ForEach(AdaptiveMixMode.allCases, id: \.self) { mode in
           Button {
@@ -196,6 +210,11 @@ struct MainWindowView: View {
   private var equalizerApp: AudioApp? {
     guard let equalizerAppID else { return nil }
     return store.visibleApps.first { $0.logicalID == equalizerAppID }
+  }
+
+  private var resetMixHelp: String {
+    guard let restorePoint = store.mixRestorePoint else { return "Reset mix" }
+    return "Put every app back to how it was before \(restorePoint.profileName)."
   }
 
   private func handleEqualizerFocusRequest() {
@@ -428,6 +447,11 @@ private struct SidebarView: View {
             .contextMenu {
               if profile.carriesLevels {
                 Button("Apply Levels") { store.applyProfile(profile) }
+                if store.preferences.defaultProfileID == profile.id {
+                  Button("Don't Apply at Startup") { store.setDefaultProfile(nil) }
+                } else {
+                  Button("Apply at Startup") { store.setDefaultProfile(profile) }
+                }
               }
               Button("Edit Profile…") { onEditProfile(profile) }
               Button("Export…") { store.exportProfile(profile) }
@@ -533,7 +557,11 @@ private struct ProfileSidebarRow: View {
   private var subtitle: String {
     let count = profile.entries.count
     let noun = count == 1 ? "app" : "apps"
-    return profile.carriesLevels ? "\(count) \(noun) · levels" : "\(count) \(noun)"
+    var text = profile.carriesLevels ? "\(count) \(noun) · levels" : "\(count) \(noun)"
+    if store.preferences.defaultProfileID == profile.id {
+      text += " · startup"
+    }
+    return text
   }
 }
 

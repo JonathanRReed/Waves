@@ -2927,6 +2927,9 @@ private final class PerAppTapController: @unchecked Sendable {
   private var equalizerSettings: EqualizerSettings
   private var managedAudioEqualizerSettings: GlobalEqualizerSettings
   private var equalizerHeadroomGain: Float
+  /// Invalidates a scheduled headroom release when a newer EQ change lands
+  /// first. Accessed only on `callbackQueue`, like the gain itself.
+  private var equalizerHeadroomReleaseGeneration: UInt64 = 0
   private var adaptiveGain: Float
 
   init(
@@ -3043,11 +3046,26 @@ private final class PerAppTapController: @unchecked Sendable {
     }
   }
 
+  /// Runs on `callbackQueue`. Extra attenuation lands immediately; *reduced*
+  /// attenuation is held for three smoothing windows first, because the EQ
+  /// coefficients themselves ramp to their new curve over ~20 ms — releasing
+  /// protection while the old boost is still partially in the filters would
+  /// clip exactly the transient the headroom exists to absorb.
   private func updateEqualizerHeadroomGain() {
-    equalizerHeadroomGain = GlobalEqualizerSettings.combinedHeadroomGain(
+    let target = GlobalEqualizerSettings.combinedHeadroomGain(
       perApp: equalizerSettings,
       managedAudio: managedAudioEqualizerSettings
     )
+    equalizerHeadroomReleaseGeneration &+= 1
+    if target <= equalizerHeadroomGain {
+      equalizerHeadroomGain = target
+      return
+    }
+    let generation = equalizerHeadroomReleaseGeneration
+    callbackQueue.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
+      guard let self, self.equalizerHeadroomReleaseGeneration == generation else { return }
+      self.equalizerHeadroomGain = target
+    }
   }
 
   func setAdaptiveGainDB(_ gainDB: Float) {

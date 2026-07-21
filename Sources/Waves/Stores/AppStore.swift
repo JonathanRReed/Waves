@@ -44,6 +44,18 @@ struct EqualizerFocusRequest: Equatable {
   let source: SourceFilter?
 }
 
+/// The mix as it stood the moment before a profile was applied: each visible
+/// app's volume/mute/boost, captured so the user can put everything back with
+/// one click when they're done (meeting over, game closed). Kept in memory
+/// only — a restore point describes a moment, not a preference.
+struct MixRestorePoint: Equatable {
+  /// Name of the profile whose application created this restore point.
+  let profileName: String
+  /// Level-bearing entries for every app that was visible when captured.
+  let entries: [ProfileEntry]
+  let capturedAt: Date
+}
+
 /// Explicit fields layered onto the store's latest confirmed complete app state.
 /// `replacesTargetDevice` distinguishes "leave the route alone" from an explicit
 /// nil target (follow the system default).
@@ -170,6 +182,12 @@ final class AppStore {
   /// for membership-only grouping profiles — to scope the main window. Not
   /// persisted; a fresh launch starts with no active profile.
   var activeProfileID: UUID?
+  /// The mix as it stood right before the last level-bearing profile apply, so
+  /// "Reset Mix" can put every app back when the meeting/game/session ends.
+  /// Captured once per apply chain: applying Meeting then Focus keeps the
+  /// original pre-Meeting mix, so one reset returns to where the user started.
+  /// In-memory only — quitting Waves discards it.
+  private(set) var mixRestorePoint: MixRestorePoint?
   /// Bumped every time a profile is applied/selected, so the main window can
   /// re-focus that profile even when `activeProfileID` is unchanged (e.g.
   /// re-applying the already-active profile from the menu bar).
@@ -202,6 +220,11 @@ final class AppStore {
   /// Live per-app output levels for meters, populated only while a UI surface
   /// is visible (kept out of `session` so updates don't trigger re-sorts).
   var liveLevels: [String: AudioLevels] = [:]
+  /// The adaptive engine's current temporary gain per app (dB), published so
+  /// the UI can show which apps Sidechain Focus is holding back or lifting
+  /// right now. Empty whenever Adaptive Mix is off or nothing is being
+  /// adjusted. Mirrors what the backend is actually applying.
+  private(set) var adaptiveGainsDBByAppID: [String: Float] = [:]
   /// Logical IDs of apps that are audible now OR went quiet within the last
   /// `liveLingerWindow`. A just-silenced app stays in the Live list for a beat so
   /// a brief gap, track change, or pause doesn't make its row flicker out — and so
@@ -523,13 +546,27 @@ final class AppStore {
   /// component wave genuinely fades out when its app goes quiet, and the same
   /// nominal floor for audible-but-unmetered `.live` apps.
   var waveComponents: [WaveComponent] {
+    let managedEQActive = preferences.managedAudioEqualizer.isEnabled
     var components: [WaveComponent] = []
     for app in visibleApps where !app.isMuted && isLive(app) {
       let measured = liveLevels[app.logicalID].map { Double(max($0.rms, $0.peak * 0.8)) } ?? 0
       // A slightly higher nominal floor than mixedAudioLevel's: an audible
       // but unmetered app should still ripple visibly in the showcase band.
       let level = measured > 0.001 ? measured : 0.18
-      components.append(WaveComponent(id: app.logicalID, level: min(1, pow(level, 0.5))))
+      // EQ shaping and adaptive gain only act on streams Waves actually
+      // processes, so both indicators require a managed route.
+      let isManaged = app.routingState == .managed
+      let isEqualized = isManaged
+        && (managedEQActive || equalizerSettings(for: app).isEnabled)
+      let adaptiveGainDB = isManaged
+        ? Double(adaptiveGainsDBByAppID[app.logicalID] ?? 0)
+        : 0
+      components.append(WaveComponent(
+        id: app.logicalID,
+        level: min(1, pow(level, 0.5)),
+        isEqualized: isEqualized,
+        adaptiveGainDB: adaptiveGainDB
+      ))
     }
     guard components.count > 6 else { return components }
     return Array(components.sorted { $0.level > $1.level }.prefix(6))
@@ -820,6 +857,7 @@ final class AppStore {
       checkAutoPauseMusic()
       presentRecoveredStoreWarningIfNeeded()
       showToast(title: "Waves is ready", detail: "Per-app audio mixer loaded.", kind: .success)
+      applyDefaultProfileAtStartupIfNeeded()
     } catch {
       guard startupState != .shuttingDown else { return }
       let detail = error.localizedDescription
@@ -1947,6 +1985,7 @@ final class AppStore {
       speechDuckingStates.removeAll()
       loudnessTrimStates.removeAll()
       adaptivePolicyEngine.reset()
+      adaptiveGainsDBByAppID = [:]
       startOwnedOperation { store in
         await store.backend.setAdaptiveGains([:])
       }
@@ -1960,6 +1999,7 @@ final class AppStore {
         guard !Task.isCancelled else { break }
         try? await Task.sleep(for: self.adaptiveMixInterval)
       }
+      self.adaptiveGainsDBByAppID = [:]
       await self.backend.setAdaptiveGains([:])
     }
   }
@@ -1990,6 +2030,12 @@ final class AppStore {
 
     guard !Task.isCancelled, startupState == .running,
           preferences.adaptiveMixMode == mode else { return }
+    // Publish only meaningful corrections (> ~0.05 dB) so the UI's "adaptive
+    // is acting" indicators don't flicker on numerical dust.
+    let significant = gainsDB.filter { abs($0.value) >= 0.05 }
+    if significant != adaptiveGainsDBByAppID {
+      adaptiveGainsDBByAppID = significant
+    }
     await backend.setAdaptiveGains(gainsDB)
   }
 
@@ -2960,8 +3006,28 @@ final class AppStore {
     }
   }
 
+  /// Why a profile batch is being applied. Reset and startup applies reuse the
+  /// whole ordered-batch pipeline but must not re-capture a restore point,
+  /// focus a synthesized profile, or announce themselves as a user apply.
+  enum ProfileApplyPurpose: Sendable {
+    case userProfile
+    case mixReset
+    case defaultAtStartup
+  }
+
   func applyProfile(_ profile: Profile) {
+    applyProfile(profile, purpose: .userProfile)
+  }
+
+  private func applyProfile(_ profile: Profile, purpose: ProfileApplyPurpose) {
     guard requireAudioRunning() else { return }
+    // Remember the mix as it stands so the user can come back to it when the
+    // session ends. Only a deliberate, level-changing apply creates one, and an
+    // existing restore point is kept — chaining Meeting → Focus still resets to
+    // the original mix, not to Meeting.
+    if purpose == .userProfile, profile.carriesLevels, mixRestorePoint == nil {
+      captureMixRestorePoint(before: profile)
+    }
     let generation = Self.allocateAppIntentGeneration()
     currentProfileGeneration = generation
     let excludedAppIDsAtSubmission = Set(preferences.excludedAppIDs)
@@ -2997,7 +3063,9 @@ final class AppStore {
 
     // Preserve the immediate group-selection behavior for pure membership
     // profiles while still sending every source row through the ordered result API.
-    if !profile.carriesLevels {
+    // Only a user-chosen profile takes focus — a mix reset applies a synthesized
+    // profile that doesn't exist in `profiles` and must not become "active".
+    if !profile.carriesLevels, purpose == .userProfile {
       focusProfile(profile.id)
     }
 
@@ -3008,6 +3076,7 @@ final class AppStore {
       defer { self.profileApplyTasks.removeValue(forKey: generation) }
       await self.finishProfileApplication(
         profile,
+        purpose: purpose,
         generation: generation,
         affectedLiveAppIDs: affectedLiveAppIDs,
         excludedAppIDsAtSubmission: excludedAppIDsAtSubmission,
@@ -3019,6 +3088,7 @@ final class AppStore {
 
   private func finishProfileApplication(
     _ profile: Profile,
+    purpose: ProfileApplyPurpose,
     generation: UInt64,
     affectedLiveAppIDs: Set<String>,
     excludedAppIDsAtSubmission: Set<String>,
@@ -3065,7 +3135,7 @@ final class AppStore {
       )
     }
 
-    if profile.carriesLevels {
+    if profile.carriesLevels, purpose == .userProfile {
       focusProfile(profile.id)
     }
     diagnostics = await backend.diagnosticsReport()
@@ -3076,11 +3146,82 @@ final class AppStore {
     // older aggregate status here.
     syncOnboarding(using: session)
     persistSessionSnapshot()
-    presentProfileFeedback(
-      profile,
-      result: result,
-      persistenceResult: persistenceResult
-    )
+    switch purpose {
+    case .userProfile:
+      presentProfileFeedback(
+        profile,
+        result: result,
+        persistenceResult: persistenceResult
+      )
+    case .mixReset:
+      // resetMix() already confirmed optimistically; only surface problems.
+      presentQuietProfileProblems(
+        profile,
+        result: result,
+        persistenceResult: persistenceResult,
+        failureTitle: "Some levels didn't reset"
+      )
+    case .defaultAtStartup:
+      if profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult) {
+        showToast(
+          title: "Default profile applied",
+          detail: profile.name,
+          kind: .info,
+          duration: .seconds(1.8)
+        )
+      } else {
+        presentQuietProfileProblems(
+          profile,
+          result: result,
+          persistenceResult: persistenceResult,
+          failureTitle: "Default profile partly applied"
+        )
+      }
+    }
+  }
+
+  /// True when every actionable row landed and persisted cleanly. An
+  /// `.unavailable` row counts as landed: the app isn't running, so its levels
+  /// were saved as durable intent and apply on its next launch — the right
+  /// outcome for both a reset and a startup default, not a problem to warn about.
+  private func profileFeedbackIndicatesSuccess(
+    _ result: ProfileApplyResult,
+    persistenceResult: ProfilePersistenceResult
+  ) -> Bool {
+    let actionable = result.rows.filter { $0.outcome != .membershipOnly }
+    let landed = actionable.count {
+      $0.outcome == .applied || $0.outcome == .noChange || $0.outcome == .unavailable
+    }
+    return landed == actionable.count && persistenceResult.isFullySaved
+  }
+
+  /// Problem-only feedback for applies that already announced themselves
+  /// (mix reset) or shouldn't celebrate (startup default): stays silent on
+  /// success, warns with a row summary otherwise.
+  private func presentQuietProfileProblems(
+    _ profile: Profile,
+    result: ProfileApplyResult,
+    persistenceResult: ProfilePersistenceResult,
+    failureTitle: String
+  ) {
+    guard !profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult) else {
+      return
+    }
+    let actionable = result.rows.filter { $0.outcome != .membershipOnly }
+    let problems = actionable.count {
+      $0.outcome != .applied && $0.outcome != .noChange && $0.outcome != .unavailable
+    }
+    var parts: [String] = []
+    if problems == 1 {
+      parts.append("1 app couldn't be set. It may have quit or lost its route.")
+    } else if problems > 1 {
+      parts.append("\(problems) apps couldn't be set. They may have quit or lost their routes.")
+    }
+    if let settingsError = persistenceResult.settingsError {
+      parts.append("Settings not saved: \(settingsError)")
+    }
+    guard !parts.isEmpty else { return }
+    showToast(title: failureTitle, detail: parts.joined(separator: " "), kind: .warning)
   }
 
   private func normalizedProfileResult(
@@ -3524,6 +3665,89 @@ final class AppStore {
     return visibleApps.filter { ids.contains($0.logicalID) }
   }
 
+  // MARK: - Mix restore point ("Reset Mix")
+
+  /// Snapshots the current volume/mute/boost of every visible app, taken right
+  /// before `profile` changes the mix. Covers ALL visible apps, not just the
+  /// profile's members: restoring only member levels would leave any app the
+  /// user tweaked mid-session stranded at its session value.
+  private func captureMixRestorePoint(before profile: Profile) {
+    let entries = visibleApps.map { app in
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: app.desiredVolume,
+        isMuted: app.isMuted,
+        volumeBoost: app.volumeBoost
+      )
+    }
+    guard !entries.isEmpty else { return }
+    mixRestorePoint = MixRestorePoint(
+      profileName: profile.name,
+      entries: entries,
+      capturedAt: .now
+    )
+  }
+
+  /// Puts every app back to the levels it had before the last profile apply,
+  /// then clears the restore point and the active-profile highlight. The
+  /// "meeting's over" button: apply Meeting, take the call, Reset Mix, and
+  /// everything is where it was.
+  func resetMix() {
+    guard requireAudioRunning() else { return }
+    guard let restorePoint = mixRestorePoint else { return }
+    let restoreProfile = Profile(
+      name: restorePoint.profileName,
+      entries: restorePoint.entries
+    )
+    mixRestorePoint = nil
+    activeProfileID = nil
+    applyProfile(restoreProfile, purpose: .mixReset)
+    showToast(
+      title: "Mix reset",
+      detail: "Levels are back to how they were before \(restorePoint.profileName).",
+      kind: .success,
+      duration: .seconds(1.8)
+    )
+  }
+
+  /// Drops the restore point without applying it — for a user who decides the
+  /// new mix IS the mix now.
+  func discardMixRestorePoint() {
+    mixRestorePoint = nil
+  }
+
+  // MARK: - Default profile
+
+  /// The profile applied automatically when audio starts, if it still exists.
+  var defaultProfile: Profile? {
+    guard let id = preferences.defaultProfileID else { return nil }
+    return profiles.first { $0.id == id }
+  }
+
+  /// Marks `profile` as the startup default (or clears it with nil). The
+  /// default is applied once per launch when the audio backend reaches
+  /// `.running`, so the user's baseline mix comes up without a manual apply.
+  func setDefaultProfile(_ profile: Profile?) {
+    preferences.defaultProfileID = profile?.id
+    persistPreferences()
+    if let profile {
+      showToast(
+        title: "Default profile set",
+        detail: "\(profile.name) is applied when Waves starts.",
+        kind: .success,
+        duration: .seconds(1.8)
+      )
+    }
+  }
+
+  /// Applies the saved default profile once audio is running. Called from
+  /// startup only; a reset-purpose apply so it never creates a restore point
+  /// (there is no "before" mix worth returning to at launch).
+  private func applyDefaultProfileAtStartupIfNeeded() {
+    guard let profile = defaultProfile, profile.carriesLevels else { return }
+    applyProfile(profile, purpose: .defaultAtStartup)
+  }
+
   /// Marks a profile as the active one and signals the main window to focus it.
   private func focusProfile(_ id: UUID) {
     activeProfileID = id
@@ -3641,6 +3865,11 @@ final class AppStore {
     profiles.remove(atOffsets: offsets)
     if let active = activeProfileID, removedIDs.contains(active) {
       activeProfileID = nil
+    }
+    // A deleted profile can't stay the startup default.
+    if let defaultID = preferences.defaultProfileID, removedIDs.contains(defaultID) {
+      preferences.defaultProfileID = nil
+      persistPreferences()
     }
     persistProfiles()
     if !offsets.isEmpty {
