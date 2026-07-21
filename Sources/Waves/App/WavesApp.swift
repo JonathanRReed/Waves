@@ -18,6 +18,7 @@ enum WavesURLPolicy {
 struct WavesApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
+  @Environment(\.openWindow) private var openWindow
   @State private var store: AppStore
   @State private var updaterService = UpdaterService()
 
@@ -51,6 +52,15 @@ struct WavesApp: App {
     .defaultSize(width: 1100, height: 680)
     .windowToolbarStyle(.unifiedCompact(showsTitle: false))
     .commands {
+      // Replace the stock About panel with our own window: same version info,
+      // plus the update check right where Mac users look for it first.
+      CommandGroup(replacing: .appInfo) {
+        Button("About Waves") {
+          openWindow(id: AppSceneID.aboutWindow)
+          NSApp.activate(ignoringOtherApps: true)
+        }
+      }
+
       CommandGroup(after: .appInfo) {
         Button("Check for Updates…") {
           updaterService.checkForUpdates()
@@ -78,6 +88,17 @@ struct WavesApp: App {
         }
       }
     }
+
+    Window("About Waves", id: AppSceneID.aboutWindow) {
+      AboutView()
+        .environment(updaterService)
+        .wavesTheme(
+          palette: store.preferences.palette,
+          appearance: store.preferences.appearance
+        )
+    }
+    .windowResizability(.contentSize)
+    .defaultPosition(.center)
 
     Settings {
       SettingsView()
@@ -120,17 +141,17 @@ struct WavesApp: App {
   /// status is perceivable without sight.
   private var menuBarAccessibilityLabel: String {
     if !store.isAudioRunning {
-      return "Waves — finish setup"
+      return "Waves, finish setup"
     }
     if store.visibleApps.contains(where: \.isMuted) {
-      return "Waves — muted"
+      return "Waves, muted"
     }
     // Mirror menuBarIconName: "playing" tracks the real signal, not the lingering
     // Live list, so the icon and its label never disagree.
     if store.hasLiveAudio {
-      return "Waves — playing"
+      return "Waves, playing"
     }
-    return "Waves — idle"
+    return "Waves, idle"
   }
 }
 
@@ -463,4 +484,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 enum AppSceneID {
   static let mainWindow = "main-window"
+  static let aboutWindow = "about-window"
 }

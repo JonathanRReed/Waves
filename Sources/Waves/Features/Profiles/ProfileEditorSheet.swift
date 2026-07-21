@@ -121,7 +121,7 @@ struct ProfileEditorSheet: View {
     if context.profile?.carriesLevels == true {
       return "Keeps this profile's saved levels. New apps are added as members only."
     }
-    return "Membership only — this profile just groups the apps and won't change their audio."
+    return "Membership only. This profile just groups the apps and won't change their audio."
   }
 
   private var appPicker: some View {

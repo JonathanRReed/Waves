@@ -25,21 +25,24 @@ struct HelpView: View {
 
       VStack(alignment: .leading, spacing: 8) {
         bullet(
-          "Open Sound in the sidebar to tune Managed Audio EQ for every stream routed through Waves"
+          "All equalizers live in Sound, in the sidebar. One card edits the shared All Managed Audio curve or any single app; switch with the chips above the sliders"
         )
-        bullet("Use an app row's EQ control when only that app needs a different curve")
+        bullet("An app row's EQ button jumps straight to that app's curve in Sound")
         bullet(
-          "Classify apps by content type, then assign Foreground, Normal, Background, or Never Adjust"
+          "Tell Waves what each app plays (Music, Meeting, Game…), then set its priority: Foreground, Normal, Background, or Never Adjust"
         )
         bullet(
-          "Smart Hybrid promotes an audible frontmost app by one tier while keeping your assigned priorities as guardrails"
+          "Smart Hybrid moves the app in front up one priority tier while it's audible. Your assigned priorities still set the limits"
         )
-        bullet("Follow Front App promotes an audible frontmost app directly to Foreground")
-        bullet("Voice and meeting apps must contain speech before they trigger ducking")
+        bullet("Follow Front App makes the audible app in front the foreground directly")
+        bullet("Voice and meeting apps need actual speech before anything ducks for them")
+        bullet(
+          "While the sound is being shaped, the wave visualizer shows it: EQ'd streams get more texture, ducked streams ride lower, and small EQ / Focus chips name what's active"
+        )
       }
 
       Text(
-        "Adaptive Mix only changes temporary gain. It never pauses or mutes an app, and your manual levels remain intact."
+        "Adaptive Mix only turns apps down temporarily. It never pauses or mutes anything, and your manual levels stay put."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -114,7 +117,7 @@ struct HelpView: View {
       }
       .font(.system(.body, design: .monospaced))
 
-      Text("Enable keyboard shortcuts in General Settings to use these globally.")
+      Text("Turn these on in Settings > Shortcuts. They act on the app in front.")
         .font(.caption)
         .foregroundStyle(.secondary)
 
@@ -175,7 +178,7 @@ struct HelpView: View {
         )
       }
 
-      Text("Enable URL scheme automation in General Settings before using these commands.")
+      Text("Turn on URL scheme automation in Settings > Shortcuts before using these.")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
@@ -189,16 +192,22 @@ struct HelpView: View {
         .font(.headline)
 
       VStack(alignment: .leading, spacing: 8) {
-        bullet("A profile is a group of apps you use together — like Work or Gaming")
-        bullet("Use the + in the sidebar’s Profiles section to create one")
+        bullet("A profile is a group of apps you use together, like Work or Gaming")
+        bullet("Use the + in the sidebar's Profiles section to create one")
         bullet("Pick which apps belong, and optionally capture their current levels")
         bullet("Select a profile in the sidebar to focus just those apps")
-        bullet("Profiles that carry levels show an “Apply Levels” button")
-        bullet("Switch profiles from the menu bar, and export/import them as JSON")
+        bullet("Profiles that carry levels show an Apply Levels button")
+        bullet(
+          "After applying levels, Reset Mix in the toolbar puts every app back the way it was: apply Meeting for the call, reset when it ends"
+        )
+        bullet(
+          "Right-click a profile and choose Apply at Startup to make it your baseline mix on every launch"
+        )
+        bullet("Switch profiles from the menu bar, and export or import them as JSON")
       }
 
       Text(
-        "Membership-only profiles just group apps; capture levels to also save each app’s volume, mute, and boost."
+        "Membership-only profiles just group apps. Capture levels to also save each app's volume, mute, and boost."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -215,17 +224,17 @@ struct HelpView: View {
       VStack(alignment: .leading, spacing: 8) {
         troubleshootingItem(
           issue: "No audio apps detected",
-          solution: "Ensure apps are playing sound, enable 'Show system processes', or refresh (⌘R)"
+          solution: "Play sound in an app first, refresh (⌘R), or turn on Show system processes in Settings > Mixer"
         )
         troubleshootingItem(
           issue: "Volume changes not applying",
           solution:
-            "Use 'Recover Routes' in the toolbar or Audio settings, then check Diagnostics in Advanced settings"
+            "Use Recover Routes (in the main window's status badge or Settings > Advanced), then check the diagnostics list there"
         )
         troubleshootingItem(
           issue: "An app shows a red Core Audio error",
           solution:
-            "Some apps never produce sound (menu-bar utilities, CLI tools) and can't be managed — right-click the row and choose 'Exclude from Waves' to stop the warning"
+            "Some apps never produce sound (menu-bar utilities, CLI tools) and can't be managed. Right-click the row and choose 'Exclude from Waves' to stop the warning"
         )
         troubleshootingItem(
           issue: "Keyboard shortcuts not working",

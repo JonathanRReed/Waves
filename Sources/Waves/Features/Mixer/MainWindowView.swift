@@ -407,7 +407,7 @@ private struct SidebarView: View {
 
       Section {
         if store.profiles.isEmpty {
-          Text("No profiles yet — group apps with +")
+          Text("No profiles yet. Group apps with +")
             .font(.caption)
             .foregroundStyle(.tertiary)
         }
@@ -740,7 +740,7 @@ private struct SourceListView: View {
 
   private var emptyMessage: String {
     if systemProcessesHidden {
-      return "System processes are hidden. Enable Show system processes in Settings to see them."
+      return "System processes are hidden. Turn on Show system processes in Settings > Mixer to see them."
     }
     if let profile {
       // A search spans all visible apps, so an empty result here just means the
@@ -1002,7 +1002,7 @@ private struct RouteHealthBadge: View {
       }
       .buttonStyle(.plain)
       .disabled(store.isRecovering)
-      .help(Text("\(title) — click to recover managed routes"))
+      .help(Text("\(title). Click to recover managed routes."))
       .accessibilityLabel(Text("Routing status: \(title)"))
       .accessibilityHint("Reattaches active per-app audio routes.")
     }

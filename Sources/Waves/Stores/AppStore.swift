@@ -1057,7 +1057,7 @@ final class AppStore {
         lastURLSchemeThrottleToast = now
         showToast(
           title: "URL command throttled",
-          detail: "Too many commands — try again shortly.",
+          detail: "Too many commands. Try again shortly.",
           kind: .warning
         )
       }
@@ -3648,7 +3648,7 @@ final class AppStore {
   }
 
   /// Discards every saved per-device volume/mute/boost preset — the escape
-  /// hatch for Settings > Audio's "Clear All Saved Levels", for a user who
+  /// hatch for Settings > Mixer's "Clear All Saved Levels", for a user who
   /// wants to start over rather than have Waves keep re-applying old levels
   /// per device. Does not touch the `enablePerDeviceVolumePresets` preference
   /// itself, only the accumulated data.
@@ -3970,7 +3970,7 @@ final class AppStore {
           guard let decoded = Self.decodeImportedProfiles(from: data) else {
             showToast(
               title: "Import failed",
-              detail: "Unsupported file — expected a Waves profile or profiles backup.",
+              detail: "Unsupported file. Expected a Waves profile or profiles backup.",
               kind: .error
             )
             return
@@ -4099,9 +4099,9 @@ final class AppStore {
         } else {
           let reason: String
           if !status.hasRequiredPermissions {
-            reason = "Audio capture isn't granted — allow audio recording in System Settings, then try again."
+            reason = "Audio capture isn't granted. Allow audio recording in System Settings, then try again."
           } else if session.currentDevice == nil {
-            reason = "No output device is available — connect an output device, then try again."
+            reason = "No output device is available. Connect an output device, then try again."
           } else {
             reason = status.lastError ?? "Routes are still not healthy. Check the Advanced tab for details."
           }
