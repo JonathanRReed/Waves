@@ -6,6 +6,40 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-20
+
+### Added
+- Add Reset Mix. Applying a profile with saved levels now remembers how every
+  app was set first, and one click in the toolbar or menu bar puts everything
+  back. Apply Meeting for the call, reset when it ends.
+- Add a default profile. Right-click a profile and choose Apply at Startup (or
+  pick one in Settings > Profiles) and Waves applies its levels every time it
+  starts.
+- Add an About window with the version number, an update check, and links to
+  the website, source, and privacy policy.
+- Show live processing in the wave visualizer: streams shaped by an equalizer
+  gain visible texture, streams held back by Sidechain Focus ride lower at
+  their real reduced level, and small EQ and Focus chips name what's active.
+
+### Changed
+- Merge the two equalizers into one Equalizer card in Sound. It edits the
+  shared All Managed Audio curve or any single app, switched with one chip
+  row that also marks which streams have EQ on. The per-app side panel is
+  gone, along with its overlap problems in small windows.
+- Reorganize Settings into General, Mixer, Profiles, Shortcuts, Setup,
+  Advanced, and Help. Each sidebar row says what it contains, related
+  settings live together, and the update check appears in Settings, the app
+  menu, and the About window.
+- Rewrite descriptions across the app in plain language with concrete
+  examples.
+
+### Fixed
+- Reserve headroom for the real combined EQ curve instead of only the
+  largest single band. Stacked boosts on neighboring bands could previously
+  exceed the reserve and clip loud audio.
+- Keep clipping protection in place until an EQ change has fully faded in,
+  instead of releasing it about 20 ms early.
+
 ## [1.2.1] - 2026-07-20
 
 ### Fixed
