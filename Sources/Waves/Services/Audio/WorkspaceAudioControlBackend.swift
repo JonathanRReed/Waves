@@ -1374,6 +1374,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyData(tapID, &address, 0, nil, &uidSize, $0)
     }
     try withStatusCheck(uidStatus, action: "read tap uid")
+    let expectedUIDSize = UInt32(MemoryLayout<CFString?>.size)
+    guard uidSize == expectedUIDSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Process tap UID returned \(uidSize) bytes; expected \(expectedUIDSize)."
+      )
+    }
 
     guard let rawUID else {
       throw BackendError.managedRouteUnavailable("No process tap UID returned.")
@@ -1404,6 +1410,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, $0)
     }
     try withStatusCheck(uidStatus, action: "read default output uid")
+    let expectedUIDSize = UInt32(MemoryLayout<CFString?>.size)
+    guard uidSize == expectedUIDSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Default output UID returned \(uidSize) bytes; expected \(expectedUIDSize)."
+      )
+    }
 
     guard let rawUID else {
       throw BackendError.managedRouteUnavailable("No output device UID returned.")
@@ -1535,10 +1547,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else {
       return []
     }
-    let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    let elementSize = UInt32(MemoryLayout<AudioObjectID>.size)
+    guard size % elementSize == 0 else {
+      logger.warning("Ignoring malformed device list byte size \(size); expected a multiple of \(elementSize).")
+      return []
+    }
+    let count = Int(size / elementSize)
     guard count > 0 else { return [] }
     var ids = [AudioObjectID](repeating: .unknown, count: count)
+    let expectedSize = size
     guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids) == noErr else {
+      return []
+    }
+    guard size == expectedSize else {
+      logger.warning("Ignoring device list read that returned \(size) bytes; expected \(expectedSize).")
       return []
     }
     return ids.filter { $0 != .unknown }
@@ -1567,7 +1589,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let status = withUnsafeMutablePointer(to: &rawUID) {
       AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, $0)
     }
-    guard status == noErr, let rawUID else { return nil }
+    guard status == noErr, size == UInt32(MemoryLayout<CFString?>.size), let rawUID else { return nil }
     return rawUID as String
   }
 
@@ -1593,6 +1615,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyData(objectID, &address, 0, nil, &propertySize, $0)
     }
     try withStatusCheck(status, action: action)
+    let expectedSize = UInt32(MemoryLayout<CFString?>.size)
+    guard propertySize == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "\(action) returned \(propertySize) bytes; expected \(expectedSize)."
+      )
+    }
 
     guard let rawValue else {
       throw BackendError.managedRouteUnavailable("\(action) returned no value.")
@@ -1643,6 +1671,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       ),
       action: "translate pid \(pid) to process object"
     )
+    let expectedSize = UInt32(MemoryLayout<AudioObjectID>.size)
+    guard size == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Translate pid \(pid) returned \(size) bytes; expected \(expectedSize)."
+      )
+    }
 
     return processObjectID == .unknown ? nil : processObjectID
   }
@@ -1735,11 +1769,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return AudibleProcessIndex()
     }
 
-    let processObjectCount = Int(size) / MemoryLayout<AudioObjectID>.size
+    let elementSize = UInt32(MemoryLayout<AudioObjectID>.size)
+    guard size % elementSize == 0 else {
+      logger.warning("Ignoring malformed process object list byte size \(size); expected a multiple of \(elementSize).")
+      return AudibleProcessIndex()
+    }
+    let processObjectCount = Int(size / elementSize)
     guard processObjectCount > 0 else {
       return AudibleProcessIndex()
     }
 
+    let expectedSize = size
     var processObjectIDs = [AudioObjectID](repeating: .unknown, count: processObjectCount)
     let listStatus = AudioObjectGetPropertyData(
       AudioObjectID(kAudioObjectSystemObject),
@@ -1752,6 +1792,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     guard listStatus == noErr else {
       logger.warning("Failed to get process object list (OSStatus: \(listStatus))")
+      return AudibleProcessIndex()
+    }
+    guard size == expectedSize else {
+      logger.warning("Ignoring process object list read that returned \(size) bytes; expected \(expectedSize).")
       return AudibleProcessIndex()
     }
 
@@ -1783,6 +1827,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       logger.warning("Failed to read process pid for object \(processObjectID) (OSStatus: \(status))")
       return nil
     }
+    guard size == UInt32(MemoryLayout<pid_t>.size) else {
+      logger.warning("Ignoring process pid read for object \(processObjectID) that returned \(size) bytes.")
+      return nil
+    }
 
     return pid
   }
@@ -1799,6 +1847,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let status = AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &isRunningOutput)
     guard status == noErr else {
       logger.warning("Failed to read process output state for object \(processObjectID) (OSStatus: \(status))")
+      return false
+    }
+    guard size == UInt32(MemoryLayout<UInt32>.size) else {
+      logger.warning("Ignoring process output state for object \(processObjectID) that returned \(size) bytes.")
       return false
     }
 
