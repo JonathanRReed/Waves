@@ -75,7 +75,6 @@ require_command() {
 sign_runtime_item() {
   local target="$1"
   local entitlements="${2:-}"
-  local preserve_entitlements="${3:-false}"
   local identity="-"
   local args=(--force)
 
@@ -85,8 +84,6 @@ sign_runtime_item() {
   fi
   if [ -n "$entitlements" ]; then
     args+=(--entitlements "$entitlements")
-  elif [ "$preserve_entitlements" = "true" ]; then
-    args+=(--preserve-metadata=entitlements)
   fi
 
   codesign "${args[@]}" --sign "$identity" "$target"
@@ -388,6 +385,7 @@ build_app_bundle() {
   local source_logo=""
   local privacy_manifest="$ROOT_DIR/PrivacyInfo.xcprivacy"
   local entitlements="${APP_BUNDLE}.entitlements"
+  local sparkle_downloader_entitlements="${APP_BUNDLE}.sparkle-downloader.entitlements"
 
   mkdir -p "$DIST_DIR"
 
@@ -572,6 +570,12 @@ PLIST
     fi
   fi
 
+  # Cached binary artifacts can carry Finder or resource-fork metadata that
+  # codesign rejects. Strip it from the freshly assembled app before signing.
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "$APP_BUNDLE"
+  fi
+
   # Core Audio process taps require audio-input under the hardened runtime. Keep
   # this file outside the bundle so only the embedded signature carries it.
   cat >"$entitlements" <<'ENTITLEMENTS_PLIST'
@@ -584,6 +588,22 @@ PLIST
 </dict>
 </plist>
 ENTITLEMENTS_PLIST
+
+  # Sparkle's Downloader XPC service is sandboxed and needs outbound network
+  # access. SwiftPM's copied binary artifact can arrive ad hoc signed without
+  # its source entitlements, so provide the documented values explicitly.
+  cat >"$sparkle_downloader_entitlements" <<'SPARKLE_ENTITLEMENTS_PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+  <key>com.apple.security.network.client</key>
+  <true/>
+</dict>
+</plist>
+SPARKLE_ENTITLEMENTS_PLIST
 
   if command -v codesign >/dev/null 2>&1; then
     local sparkle_version="$SPARKLE_FRAMEWORK/Versions/Current"
@@ -600,15 +620,21 @@ ENTITLEMENTS_PLIST
         echo "Error: Sparkle nested code is missing at $nested_item" >&2
         exit 1
       fi
-      sign_runtime_item "$nested_item" "" true
     done
+    sign_runtime_item "$sparkle_version/XPCServices/Installer.xpc"
+    sign_runtime_item "$sparkle_version/XPCServices/Downloader.xpc" "$sparkle_downloader_entitlements"
+    sign_runtime_item "$sparkle_version/Autoupdate"
+    sign_runtime_item "$sparkle_version/Updater.app"
     sign_runtime_item "$SPARKLE_FRAMEWORK"
     sign_runtime_item "$APP_BUNDLE" "$entitlements"
+    if command -v xattr >/dev/null 2>&1; then
+      xattr -cr "$APP_BUNDLE"
+    fi
   else
     echo "Warning: codesign not found, skipping code signing" >&2
   fi
 
-  rm -f "$entitlements"
+  rm -f "$entitlements" "$sparkle_downloader_entitlements"
 }
 
 open_app() {
@@ -625,6 +651,7 @@ validate_app_bundle() {
   local sparkle_framework="$frameworks/$SPARKLE_FRAMEWORK_NAME"
   local info_plist="$contents/Info.plist"
   local entitlement_file
+  local entitlement_key
   local entitlement_value
   local nested_item
 
@@ -692,28 +719,28 @@ validate_app_bundle() {
     fi
   done
 
-  # Sparkle's XPC services are distributed sandboxed. Re-signing must not
-  # silently broaden their privileges by dropping that entitlement.
-  for nested_item in \
-    "$sparkle_framework/Versions/Current/XPCServices/Downloader.xpc" \
-    "$sparkle_framework/Versions/Current/XPCServices/Installer.xpc"; do
-    entitlement_file="$(mktemp)"
-    if ! codesign -d --entitlements :- "$nested_item" >"$entitlement_file" 2>/dev/null; then
-      rm -f "$entitlement_file"
-      echo "Error: Failed to read entitlements from Sparkle nested code at $nested_item." >&2
-      exit 1
-    fi
-    if ! entitlement_value="$(plist_value "$entitlement_file" com.apple.security.app-sandbox 2>/dev/null)"; then
-      rm -f "$entitlement_file"
-      echo "Error: Sparkle nested code is missing its app sandbox entitlement at $nested_item." >&2
-      exit 1
-    fi
+  # Sparkle documents sandbox and network-client entitlements for Downloader.
+  # Installer is intentionally re-signed without preserving entitlements.
+  nested_item="$sparkle_framework/Versions/Current/XPCServices/Downloader.xpc"
+  entitlement_file="$(mktemp)"
+  if ! codesign -d --entitlements :- "$nested_item" >"$entitlement_file" 2>/dev/null; then
     rm -f "$entitlement_file"
+    echo "Error: Failed to read entitlements from Sparkle nested code at $nested_item." >&2
+    exit 1
+  fi
+  for entitlement_key in com.apple.security.app-sandbox com.apple.security.network.client; do
+    if ! entitlement_value="$(plist_value "$entitlement_file" "$entitlement_key" 2>/dev/null)"; then
+      rm -f "$entitlement_file"
+      echo "Error: Sparkle Downloader is missing its $entitlement_key entitlement." >&2
+      exit 1
+    fi
     if [ "$entitlement_value" != "true" ] && [ "$entitlement_value" != "1" ]; then
-      echo "Error: Sparkle nested code has an invalid app sandbox entitlement at $nested_item." >&2
+      rm -f "$entitlement_file"
+      echo "Error: Sparkle Downloader has an invalid $entitlement_key entitlement." >&2
       exit 1
     fi
   done
+  rm -f "$entitlement_file"
 
   require_universal_binary "$binary" "$label executable"
   require_universal_binary "$sparkle_framework/Versions/Current/Sparkle" "$label Sparkle framework"
@@ -881,6 +908,9 @@ validate_unsigned_package() {
   fi
 
   require_command hdiutil "to validate $DMG_PATH"
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "$APP_BUNDLE"
+  fi
   hdiutil imageinfo "$DMG_PATH" >/dev/null
   validate_app_bundle "$APP_BUNDLE" "built $APP_NAME.app"
   validate_dsym
@@ -896,6 +926,9 @@ create_dmg() {
   require_command ditto "to stage $APP_NAME.app"
 
   mkdir -p "$DIST_DIR"
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "$APP_BUNDLE"
+  fi
   ACTIVE_STAGING_DIR="$(mktemp -d "$DIST_DIR/.dmg-staging.XXXXXX")"
   ditto "$APP_BUNDLE" "$ACTIVE_STAGING_DIR/$APP_NAME.app"
   ln -s /Applications "$ACTIVE_STAGING_DIR/Applications"
