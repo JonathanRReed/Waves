@@ -62,6 +62,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var controllers: [String: PerAppTapController] = [:]
   private var controllerGenerationByRuntimeID: [String: UInt64] = [:]
   private var equalizerSettingsByAppID: [String: EqualizerSettings] = [:]
+  private var managedAudioEqualizerSettings = GlobalEqualizerSettings()
   private var adaptiveGainDBByAppID: [String: Float] = [:]
   private var latestAcceptedGenerationByLogicalID: [String: UInt64] = [:]
   private var stagedIntentByLogicalID: [String: AppRouteIntent] = [:]
@@ -523,6 +524,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       reason: .userEdit
     ))
     try validateLegacyApplyResult(result)
+  }
+
+  func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async {
+    guard !isShuttingDown else { return }
+    managedAudioEqualizerSettings = settings
+    for controller in controllers.values {
+      controller.setManagedAudioEqualizer(settings)
+    }
+  }
+
+  func managedAudioEqualizerSettingsForTesting() -> GlobalEqualizerSettings {
+    managedAudioEqualizerSettings
   }
 
   func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels] {
@@ -1033,6 +1046,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       controller.setEqualizer(stagedEqualizer)
+      controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
       controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
       return
     }
@@ -1069,6 +1083,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       controller.setEqualizer(stagedEqualizer)
+      controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
       controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
       if let replacedController {
         retainCleanupDegradations(replacedController.dispose())
@@ -1243,6 +1258,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         volumeBoost: app.volumeBoost,
         muted: app.isMuted,
         equalizerSettings: equalizerSettings,
+        managedAudioEqualizerSettings: managedAudioEqualizerSettings,
         adaptiveGainDB: adaptiveGainDBByAppID[app.logicalID] ?? 0,
         audioFormatPlan: audioFormatPlan
       )
@@ -1358,6 +1374,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyData(tapID, &address, 0, nil, &uidSize, $0)
     }
     try withStatusCheck(uidStatus, action: "read tap uid")
+    let expectedUIDSize = UInt32(MemoryLayout<CFString?>.size)
+    guard uidSize == expectedUIDSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Process tap UID returned \(uidSize) bytes; expected \(expectedUIDSize)."
+      )
+    }
 
     guard let rawUID else {
       throw BackendError.managedRouteUnavailable("No process tap UID returned.")
@@ -1388,6 +1410,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, $0)
     }
     try withStatusCheck(uidStatus, action: "read default output uid")
+    let expectedUIDSize = UInt32(MemoryLayout<CFString?>.size)
+    guard uidSize == expectedUIDSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Default output UID returned \(uidSize) bytes; expected \(expectedUIDSize)."
+      )
+    }
 
     guard let rawUID else {
       throw BackendError.managedRouteUnavailable("No output device UID returned.")
@@ -1510,6 +1538,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func allDeviceIDs() -> [AudioObjectID] {
+    let elementSize = UInt32(MemoryLayout<AudioObjectID>.size)
+    let maximumDeviceCount = 256
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyDevices,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -1519,10 +1549,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else {
       return []
     }
-    let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    guard size % elementSize == 0 else {
+      logger.warning("Ignoring malformed device list byte size \(size); expected a multiple of \(elementSize).")
+      return []
+    }
+    let count = Int(size / elementSize)
+    guard count <= maximumDeviceCount else { return [] }
     guard count > 0 else { return [] }
+    let expectedSize = size
+    var readSize = expectedSize
     var ids = [AudioObjectID](repeating: .unknown, count: count)
-    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids) == noErr else {
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &readSize, &ids) == noErr else {
+      return []
+    }
+    guard readSize == expectedSize else {
+      logger.warning("Ignoring device list read that returned \(readSize) bytes; expected \(expectedSize).")
       return []
     }
     return ids.filter { $0 != .unknown }
@@ -1547,11 +1588,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
     var size: UInt32 = 0
     guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return nil }
+    guard size == UInt32(MemoryLayout<CFString?>.size) else { return nil }
     var rawUID: CFString?
     let status = withUnsafeMutablePointer(to: &rawUID) {
       AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, $0)
     }
-    guard status == noErr, let rawUID else { return nil }
+    guard status == noErr, size == UInt32(MemoryLayout<CFString?>.size), let rawUID else { return nil }
     return rawUID as String
   }
 
@@ -1571,6 +1613,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyDataSize(objectID, &address, 0, nil, &propertySize),
       action: "\(action) size"
     )
+    guard propertySize == UInt32(MemoryLayout<CFString?>.size) else {
+      throw BackendError.managedRouteUnavailable("\(action) returned an invalid value size.")
+    }
 
     let expectedSize = UInt32(MemoryLayout<CFString?>.size)
     guard propertySize == expectedSize else {
@@ -1585,6 +1630,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyData(objectID, &address, 0, nil, &readSize, $0)
     }
     try withStatusCheck(status, action: action)
+    let expectedSize = UInt32(MemoryLayout<CFString?>.size)
+    guard propertySize == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "\(action) returned \(propertySize) bytes; expected \(expectedSize)."
+      )
+    }
 
     guard let rawValue else {
       throw BackendError.managedRouteUnavailable("\(action) returned no value.")
@@ -1635,6 +1686,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       ),
       action: "translate pid \(pid) to process object"
     )
+    let expectedSize = UInt32(MemoryLayout<AudioObjectID>.size)
+    guard size == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Translate pid \(pid) returned \(size) bytes; expected \(expectedSize)."
+      )
+    }
 
     return processObjectID == .unknown ? nil : processObjectID
   }
@@ -1727,11 +1784,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return AudibleProcessIndex()
     }
 
-    let processObjectCount = Int(size) / MemoryLayout<AudioObjectID>.size
+    let elementSize = UInt32(MemoryLayout<AudioObjectID>.size)
+    guard size % elementSize == 0 else {
+      logger.warning("Ignoring malformed process object list byte size \(size); expected a multiple of \(elementSize).")
+      return AudibleProcessIndex()
+    }
+    let processObjectCount = Int(size / elementSize)
     guard processObjectCount > 0 else {
       return AudibleProcessIndex()
     }
 
+    let expectedSize = size
     var processObjectIDs = [AudioObjectID](repeating: .unknown, count: processObjectCount)
     let listStatus = AudioObjectGetPropertyData(
       AudioObjectID(kAudioObjectSystemObject),
@@ -1744,6 +1807,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     guard listStatus == noErr else {
       logger.warning("Failed to get process object list (OSStatus: \(listStatus))")
+      return AudibleProcessIndex()
+    }
+    guard size == expectedSize else {
+      logger.warning("Ignoring process object list read that returned \(size) bytes; expected \(expectedSize).")
       return AudibleProcessIndex()
     }
 
@@ -1775,6 +1842,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       logger.warning("Failed to read process pid for object \(processObjectID) (OSStatus: \(status))")
       return nil
     }
+    guard size == UInt32(MemoryLayout<pid_t>.size) else {
+      logger.warning("Ignoring process pid read for object \(processObjectID) that returned \(size) bytes.")
+      return nil
+    }
 
     return pid
   }
@@ -1791,6 +1862,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let status = AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &isRunningOutput)
     guard status == noErr else {
       logger.warning("Failed to read process output state for object \(processObjectID) (OSStatus: \(status))")
+      return false
+    }
+    guard size == UInt32(MemoryLayout<UInt32>.size) else {
+      logger.warning("Ignoring process output state for object \(processObjectID) that returned \(size) bytes.")
       return false
     }
 
@@ -2906,6 +2981,7 @@ private final class PerAppTapController: @unchecked Sendable {
   private let stateBox: TapRenderStateBox
   private let audioFormatPlan: AudioFormatPlan
   private let equalizerDSP: EqualizerDSP
+  private let managedAudioEqualizerDSP: EqualizerDSP
   private let voiceBandAnalyzer: VoiceBandEnergyAnalyzer
   private let callbackQueue: DispatchQueue
   private let callbackQueueKey = DispatchSpecificKey<UUID>()
@@ -2915,7 +2991,12 @@ private final class PerAppTapController: @unchecked Sendable {
   private let disposeOnce = IdempotentCleanupResult()
   private var retainedCleanupDegradations: [CleanupDegradation] = []
   private var didReportGeometryMismatch = false
+  private var equalizerSettings: EqualizerSettings
+  private var managedAudioEqualizerSettings: GlobalEqualizerSettings
   private var equalizerHeadroomGain: Float
+  /// Invalidates a scheduled headroom release when a newer EQ change lands
+  /// first. Accessed only on `callbackQueue`, like the gain itself.
+  private var equalizerHeadroomReleaseGeneration: UInt64 = 0
   private var adaptiveGain: Float
 
   init(
@@ -2928,6 +3009,7 @@ private final class PerAppTapController: @unchecked Sendable {
     volumeBoost: Float,
     muted: Bool,
     equalizerSettings: EqualizerSettings,
+    managedAudioEqualizerSettings: GlobalEqualizerSettings,
     adaptiveGainDB: Float,
     audioFormatPlan: AudioFormatPlan
   ) throws {
@@ -2942,13 +3024,21 @@ private final class PerAppTapController: @unchecked Sendable {
       channelCount: audioFormatPlan.channelCount,
       settings: equalizerSettings
     )
+    self.managedAudioEqualizerDSP = EqualizerDSP(
+      sampleRate: audioFormatPlan.sampleRate,
+      channelCount: audioFormatPlan.channelCount,
+      settings: managedAudioEqualizerSettings.equalizerSettings
+    )
     self.voiceBandAnalyzer = VoiceBandEnergyAnalyzer(
       sampleRate: audioFormatPlan.sampleRate,
       channelCount: audioFormatPlan.channelCount
     )
-    self.equalizerHeadroomGain = equalizerSettings.isEnabled
-      ? Float(pow(10, Double(equalizerSettings.headroomCompensationDB) / 20))
-      : 1
+    self.equalizerSettings = equalizerSettings
+    self.managedAudioEqualizerSettings = managedAudioEqualizerSettings
+    self.equalizerHeadroomGain = GlobalEqualizerSettings.combinedHeadroomGain(
+      perApp: equalizerSettings,
+      managedAudio: managedAudioEqualizerSettings
+    )
     let safeAdaptiveGainDB = adaptiveGainDB.isFinite ? min(3, max(-18, adaptiveGainDB)) : 0
     self.adaptiveGain = Float(pow(10, Double(safeAdaptiveGainDB) / 20))
     self.callbackQueue = DispatchQueue(label: "com.waves.backend.tap.\(appID)", qos: .userInitiated)
@@ -3008,10 +3098,40 @@ private final class PerAppTapController: @unchecked Sendable {
   func setEqualizer(_ settings: EqualizerSettings) {
     callbackQueue.async { [weak self] in
       guard let self else { return }
+      self.equalizerSettings = settings
       self.equalizerDSP.update(settings: settings)
-      self.equalizerHeadroomGain = settings.isEnabled
-        ? Float(pow(10, Double(settings.headroomCompensationDB) / 20))
-        : 1
+      self.updateEqualizerHeadroomGain()
+    }
+  }
+
+  func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) {
+    callbackQueue.async { [weak self] in
+      guard let self else { return }
+      self.managedAudioEqualizerSettings = settings
+      self.managedAudioEqualizerDSP.update(settings: settings.equalizerSettings)
+      self.updateEqualizerHeadroomGain()
+    }
+  }
+
+  /// Runs on `callbackQueue`. Extra attenuation lands immediately; *reduced*
+  /// attenuation is held for three smoothing windows first, because the EQ
+  /// coefficients themselves ramp to their new curve over ~20 ms — releasing
+  /// protection while the old boost is still partially in the filters would
+  /// clip exactly the transient the headroom exists to absorb.
+  private func updateEqualizerHeadroomGain() {
+    let target = GlobalEqualizerSettings.combinedHeadroomGain(
+      perApp: equalizerSettings,
+      managedAudio: managedAudioEqualizerSettings
+    )
+    equalizerHeadroomReleaseGeneration &+= 1
+    if target <= equalizerHeadroomGain {
+      equalizerHeadroomGain = target
+      return
+    }
+    let generation = equalizerHeadroomReleaseGeneration
+    callbackQueue.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
+      guard let self, self.equalizerHeadroomReleaseGeneration == generation else { return }
+      self.equalizerHeadroomGain = target
     }
   }
 
@@ -3400,15 +3520,34 @@ private final class PerAppTapController: @unchecked Sendable {
         memset(outputPointer.advanced(by: copyByteCount), 0, outputByteCount - copyByteCount)
       }
 
-      TapDSP.processEqualized(
+      // Apply the combined compensation before either filter. EqualizerDSP
+      // clamps typed samples to their valid range, so pre-attenuation is the
+      // realtime-safe way to prevent stacked boosts from clipping internally.
+      TapDSP.scale(
         outputPointer,
         byteCount: copyByteCount,
         format: audioFormatPlan.sampleFormat,
-        equalizer: equalizerDSP,
-        equalizerHeadroomGain: equalizerHeadroomGain,
-        manualGain: manualGain,
+        gain: equalizerHeadroomGain
+      )
+      equalizerDSP.process(
+        outputPointer,
+        byteCount: copyByteCount,
+        format: audioFormatPlan.sampleFormat,
         bufferChannelCount: bufferChannelCount,
         channelOffset: currentChannelOffset
+      )
+      managedAudioEqualizerDSP.process(
+        outputPointer,
+        byteCount: copyByteCount,
+        format: audioFormatPlan.sampleFormat,
+        bufferChannelCount: bufferChannelCount,
+        channelOffset: currentChannelOffset
+      )
+      TapDSP.scale(
+        outputPointer,
+        byteCount: copyByteCount,
+        format: audioFormatPlan.sampleFormat,
+        gain: manualGain
       )
 
       // Adaptive analysis observes the user's EQ and manual controls, but not

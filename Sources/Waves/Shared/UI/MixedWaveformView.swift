@@ -9,6 +9,13 @@ struct WaveComponent: Equatable, Identifiable {
   let id: String
   /// 0...1, already perceptually curved upstream (see `AppStore.waveComponents`).
   let level: Double
+  /// True when an equalizer (per-app or managed) is shaping this stream, so
+  /// the band can show the shaping visually.
+  var isEqualized: Bool = false
+  /// The adaptive engine's current temporary gain for this app in dB.
+  /// Negative while Sidechain Focus is holding the app back, positive while
+  /// it's being lifted, zero when untouched.
+  var adaptiveGainDB: Double = 0
 }
 
 // MARK: - Engine
@@ -29,6 +36,13 @@ final class WaveEngine {
     /// Eased level (fast attack / slow release), 0...1.
     var eased: Double = 0
     var target: Double = 0
+    /// Eased 0...1 mix toward "an equalizer is shaping this stream" — drives
+    /// the sculpted bright core so the state change fades in, never pops.
+    var eqMix: Double = 0
+    var eqTarget: Double = 0
+    /// Eased adaptive gain in dB (negative = ducked by Sidechain Focus).
+    var adaptiveDB: Double = 0
+    var adaptiveTargetDB: Double = 0
     /// Accumulated phase per partial (radians). Never reset while alive.
     var phases: [Double]
     let freqs: [Double]
@@ -52,6 +66,8 @@ final class WaveEngine {
         (1.00 + 0.80 * rng.nextDouble()) * (rng.nextBool() ? 1 : -1),
       ]
       weights = [0.60, 0.28, 0.12]
+      // (equalizedWeights below redistributes these toward the upper partials
+      // while an EQ is shaping the stream.)
       phases = [
         rng.nextDouble() * 2 * .pi,
         rng.nextDouble() * 2 * .pi,
@@ -59,6 +75,11 @@ final class WaveEngine {
       ]
       color = Self.palette[Int(seed % UInt64(Self.palette.count))]
     }
+
+    /// The partial-weight mix an equalized voice eases toward: energy moves
+    /// into the higher partials so the thread reads as sculpted, not just
+    /// louder. Same total weight as the resting mix.
+    static let equalizedWeights: [Double] = [0.42, 0.36, 0.22]
 
     /// Cyan/teal family only, per DESIGN.md's Signal Rarity Rule — the voices
     /// differ in temperature within the signal hue, never in hue family.
@@ -94,9 +115,9 @@ final class WaveEngine {
     // Retarget: every reported component keeps/gets a voice; anything no
     // longer reported eases toward zero and is reaped once inaudible, so a
     // stopping app's wave sinks into the baseline instead of blinking out.
-    var targets: [String: Double] = [:]
+    var targets: [String: WaveComponent] = [:]
     for component in components {
-      targets[component.id] = component.level
+      targets[component.id] = component
       if voices[component.id] == nil {
         voices[component.id] = Voice(seed: Self.seed(for: component.id))
       }
@@ -104,10 +125,18 @@ final class WaveEngine {
 
     for (id, voice) in voices {
       var voice = voice
-      voice.target = targets[id] ?? 0
+      let component = targets[id]
+      voice.target = component?.level ?? 0
+      voice.eqTarget = component?.isEqualized == true ? 1 : 0
+      voice.adaptiveTargetDB = component?.adaptiveGainDB ?? 0
       let tau = voice.target > voice.eased ? attack : release
       let alpha = frozen ? 1.0 : 1 - exp(-dt / tau)
       voice.eased += alpha * (voice.target - voice.eased)
+      // State indicators ease on a slower, symmetric curve — they describe a
+      // mode, not a level, so they should glide rather than track transients.
+      let stateAlpha = frozen ? 1.0 : 1 - exp(-dt / 0.35)
+      voice.eqMix += stateAlpha * (voice.eqTarget - voice.eqMix)
+      voice.adaptiveDB += stateAlpha * (voice.adaptiveTargetDB - voice.adaptiveDB)
       if voice.target <= 0, voice.eased < 0.004 {
         voices[id] = nil
         continue
@@ -125,14 +154,13 @@ final class WaveEngine {
     let alpha = frozen ? 1.0 : 1 - exp(-dt / tau)
     energy += alpha * (mixedLevel - energy)
 
-    // The resting wave drifts very slowly, always — it's the "carrier" the
-    // signals rise out of and settle back into.
+    // While rendering, the resting wave drifts very slowly — it's the
+    // "carrier" the signals rise out of and settle back into.
     restPhases[0] += 0.30 * dt
     restPhases[1] += 0.45 * dt
   }
 
-  /// True once everything has decayed to stillness — the render loop can drop
-  /// to its idle cadence.
+  /// True once everything has decayed to stillness — the render loop can stop.
   var isSettled: Bool {
     energy < 0.004 && voices.values.allSatisfy { $0.eased < 0.004 && $0.target <= 0 }
   }
@@ -187,10 +215,10 @@ private struct SplitMix64 {
 /// simply crossfade as functions of the same eased energy.
 ///
 /// Costs: while audible (plus a short settle window) it renders at the display
-/// rate; once settled it drops to a 10 Hz drift for the ambient motion, which
-/// is imperceptible on a hairline moving this slowly and keeps idle CPU noise-
-/// floor low. Under Reduce Motion the timeline is static: the wave holds a
-/// still pose and only amplitude changes (stepped, unanimated) as levels move.
+/// rate; once settled the resting hairline is static, so silence does not keep
+/// a render loop alive. Under Reduce Motion the timeline is also static: the
+/// wave holds a still pose and only amplitude changes (stepped, unanimated) as
+/// levels move.
 struct MixedWaveformView: View {
   /// Per-app live contributions (real signal, no linger — see the live-state
   /// invariant note on `AppStore.waveComponents`).
@@ -202,7 +230,7 @@ struct MixedWaveformView: View {
   @Environment(\.colorSchemeContrast) private var contrast
   @State private var engine = WaveEngine()
   /// Keeps the full-rate render loop mounted through a graceful settle after
-  /// audio stops; cleared a beat later (see `.task`) so idle drops to 10 Hz.
+  /// audio stops; cleared a beat later (see `.task`) so idle becomes static.
   @State private var isActive = false
 
   private var isAudible: Bool { level > 0.012 || !components.isEmpty }
@@ -225,15 +253,11 @@ struct MixedWaveformView: View {
           }
         }
       } else {
-        // Same drawing, ambient cadence. Swapping timelines is seamless
-        // because the picture is a pure function of the engine's accumulated
-        // state — the first idle frame is pixel-continuous with the last
-        // active one.
-        TimelineView(.animation(minimumInterval: 1.0 / 10.0)) { timeline in
-          Canvas { context, size in
-            engine.advance(to: timeline.date, components: components, mixedLevel: level, frozen: false)
-            draw(context, size: size)
-          }
+        // Silence must not keep a timeline or repeating animation alive. Snap
+        // the already-decayed engine to its resting pose on this final render.
+        Canvas { context, size in
+          engine.advance(to: Date(), components: components, mixedLevel: level, frozen: true)
+          draw(context, size: size)
         }
       }
     }
@@ -254,7 +278,7 @@ struct MixedWaveformView: View {
     )
     // Mount the full-rate loop the instant sound appears; after it stops,
     // hold long enough for the slow release to carry every wave back down to
-    // the baseline, then relax to the idle cadence.
+    // the baseline, then stop rendering until the inputs change.
     .task(id: isAudible) {
       if isAudible {
         isActive = true
@@ -298,11 +322,21 @@ struct MixedWaveformView: View {
     // Per-voice displacement at horizontal position u (0...1), in points.
     // Components render smaller than the band (0.72×, level-scaled) so the sum
     // constructively exceeds any one of them and visibly towers over its parts.
+    //
+    // Two live processing states shape the wave itself:
+    // - An equalized voice's weights shift toward its higher partials, so the
+    //   thread visibly gains texture — the EQ is literally re-shaping it.
+    // - Sidechain Focus scales the amplitude by its real dB correction, so a
+    //   ducked app's wave visibly sits lower while the engine holds it back.
     func displacement(_ voice: WaveEngine.Voice, _ u: Double) -> Double {
-      let amp = maxAmp * 0.72 * (0.24 + 0.76 * voice.eased)
+      let adaptiveScale = min(1.25, max(0.45, pow(10, voice.adaptiveDB / 20)))
+      let amp = maxAmp * 0.72 * (0.24 + 0.76 * voice.eased) * adaptiveScale
       var wave = 0.0
       for index in 0..<3 {
-        wave += voice.weights[index] * sin(2 * .pi * voice.freqs[index] * u + voice.phases[index])
+        let base = voice.weights[index]
+        let sculpted = WaveEngine.Voice.equalizedWeights[index]
+        let weight = base + (sculpted - base) * voice.eqMix
+        wave += weight * sin(2 * .pi * voice.freqs[index] * u + voice.phases[index])
       }
       return amp * wave * envelope(u)
     }
@@ -473,11 +507,46 @@ struct MixedWaveformView: View {
 /// (a few times a second), not the whole header around it.
 struct HeaderWaveform: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   var height: CGFloat = 48
 
   var body: some View {
-    MixedWaveformView(components: store.waveComponents, level: Double(store.mixedAudioLevel))
+    let components = store.waveComponents
+    MixedWaveformView(components: components, level: Double(store.mixedAudioLevel))
       .frame(height: height)
       .frame(maxWidth: .infinity)
+      // Quiet corner chips naming what's shaping the sound right now, so the
+      // wave's texture/amplitude changes are labeled, not mysterious.
+      .overlay(alignment: .topTrailing) {
+        HStack(spacing: 4) {
+          if components.contains(where: \.isEqualized) {
+            processingChip("EQ", help: "An equalizer is shaping the highlighted audio.")
+          }
+          if let focusText {
+            processingChip(focusText, help: "Sidechain Focus is adjusting app volumes to keep the foreground clear.")
+          }
+        }
+        .padding(.top, 2)
+        .padding(.trailing, 6)
+      }
+  }
+
+  /// "Focus −4 dB" while the adaptive engine is actively holding something
+  /// back; nil (no chip) when idle so the band stays clean.
+  private var focusText: String? {
+    let strongest = store.waveComponents.map(\.adaptiveGainDB).min() ?? 0
+    guard strongest < -0.25 else { return nil }
+    return String(format: "Focus −%.0f dB", -strongest)
+  }
+
+  private func processingChip(_ text: String, help: String) -> some View {
+    Text(text)
+      .font(.caption2.weight(.semibold).monospacedDigit())
+      .foregroundStyle(theme.accent)
+      .padding(.horizontal, 6)
+      .padding(.vertical, 1)
+      .background(theme.accent.opacity(0.12), in: Capsule())
+      .help(help)
+      .accessibilityLabel(help)
   }
 }
