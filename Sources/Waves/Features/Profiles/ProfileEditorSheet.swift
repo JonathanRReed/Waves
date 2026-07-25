@@ -306,6 +306,10 @@ struct ProfileEditorSheet: View {
 /// live in the same view body. Mirrors `AppIconCache` in MixerRowView.swift.
 @MainActor
 private enum FriendlyNameCache {
+  /// Match `AudioApp`'s bound for display metadata before caching or rendering
+  /// names supplied by an installed app's Info.plist.
+  private static let maxNameLength = 256
+
   /// The value is itself optional so a miss (uninstalled bundle id, or a bundle
   /// with no usable name) is cached as `nil` too — otherwise every keystroke in
   /// the name field would re-hit Launch Services for each unresolvable member.
@@ -327,9 +331,9 @@ private enum FriendlyNameCache {
     else { return nil }
 
     return (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-      .flatMap { $0.isEmpty ? nil : $0 }
+      .flatMap { $0.isEmpty ? nil : String($0.prefix(maxNameLength)) }
       ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
-      .flatMap { $0.isEmpty ? nil : $0 }
+      .flatMap { $0.isEmpty ? nil : String($0.prefix(maxNameLength)) }
   }
 }
 

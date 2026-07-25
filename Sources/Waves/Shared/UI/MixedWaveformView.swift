@@ -154,14 +154,13 @@ final class WaveEngine {
     let alpha = frozen ? 1.0 : 1 - exp(-dt / tau)
     energy += alpha * (mixedLevel - energy)
 
-    // The resting wave drifts very slowly, always — it's the "carrier" the
-    // signals rise out of and settle back into.
+    // While rendering, the resting wave drifts very slowly — it's the
+    // "carrier" the signals rise out of and settle back into.
     restPhases[0] += 0.30 * dt
     restPhases[1] += 0.45 * dt
   }
 
-  /// True once everything has decayed to stillness — the render loop can drop
-  /// to its idle cadence.
+  /// True once everything has decayed to stillness — the render loop can stop.
   var isSettled: Bool {
     energy < 0.004 && voices.values.allSatisfy { $0.eased < 0.004 && $0.target <= 0 }
   }
@@ -216,10 +215,10 @@ private struct SplitMix64 {
 /// simply crossfade as functions of the same eased energy.
 ///
 /// Costs: while audible (plus a short settle window) it renders at the display
-/// rate; once settled it drops to a 10 Hz drift for the ambient motion, which
-/// is imperceptible on a hairline moving this slowly and keeps idle CPU noise-
-/// floor low. Under Reduce Motion the timeline is static: the wave holds a
-/// still pose and only amplitude changes (stepped, unanimated) as levels move.
+/// rate; once settled the resting hairline is static, so silence does not keep
+/// a render loop alive. Under Reduce Motion the timeline is also static: the
+/// wave holds a still pose and only amplitude changes (stepped, unanimated) as
+/// levels move.
 struct MixedWaveformView: View {
   /// Per-app live contributions (real signal, no linger — see the live-state
   /// invariant note on `AppStore.waveComponents`).
@@ -231,7 +230,7 @@ struct MixedWaveformView: View {
   @Environment(\.colorSchemeContrast) private var contrast
   @State private var engine = WaveEngine()
   /// Keeps the full-rate render loop mounted through a graceful settle after
-  /// audio stops; cleared a beat later (see `.task`) so idle drops to 10 Hz.
+  /// audio stops; cleared a beat later (see `.task`) so idle becomes static.
   @State private var isActive = false
 
   private var isAudible: Bool { level > 0.012 || !components.isEmpty }
@@ -254,15 +253,11 @@ struct MixedWaveformView: View {
           }
         }
       } else {
-        // Same drawing, ambient cadence. Swapping timelines is seamless
-        // because the picture is a pure function of the engine's accumulated
-        // state — the first idle frame is pixel-continuous with the last
-        // active one.
-        TimelineView(.animation(minimumInterval: 1.0 / 10.0)) { timeline in
-          Canvas { context, size in
-            engine.advance(to: timeline.date, components: components, mixedLevel: level, frozen: false)
-            draw(context, size: size)
-          }
+        // Silence must not keep a timeline or repeating animation alive. Snap
+        // the already-decayed engine to its resting pose on this final render.
+        Canvas { context, size in
+          engine.advance(to: Date(), components: components, mixedLevel: level, frozen: true)
+          draw(context, size: size)
         }
       }
     }
@@ -283,7 +278,7 @@ struct MixedWaveformView: View {
     )
     // Mount the full-rate loop the instant sound appears; after it stops,
     // hold long enough for the slow release to carry every wave back down to
-    // the baseline, then relax to the idle cadence.
+    // the baseline, then stop rendering until the inputs change.
     .task(id: isAudible) {
       if isAudible {
         isActive = true
