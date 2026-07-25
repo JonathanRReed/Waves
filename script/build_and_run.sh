@@ -75,6 +75,7 @@ require_command() {
 sign_runtime_item() {
   local target="$1"
   local entitlements="${2:-}"
+  local preserve_entitlements="${3:-false}"
   local identity="-"
   local args=(--force)
 
@@ -84,6 +85,8 @@ sign_runtime_item() {
   fi
   if [ -n "$entitlements" ]; then
     args+=(--entitlements "$entitlements")
+  elif [ "$preserve_entitlements" = "true" ]; then
+    args+=(--preserve-metadata=entitlements)
   fi
 
   codesign "${args[@]}" --sign "$identity" "$target"
@@ -597,7 +600,7 @@ ENTITLEMENTS_PLIST
         echo "Error: Sparkle nested code is missing at $nested_item" >&2
         exit 1
       fi
-      sign_runtime_item "$nested_item"
+      sign_runtime_item "$nested_item" "" true
     done
     sign_runtime_item "$SPARKLE_FRAMEWORK"
     sign_runtime_item "$APP_BUNDLE" "$entitlements"
@@ -685,6 +688,29 @@ validate_app_bundle() {
     "$sparkle_framework/Versions/Current/Updater.app"; do
     if [ ! -e "$nested_item" ]; then
       echo "Error: $label is missing Sparkle nested code at $nested_item." >&2
+      exit 1
+    fi
+  done
+
+  # Sparkle's XPC services are distributed sandboxed. Re-signing must not
+  # silently broaden their privileges by dropping that entitlement.
+  for nested_item in \
+    "$sparkle_framework/Versions/Current/XPCServices/Downloader.xpc" \
+    "$sparkle_framework/Versions/Current/XPCServices/Installer.xpc"; do
+    entitlement_file="$(mktemp)"
+    if ! codesign -d --entitlements :- "$nested_item" >"$entitlement_file" 2>/dev/null; then
+      rm -f "$entitlement_file"
+      echo "Error: Failed to read entitlements from Sparkle nested code at $nested_item." >&2
+      exit 1
+    fi
+    if ! entitlement_value="$(plist_value "$entitlement_file" com.apple.security.app-sandbox 2>/dev/null)"; then
+      rm -f "$entitlement_file"
+      echo "Error: Sparkle nested code is missing its app sandbox entitlement at $nested_item." >&2
+      exit 1
+    fi
+    rm -f "$entitlement_file"
+    if [ "$entitlement_value" != "true" ] && [ "$entitlement_value" != "1" ]; then
+      echo "Error: Sparkle nested code has an invalid app sandbox entitlement at $nested_item." >&2
       exit 1
     fi
   done
