@@ -1613,19 +1613,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyDataSize(objectID, &address, 0, nil, &propertySize),
       action: "\(action) size"
     )
-    guard propertySize == UInt32(MemoryLayout<CFString?>.size) else {
-      throw BackendError.managedRouteUnavailable("\(action) returned an invalid value size.")
-    }
-
-    var rawValue: CFString?
-    let status = withUnsafeMutablePointer(to: &rawValue) {
-      AudioObjectGetPropertyData(objectID, &address, 0, nil, &propertySize, $0)
-    }
-    try withStatusCheck(status, action: action)
     let expectedSize = UInt32(MemoryLayout<CFString?>.size)
     guard propertySize == expectedSize else {
       throw BackendError.managedRouteUnavailable(
-        "\(action) returned \(propertySize) bytes; expected \(expectedSize)."
+        "\(action) returned an invalid string property size."
+      )
+    }
+
+    var readSize = expectedSize
+    var rawValue: CFString?
+    let status = withUnsafeMutablePointer(to: &rawValue) {
+      AudioObjectGetPropertyData(objectID, &address, 0, nil, &readSize, $0)
+    }
+    try withStatusCheck(status, action: action)
+    guard readSize == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "\(action) returned \(readSize) bytes; expected \(expectedSize)."
       )
     }
 
