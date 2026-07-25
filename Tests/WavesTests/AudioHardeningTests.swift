@@ -191,8 +191,24 @@ import WavesAudioCore
   #expect(AudioFormatPlan(validating: linearPCMDescription(bitsPerChannel: 24)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(bytesPerFrame: 4, bytesPerPacket: 4)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(channelsPerFrame: 0)) == nil)
+  #expect(AudioFormatPlan(validating: linearPCMDescription(
+    bytesPerFrame: 4 * (AudioFormatPlan.maximumChannelCount + 1),
+    channelsPerFrame: AudioFormatPlan.maximumChannelCount + 1,
+    bytesPerPacket: 4 * (AudioFormatPlan.maximumChannelCount + 1)
+  )) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(framesPerPacket: 0, bytesPerPacket: 0)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(bytesPerPacket: 16)) == nil)
+}
+
+@Test func audioFormatPlanRejectsExcessiveDirectChannelCounts() {
+  #expect(AudioFormatPlan(
+    sampleFormat: .float32,
+    sampleRate: 48_000,
+    channelCount: AudioFormatPlan.maximumChannelCount + 1,
+    isInterleaved: false,
+    bytesPerSample: 4,
+    bytesPerFrame: 4
+  ) == nil)
 }
 
 @Test func audioFormatPlanValidatesInterleavedAndNoninterleavedCallbackGeometry() throws {

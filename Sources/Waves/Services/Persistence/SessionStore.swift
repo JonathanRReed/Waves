@@ -80,7 +80,9 @@ final class SessionStore: @unchecked Sendable {
         }
 
         let data = try Data(contentsOf: url)
-        return try PersistedSchema.decode(AudioSessionSnapshot.self, from: data, using: decoder)
+        var snapshot = try PersistedSchema.decode(AudioSessionSnapshot.self, from: data, using: decoder)
+        snapshot.backendStatus = .unprobed
+        return snapshot
       } catch {
         // Preserve the unreadable file for recovery instead of letting the next
         // save overwrite it (e.g. a session.json from a newer schema version).

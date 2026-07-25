@@ -8,6 +8,7 @@ enum PrivacySetupSurfaceStyle: Equatable {
 struct PrivacySetupSurface: View {
   @Environment(AppStore.self) private var store
   @Environment(\.colorSchemeContrast) private var contrast
+  @Environment(\.wavesTheme) private var theme
   let style: PrivacySetupSurfaceStyle
 
   init(style: PrivacySetupSurfaceStyle = .full) {
@@ -156,7 +157,7 @@ struct PrivacySetupSurface: View {
       )
       .strokeBorder(
         isProgressing
-          ? WavesDesign.accent.opacity(contrast == .increased ? 0.65 : 0.3)
+          ? theme.accent.opacity(contrast == .increased ? 0.65 : 0.3)
           : WavesDesign.error.opacity(contrast == .increased ? 0.75 : 0.4)
       )
     )
@@ -196,7 +197,6 @@ struct PrivacySetupSurface: View {
       .wavesGlassProminentButton()
       .controlSize(style == .full ? .large : .regular)
       .disabled(isProgressing)
-      .keyboardShortcut(.defaultAction)
       .accessibilityLabel(actionAccessibilityLabel)
       .accessibilityHint(actionAccessibilityHint)
 
@@ -220,7 +220,7 @@ struct PrivacySetupSurface: View {
     HStack(alignment: .top, spacing: 12) {
       Image(systemName: systemImage)
         .font(.body.weight(.semibold))
-        .foregroundStyle(WavesDesign.accent)
+        .foregroundStyle(theme.accent)
         .frame(width: 24)
         .accessibilityHidden(true)
 
@@ -267,7 +267,7 @@ struct PrivacySetupSurface: View {
         ? "Before Waves asks macOS for audio access, here is exactly how local processing works."
         : "Waves uses private Core Audio process taps to process selected app audio locally."
     case .savingConsent:
-      return "Waves is making your local-processing choice durable before starting audio."
+      return "Waves is saving your choice before it starts any audio."
     case .startingAudio:
       return "Your choice is saved. Waves is now starting the local audio engine and checking macOS authorization."
     case .startupFailed:
@@ -311,9 +311,9 @@ struct PrivacySetupSurface: View {
   private var statusDetail: String {
     switch store.privacySetupPresentationState {
     case .savingConsent:
-      return "No audio backend or capture-capable probe will start until this save succeeds."
+      return "Waves won't start audio or ask for any permission until this save succeeds."
     case .startingAudio:
-      return "Waves is building the live app snapshot, restoring your saved audio choices, and preparing background maintenance."
+      return "Waves is finding your running apps and restoring your saved levels."
     case let .startupFailed(detail):
       return detail
     case .hidden:

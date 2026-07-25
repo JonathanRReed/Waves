@@ -35,16 +35,17 @@ struct VisualEffectView: NSViewRepresentable {
 /// must not be semi-transparent in that mode).
 struct WavesBackground: View {
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+  @Environment(\.wavesTheme) private var theme
 
   var body: some View {
     ZStack {
       if reduceTransparency {
-        Color(red: 0.04, green: 0.06, blue: 0.10)
+        theme.opaqueBackground
       } else {
         VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow)
-        WavesDesign.windowGradient.opacity(0.86)
+        theme.windowGradient.opacity(0.86)
         LinearGradient(
-          colors: [Color.white.opacity(0.05), .clear],
+          colors: [theme.topSheen, .clear],
           startPoint: .top,
           endPoint: .center
         )
@@ -97,11 +98,13 @@ extension View {
 /// looks native on every supported OS. The system style owns its own edge and
 /// legibility adaptations (Reduce Transparency / Increase Contrast).
 private struct WavesGlassButtonStyle: ViewModifier {
+  @Environment(\.wavesTheme) private var theme
+
   func body(content: Content) -> some View {
     if #available(macOS 26.0, *) {
-      content.buttonStyle(.glassProminent).tint(WavesDesign.accent)
+      content.buttonStyle(.glassProminent).tint(theme.accent)
     } else {
-      content.buttonStyle(.borderedProminent).tint(WavesDesign.accent)
+      content.buttonStyle(.borderedProminent).tint(theme.accent)
     }
   }
 }
