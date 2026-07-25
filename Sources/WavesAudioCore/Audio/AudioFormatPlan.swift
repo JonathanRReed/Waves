@@ -72,6 +72,11 @@ public struct AudioBufferGeometry: Hashable, Sendable {
 /// Native Core Audio structures stay in the app target. A controller may only
 /// enter the direct DSP path after producing one of these plans.
 public struct AudioFormatPlan: Hashable, Sendable {
+  /// Upper bound for Core Audio channel layouts accepted by the realtime DSP path.
+  /// This covers common surround/aggregate layouts while preventing hostile
+  /// stream metadata from driving unbounded per-channel allocations.
+  public static let maximumChannelCount = 64
+
   public let sampleFormat: TapSampleFormat
   public let sampleRate: Double
   public let channelCount: Int
@@ -95,6 +100,7 @@ public struct AudioFormatPlan: Hashable, Sendable {
           sampleRate.isFinite,
           sampleRate > 0,
           channelCount > 0,
+          channelCount <= Self.maximumChannelCount,
           bytesPerSample > 0,
           bytesPerFrame > 0,
           framesPerPacket > 0 else {
