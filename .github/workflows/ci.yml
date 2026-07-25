@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Belt-and-suspenders: pick the newest Xcode actually on the runner
       # rather than trusting the image's default selection, so a future image
@@ -66,7 +66,7 @@ jobs:
 
       - name: Upload package artifacts and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: waves-ci-package-${{ github.run_number }}
           path: |

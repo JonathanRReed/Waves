@@ -15,6 +15,7 @@ struct ProfileEditorContext: Identifiable {
 /// grouping.
 struct ProfileEditorSheet: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @Environment(\.dismiss) private var dismiss
   @Environment(\.colorSchemeContrast) private var contrast
 
@@ -63,7 +64,7 @@ struct ProfileEditorSheet: View {
     HStack(spacing: 12) {
       Image(systemName: "rectangle.stack.badge.plus")
         .font(.title2)
-        .foregroundStyle(WavesDesign.accent)
+        .foregroundStyle(theme.accent)
       VStack(alignment: .leading, spacing: 2) {
         Text(context.profile == nil ? "New Profile" : "Edit Profile")
           .font(.title3.weight(.semibold))
@@ -89,7 +90,7 @@ struct ProfileEditorSheet: View {
         .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
           RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .strokeBorder(WavesDesign.hairline(increasedContrast: contrast == .increased))
+            .strokeBorder(theme.hairline(increasedContrast: contrast == .increased))
         )
       if isTooLong {
         Text("Name too long (max \(Self.maxNameLength) characters)")
@@ -120,7 +121,7 @@ struct ProfileEditorSheet: View {
     if context.profile?.carriesLevels == true {
       return "Keeps this profile's saved levels. New apps are added as members only."
     }
-    return "Membership only — this profile just groups the apps and won't change their audio."
+    return "Membership only. This profile just groups the apps and won't change their audio."
   }
 
   private var appPicker: some View {
@@ -305,6 +306,10 @@ struct ProfileEditorSheet: View {
 /// live in the same view body. Mirrors `AppIconCache` in MixerRowView.swift.
 @MainActor
 private enum FriendlyNameCache {
+  /// Match `AudioApp`'s bound for display metadata before caching or rendering
+  /// names supplied by an installed app's Info.plist.
+  private static let maxNameLength = 256
+
   /// The value is itself optional so a miss (uninstalled bundle id, or a bundle
   /// with no usable name) is cached as `nil` too — otherwise every keystroke in
   /// the name field would re-hit Launch Services for each unresolvable member.
@@ -326,13 +331,14 @@ private enum FriendlyNameCache {
     else { return nil }
 
     return (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-      .flatMap { $0.isEmpty ? nil : $0 }
+      .flatMap { $0.isEmpty ? nil : String($0.prefix(maxNameLength)) }
       ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
-      .flatMap { $0.isEmpty ? nil : $0 }
+      .flatMap { $0.isEmpty ? nil : String($0.prefix(maxNameLength)) }
   }
 }
 
 private struct AppCheckRow: View {
+  @Environment(\.wavesTheme) private var theme
   let title: String
   let subtitle: String?
   let iconApp: AudioApp?
@@ -379,7 +385,7 @@ private struct AppCheckRow: View {
         Spacer()
 
         Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-          .foregroundStyle(WavesDesign.accentOrTertiary(isOn))
+          .foregroundStyle(theme.accentOrTertiary(isOn))
           .font(.title3)
       }
       .padding(.horizontal, 12)

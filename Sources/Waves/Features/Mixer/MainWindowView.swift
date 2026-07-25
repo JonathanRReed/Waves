@@ -3,75 +3,15 @@ import WavesAudioCore
 
 struct MainWindowView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @State private var searchText = ""
   // Restored across launches so the user returns to the scope they left.
   @SceneStorage("waves.selectedScope") private var selection: MixerScope = .source(.running)
   @State private var editorContext: ProfileEditorContext?
-  @State private var equalizerAppID: String?
 
   var body: some View {
     ZStack(alignment: .top) {
-      if store.privacySetupPresentationState == .hidden {
-        NavigationSplitView {
-        SidebarView(selection: $selection, onNewProfile: presentNewProfile, onEditProfile: presentEditProfile)
-          .navigationSplitViewColumnWidth(min: 220, ideal: 248, max: 300)
-      } detail: {
-        SourceListView(
-          scope: selection,
-          apps: filteredApps,
-          searchText: searchText,
-          onEditProfile: presentEditProfile
-        )
-      }
-      .navigationSplitViewStyle(.balanced)
-      .searchable(text: $searchText, placement: .sidebar, prompt: "Filter apps")
-      .toolbar {
-        // Keep global controls compact. Profile creation and route recovery stay
-        // in their contextual UI, so the toolbar does not duplicate large labels.
-        ToolbarItemGroup(placement: .primaryAction) {
-          Menu {
-            ForEach(AdaptiveMixMode.allCases, id: \.self) { mode in
-              Button {
-                store.setAdaptiveMixMode(mode)
-              } label: {
-                if store.preferences.adaptiveMixMode == mode {
-                  Label(mode.displayName, systemImage: "checkmark")
-                } else {
-                  Text(mode.displayName)
-                }
-              }
-            }
-          } label: {
-            Image(systemName: "waveform.badge.plus")
-              .foregroundStyle(
-                WavesDesign.accentOrSecondary(store.preferences.adaptiveMixMode != .off)
-              )
-          }
-          .help("Adaptive Mix: \(store.preferences.adaptiveMixMode.displayName)")
-          .accessibilityLabel("Adaptive Mix")
-          .accessibilityValue(store.preferences.adaptiveMixMode.displayName)
-
-          Button {
-            store.refresh()
-          } label: {
-            if store.isRefreshing {
-              ProgressView().controlSize(.small)
-            } else {
-              Image(systemName: "arrow.clockwise")
-            }
-          }
-          .disabled(store.isRefreshing)
-          .help("Refresh App List (⌘R)")
-          // Reflect the spinner state for VoiceOver — the visual progress cue
-          // should not be sighted-only.
-          .accessibilityLabel(store.isRefreshing ? "Refreshing app list, in progress" : "Refresh app list")
-          .accessibilityHint("Refreshes running apps and audio session state.")
-          .keyboardShortcut("r", modifiers: [.command])
-        }
-      }
-      } else {
-        PrivacySetupSurface()
-      }
+      primarySurface
 
       AppToastStack()
         .padding(.top, 12)
@@ -90,40 +30,16 @@ struct MainWindowView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(WavesDesign.accent.opacity(0.22)))
+        .overlay(Capsule().strokeBorder(theme.accent.opacity(0.22)))
         .padding(.top, 12)
         .padding(.leading, 14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
       }
     }
-    .background(Color(nsColor: .windowBackgroundColor))
+    .background(WavesBackground())
     .sheet(item: $editorContext) { context in
       ProfileEditorSheet(context: context)
         .environment(store)
-    }
-    .inspector(
-      isPresented: Binding(
-        get: { equalizerAppID != nil },
-        set: { isPresented in
-          if !isPresented { equalizerAppID = nil }
-        }
-      )
-    ) {
-      if let equalizerApp {
-        EqualizerInspectorView(
-          app: equalizerApp,
-          onClose: { equalizerAppID = nil }
-        )
-          .environment(store)
-          .inspectorColumnWidth(min: 290, ideal: 330, max: 390)
-      } else {
-        ContentUnavailableView(
-          "App Unavailable",
-          systemImage: "waveform.slash",
-          description: Text("Close the equalizer and choose a running app.")
-        )
-        .inspectorColumnWidth(min: 290, ideal: 330, max: 390)
-      }
     }
     .onOpenURL { url in
       store.handleURLScheme(url)
@@ -176,17 +92,107 @@ struct MainWindowView: View {
     .onDisappear { store.endLiveLevels() }
   }
 
-  private var equalizerApp: AudioApp? {
-    guard let equalizerAppID else { return nil }
-    return store.visibleApps.first { $0.logicalID == equalizerAppID }
+  @ViewBuilder
+  private var primarySurface: some View {
+    if store.privacySetupPresentationState != .hidden {
+      PrivacySetupSurface()
+    } else if !store.preferences.hasCompletedGuidedSetup {
+      OnboardingView()
+    } else {
+      mixerNavigation
+    }
   }
 
-  private func handleEqualizerFocusRequest() {
-    guard let request = store.consumeEqualizerFocusRequest() else { return }
-    if let source = request.source {
-      selection = .source(source)
+  private var mixerNavigation: some View {
+    NavigationSplitView {
+      SidebarView(
+        selection: $selection,
+        onNewProfile: presentNewProfile,
+        onEditProfile: presentEditProfile
+      )
+      .navigationSplitViewColumnWidth(min: 220, ideal: 248, max: 300)
+    } detail: {
+      if selection == .sound {
+        SoundWorkspaceView()
+      } else {
+        SourceListView(
+          scope: selection,
+          apps: filteredApps,
+          searchText: searchText,
+          onEditProfile: presentEditProfile
+        )
+      }
     }
-    equalizerAppID = request.appID
+    .navigationSplitViewStyle(.balanced)
+    .searchable(text: $searchText, placement: .sidebar, prompt: "Filter apps")
+    .toolbar { mixerToolbar }
+  }
+
+  @ToolbarContentBuilder
+  private var mixerToolbar: some ToolbarContent {
+    ToolbarItemGroup(placement: .primaryAction) {
+      // Appears only while there's a mix to go back to: after a profile with
+      // saved levels is applied, one click returns every app to its
+      // pre-profile volume, mute, and boost.
+      if store.mixRestorePoint != nil {
+        Button {
+          store.resetMix()
+        } label: {
+          Label("Reset Mix", systemImage: "arrow.uturn.backward.circle")
+        }
+        .help(resetMixHelp)
+        .accessibilityLabel("Reset mix")
+        .accessibilityHint("Returns every app to the levels it had before the last profile.")
+      }
+
+      Menu {
+        ForEach(AdaptiveMixMode.allCases, id: \.self) { mode in
+          Button {
+            store.setAdaptiveMixMode(mode)
+          } label: {
+            if store.preferences.adaptiveMixMode == mode {
+              Label(mode.displayName, systemImage: "checkmark")
+            } else {
+              Text(mode.displayName)
+            }
+          }
+        }
+      } label: {
+        Image(systemName: "waveform.badge.plus")
+          .foregroundStyle(theme.accentOrSecondary(store.preferences.adaptiveMixMode != .off))
+      }
+      .help("Adaptive Mix: \(store.preferences.adaptiveMixMode.displayName)")
+      .accessibilityLabel("Adaptive Mix")
+      .accessibilityValue(store.preferences.adaptiveMixMode.displayName)
+
+      Button {
+        store.refresh()
+      } label: {
+        if store.isRefreshing {
+          ProgressView().controlSize(.small)
+        } else {
+          Image(systemName: "arrow.clockwise")
+        }
+      }
+      .disabled(store.isRefreshing)
+      .help("Refresh App List (⌘R)")
+      .accessibilityLabel(store.isRefreshing ? "Refreshing app list, in progress" : "Refresh app list")
+      .accessibilityHint("Refreshes running apps and audio session state.")
+      .keyboardShortcut("r", modifiers: [.command])
+    }
+  }
+
+  private var resetMixHelp: String {
+    guard let restorePoint = store.mixRestorePoint else { return "Reset mix" }
+    return "Put every app back to how it was before \(restorePoint.profileName)."
+  }
+
+  /// Per-app EQ lives in the Sound workspace now (one EQ surface, no side
+  /// panel), so an equalizer request just switches this window there — the
+  /// workspace itself consumes the request to select the right app.
+  private func handleEqualizerFocusRequest() {
+    guard store.equalizerFocusRequest != nil else { return }
+    selection = .sound
   }
 
   /// A persisted scope can become invalid: a `.recent` source after the user
@@ -218,6 +224,8 @@ struct MainWindowView: View {
 
   private var scopedApps: [AudioApp] {
     switch selection {
+    case .sound:
+      return []
     case .source(.running):
       return store.visibleApps
     case .source(.pinned):
@@ -255,11 +263,14 @@ struct MainWindowView: View {
 /// What the main window is currently showing: one of the built-in sources, or a
 /// user profile (an app group). Persisted via `@SceneStorage` as a string.
 enum MixerScope: Hashable, RawRepresentable {
+  case sound
   case source(SourceFilter)
   case profile(UUID)
 
   var rawValue: String {
     switch self {
+    case .sound:
+      return "sound"
     case .source(let filter):
       return "source:\(filter.rawValue)"
     case .profile(let id):
@@ -268,7 +279,9 @@ enum MixerScope: Hashable, RawRepresentable {
   }
 
   init?(rawValue: String) {
-    if rawValue.hasPrefix("source:"),
+    if rawValue == "sound" {
+      self = .sound
+    } else if rawValue.hasPrefix("source:"),
        let filter = SourceFilter(rawValue: String(rawValue.dropFirst("source:".count))) {
       self = .source(filter)
     } else if rawValue.hasPrefix("profile:"),
@@ -355,6 +368,7 @@ enum SourceFilter: String, CaseIterable, Identifiable {
 
 private struct SidebarView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   @Binding var selection: MixerScope
   let onNewProfile: () -> Void
   let onEditProfile: (Profile) -> Void
@@ -364,6 +378,21 @@ private struct SidebarView: View {
 
   var body: some View {
     List(selection: $selection) {
+      Section("Sound") {
+        Label {
+          VStack(alignment: .leading, spacing: 1) {
+            Text("Sound")
+            Text("EQ and Adaptive Mix")
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+          }
+        } icon: {
+          Image(systemName: "waveform.and.magnifyingglass")
+            .foregroundStyle(theme.accentOrSecondary(selection == .sound))
+        }
+        .tag(MixerScope.sound)
+      }
+
       Section("Sources") {
         ForEach(availableFilters) { filter in
           SourceFilterRow(
@@ -378,7 +407,7 @@ private struct SidebarView: View {
 
       Section {
         if store.profiles.isEmpty {
-          Text("No profiles yet — group apps with +")
+          Text("No profiles yet. Group apps with +")
             .font(.caption)
             .foregroundStyle(.tertiary)
         }
@@ -388,6 +417,11 @@ private struct SidebarView: View {
             .contextMenu {
               if profile.carriesLevels {
                 Button("Apply Levels") { store.applyProfile(profile) }
+                if store.preferences.defaultProfileID == profile.id {
+                  Button("Don't Apply at Startup") { store.setDefaultProfile(nil) }
+                } else {
+                  Button("Apply at Startup") { store.setDefaultProfile(profile) }
+                }
               }
               Button("Edit Profile…") { onEditProfile(profile) }
               Button("Export…") { store.exportProfile(profile) }
@@ -447,6 +481,7 @@ private struct SidebarView: View {
 
 private struct SourceFilterRow: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.wavesTheme) private var theme
   let filter: SourceFilter
   let countText: String
   var isLive: Bool = false
@@ -463,7 +498,7 @@ private struct SourceFilterRow: View {
       }
     } icon: {
       Image(systemName: filter.systemImage)
-        .foregroundStyle(WavesDesign.accentOrSecondary(filter == .frontmost))
+        .foregroundStyle(theme.accentOrSecondary(filter == .frontmost))
         .symbolEffect(.variableColor.iterative, isActive: isLive && !reduceMotion)
     }
   }
@@ -492,13 +527,18 @@ private struct ProfileSidebarRow: View {
   private var subtitle: String {
     let count = profile.entries.count
     let noun = count == 1 ? "app" : "apps"
-    return profile.carriesLevels ? "\(count) \(noun) · levels" : "\(count) \(noun)"
+    var text = profile.carriesLevels ? "\(count) \(noun) · levels" : "\(count) \(noun)"
+    if store.preferences.defaultProfileID == profile.id {
+      text += " · startup"
+    }
+    return text
   }
 }
 
 private struct SourceListView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.openSettings) private var openSettings
+  @Environment(\.wavesTheme) private var theme
   @State private var selectedAppID: AudioApp.ID?
   let scope: MixerScope
   let apps: [AudioApp]
@@ -525,7 +565,7 @@ private struct SourceListView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(theme.contentFill)
         .overlay(Divider(), alignment: .bottom)
 
       if !unroutableApps.isEmpty {
@@ -583,7 +623,7 @@ private struct SourceListView: View {
           ForEach(Array(apps.enumerated()), id: \.element.id) { index, app in
             MixerRowView(app: app)
               .listRowInsets(EdgeInsets(top: 2, leading: 18, bottom: 2, trailing: 18))
-              .listRowBackground(Color.clear)
+              .listRowBackground(selectedAppID == app.id ? theme.selectionFill : Color.clear)
               .tag(app.id)
               // Drag-and-drop reordering (.onMove below) has no VoiceOver
               // equivalent on its own — these actions are the accessible path
@@ -662,7 +702,7 @@ private struct SourceListView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
     }
-    .background(Color(nsColor: .textBackgroundColor))
+    .background(WavesBackground())
   }
 
   /// Apps in the current scope that do not expose a manageable audio stream (see
@@ -700,7 +740,7 @@ private struct SourceListView: View {
 
   private var emptyMessage: String {
     if systemProcessesHidden {
-      return "System processes are hidden. Enable Show system processes in Settings to see them."
+      return "System processes are hidden. Turn on Show system processes in Settings > Mixer to see them."
     }
     if let profile {
       // A search spans all visible apps, so an empty result here just means the
@@ -801,6 +841,7 @@ private struct UnroutableAppsBanner: View {
 
 private struct ProfileHeaderView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
   let profile: Profile
   let visibleCount: Int
   // True when a search is active. Search spans all visible apps regardless of
@@ -814,9 +855,9 @@ private struct ProfileHeaderView: View {
     HStack(spacing: 12) {
       Image(systemName: profile.carriesLevels ? "slider.horizontal.below.square.filled.and.square" : "square.grid.2x2")
         .font(.system(size: 16, weight: .semibold))
-        .foregroundStyle(WavesDesign.accent)
+        .foregroundStyle(theme.accent)
         .frame(width: 30, height: 30)
-        .background(WavesDesign.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(theme.selectionFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
       VStack(alignment: .leading, spacing: 1) {
         Text(profile.name)
@@ -853,7 +894,7 @@ private struct ProfileHeaderView: View {
     }
     .padding(.horizontal, 18)
     .padding(.vertical, 12)
-    .background(.bar)
+    .background(theme.subtleFill)
     .overlay(Divider(), alignment: .bottom)
   }
 
@@ -869,6 +910,7 @@ private struct ProfileHeaderView: View {
 private struct OutputSummaryView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.colorSchemeContrast) private var contrast
+  @Environment(\.wavesTheme) private var theme
   let scope: MixerScope
   let visibleCount: Int
   // True when a search is active. Search spans all visible apps regardless of
@@ -908,7 +950,7 @@ private struct OutputSummaryView: View {
             Label(liveSummary, systemImage: "waveform")
               // Drop to primary text under Increase Contrast so the cyan never
               // fails contrast on the .bar header.
-              .foregroundStyle(contrast == .increased ? Color.primary : WavesDesign.accent)
+              .foregroundStyle(contrast == .increased ? Color.primary : theme.accent)
               // The accent "playing" signal survives truncation over the static count.
               .layoutPriority(1)
           }
@@ -923,7 +965,7 @@ private struct OutputSummaryView: View {
     }
     .padding(.horizontal, 18)
     .padding(.vertical, 12)
-    .background(.bar)
+    .background(theme.subtleFill)
     .overlay(Divider(), alignment: .bottom)
   }
 
@@ -960,7 +1002,7 @@ private struct RouteHealthBadge: View {
       }
       .buttonStyle(.plain)
       .disabled(store.isRecovering)
-      .help(Text("\(title) — click to recover managed routes"))
+      .help(Text("\(title). Click to recover managed routes."))
       .accessibilityLabel(Text("Routing status: \(title)"))
       .accessibilityHint("Reattaches active per-app audio routes.")
     }

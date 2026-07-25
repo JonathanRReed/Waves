@@ -1094,6 +1094,79 @@ private func waitForRefresh(_ store: AppStore) async {
 }
 
 @MainActor
+@Test func applyingLevelProfileCapturesRestorePointAndResetMixRestoresIt() async {
+  let device = transactionTestDevice()
+  let app = transactionTestApp(id: "reset.app", desiredVolume: 0.8, volumeBoost: 1)
+  let profile = Profile(
+    name: "Meeting",
+    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2, isMuted: false)]
+  )
+  let fixture = makeTransactionFixture(apps: [app], device: device)
+
+  #expect(fixture.store.mixRestorePoint == nil)
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+
+  // The restore point holds the pre-profile mix for every visible app.
+  let restorePoint = try? #require(fixture.store.mixRestorePoint)
+  #expect(restorePoint?.profileName == "Meeting")
+  #expect(restorePoint?.entries.first?.desiredVolume == 0.8)
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.2)
+
+  // Applying a second level profile keeps the ORIGINAL restore point.
+  let second = Profile(
+    name: "Focus",
+    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.5)]
+  )
+  fixture.store.applyProfile(second)
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.mixRestorePoint?.profileName == "Meeting")
+  #expect(fixture.store.mixRestorePoint?.entries.first?.desiredVolume == 0.8)
+
+  // Reset returns to the pre-Meeting mix, clears the point and active profile.
+  fixture.store.resetMix()
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.mixRestorePoint == nil)
+  #expect(fixture.store.activeProfileID == nil)
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.8)
+  #expect(fixture.store.toasts.contains { $0.title == "Mix reset" })
+  // The synthesized restore profile never lands in the saved profiles list.
+  #expect(!fixture.store.profiles.contains { $0.name == "Meeting" && $0.id != profile.id })
+}
+
+@MainActor
+@Test func membershipOnlyProfileDoesNotCaptureRestorePoint() async {
+  let device = transactionTestDevice()
+  let app = transactionTestApp(id: "group.app")
+  let grouping = Profile(name: "Grouping", entries: [ProfileEntry(appID: app.logicalID)])
+  let fixture = makeTransactionFixture(apps: [app], device: device)
+
+  fixture.store.applyProfile(grouping)
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.mixRestorePoint == nil)
+}
+
+@MainActor
+@Test func deletingDefaultProfileClearsTheDefault() async {
+  let device = transactionTestDevice()
+  let app = transactionTestApp(id: "default.app")
+  let fixture = makeTransactionFixture(apps: [app], device: device)
+  let profile = Profile(
+    name: "Baseline",
+    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.6)]
+  )
+  fixture.store.profiles = [profile]
+
+  fixture.store.setDefaultProfile(profile)
+  #expect(fixture.store.preferences.defaultProfileID == profile.id)
+  #expect(fixture.store.defaultProfile?.id == profile.id)
+
+  fixture.store.deleteProfiles(at: IndexSet(integer: 0))
+  #expect(fixture.store.preferences.defaultProfileID == nil)
+  #expect(fixture.store.defaultProfile == nil)
+}
+
+@MainActor
 private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async {
   for _ in 0..<10_000 {
     if await predicate() { return }
