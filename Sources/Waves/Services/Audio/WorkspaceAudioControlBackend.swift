@@ -1538,6 +1538,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func allDeviceIDs() -> [AudioObjectID] {
+    let elementSize = UInt32(MemoryLayout<AudioObjectID>.size)
+    let maximumDeviceCount = 256
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyDevices,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -1547,20 +1549,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else {
       return []
     }
-    let elementSize = UInt32(MemoryLayout<AudioObjectID>.size)
     guard size % elementSize == 0 else {
       logger.warning("Ignoring malformed device list byte size \(size); expected a multiple of \(elementSize).")
       return []
     }
     let count = Int(size / elementSize)
+    guard count <= maximumDeviceCount else { return [] }
     guard count > 0 else { return [] }
-    var ids = [AudioObjectID](repeating: .unknown, count: count)
     let expectedSize = size
-    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids) == noErr else {
+    var readSize = expectedSize
+    var ids = [AudioObjectID](repeating: .unknown, count: count)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &readSize, &ids) == noErr else {
       return []
     }
-    guard size == expectedSize else {
-      logger.warning("Ignoring device list read that returned \(size) bytes; expected \(expectedSize).")
+    guard readSize == expectedSize else {
+      logger.warning("Ignoring device list read that returned \(readSize) bytes; expected \(expectedSize).")
       return []
     }
     return ids.filter { $0 != .unknown }
@@ -1585,6 +1588,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
     var size: UInt32 = 0
     guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return nil }
+    guard size == UInt32(MemoryLayout<CFString?>.size) else { return nil }
     var rawUID: CFString?
     let status = withUnsafeMutablePointer(to: &rawUID) {
       AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, $0)
@@ -1609,6 +1613,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyDataSize(objectID, &address, 0, nil, &propertySize),
       action: "\(action) size"
     )
+    guard propertySize == UInt32(MemoryLayout<CFString?>.size) else {
+      throw BackendError.managedRouteUnavailable("\(action) returned an invalid value size.")
+    }
 
     var rawValue: CFString?
     let status = withUnsafeMutablePointer(to: &rawValue) {
