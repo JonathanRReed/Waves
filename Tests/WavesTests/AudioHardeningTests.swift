@@ -425,6 +425,55 @@ private func linearPCMDescription(
   )
 }
 
+// MARK: - Stale Core Audio objects (WAV-002)
+
+@Test func vanishedAudioObjectIsClassifiedApartFromRealFailures() {
+  // '!obj' — the object stopped existing between enumeration and the read.
+  // Ordinary app churn, and the one status that must never reach the log as a
+  // warning: 1.3.0 emitted 34 of these in a single audit window.
+  #expect(CoreAudioObjectReadOutcome(kAudioHardwareBadObjectError) == .objectDisappeared)
+  #expect(kAudioHardwareBadObjectError == 560_947_818)
+
+  #expect(CoreAudioObjectReadOutcome(noErr) == .ok)
+
+  // Everything else stays visible: permission trouble, unknown properties,
+  // device faults, and bad-size reads all still deserve a warning.
+  for status in [
+    kAudioHardwareUnknownPropertyError,
+    kAudioHardwareBadPropertySizeError,
+    kAudioHardwareNotRunningError,
+    kAudioHardwareIllegalOperationError,
+    kAudioHardwareBadDeviceError,
+    OSStatus(-50),
+  ] {
+    #expect(CoreAudioObjectReadOutcome(status) == .failed(status))
+    #expect(CoreAudioObjectReadOutcome(status).isObjectDisappeared == false)
+  }
+}
+
+@Test func staleObjectTallyDeduplicatesWithinAPass() {
+  var tally = StaleAudioObjectTally()
+  #expect(tally.isEmpty)
+  #expect(tally.count == 0)
+
+  let firstSighting = tally.record(AudioObjectID(41))
+  // The same dead object is read twice in one pass (running-output check, then
+  // pid). It must count once, so the summary line reports objects, not reads.
+  let repeatSighting = tally.record(AudioObjectID(41))
+  #expect(firstSighting)
+  #expect(repeatSighting == false)
+  #expect(tally.count == 1)
+
+  let otherObject = tally.record(AudioObjectID(42))
+  #expect(otherObject)
+  #expect(tally.count == 2)
+  #expect(tally.isEmpty == false)
+
+  // A fresh pass starts clean — a tally never carries IDs across enumerations.
+  let next = StaleAudioObjectTally()
+  #expect(next.isEmpty)
+}
+
 private func hardeningSnapshot() -> AudioSessionSnapshot {
   let device = AudioDevice(
     id: "device.current",

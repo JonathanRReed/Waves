@@ -19,9 +19,21 @@ final class UpdaterService {
     }
   }
 
+  /// True only in a real packaged Waves bundle.
+  ///
+  /// Sparkle has nothing to update in a test binary, but starting its updater
+  /// there still arms the scheduler — and when a check fires it puts up a modal
+  /// `NSAlert` on the main thread, which in a headless test host nobody can
+  /// dismiss. That deadlocks the entire run: `PhaseOneContractTests` constructs
+  /// `WavesApp`, which constructs this service, so the whole suite could hang
+  /// indefinitely once enough time had passed since the last check.
+  private static var isRunningInRealAppBundle: Bool {
+    Bundle.main.bundleIdentifier == "com.jonathanreed.Waves"
+  }
+
   init() {
     let controller = SPUStandardUpdaterController(
-      startingUpdater: true,
+      startingUpdater: Self.isRunningInRealAppBundle,
       updaterDelegate: nil,
       userDriverDelegate: nil
     )

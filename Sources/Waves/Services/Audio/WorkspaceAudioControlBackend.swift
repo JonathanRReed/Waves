@@ -39,6 +39,63 @@ func checkedCleanupDegradations(
   }
 }
 
+/// What a Core Audio property read on a specific object actually means.
+///
+/// Core Audio hands out object IDs that can stop being valid at any instant: an
+/// app quits, a browser helper exits, a device is unplugged — all between the
+/// moment Waves enumerates the object list and the moment it reads a property
+/// off one of those objects. Core Audio reports that as
+/// `kAudioHardwareBadObjectError` (`'!obj'`, 560947818).
+///
+/// That is ordinary lifecycle, not a fault. Through 1.3.0 every non-`noErr`
+/// status was logged at warning level, so routine app churn produced a warning
+/// storm — 34 of them in a single audit window — that buried the failures which
+/// genuinely need attention (permission problems, malformed property sizes,
+/// device faults). Classifying the status keeps those visible while treating a
+/// vanished object as the non-event it is.
+enum CoreAudioObjectReadOutcome: Equatable, Sendable {
+  /// The read succeeded.
+  case ok
+  /// The object no longer exists. Skip it; the next enumeration pass will have
+  /// an accurate list. Never retry the same ID — it cannot come back.
+  case objectDisappeared
+  /// A real failure worth surfacing.
+  case failed(OSStatus)
+
+  init(_ status: OSStatus) {
+    switch status {
+    case noErr: self = .ok
+    case kAudioHardwareBadObjectError: self = .objectDisappeared
+    default: self = .failed(status)
+    }
+  }
+
+  var isObjectDisappeared: Bool { self == .objectDisappeared }
+}
+
+/// Counts objects that vanished mid-enumeration so one pass reports one summary
+/// line instead of one warning per object, and so the same object cannot be
+/// reported twice within a pass.
+struct StaleAudioObjectTally {
+  private(set) var objectIDs: Set<AudioObjectID> = []
+
+  var count: Int { objectIDs.count }
+  var isEmpty: Bool { objectIDs.isEmpty }
+
+  /// Returns true the first time a given object is recorded in this pass.
+  @discardableResult
+  mutating func record(_ objectID: AudioObjectID) -> Bool {
+    objectIDs.insert(objectID).inserted
+  }
+}
+
+/// Runs a cleanup once, memoizing its result — including a failed one.
+///
+/// This is what makes repeated shutdown requests safe: the second call returns
+/// the same rows without repeating destructive native teardown. A retry after a
+/// failure is a *deliberate* act, not something that should fall out of calling
+/// `dispose()` twice — see `reset()` and the backend's orphaned-controller
+/// retry, which is bounded and driven from route maintenance.
 final class IdempotentCleanupResult: @unchecked Sendable {
   private let lock = NSLock()
   private var result: [CleanupDegradation]?
@@ -50,6 +107,14 @@ final class IdempotentCleanupResult: @unchecked Sendable {
     let result = cleanup()
     self.result = result
     return result
+  }
+
+  /// Clears the memo so the next `run` executes again. Only for an explicit,
+  /// bounded retry of a teardown that previously failed.
+  func reset() {
+    lock.lock()
+    result = nil
+    lock.unlock()
   }
 }
 
@@ -74,12 +139,35 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var shutdownResult: BackendShutdownResult?
   private var didFinishDeviceChangeContinuation = false
   private var retainedCleanupDegradations: [CleanupDegradation] = []
+  /// How many rows were discarded once the buffer filled, so a bounded report
+  /// never reads as a complete one.
+  private var droppedCleanupDegradations = 0
+  private var cleanupDegradationLogCounts: [CleanupLogKey: Int] = [:]
+  /// Comfortably above `DiagnosticsExportFormatter.maximumCleanupRows`, so the
+  /// export's own bound stays the one that shapes the report.
+  private static let maxRetainedCleanupDegradations = 64
+
+  private struct CleanupLogKey: Hashable {
+    let stage: CleanupStage
+    let appID: String?
+  }
   private var levelUpdateTask: Task<Void, Never>?
   private var routeMaintenanceTick = 0
   private var staleRouteTicks: [String: Int] = [:]
+  /// Last IO-render-callback count seen per app, so a route that has genuinely
+  /// stopped rendering can be told apart from one that is merely silent.
+  private var lastRenderTickByAppID: [String: UInt64] = [:]
+  /// Authorization-probe taps whose destroy failed, awaiting another attempt.
+  private var leakedProbeTapIDs: [AudioObjectID] = []
+  private var probeTapDestroyAttempts: [AudioObjectID: Int] = [:]
+  private let maxProbeTapDestroyRetries = 5
+  /// Controllers whose native teardown failed, awaiting another attempt.
+  private var orphanedControllers: [PerAppTapController] = []
+  private var orphanDisposeAttempts: [String: Int] = [:]
+  private static let maxOrphanedControllers = 16
+  private static let maxOrphanDisposeRetries = 5
   private let routeMaintenanceTickInterval = 20
   private let staleRouteThresholdTicks = 24
-  private let staleRouteLevelThreshold: Float = 0.0005
   private var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
   private var lastKnownDefaultOutputDeviceUID: String?
@@ -170,24 +258,53 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       await levelTask.value
     }
 
-    degradations.append(contentsOf: removeDeviceChangeListener())
+    // Everything below goes through `record` rather than appending directly, so
+    // the failures that happen *during shutdown* are logged like every in-session
+    // failure is. They previously bypassed the only logging site, which is why a
+    // degraded quit left nothing behind explaining which stage had failed.
+    func record(_ new: [CleanupDegradation]) {
+      guard !new.isEmpty else { return }
+      logCleanupDegradations(new)
+      degradations.append(contentsOf: new)
+    }
+
+    record(removeDeviceChangeListener())
     lastKnownDefaultOutputDeviceUID = nil
 
     let installedControllers = controllers.sorted { $0.key < $1.key }
     controllers.removeAll()
     for (_, controller) in installedControllers {
       let controllerDegradations = controller.dispose()
-      degradations.append(contentsOf: controllerDegradations)
+      record(controllerDegradations)
       if !controllerDegradations.isEmpty {
-        degradations.append(CleanupDegradation(
+        record([CleanupDegradation(
           appID: controller.appID,
           stage: .controllerDisposal,
           detail: "Controller disposal completed with \(controllerDegradations.count) checked native cleanup failure(s)."
-        ))
+        )])
       }
     }
     if let shutdownCleanupOverride {
-      degradations.append(contentsOf: shutdownCleanupOverride())
+      record(shutdownCleanupOverride())
+    }
+
+    // One last attempt at anything a previous teardown could not release, so a
+    // stranded tap does not outlive the process if it can be avoided.
+    let parked = orphanedControllers
+    orphanedControllers.removeAll()
+    orphanDisposeAttempts.removeAll()
+    for controller in parked {
+      record(controller.retryDispose())
+    }
+
+    // Never let the buffer's cap hide the fact that it capped: a truncated
+    // report that looks complete is worse than one that admits the gap.
+    if droppedCleanupDegradations > 0 {
+      record([CleanupDegradation(
+        stage: .controllerDisposal,
+        detail: "\(droppedCleanupDegradations) earlier cleanup failure(s) were dropped once the in-session buffer reached \(Self.maxRetainedCleanupDegradations) rows."
+      )])
+      droppedCleanupDegradations = 0
     }
 
     controllerGenerationByRuntimeID.removeAll()
@@ -196,6 +313,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     latestAcceptedGenerationByLogicalID.removeAll()
     stagedIntentByLogicalID.removeAll()
     staleRouteTicks.removeAll()
+    lastRenderTickByAppID.removeAll()
     routeMaintenanceTick = 0
     appBundleIDByPath.removeAll()
     audibleCache = nil
@@ -846,6 +964,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return captureAuthorization
     }
 
+    // A live managed route is stronger evidence of the capture grant than this
+    // probe: it *is* a process tap, already created and rendering. Re-probing
+    // behind one meant building and tearing down a system-wide tap against
+    // coreaudiod twice every 8 seconds — the silent session refresh calls
+    // `refresh()` and `diagnosticsReport()`, and both used to probe — for the
+    // entire life of the process.
+    if captureAuthorization == .authorized,
+       controllers.values.contains(where: \.isActive) {
+      return captureAuthorization
+    }
+
+    // A probe tap whose destroy failed is a private system-wide tap stranded in
+    // coreaudiod. Retry those before creating another one.
+    retryLeakedProbeTapDestroys()
+
     let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
     description.name = "Waves-CapabilityProbe"
     description.uuid = UUID()
@@ -861,6 +994,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         stage: .authorizationProbe,
         detail: "Destroy audio-capture authorization probe tap"
       )
+      if destroyStatus != noErr {
+        // Keep the ID rather than discarding it, so the next pass can try again
+        // instead of leaking one more global tap every probe.
+        leakedProbeTapIDs.append(tapID)
+      }
     }
 
     captureAuthorization = CaptureAuthorizationResult.fromProbe(
@@ -871,6 +1009,31 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       logger.warning("Audio-capture authorization probe could not be verified (OSStatus: \(nativeStatus))")
     }
     return captureAuthorization
+  }
+
+  /// Retries destroying probe taps whose first destroy failed, newest last.
+  /// Bounded: anything still failing after `maxProbeTapDestroyRetries` rounds is
+  /// recorded once and dropped, so this can never grow without limit.
+  private func retryLeakedProbeTapDestroys() {
+    guard !leakedProbeTapIDs.isEmpty else { return }
+    var stillLeaked: [AudioObjectID] = []
+    for tapID in leakedProbeTapIDs {
+      let status = AudioHardwareDestroyProcessTap(tapID)
+      if status == noErr { continue }
+      let attempts = (probeTapDestroyAttempts[tapID] ?? 0) + 1
+      probeTapDestroyAttempts[tapID] = attempts
+      if attempts >= maxProbeTapDestroyRetries {
+        retainCleanupStatus(
+          status,
+          stage: .authorizationProbe,
+          detail: "Gave up destroying authorization probe tap after \(attempts) attempts"
+        )
+        probeTapDestroyAttempts.removeValue(forKey: tapID)
+        continue
+      }
+      stillLeaked.append(tapID)
+    }
+    leakedProbeTapIDs = stillLeaked
   }
 
   private struct IntentGenerationContext: Sendable {
@@ -915,10 +1078,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func excludeApp(at index: Int) {
     let runtimeID = snapshot.apps[index].id
     if let controller = controllers.removeValue(forKey: runtimeID) {
-      retainCleanupDegradations(controller.dispose())
+      retainCleanupDegradations(disposeController(controller))
     }
     controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
     staleRouteTicks.removeValue(forKey: runtimeID)
+    lastRenderTickByAppID.removeValue(forKey: runtimeID)
     snapshot.apps[index].routingState = .monitorOnly
     snapshot.apps[index].appliedVolume = nil
     snapshot.apps[index].peakLevel = 0
@@ -934,9 +1098,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard controllerGenerationByRuntimeID[runtimeID] == generation else { return }
     controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
     if let controller = controllers.removeValue(forKey: runtimeID) {
-      retainCleanupDegradations(controller.dispose())
+      retainCleanupDegradations(disposeController(controller))
     }
     staleRouteTicks.removeValue(forKey: runtimeID)
+    lastRenderTickByAppID.removeValue(forKey: runtimeID)
   }
 
   private struct IntentControlValues {
@@ -1086,13 +1251,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
       controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
       if let replacedController {
-        retainCleanupDegradations(replacedController.dispose())
+        retainCleanupDegradations(disposeController(replacedController))
       }
 
       // A freshly-created process tap proves capture is currently authorized.
       captureAuthorization = .authorized
     } catch {
-      retainCleanupDegradations(controller.dispose())
+      retainCleanupDegradations(disposeController(controller))
       throw error
     }
   }
@@ -1267,7 +1432,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       do {
         try controller.start()
       } catch {
-        let cleanupDegradations = controller.dispose()
+        let cleanupDegradations = disposeController(controller)
         retainCleanupDegradations(cleanupDegradations)
         if !cleanupDegradations.isEmpty {
           logger.error(
@@ -1810,20 +1975,31 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     var index = AudibleProcessIndex()
+    // Objects that vanish between the enumeration above and the reads below are
+    // normal churn, not faults. Tally them and report one summary line for the
+    // pass rather than a warning per object.
+    var stale = StaleAudioObjectTally()
     for processObjectID in processObjectIDs where processObjectID != .unknown {
-      guard isProcessRunningOutput(processObjectID) else { continue }
-      guard let pid = readProcessPID(processObjectID) else { continue }
+      guard isProcessRunningOutput(processObjectID, stale: &stale) else { continue }
+      guard let pid = readProcessPID(processObjectID, stale: &stale) else { continue }
       index.pids.insert(pid)
       // Attribute helper/utility audio (browsers, Electron) to the parent app.
       if let parentBundleID = enclosingAppBundleID(forPID: pid) {
         index.parentBundleIDs.insert(parentBundleID)
       }
     }
+    if !stale.isEmpty {
+      logger.debug(
+        "Skipped \(stale.count) audio process object(s) that exited during enumeration.")
+    }
 
     return index
   }
 
-  private func readProcessPID(_ processObjectID: AudioObjectID) -> pid_t? {
+  private func readProcessPID(
+    _ processObjectID: AudioObjectID,
+    stale: inout StaleAudioObjectTally
+  ) -> pid_t? {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioProcessPropertyPID,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -1833,7 +2009,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var pid = pid_t()
     var size = UInt32(MemoryLayout<pid_t>.size)
     let status = AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &pid)
-    guard status == noErr else {
+    switch CoreAudioObjectReadOutcome(status) {
+    case .ok:
+      break
+    case .objectDisappeared:
+      // The process exited between enumeration and this read. Expected.
+      stale.record(processObjectID)
+      return nil
+    case .failed(let status):
       logger.warning("Failed to read process pid for object \(processObjectID) (OSStatus: \(status))")
       return nil
     }
@@ -1845,7 +2028,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return pid
   }
 
-  private func isProcessRunningOutput(_ processObjectID: AudioObjectID) -> Bool {
+  private func isProcessRunningOutput(
+    _ processObjectID: AudioObjectID,
+    stale: inout StaleAudioObjectTally
+  ) -> Bool {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioProcessPropertyIsRunningOutput,
       mScope: kAudioObjectPropertyScopeGlobal,
@@ -1855,7 +2041,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var isRunningOutput: UInt32 = 0
     var size = UInt32(MemoryLayout<UInt32>.size)
     let status = AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &size, &isRunningOutput)
-    guard status == noErr else {
+    switch CoreAudioObjectReadOutcome(status) {
+    case .ok:
+      break
+    case .objectDisappeared:
+      // The process exited between enumeration and this read. Expected.
+      stale.record(processObjectID)
+      return false
+    case .failed(let status):
       logger.warning("Failed to read process output state for object \(processObjectID) (OSStatus: \(status))")
       return false
     }
@@ -1906,11 +2099,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // Waves can actually take over audio, not merely whether the OS supports it.
     refreshCaptureAuthorization()
     let audible = getAudibleProcesses()
-    let runningApps = await Task.detached { [currentBundleID, audible] in
+    // Carry icons forward like every other preserved field. An app's icon does
+    // not change while it runs, but this rebuild happens every 8 seconds — and
+    // each one used to draw and PNG-encode the icon of every running app, then
+    // throw the result away in the merge below, which already keeps the previous
+    // app's data. That is dozens of image encodes a minute for nothing.
+    let knownIcons = (previousSnapshot?.apps ?? []).reduce(into: [String: Data]()) { result, app in
+      if let data = app.iconTIFFData { result[app.logicalID] = data }
+    }
+    let runningApps = await Task.detached { [currentBundleID, audible, knownIcons] in
       Self.discoverRunningApps(
         currentBundleID: currentBundleID,
         audiblePIDs: audible.pids,
-        audibleParentBundleIDs: audible.parentBundleIDs
+        audibleParentBundleIDs: audible.parentBundleIDs,
+        knownIconData: knownIcons
       )
     }.value
     guard !isShuttingDown else { return snapshot }
@@ -2072,10 +2274,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     for id in targetIDs {
       if let controller = controllers.removeValue(forKey: id) {
-        retainCleanupDegradations(controller.dispose())
+        retainCleanupDegradations(disposeController(controller))
       }
       controllerGenerationByRuntimeID.removeValue(forKey: id)
       staleRouteTicks.removeValue(forKey: id)
+      lastRenderTickByAppID.removeValue(forKey: id)
     }
 
     for index in snapshot.apps.indices where targetIDs.contains(snapshot.apps[index].id) {
@@ -2101,18 +2304,23 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var degradations: [CleanupDegradation] = []
     for appID in stale {
       if let controller = controllers.removeValue(forKey: appID) {
-        degradations.append(contentsOf: controller.dispose())
+        degradations.append(contentsOf: disposeController(controller))
       }
       controllerGenerationByRuntimeID.removeValue(forKey: appID)
       staleRouteTicks.removeValue(forKey: appID)
+      lastRenderTickByAppID.removeValue(forKey: appID)
     }
     return degradations
   }
 
+  /// - Parameter knownIconData: icons already encoded on a previous pass, keyed
+  ///   by logical ID. Reused rather than re-encoded; an app's icon is fixed for
+  ///   as long as it runs.
   private static func discoverRunningApps(
     currentBundleID: String?,
     audiblePIDs: Set<pid_t>,
-    audibleParentBundleIDs: Set<String>
+    audibleParentBundleIDs: Set<String>,
+    knownIconData: [String: Data] = [:]
   ) -> [AudioApp] {
     let runningApps = NSWorkspace.shared.runningApplications
       .filter { app in
@@ -2177,7 +2385,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           bundleID: bundleID,
           displayName: name,
           iconName: AppDiscoveryPolicy.iconName(for: category),
-          iconTIFFData: Self.iconTIFFData(for: app),
+          iconTIFFData: knownIconData[logicalID] ?? Self.iconTIFFData(for: app),
           category: category,
           isActive: isAudible || isFrontmost,
           peakLevel: 0,
@@ -2347,12 +2555,78 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     ]))
   }
 
+  /// Records cleanup failures for diagnostics, bounded in both size and noise.
+  ///
+  /// A route that fails the same teardown stage on every maintenance pass used
+  /// to append a row and emit a log line every time, for the life of the
+  /// process — an unbounded array and an unbounded log for one stuck condition.
+  /// Keeping the first rows preserves the original failure (usually the
+  /// informative one) while a counter records what came after.
   private func retainCleanupDegradations(_ degradations: [CleanupDegradation]) {
     guard !degradations.isEmpty else { return }
-    retainedCleanupDegradations.append(contentsOf: degradations)
     for degradation in degradations {
+      if retainedCleanupDegradations.count < Self.maxRetainedCleanupDegradations {
+        retainedCleanupDegradations.append(degradation)
+      } else {
+        droppedCleanupDegradations += 1
+      }
+    }
+    logCleanupDegradations(degradations)
+  }
+
+  /// Disposes a controller and, if the native teardown failed, keeps it for
+  /// another attempt.
+  ///
+  /// A failed teardown is not cosmetic: the process tap is created with
+  /// `.mutedWhenTapped`, so while it exists but nothing renders it, the target
+  /// app is *silent*. Before this, the controller was dropped on the floor
+  /// regardless of outcome and `IdempotentCleanupResult` memoized the failure,
+  /// so nothing would ever try again — the app stayed muted for the rest of the
+  /// session with no signal to the user.
+  private func disposeController(_ controller: PerAppTapController) -> [CleanupDegradation] {
+    let degradations = controller.dispose()
+    guard !degradations.isEmpty else { return degradations }
+    guard orphanedControllers.count < Self.maxOrphanedControllers else { return degradations }
+    orphanedControllers.append(controller)
+    return degradations
+  }
+
+  /// Retries parked teardowns, dropping each one once it succeeds or has had
+  /// enough attempts. Driven from the existing route-maintenance tick, so it
+  /// costs nothing when there is nothing parked.
+  private func retryOrphanedControllerDisposals() {
+    guard !orphanedControllers.isEmpty else { return }
+    var stillOrphaned: [PerAppTapController] = []
+    for controller in orphanedControllers {
+      let degradations = controller.retryDispose()
+      if degradations.isEmpty { continue }
+      let attempts = (orphanDisposeAttempts[controller.appID] ?? 0) + 1
+      orphanDisposeAttempts[controller.appID] = attempts
+      if attempts >= Self.maxOrphanDisposeRetries {
+        retainCleanupDegradations([CleanupDegradation(
+          appID: controller.appID,
+          stage: .controllerDisposal,
+          detail: "Gave up releasing native audio resources after \(attempts) attempts; the app may stay silent until Waves restarts."
+        )])
+        orphanDisposeAttempts.removeValue(forKey: controller.appID)
+        continue
+      }
+      stillOrphaned.append(controller)
+    }
+    orphanedControllers = stillOrphaned
+  }
+
+  /// Logs the first occurrence of each (stage, app) pair, then stays quiet:
+  /// repetition adds no information and buries everything else. A route stuck
+  /// failing the same teardown every maintenance pass used to log forever.
+  private func logCleanupDegradations(_ degradations: [CleanupDegradation]) {
+    for degradation in degradations {
+      let key = CleanupLogKey(stage: degradation.stage, appID: degradation.appID)
+      let seen = (cleanupDegradationLogCounts[key] ?? 0) + 1
+      cleanupDegradationLogCounts[key] = seen
+      guard seen == 1 else { continue }
       logger.error(
-        "Cleanup degraded at \(String(describing: degradation.stage), privacy: .public) for \(degradation.appID ?? "backend", privacy: .public): OSStatus \(degradation.nativeStatus ?? 0, privacy: .public). \(degradation.detail ?? "No detail.", privacy: .public)"
+        "Cleanup degraded at \(degradation.stage.name, privacy: .public) for \(degradation.appID ?? "backend", privacy: .public): OSStatus \(degradation.nativeStatus ?? 0, privacy: .public). \(degradation.detail ?? "No detail.", privacy: .public)"
       )
     }
   }
@@ -2516,13 +2790,30 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           snapshot.apps[index].rmsLevel = rms
         }
 
-        let sourceIsRunningOutput = controller.targetProcessObjectIDs.contains { isProcessRunningOutput($0) }
-        let measuredLevel = max(peak, rms)
+        // A controller's target objects disappear whenever the source app quits,
+        // which is exactly when this check runs — so the tally absorbs those
+        // instead of logging a warning per dead object per poll.
+        var stale = StaleAudioObjectTally()
+        let sourceIsRunningOutput = controller.targetProcessObjectIDs.contains {
+          isProcessRunningOutput($0, stale: &stale)
+        }
+        // Liveness comes from the IO proc actually running, never from signal
+        // level. Judging a route dead because it went quiet meant that any app
+        // holding output IO open while emitting digital silence — a call with
+        // nobody talking, a stream between cues, a paused game — got its process
+        // tap and aggregate device torn down and rebuilt every 6 seconds,
+        // forever, with an audible dropout each time and two device-change
+        // notifications feeding back into route maintenance.
+        let renderTick = controller.currentRenderTick()
+        let previousRenderTick = lastRenderTickByAppID[app.logicalID]
+        lastRenderTickByAppID[app.logicalID] = renderTick
+        let isRendering = previousRenderTick.map { renderTick != $0 } ?? true
+
         if app.routingState == .managed,
            !app.isMuted,
            !isVolumeZero,
            sourceIsRunningOutput,
-           measuredLevel <= staleRouteLevelThreshold {
+           !isRendering {
           let ticks = (staleRouteTicks[app.logicalID] ?? 0) + 1
           staleRouteTicks[app.logicalID] = ticks
           if ticks >= staleRouteThresholdTicks {
@@ -2537,6 +2828,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     routeMaintenanceTick += 1
     if routeMaintenanceTick >= routeMaintenanceTickInterval || !routeIDsNeedingRebuild.isEmpty {
       routeMaintenanceTick = 0
+      // A tap left behind by a failed teardown keeps its app muted, so keep
+      // trying to release it rather than leaving the app silent for the session.
+      retryOrphanedControllerDisposals()
       await maintainManagedRoutes(forceRebuildIDs: routeIDsNeedingRebuild)
     }
   }
@@ -2583,6 +2877,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           snapshot.apps[currentIndex].notes = nil
         }
         staleRouteTicks.removeValue(forKey: app.logicalID)
+        lastRenderTickByAppID.removeValue(forKey: app.logicalID)
         changed = true
       } catch {
         if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
@@ -2591,6 +2886,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
             snapshot.apps[currentIndex].isMuted ? 0 : snapshot.apps[currentIndex].desiredVolume
         }
         staleRouteTicks.removeValue(forKey: app.logicalID)
+        lastRenderTickByAppID.removeValue(forKey: app.logicalID)
         lastError = error.localizedDescription
         changed = true
       }
@@ -2720,10 +3016,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
       if isActivelyManaged, !targetIsAvailable {
         if let controller = controllers.removeValue(forKey: app.id) {
-          retainCleanupDegradations(controller.dispose())
+          retainCleanupDegradations(disposeController(controller))
         }
         controllerGenerationByRuntimeID.removeValue(forKey: app.id)
         staleRouteTicks.removeValue(forKey: app.logicalID)
+        lastRenderTickByAppID.removeValue(forKey: app.logicalID)
         let error = BackendError.managedRouteUnavailable(
           "The chosen output device for \(app.displayName) is unavailable. Pick another in the app's Output Device menu."
         )
@@ -2818,6 +3115,14 @@ private struct TapRenderState {
   var analysisRMS: Float
   var voiceBandEnergy: Float
   var geometryMismatchObserved: UInt32
+  /// Bumped on every IO render callback, including the ones that return early
+  /// (geometry mismatch, inactive, muted, volume zero).
+  ///
+  /// This is the route's liveness proof. Signal level cannot be one: an app can
+  /// hold its output IO running while emitting digital silence indefinitely — a
+  /// call with nobody talking, a stream between cues, a game with a quiet
+  /// scene — and Waves would otherwise conclude the route had died.
+  var renderTick: UInt64
 }
 
 private final class TapRenderStateBox {
@@ -2832,7 +3137,8 @@ private final class TapRenderStateBox {
     rmsLevel: 0,
     analysisRMS: 0,
     voiceBandEnergy: 0,
-    geometryMismatchObserved: 0
+    geometryMismatchObserved: 0,
+    renderTick: 0
   )
 
   init(initialState: TapRenderState) {
@@ -2937,6 +3243,27 @@ private final class TapRenderStateBox {
     )
     stateLock.unlock()
     return analysis
+  }
+
+  /// Records that the IO render callback ran. Called first thing in the
+  /// callback, before any early return, so silence still proves liveness.
+  ///
+  /// Uses the same non-blocking `try()` as the other realtime writers: the
+  /// realtime thread must never wait. Losing an increment to contention is
+  /// harmless here — staleness is judged over 24 poll ticks (6 s), across which
+  /// a live IO proc runs hundreds of times.
+  func markRenderTick() {
+    guard stateLock.try() else { return }
+    state.pointee.renderTick &+= 1
+    stateBox.renderTick = state.pointee.renderTick
+    stateLock.unlock()
+  }
+
+  func readRenderTick() -> UInt64 {
+    stateLock.lock()
+    let tick = state.pointee.renderTick
+    stateLock.unlock()
+    return tick
   }
 
   func flagGeometryMismatch() {
@@ -3046,7 +3373,8 @@ private final class PerAppTapController: @unchecked Sendable {
       rmsLevel: 0,
       analysisRMS: 0,
       voiceBandEnergy: 0,
-      geometryMismatchObserved: 0
+      geometryMismatchObserved: 0,
+      renderTick: 0
     )
     self.stateBox = TapRenderStateBox(initialState: initialState)
     self.callbackQueue.setSpecific(key: callbackQueueKey, value: callbackQueueToken)
@@ -3141,6 +3469,12 @@ private final class PerAppTapController: @unchecked Sendable {
     stateBox.readLevels()
   }
 
+  /// Monotonic count of IO render callbacks. A value that has not moved since
+  /// the previous poll means the route really has stopped rendering.
+  func currentRenderTick() -> UInt64 {
+    stateBox.readRenderTick()
+  }
+
   func getAdaptiveAnalysis() -> AdaptiveAnalysisLevels {
     stateBox.readAdaptiveAnalysis()
   }
@@ -3160,6 +3494,10 @@ private final class PerAppTapController: @unchecked Sendable {
       aggregateDeviceID,
       callbackQueue
     ) { _, inputData, _, outOutputData, _ in
+      // First, unconditionally: this is what proves the route is still alive.
+      // Every path below can legitimately produce silence.
+      self.stateBox.markRenderTick()
+
       guard self.validatesCallbackGeometry(inputData, outputData: outOutputData) else {
         self.stateBox.flagGeometryMismatch()
         self.zeroOutput(outOutputData)
@@ -3369,6 +3707,14 @@ private final class PerAppTapController: @unchecked Sendable {
   }
 
   @discardableResult
+  /// Retries a teardown that previously failed. Distinct from `dispose()`,
+  /// which stays idempotent so a second shutdown request never repeats
+  /// destructive native cleanup.
+  func retryDispose() -> [CleanupDegradation] {
+    disposeOnce.reset()
+    return dispose()
+  }
+
   func dispose() -> [CleanupDegradation] {
     disposeOnce.run { [self] in
       stateBox.setInactive()

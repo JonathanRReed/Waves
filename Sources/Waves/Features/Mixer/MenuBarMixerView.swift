@@ -249,14 +249,14 @@ private struct MenuBarHeader: View {
   private var statusLine: String {
     // Real playing count (no linger), so the header text follows the live signal
     // like the ribbon — it never keeps claiming "1 app playing" after silence.
-    let live = store.actuallyLiveApps.count
-    if store.visibleApps.contains(where: \.isMuted) && live == 0 {
-      return "Muted"
-    }
-    switch live {
-    case 0: return "Nothing playing"
-    case 1: return "1 app playing"
-    default: return "\(live) apps playing"
+    // Shares `menuBarStatus` with the glyph and its VoiceOver label so the three
+    // can never disagree about what Waves is doing.
+    switch store.menuBarStatus {
+    case .setup, .idle: return "Nothing playing"
+    case .muted: return "Muted"
+    case .playing:
+      let live = store.actuallyLiveApps.count
+      return live == 1 ? "1 app playing" : "\(live) apps playing"
     }
   }
 }

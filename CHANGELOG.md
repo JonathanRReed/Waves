@@ -6,6 +6,85 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-28
+
+A refinement release. No new features — Waves does the same things, using a
+small fraction of the energy, and tells you more when something goes wrong.
+
+### Fixed
+- Stop rebuilding a working audio route every six seconds. Waves decided a route
+  had died when it stopped hearing sound through it — but an app can hold its
+  audio open and send silence indefinitely: a call with nobody talking, a stream
+  between cues, a paused game. Each false alarm tore down and rebuilt that app's
+  audio tap, with a small dropout every time, and then did it again six seconds
+  later, forever. Waves now checks whether the route is still running rather than
+  whether it is loud.
+- Stop Waves from burning CPU in the background. Left running with one app
+  routed, Waves kept redrawing its waveform and level meters at full display
+  rate for as long as audio was playing — even with its window behind another
+  app, minimized, on another Space, or closed entirely. Over a long session that
+  was roughly two saturated processor cores, a warm machine, and a loud fan.
+  Waves now stops drawing the moment nothing of it is on screen, and eases off
+  to half rate when its window is visible but not the app you are using.
+- Redraw the level meters without re-laying out the window. Each meter used to
+  animate by resizing itself, which forced macOS to re-measure the entire window
+  on every frame, for every playing app at once. The meters now paint directly,
+  so the cost stays proportional to what is actually visible.
+- Stop polling audio levels for windows nobody can see. The three-times-a-second
+  level poll kept running while Waves was hidden, because the signal it used to
+  detect "hidden" never fired for a window that was merely covered.
+- Let Adaptive Mix rest. It woke ten times a second whenever it was switched on,
+  even with nothing routed through Waves and therefore nothing to balance or
+  duck. It now idles until there is real work, and stops rewriting gain values
+  that have not changed.
+- Stop logging normal app churn as a warning. Quitting an app while Waves was
+  looking at it produced a Core Audio "bad object" warning, dozens per session,
+  which buried the failures that actually matter. Those are now recognized as
+  ordinary lifecycle events; genuine device, permission, and property failures
+  are still reported.
+- Stop re-checking audio permission the hard way. Waves confirmed its recording
+  permission by creating and destroying a system-wide audio tap — twice every
+  eight seconds, for as long as it was open, even while a working route was
+  already proving the permission was granted. A tap that failed to clean up was
+  also abandoned; those are now retried.
+- Stop re-encoding every app's icon every eight seconds. The result was thrown
+  away each time.
+- Keep the menu-bar icon honest. It reported "muted" whenever any app was muted,
+  even with something else audibly playing — directly above a panel that read
+  "1 app playing" — and its VoiceOver label said the same. Playing now wins;
+  "muted" appears only when nothing is audible. The icon, its spoken label, and
+  the panel header now come from one shared answer.
+- Stop losing a profile member you can't get back. Unticking an app that wasn't
+  running made its row disappear from the profile editor entirely, with no way to
+  re-tick it, and Save then wrote the profile without it.
+- Keep the equalizer card pointed at something real. Excluding the app it was
+  editing left the card attached to a stream Waves no longer touches.
+- Stop resetting an Adaptive Mix choice. Turning Adaptive Mix off and back on
+  rewrote a deliberate Speech Focus or Loudness Balance selection to Both. Waves
+  now restores the mode you picked, including across a restart.
+- Adaptive Mix no longer takes its cue from the app list's display settings —
+  hiding system processes could change which streams got turned down.
+- Say "No Results" when a search matches nothing, instead of "No Running Apps",
+  and offer to clear the search.
+- Help ▸ Waves Help now opens Settings on the Help page rather than General.
+- Flush each saved file independently when quitting. One failure used to abandon
+  the other three, so a single bad write could discard your session, profiles,
+  and device presets — and the error named none of them.
+- Keep trying to release audio resources a first teardown could not. A tap left
+  behind keeps its app silent, and nothing used to retry it.
+- Don't start the update checker inside the test suite, where its scheduled check
+  could raise a dialog no one can answer and hang the run.
+
+### Added
+- Record what happened during shutdown. If cleanup finishes in a degraded state,
+  Waves now writes exactly which stage failed and with what status to
+  `~/Library/Application Support/Waves/Diagnostics/last-shutdown.json`, before it
+  exits. The next launch reads it back into the diagnostics report. Previously a
+  degraded shutdown said only that it was degraded, and the detail was gone with
+  the process.
+- Include the source revision in the diagnostics report, so a bug report names
+  the exact build it came from.
+
 ## [1.3.0] - 2026-07-20
 
 ### Added

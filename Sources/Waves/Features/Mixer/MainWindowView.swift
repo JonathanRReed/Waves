@@ -119,7 +119,8 @@ struct MainWindowView: View {
           scope: selection,
           apps: filteredApps,
           searchText: searchText,
-          onEditProfile: presentEditProfile
+          onEditProfile: presentEditProfile,
+          onClearSearch: { searchText = "" }
         )
       }
     }
@@ -310,13 +311,14 @@ enum SourceFilter: String, CaseIterable, Identifiable {
     }
   }
 
-  @MainActor
-  func count(in store: AppStore) -> Int {
+  /// Reads from one precomputed snapshot rather than re-deriving (and
+  /// re-sorting) the app list per row. See `AppStore.SourceCounts`.
+  func count(in counts: AppStore.SourceCounts) -> Int {
     switch self {
-    case .running: store.visibleApps.count
-    case .pinned: store.pinnedApps.count
-    case .frontmost: store.liveApps.count
-    case .recent: store.recentApps.count
+    case .running: counts.running
+    case .pinned: counts.pinned
+    case .frontmost: counts.live
+    case .recent: counts.recent
     }
   }
 
@@ -394,12 +396,15 @@ private struct SidebarView: View {
       }
 
       Section("Sources") {
+        // One evaluation feeds every row's count and the Live row's animation,
+        // instead of each row re-deriving the sorted app list for itself.
+        let counts = store.sourceCounts
         ForEach(availableFilters) { filter in
           SourceFilterRow(
             filter: filter,
-            countText: filter.detail(count: filter.count(in: store)),
+            countText: filter.detail(count: filter.count(in: counts)),
             // The Live row's waveform comes alive whenever something is playing.
-            isLive: filter == .frontmost && !store.liveApps.isEmpty
+            isLive: filter == .frontmost && counts.live > 0
           )
           .tag(MixerScope.source(filter))
         }
@@ -544,6 +549,7 @@ private struct SourceListView: View {
   let apps: [AudioApp]
   let searchText: String
   let onEditProfile: (Profile) -> Void
+  let onClearSearch: () -> Void
 
   private var profile: Profile? {
     guard case .profile(let id) = scope else { return nil }
@@ -600,7 +606,16 @@ private struct SourceListView: View {
               Label("Open Settings", systemImage: "gearshape")
             }
             .wavesGlassProminentButton()
-          } else if case .source(.pinned) = scope, !isSearching {
+          } else if isSearching {
+            // The list is empty because of the query, so Refresh would not help;
+            // clearing it is the only thing that brings the rows back.
+            Button {
+              onClearSearch()
+            } label: {
+              Label("Clear Search", systemImage: "xmark.circle")
+            }
+            .wavesGlassProminentButton()
+          } else if case .source(.pinned) = scope {
             // Pinning only happens from the Running list, never from here.
             Button {
               store.focusSource(.running)
@@ -734,7 +749,10 @@ private struct SourceListView: View {
     // While searching, "No <profile> Apps Running" would be a false claim — the
     // emptiness is just a non-matching query.
     if let profile { return isSearching ? "No Results" : "No \(profile.name) Apps Running" }
-    if case .source(let filter) = scope { return filter.emptyTitle }
+    // Same reasoning for the source scopes: "No Running Apps" while a query is
+    // active contradicts the list the user is looking at, which may have been
+    // full a keystroke ago.
+    if case .source(let filter) = scope { return isSearching ? "No Results" : filter.emptyTitle }
     return "Nothing Here"
   }
 

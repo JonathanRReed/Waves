@@ -39,9 +39,12 @@ struct SoundWorkspaceView: View {
     .onChange(of: store.visibleApps.map(\.logicalID)) { _, _ in
       // The selected app can quit; fall back to the shared EQ instead of
       // stranding the card on a stream that no longer exists.
-      if case .app(let id) = eqScope, resolvedApp(for: id) == nil {
-        eqScope = .managedAudio
-      }
+      dropScopeIfSelectedAppIsGone()
+    }
+    .onChange(of: store.preferences.excludedAppIDs) { _, _ in
+      // Excluding the selected app removes it from Waves's reach without
+      // changing which apps are visible, so the list above never fires.
+      dropScopeIfSelectedAppIsGone()
     }
     .confirmationDialog(
       "Apply \(pendingStrategy?.displayName ?? "this strategy")?",
@@ -237,8 +240,18 @@ struct SoundWorkspaceView: View {
     return resolvedApp(for: id)
   }
 
+  /// Excluded apps are deliberately absent from `equalizerApps`, so they must be
+  /// absent here too — otherwise excluding the selected app left the EQ card
+  /// pointed at a stream Waves no longer touches, editing a curve that could not
+  /// be applied.
+  private func dropScopeIfSelectedAppIsGone() {
+    if case .app(let id) = eqScope, resolvedApp(for: id) == nil {
+      eqScope = .managedAudio
+    }
+  }
+
   private func resolvedApp(for id: String) -> AudioApp? {
-    store.visibleApps.first { $0.logicalID == id }
+    store.visibleApps.first { $0.logicalID == id && !store.isExcluded($0) }
   }
 
   /// Apps offered in the scope picker: everything the mixer shows.
@@ -348,7 +361,7 @@ struct SoundWorkspaceView: View {
           "Adaptive Mix",
           isOn: Binding(
             get: { store.preferences.adaptiveMixMode != .off },
-            set: { store.setAdaptiveMixMode($0 ? .both : .off) }
+            set: { store.setAdaptiveMixEnabled($0) }
           )
         )
         .labelsHidden()

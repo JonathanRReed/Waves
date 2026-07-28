@@ -66,6 +66,13 @@ struct WavesTheme {
   let topSheen: Color
   let accent: Color
   let accentGradient: LinearGradient
+  /// The raw stops behind `accentGradient`, for `Canvas` drawing.
+  ///
+  /// A `LinearGradient`'s unit points resolve against the context's bounds, not
+  /// the path being filled, so painting a small shape inside a large `Canvas`
+  /// with it samples only a sliver of the sweep. Callers that need the gradient
+  /// to span the shape build an absolute-coordinate shading from these.
+  let accentGradientColors: [Color]
   let contentFill: Color
   let subtleFill: Color
   let selectionFill: Color
@@ -94,6 +101,7 @@ struct WavesTheme {
       startPoint: .topLeading,
       endPoint: .bottomTrailing
     )
+    accentGradientColors = colors.accentGradient
     contentFill = colors.contentFill
     subtleFill = colors.subtleFill
     selectionFill = colors.selectionFill

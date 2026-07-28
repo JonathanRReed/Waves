@@ -23,3 +23,8 @@ docs/phase4-followups.json
 
 # Mirror of .claude/skills for other agent runtimes — machine-local
 .agents/
+
+# Launch-film production tree: ~17 GB of raw footage, renders, and tooling.
+# Local-only by design — binaries this size are effectively permanent once
+# committed, and every clone would pay for them.
+video/

@@ -6,8 +6,12 @@ APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 LOG_SUBSYSTEM="com.jonathanreed.Waves"
 MIN_SYSTEM_VERSION="14.2"
-APP_VERSION="${APP_VERSION:-1.3.0}"
-APP_BUILD="${APP_BUILD:-6}"
+APP_VERSION="${APP_VERSION:-1.3.1}"
+APP_BUILD="${APP_BUILD:-7}"
+# Baked into Info.plist so a diagnostic or crash report can name the exact
+# commit a binary came from. WAV-004's lesson: version and build alone could not
+# distinguish two different binaries once a rebuild reused 1.3.0 (6).
+APP_SOURCE_REVISION="${APP_SOURCE_REVISION:-$(git -C "$(dirname "$0")/.." rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 SWIFT_SDK="${SWIFT_SDK:-}"
@@ -514,6 +518,8 @@ build_app_bundle() {
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
   <string>$APP_BUILD</string>
+  <key>WavesSourceRevision</key>
+  <string>$APP_SOURCE_REVISION</string>
   <key>SUFeedURL</key>
   <string>https://waves.jonathanrreed.com/appcast.xml</string>
   <key>SUPublicEDKey</key>

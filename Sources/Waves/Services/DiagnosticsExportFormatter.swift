@@ -74,7 +74,8 @@ enum DiagnosticsExportFormatter {
     diagnostics: DiagnosticsReport?,
     persistenceFailureCount: Int,
     lastPersistenceError: String?,
-    shutdownResult: AppShutdownResult?
+    shutdownResult: AppShutdownResult?,
+    previousShutdown: ShutdownReport? = nil
   ) -> String {
     var lines: [String] = [
       "Waves diagnostics",
@@ -117,10 +118,59 @@ enum DiagnosticsExportFormatter {
     lines.append("Last failure [error text]: \(boundedOptional(lastPersistenceError, maximumLength: 1_000))")
 
     appendShutdown(shutdownResult, to: &lines)
+    appendPreviousShutdown(previousShutdown, to: &lines)
     appendApps(apps, to: &lines)
     appendChecks(diagnostics, to: &lines)
 
     return boundedReport(lines)
+  }
+
+  /// The *previous* launch's checked shutdown, read back from disk.
+  ///
+  /// The section above can only describe a shutdown that happened inside this
+  /// process, so it reads `notAvailable` in every live export — which is exactly
+  /// why the 1.3.0 degraded cleanup left nothing to investigate. This section is
+  /// the durable one.
+  private static func appendPreviousShutdown(
+    _ report: ShutdownReport?,
+    to lines: inout [String]
+  ) {
+    lines.append("")
+    lines.append("Previous launch's shutdown (persisted)")
+    guard let report else {
+      lines.append("Result: notRecorded (no previous shutdown report on disk)")
+      return
+    }
+
+    lines.append("Result: \(bounded(report.completion, maximumLength: 64))")
+    lines.append("Recorded: \(ISO8601DateFormatter().string(from: report.date))")
+    lines.append("Recorded by version: \(bounded(report.appVersion, maximumLength: 64)) (\(bounded(report.appBuild, maximumLength: 64)))")
+    lines.append("Recorded by source revision: \(boundedOptional(report.sourceRevision, maximumLength: 64))")
+    lines.append("Recorded on macOS: \(bounded(report.osVersion, maximumLength: 128))")
+    lines.append("Backend cleanup result: \(boundedOptional(report.backendCompletion, maximumLength: 64))")
+    lines.append("Persistence issue count: \(report.persistenceIssues.count)")
+    if report.droppedPersistenceIssues > 0 {
+      lines.append("Persistence issues omitted by bound: \(report.droppedPersistenceIssues)")
+    }
+    lines.append("Cleanup degradation count: \(report.cleanupRows.count)")
+    for (index, row) in report.cleanupRows.prefix(maximumCleanupRows).enumerated() {
+      lines.append("  Cleanup \(index + 1) stage: \(bounded(row.stage, maximumLength: 64))")
+      if let appID = row.appID {
+        lines.append("    App identifier [identifier]: \(bounded(appID, maximumLength: 256))")
+      }
+      if let nativeStatus = row.nativeStatus {
+        lines.append("    Native status: \(nativeStatus)")
+      }
+      if let detail = row.detail {
+        lines.append("    Cleanup detail [error text]: \(bounded(detail, maximumLength: 1_000))")
+      }
+    }
+    if report.cleanupRows.count > maximumCleanupRows {
+      lines.append("  Cleanup rows omitted by bound: \(report.cleanupRows.count - maximumCleanupRows)")
+    }
+    if report.droppedCleanupRows > 0 {
+      lines.append("  Cleanup rows dropped when recorded: \(report.droppedCleanupRows)")
+    }
   }
 
   private static func appendShutdown(
@@ -283,14 +333,9 @@ enum DiagnosticsExportFormatter {
   }
 
   private static func cleanupStageDescription(_ stage: CleanupStage) -> String {
-    switch stage {
-    case .authorizationProbe: "authorizationProbe"
-    case .listenerRemoval: "listenerRemoval"
-    case .ioProcStop: "ioProcStop"
-    case .ioProcDestroy: "ioProcDestroy"
-    case .aggregateDeviceDestroy: "aggregateDeviceDestroy"
-    case .processTapDestroy: "processTapDestroy"
-    case .controllerDisposal: "controllerDisposal"
-    }
+    // One source of truth with the persisted shutdown report, so an exported
+    // diagnostic and a stored `last-shutdown.json` name the same stage the
+    // same way.
+    stage.name
   }
 }

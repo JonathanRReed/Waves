@@ -203,6 +203,8 @@ final class AppStore {
   private(set) var sourceFocusToken = 0
   private(set) var equalizerFocusRequest: EqualizerFocusRequest?
   private(set) var equalizerFocusToken = 0
+  private(set) var settingsPaneRequest: SettingsPane?
+  private(set) var settingsPaneToken = 0
   var onboarding = OnboardingState()
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
@@ -225,6 +227,10 @@ final class AppStore {
   /// right now. Empty whenever Adaptive Mix is off or nothing is being
   /// adjusted. Mirrors what the backend is actually applying.
   private(set) var adaptiveGainsDBByAppID: [String: Float] = [:]
+  /// The previous launch's checked-shutdown report, read from disk at startup.
+  /// Surfaced in Diagnostics so a degraded cleanup is still explainable on the
+  /// next run instead of vanishing with the process that produced it.
+  var previousShutdownReport: ShutdownReport?
   /// Logical IDs of apps that are audible now OR went quiet within the last
   /// `liveLingerWindow`. A just-silenced app stays in the Live list for a beat so
   /// a brief gap, track change, or pause doesn't make its row flicker out — and so
@@ -328,6 +334,18 @@ final class AppStore {
   private var loudnessTrimStates: [String: LoudnessTrimState] = [:]
   private var adaptivePolicyEngine = AdaptivePolicyEngine()
   private var liveLevelsRefcount = 0
+  /// False while no Waves window is on screen (all closed, minimized, on an
+  /// inactive Space, or fully occluded). The level poll feeds nothing but
+  /// meters and the waveform, so polling the backend three times a second for
+  /// a surface nobody can see is pure waste — and through 1.3.0 it ran for
+  /// days, driving the render loops that tripped the macOS CPU limit. The
+  /// view-side `beginLiveLevels` refcount cannot cover this on its own:
+  /// `onDisappear` does not fire for a `Window` scene that is merely occluded
+  /// or behind another app.
+  private var isUISurfaceVisible = true
+  /// Interval the running poll task was started with, so a cadence change can
+  /// be detected without restarting the task on every visibility flicker.
+  private var activeLevelPollInterval: Duration?
   private var isRunningSessionMaintenance = false
   // Per-app one-shot tasks that drop an app out of the lingering-live set once it
   // has been quiet for `liveLingerWindow`. Cancelled (and the app kept) the moment
@@ -336,6 +354,25 @@ final class AppStore {
   private var liveLingerWindow: Duration { preferences.liveListLinger.duration }
   private let sessionMaintenanceInterval = Duration.seconds(8)
   private let adaptiveMixInterval = Duration.milliseconds(100)
+  /// Cadence while nothing is routed through Waves. With no managed route there
+  /// is nothing to balance or duck, so the 100 ms pass has no work to do — but
+  /// it still woke the coordinator, hopped to the backend actor, and asked for
+  /// an analysis ten times a second for as long as Adaptive Mix was enabled.
+  /// Dropping to a one-second heartbeat keeps the loop self-healing (it notices
+  /// a new route within a second no matter how that route appeared) without
+  /// relying on every route-creating path remembering to restart it.
+  private let adaptiveMixIdleInterval = Duration.seconds(1)
+  /// Gains identical to the last write are skipped. This bounds how long that
+  /// can go on, so a route rebuilt underneath us cannot strand its controller at
+  /// unity gain waiting for a value that never changes. 20 passes ≈ 2 s.
+  private let adaptiveGainRepublishPasses = 20
+  /// The mode a boolean "Adaptive Mix" toggle restores when switched back on.
+  /// Seeded from the persisted mode at launch so the choice survives a restart.
+  private var lastActiveAdaptiveMixMode: AdaptiveMixMode = .both
+  /// The last gain map actually handed to the backend, so unchanged values are
+  /// not rewritten on every pass.
+  private var lastPublishedAdaptiveGains: [String: Float] = [:]
+  private var adaptiveGainRepublishCountdown = 0
   private let maxToasts = 3
   private let defaultToastDuration = Duration.seconds(2.0)
   // Failures need longer on screen than routine successes: 2.0s is too short to
@@ -386,6 +423,11 @@ final class AppStore {
     let loadedPreferences = preferencesStore.load()
     let loadedDeviceVolumePresets = deviceVolumePresetsStore.load()
     self.preferences = loadedPreferences
+    // So a boolean toggle restores the mode the user actually chose, even across
+    // a relaunch. `.off` carries no choice, so keep the default in that case.
+    if loadedPreferences.adaptiveMixMode != .off {
+      self.lastActiveAdaptiveMixMode = loadedPreferences.adaptiveMixMode
+    }
     self.profiles = profileStore.load(defaults: Profile.defaults)
     self.session = sessionStore.load() ?? Self.emptySession
     self.deviceVolumePresets = loadedDeviceVolumePresets
@@ -589,6 +631,33 @@ final class AppStore {
     session.currentDevice?.id
   }
 
+  /// The four sidebar counts, from a single `visibleApps` evaluation.
+  ///
+  /// Asking each scope for its own count made the sidebar re-derive (and
+  /// re-sort) the whole app list four times per body pass — and `pinnedApps`,
+  /// `liveApps`, and `recentApps` each re-derive it again internally, so one
+  /// redraw cost roughly seven sorts. At the level poll's cadence that is
+  /// several sorts a second for a number that changes rarely.
+  struct SourceCounts: Equatable {
+    var running = 0
+    var pinned = 0
+    var live = 0
+    var recent = 0
+  }
+
+  var sourceCounts: SourceCounts {
+    let visible = visibleApps
+    let liveIDs = Set(visible.filter(isRecentlyLive).map(\.logicalID))
+    return SourceCounts(
+      running: visible.count,
+      pinned: visible.count(where: \.isPinned),
+      live: liveIDs.count,
+      recent: preferences.showRecentApps
+        ? visible.count { !$0.isPinned && !liveIDs.contains($0.logicalID) }
+        : 0
+    )
+  }
+
   private func invalidateVisibleAppsCache() {
     // No-op cache removed; keep explicit invalidation points intact for future
     // callers without forcing a runtime write during view updates.
@@ -598,21 +667,38 @@ final class AppStore {
     session.currentDevice?.name ?? "No output device"
   }
 
+  /// The single definition of what the menu bar is reporting.
+  ///
+  /// The glyph, its VoiceOver label, and the panel header used to compute this
+  /// independently, and the glyph's version checked "anything muted?" before
+  /// "anything playing?". Mute one app while another plays and the icon showed a
+  /// slashed speaker and announced "Waves, muted" directly above a panel reading
+  /// "1 app playing". Playing wins: mute is only the headline when nothing is
+  /// audible, which is what the panel already did.
+  enum MenuBarStatus {
+    case setup
+    case playing
+    case muted
+    case idle
+  }
+
+  var menuBarStatus: MenuBarStatus {
+    guard isAudioRunning else { return .setup }
+    // What's playing *now*, not the lingering Live list — the glyph must drop
+    // back to idle the moment audio actually stops.
+    let apps = visibleApps
+    if apps.contains(where: isLive) { return .playing }
+    if apps.contains(where: \.isMuted) { return .muted }
+    return .idle
+  }
+
   var menuBarIconName: String {
-    if !isAudioRunning {
-      return "lock.shield.fill"
+    switch menuBarStatus {
+    case .setup: "lock.shield.fill"
+    case .playing: "speaker.wave.3.fill"
+    case .muted: "speaker.slash.fill"
+    case .idle: "speaker.wave.2.fill"
     }
-    // Reflect what the app is actually doing rather than an average of all
-    // apps' volumes (which carries little meaning).
-    if visibleApps.contains(where: \.isMuted) {
-      return "speaker.slash.fill"
-    }
-    // Reflect what's playing *now*, not the lingering Live list — the glyph must
-    // drop back to the idle wave the moment audio actually stops.
-    if hasLiveAudio {
-      return "speaker.wave.3.fill"
-    }
-    return "speaker.wave.2.fill"
   }
 
   var sourceInventorySummary: String {
@@ -1850,19 +1936,26 @@ final class AppStore {
     }
   }
 
+  /// The policy for an app: the stored one, or the deterministic default derived
+  /// from its legacy role and category.
+  ///
+  /// Deliberately pure. This is read from view bodies (the Sound workspace's
+  /// per-app controls) and from the adaptive coordinator's per-pass input build,
+  /// and it used to write the derived value into `preferences` and schedule a
+  /// persist as a side effect of being read — mutating observed state during a
+  /// SwiftUI view update, and queueing a preferences write from inside the
+  /// render pass. The derivation is deterministic, so not storing it changes no
+  /// answer; the value is persisted the moment the user actually edits it.
   func adaptivePolicy(for app: AudioApp) -> AdaptiveAppPolicy {
     if let policy = preferences.adaptiveAppPolicies[app.logicalID] {
       return policy
     }
-    let migrated = AdaptiveAppPolicy.migrating(
+    return AdaptiveAppPolicy.migrating(
       legacyRole: equalizerSettings(for: app).adaptiveRole,
       category: app.category,
       bundleIdentifier: app.bundleID,
       displayName: app.displayName
     )
-    preferences.adaptiveAppPolicies[app.logicalID] = migrated
-    persistPreferences()
-    return migrated
   }
 
   func setAdaptiveContentType(_ contentType: AdaptiveContentType, for app: AudioApp) {
@@ -1900,9 +1993,19 @@ final class AppStore {
     restartAdaptiveMixing()
   }
 
+  /// Turns Adaptive Mix on or off without discarding *which* mode the user
+  /// chose. The boolean toggles in Sound, Settings, and Onboarding used to write
+  /// `.both` on enable, so anyone who had deliberately picked Speech Focus or
+  /// Loudness Balance got silently switched to both the next time they flipped
+  /// the switch off and on.
+  func setAdaptiveMixEnabled(_ isEnabled: Bool) {
+    setAdaptiveMixMode(isEnabled ? lastActiveAdaptiveMixMode : .off)
+  }
+
   func setAdaptiveMixMode(_ mode: AdaptiveMixMode) {
     guard requireAudioRunning() else { return }
     guard preferences.adaptiveMixMode != mode else { return }
+    if mode != .off { lastActiveAdaptiveMixMode = mode }
     preferences.adaptiveMixMode = mode
     if mode.usesSpeechFocus {
       // The legacy frontmost-app behavior fully mutes media. It cannot run at
@@ -1986,6 +2089,8 @@ final class AppStore {
       loudnessTrimStates.removeAll()
       adaptivePolicyEngine.reset()
       adaptiveGainsDBByAppID = [:]
+      lastPublishedAdaptiveGains = [:]
+      adaptiveGainRepublishCountdown = 0
       startOwnedOperation { store in
         await store.backend.setAdaptiveGains([:])
       }
@@ -1995,13 +2100,53 @@ final class AppStore {
     adaptiveMixTask = Task { [weak self] in
       guard let self else { return }
       while !Task.isCancelled {
-        await self.performAdaptiveMixPass(elapsed: 0.1)
+        let didWork = await self.performAdaptiveMixPassIfNeeded()
         guard !Task.isCancelled else { break }
-        try? await Task.sleep(for: self.adaptiveMixInterval)
+        try? await Task.sleep(
+          for: didWork ? self.adaptiveMixInterval : self.adaptiveMixIdleInterval)
       }
       self.adaptiveGainsDBByAppID = [:]
+      self.lastPublishedAdaptiveGains = [:]
       await self.backend.setAdaptiveGains([:])
     }
+  }
+
+  /// The apps Adaptive Mix is allowed to act on: everything in the session that
+  /// the user has not excluded.
+  ///
+  /// Deliberately *not* `visibleApps`. That list is sorted for display and
+  /// filtered by presentation preferences like "show system processes", so
+  /// feeding it to the mixer meant a display toggle could change which streams
+  /// got ducked — and made the 10 Hz coordinator pay for a full sort of the app
+  /// list on every pass.
+  private var adaptiveCandidateApps: [AudioApp] {
+    session.apps.filter { !preferences.excludedAppIDs.contains($0.logicalID) }
+  }
+
+  /// Runs one adaptive pass when there is something to adjust. Returns whether
+  /// real work happened, which selects the next sleep interval.
+  ///
+  /// Adaptive Mix can only act on streams Waves actually owns, so with no
+  /// managed route the whole pass — the backend analysis, the policy update, the
+  /// gain write — is guaranteed to be a no-op. Skipping it is a single scan of
+  /// the candidate list.
+  private func performAdaptiveMixPassIfNeeded() async -> Bool {
+    guard startupState == .running else { return false }
+
+    guard adaptiveCandidateApps.contains(where: { $0.routingState == .managed }) else {
+      // Nothing routed. Clear any gains left over from the route that just went
+      // away, once, then idle — repeated empty writes would defeat the point.
+      if !adaptiveGainsDBByAppID.isEmpty || !lastPublishedAdaptiveGains.isEmpty {
+        adaptiveGainsDBByAppID = [:]
+        lastPublishedAdaptiveGains = [:]
+        adaptiveGainRepublishCountdown = 0
+        await backend.setAdaptiveGains([:])
+      }
+      return false
+    }
+
+    await performAdaptiveMixPass(elapsed: 0.1)
+    return true
   }
 
   private func performAdaptiveMixPass(elapsed: TimeInterval) async {
@@ -2010,7 +2155,7 @@ final class AppStore {
     guard !Task.isCancelled, preferences.adaptiveMixMode != .off else { return }
 
     let mode = preferences.adaptiveMixMode
-    let apps = visibleApps
+    let apps = adaptiveCandidateApps
     adaptivePolicyEngine.usesLoudnessCorrection = mode.usesLoudnessBalance
     adaptivePolicyEngine.focusMode = preferences.adaptiveFocusMode
     let frontmostAppID = frontmostManagedAppIDForAdaptiveMix(in: apps)
@@ -2036,6 +2181,17 @@ final class AppStore {
     if significant != adaptiveGainsDBByAppID {
       adaptiveGainsDBByAppID = significant
     }
+
+    // Rewriting identical gains ten times a second wakes the backend actor and
+    // every managed controller to change nothing. Publish on change, plus a
+    // bounded periodic refresh so a route rebuilt underneath us cannot sit at
+    // unity gain waiting for a value that never changes.
+    adaptiveGainRepublishCountdown -= 1
+    guard gainsDB != lastPublishedAdaptiveGains || adaptiveGainRepublishCountdown <= 0 else {
+      return
+    }
+    lastPublishedAdaptiveGains = gainsDB
+    adaptiveGainRepublishCountdown = adaptiveGainRepublishPasses
     await backend.setAdaptiveGains(gainsDB)
   }
 
@@ -2079,21 +2235,53 @@ final class AppStore {
 
   // MARK: - Live level metering (visibility-gated)
 
+  /// Cadence for smooth meters, used while a mixer surface is actually on screen.
+  private static let fastLevelPollInterval = Duration.milliseconds(300)
+  /// Heartbeat used when no mixer surface is visible.
+  ///
+  /// Polling cannot stop outright, however hidden the windows are: the menu-bar
+  /// glyph is a surface too, and it is on screen whenever Waves is running. It
+  /// reads the same levels (`isLive` treats the poll as authoritative for a
+  /// `.managed` app, because the snapshot's own levels are always zero), so with
+  /// no poll the icon and its VoiceOver label would claim "idle" for the entire
+  /// time a managed app was playing behind a hidden window.
+  private static let idleLevelPollInterval = Duration.seconds(1)
+
+  /// Fast only when a surface that draws meters is genuinely visible.
+  private var levelPollInterval: Duration {
+    liveLevelsRefcount > 0 && isUISurfaceVisible
+      ? Self.fastLevelPollInterval
+      : Self.idleLevelPollInterval
+  }
+
   /// Call when a mixer surface becomes visible. Reference-counted so multiple
-  /// open surfaces (main window + menu bar) share one poller, and polling stops
-  /// entirely when nothing is on screen (keeps idle CPU near zero).
+  /// open surfaces (main window + menu bar) share one poller and the fast
+  /// cadence is used only while one of them is on screen.
   func beginLiveLevels() {
     guard startupState != .shuttingDown else { return }
     liveLevelsRefcount += 1
+    restartLevelPollingForCadenceChange()
+  }
+
+  /// Restarts the poller when the interval it should be using has changed.
+  /// Cheap and idempotent: a no-op when the cadence is already correct.
+  private func restartLevelPollingForCadenceChange() {
+    guard startupState == .running else { return }
+    let desired = levelPollInterval
+    guard desired != activeLevelPollInterval || levelPollTask == nil else { return }
+    levelPollTask?.cancel()
+    levelPollTask = nil
     startLiveLevelPollingIfNeeded()
   }
 
   private func startLiveLevelPollingIfNeeded() {
-    guard startupState == .running, liveLevelsRefcount > 0 else { return }
+    guard startupState == .running else { return }
     guard levelPollTask == nil else { return }
+    let interval = levelPollInterval
+    activeLevelPollInterval = interval
     levelPollTask = Task { [weak self] in
       while !Task.isCancelled {
-        try? await Task.sleep(for: .milliseconds(300))
+        try? await Task.sleep(for: interval)
         guard let self, !Task.isCancelled, self.startupState == .running else { return }
         let levels = await self.backend.audioLevels()
         // Re-check after the await (the poll may have been cancelled while
@@ -2143,14 +2331,23 @@ final class AppStore {
   func endLiveLevels() {
     liveLevelsRefcount = max(0, liveLevelsRefcount - 1)
     guard liveLevelsRefcount == 0 else { return }
-    levelPollTask?.cancel()
-    levelPollTask = nil
-    liveLevels = [:]
-    // No more poll ticks will arrive, so cancel pending linger removals and clear
-    // the set rather than leave a stale "live" row frozen on a hidden surface.
-    for task in lingerRemovalTasks.values { task.cancel() }
-    lingerRemovalTasks.removeAll()
-    recentlyLiveIDs = []
+    // Drop to the heartbeat rather than stopping: see `idleLevelPollInterval`.
+    restartLevelPollingForCadenceChange()
+  }
+
+  /// Called when the app's windows go on or off screen. Drops the level poll to
+  /// its heartbeat while nothing is visible and restores the fast cadence the
+  /// moment something is, without disturbing the view-side refcount — the
+  /// surfaces are still mounted and will not call `beginLiveLevels` again on
+  /// their own.
+  ///
+  /// Levels are deliberately *not* cleared here. Doing so made the menu-bar
+  /// glyph report "idle" for the whole time a managed app played behind a
+  /// hidden window.
+  func setUISurfaceVisible(_ visible: Bool) {
+    guard isUISurfaceVisible != visible else { return }
+    isUISurfaceVisible = visible
+    restartLevelPollingForCadenceChange()
   }
 
   // MARK: - Per-app output routing
@@ -2276,7 +2473,8 @@ final class AppStore {
       diagnostics: diagnostics,
       persistenceFailureCount: persistenceFailureCount,
       lastPersistenceError: lastPersistenceError,
-      shutdownResult: shutdownResult
+      shutdownResult: shutdownResult,
+      previousShutdown: previousShutdownReport
     )
   }
 
@@ -2596,6 +2794,7 @@ final class AppStore {
     sessionMaintenanceTask = nil
     adaptiveMixTask = nil
     levelPollTask = nil
+    activeLevelPollInterval = nil
     ownedOperationTasks.removeAll()
     pendingEqualizerDebounceTasks.removeAll()
     profileApplyTasks.removeAll()
@@ -2664,11 +2863,9 @@ final class AppStore {
       enqueueSessionPersistence(session)
     }
     enqueueDevicePresetsPersistence(deviceVolumePresets)
-    do {
-      try await drainAndFlushPersistence()
-    } catch {
-      reportPersistenceFailure(storeName: "saved data flush", error: error, showWarning: false)
-    }
+    // Non-throwing: each store reports its own failure, so none can suppress
+    // another's flush.
+    await drainAndFlushPersistence()
     isFinalizingShutdownPersistence = false
     let persistenceDegradations = Array(persistenceFailureHistory.dropFirst(failureMarker))
 
@@ -3773,6 +3970,21 @@ final class AppStore {
     return equalizerFocusRequest
   }
 
+  /// Asks the Settings scene to open on a specific pane. Same request/token
+  /// shape as the equalizer and source focus requests, for the same reason: the
+  /// Settings window may not exist yet when the request is made, so the token
+  /// covers the already-open case and the request survives for a fresh view's
+  /// `onAppear`.
+  func requestSettingsPane(_ pane: SettingsPane) {
+    settingsPaneRequest = pane
+    settingsPaneToken &+= 1
+  }
+
+  func consumeSettingsPaneRequest() -> SettingsPane? {
+    defer { settingsPaneRequest = nil }
+    return settingsPaneRequest
+  }
+
   /// Reads and clears `sourceFocusRequest` so it applies at most once. Needed
   /// because the token/request are set *before* `openWindow` — when the main
   /// window was already closed, that call creates a brand-new `MainWindowView`
@@ -4424,12 +4636,31 @@ final class AppStore {
     durablySavedDeviceVolumePresets = snapshot
   }
 
-  func drainAndFlushPersistence() async throws {
+  /// Flushes every store, independently.
+  ///
+  /// This runs on the quit path, where partial persistence is the worst
+  /// outcome: a `try` chain meant the first store to fail cancelled the other
+  /// three, so one bad settings write could silently discard the session,
+  /// profiles, and device presets — and the single error it threw named "saved
+  /// data flush" rather than the store that actually failed. Each store now gets
+  /// its own attempt and its own attributed report.
+  func drainAndFlushPersistence() async {
     await drainPersistenceTasks()
-    try await preferencesStore.flush()
-    try await profileStore.flush()
-    try await sessionStore.flush()
-    try await deviceVolumePresetsStore.flush()
+
+    let flushes: [(name: String, flush: () async throws -> Void)] = [
+      ("settings", preferencesStore.flush),
+      ("profiles", profileStore.flush),
+      ("session", sessionStore.flush),
+      ("device volume presets", deviceVolumePresetsStore.flush),
+    ]
+
+    for entry in flushes {
+      do {
+        try await entry.flush()
+      } catch {
+        reportPersistenceFailure(storeName: entry.name, error: error, showWarning: false)
+      }
+    }
   }
 
   private func reportPersistenceFailure(
@@ -4466,10 +4697,27 @@ final class AppStore {
     NotificationCenter.default.post(name: .wavesKeyboardShortcutsPreferenceChanged, object: nil)
   }
 
+  /// Decorate-sort-undecorate: fold the case once per app instead of paying for
+  /// a full ICU collation on every one of the O(n log n) comparisons. This is
+  /// the default sort mode and runs on every `visibleApps` read, which the level
+  /// poll drives several times a second.
+  private func sortedByFoldedDisplayName(_ apps: [AudioApp]) -> [AudioApp] {
+    struct SortEntry {
+      let key: String
+      let app: AudioApp
+    }
+    let decorated = apps.map { SortEntry(key: $0.displayName.lowercased(), app: $0) }
+    let sorted = decorated.sorted { lhs, rhs in
+      if lhs.key != rhs.key { return lhs.key < rhs.key }
+      return lhs.app.logicalID < rhs.app.logicalID
+    }
+    return sorted.map(\.app)
+  }
+
   private func sortedApps(_ apps: [AudioApp]) -> [AudioApp] {
     switch preferences.sortMode {
     case .name:
-      apps.sorted(by: displayNameComparator)
+      sortedByFoldedDisplayName(apps)
     case .activity:
       apps.sorted { app1, app2 in
         let rank1 = activityRank(for: app1)

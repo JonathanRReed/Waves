@@ -3,7 +3,10 @@ import WavesAudioCore
 
 /// One case per settings pane. Order here drives the sidebar's top-to-bottom
 /// order, so reordering panes is a one-line change.
-private enum SettingsPane: String, CaseIterable, Identifiable {
+/// Internal (not private) so another scene can ask Settings to open on a
+/// specific pane — the Help menu item in particular, which used to open this
+/// window on General and leave the user to find Help themselves.
+enum SettingsPane: String, CaseIterable, Identifiable {
   case general, mixer, profiles, control, setup, advanced, help
 
   var id: String { rawValue }
@@ -81,8 +84,20 @@ struct SettingsView: View {
     // the user's (often clashing) system accent.
     .tint(theme.accent)
     .background(WavesBackground())
+    // Covers the case where this window had to be created by the request (it
+    // was closed), so the `onChange` below never sees the token move.
+    .onAppear { applyRequestedPaneIfAny() }
+    .onChange(of: store.settingsPaneToken) { _, _ in
+      applyRequestedPaneIfAny()
+    }
     .onDisappear {
       store.persistPreferences()
+    }
+  }
+
+  private func applyRequestedPaneIfAny() {
+    if let pane = store.consumeSettingsPaneRequest() {
+      selection = pane
     }
   }
 

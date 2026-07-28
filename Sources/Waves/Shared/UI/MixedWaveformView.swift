@@ -214,11 +214,16 @@ private struct SplitMix64 {
 /// used to make the handoff visible; the resting hairline and the live sum
 /// simply crossfade as functions of the same eased energy.
 ///
-/// Costs: while audible (plus a short settle window) it renders at the display
-/// rate; once settled the resting hairline is static, so silence does not keep
-/// a render loop alive. Under Reduce Motion the timeline is also static: the
-/// wave holds a still pose and only amplitude changes (stepped, unanimated) as
-/// levels move.
+/// Costs: while audible, visible, and frontmost (plus a short settle window) it
+/// renders at the display rate; at half that when Waves is visible but not the
+/// active app; and not at all while no Waves window is on screen. Once settled
+/// the resting hairline is static, so silence does not keep a render loop alive
+/// either. Under Reduce Motion the timeline is also static: the wave holds a
+/// still pose and only amplitude changes (stepped, unanimated) as levels move.
+///
+/// The visibility gate is what 1.3.0 was missing. Silence was handled; being
+/// unwatched was not, so a single live route kept this view at display rate for
+/// days behind other windows.
 struct MixedWaveformView: View {
   /// Per-app live contributions (real signal, no linger — see the live-state
   /// invariant note on `AppStore.waveComponents`).
@@ -228,6 +233,9 @@ struct MixedWaveformView: View {
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.colorSchemeContrast) private var contrast
+  /// Paused while no Waves window is on screen; halved while Waves is visible
+  /// but not frontmost. See `RenderActivityMonitor`.
+  @Environment(\.renderCadence) private var cadence
   @State private var engine = WaveEngine()
   /// Keeps the full-rate render loop mounted through a graceful settle after
   /// audio stops; cleared a beat later (see `.task`) so idle becomes static.
@@ -245,16 +253,20 @@ struct MixedWaveformView: View {
           engine.advance(to: Date(timeIntervalSinceReferenceDate: 0), components: components, mixedLevel: level, frozen: true)
           draw(context, size: size)
         }
-      } else if isActive {
-        TimelineView(.animation) { timeline in
+      } else if isActive && cadence.isAnimating {
+        TimelineView(.animation(minimumInterval: cadence.minimumInterval)) { timeline in
           Canvas { context, size in
             engine.advance(to: timeline.date, components: components, mixedLevel: level, frozen: false)
             draw(context, size: size)
           }
         }
       } else {
-        // Silence must not keep a timeline or repeating animation alive. Snap
-        // the already-decayed engine to its resting pose on this final render.
+        // Two cases land here, and `frozen: true` (dt = 0) is right for both.
+        // Silence: the engine has already decayed, so this is the final render
+        // of the resting pose and no timeline stays alive. Audible but not
+        // visible: hold the current pose exactly as it was — no motion, but no
+        // decay either, so the wave is already correct the instant the window
+        // comes back on screen rather than snapping up from flat.
         Canvas { context, size in
           engine.advance(to: Date(), components: components, mixedLevel: level, frozen: true)
           draw(context, size: size)
@@ -522,7 +534,7 @@ struct HeaderWaveform: View {
           if components.contains(where: \.isEqualized) {
             processingChip("EQ", help: "An equalizer is shaping the highlighted audio.")
           }
-          if let focusText {
+          if let focusText = focusText(for: components) {
             processingChip(focusText, help: "Sidechain Focus is adjusting app volumes to keep the foreground clear.")
           }
         }
@@ -533,8 +545,13 @@ struct HeaderWaveform: View {
 
   /// "Focus −4 dB" while the adaptive engine is actively holding something
   /// back; nil (no chip) when idle so the band stays clean.
-  private var focusText: String? {
-    let strongest = store.waveComponents.map(\.adaptiveGainDB).min() ?? 0
+  ///
+  /// Takes the components the body already resolved rather than reading
+  /// `store.waveComponents` again: that property rebuilds its array from
+  /// `visibleApps` (a sorted derivation), and the body evaluates on every level
+  /// poll.
+  private func focusText(for components: [WaveComponent]) -> String? {
+    let strongest = components.map(\.adaptiveGainDB).min() ?? 0
     guard strongest < -0.25 else { return nil }
     return String(format: "Focus −%.0f dB", -strongest)
   }

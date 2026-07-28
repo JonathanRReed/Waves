@@ -25,12 +25,22 @@ struct ProfileEditorSheet: View {
 
   @State private var name: String
   @State private var selectedIDs: Set<String>
+  /// The offline roster, snapshotted once when the sheet opens.
+  ///
+  /// Deriving it from `selectedIDs` instead made every offline row impossible to
+  /// untick and then re-tick: unticking removed the id from the selection, which
+  /// removed the row from the derived list, which erased it from the sheet with
+  /// no way back short of cancelling — and Save then wrote the membership out
+  /// without it.
+  @State private var offlineMemberIDs: [String]
+  @State private var didResolveOfflineMembers = false
   @State private var captureLevels: Bool
 
   init(context: ProfileEditorContext) {
     self.context = context
     _name = State(initialValue: context.profile?.name ?? "")
     _selectedIDs = State(initialValue: Set(context.preselectedAppIDs))
+    _offlineMemberIDs = State(initialValue: [])
     // Default off so editing membership never clobbers a saved mix — an existing
     // profile keeps its stored levels unless the user explicitly re-captures.
     // Capturing is the deliberate opt-in to bake in the *current* mix.
@@ -58,6 +68,7 @@ struct ProfileEditorSheet: View {
     }
     .frame(width: 460, height: 560)
     .background(WavesBackground())
+    .onAppear { resolveOfflineMembersIfNeeded() }
   }
 
   private var header: some View {
@@ -216,12 +227,20 @@ struct ProfileEditorSheet: View {
     }
   }
 
-  /// Selected members not shown in the visible list, kept visible so editing a
-  /// profile never silently drops an app just because it's closed (or hidden by
-  /// the "show system processes" preference) right now.
-  private var offlineMembers: [String] {
+  /// The profile's existing members that aren't in the visible list, shown so
+  /// editing a profile never silently drops an app just because it's closed (or
+  /// hidden by the "show system processes" preference) right now. Listed
+  /// regardless of whether they are currently ticked, so unticking one is
+  /// reversible.
+  private var offlineMembers: [String] { offlineMemberIDs }
+
+  /// The roster is fixed for the life of the sheet: which members are offline
+  /// depends on what is running, not on what is currently ticked.
+  private func resolveOfflineMembersIfNeeded() {
+    guard !didResolveOfflineMembers else { return }
+    didResolveOfflineMembers = true
     let visibleIDs = Set(store.visibleApps.map(\.logicalID))
-    return selectedIDs.subtracting(visibleIDs).sorted()
+    offlineMemberIDs = Set(context.preselectedAppIDs).subtracting(visibleIDs).sorted()
   }
 
   /// Subtitle for a member not in the visible list: distinguish a genuinely
@@ -289,7 +308,10 @@ struct ProfileEditorSheet: View {
   private func save() {
     guard canSave else { return }
     // Keep the editor's display order: running (selected-first) then offline.
-    let orderedIDs = runningApps.map(\.logicalID).filter { selectedIDs.contains($0) } + offlineMembers
+    // Offline members are filtered by the selection the same way running ones
+    // are, so unticking one actually removes it — and leaving it ticked keeps it.
+    let orderedIDs = runningApps.map(\.logicalID).filter { selectedIDs.contains($0) }
+      + offlineMemberIDs.filter { selectedIDs.contains($0) }
     store.saveProfile(
       id: context.profile?.id,
       named: trimmedName,

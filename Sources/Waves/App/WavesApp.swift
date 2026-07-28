@@ -21,6 +21,10 @@ struct WavesApp: App {
   @Environment(\.openWindow) private var openWindow
   @State private var store: AppStore
   @State private var updaterService = UpdaterService()
+  /// Drives every animated surface's clock, and the level poll's cadence.
+  /// See `RenderActivityMonitor`. Assigned in `init` so it can be wired to the
+  /// store before any scene exists.
+  @State private var renderActivity: RenderActivityMonitor
 
   init() {
     self.init(composition: .live)
@@ -29,6 +33,17 @@ struct WavesApp: App {
   init(composition: WavesComposition) {
     let store = composition.makeStore()
     _store = State(initialValue: store)
+
+    // Suspend the backend level poll whenever no Waves window is on screen.
+    // Driven from occlusion, not `onDisappear`, which never fires for a window
+    // that is merely occluded, behind another app, or on an inactive Space.
+    let monitor = RenderActivityMonitor()
+    monitor.onVisibilityChange = { [weak store] isVisible in
+      store?.setUISurfaceVisible(isVisible)
+    }
+    store.setUISurfaceVisible(monitor.isVisible)
+    _renderActivity = State(initialValue: monitor)
+
     AppDelegate.bootstrapStore = store
   }
 
@@ -44,6 +59,7 @@ struct WavesApp: App {
           palette: store.preferences.palette,
           appearance: store.preferences.appearance
         )
+        .renderCadence(renderActivity)
         .task {
           appDelegate.setStore(store)
           store.start()
@@ -86,6 +102,12 @@ struct WavesApp: App {
         SettingsLink {
           Text("Waves Help")
         }
+        // Otherwise this opens Settings on whichever pane it last showed —
+        // usually General — leaving the user to go find Help themselves, which
+        // is exactly what this menu item promised to do for them.
+        .simultaneousGesture(TapGesture().onEnded {
+          store.requestSettingsPane(.help)
+        })
       }
     }
 
@@ -115,6 +137,7 @@ struct WavesApp: App {
           palette: store.preferences.palette,
           appearance: store.preferences.appearance
         )
+        .renderCadence(renderActivity)
     }
 
     MenuBarExtra(isInserted: $showMenuBarExtra) {
@@ -126,6 +149,7 @@ struct WavesApp: App {
           palette: store.preferences.palette,
           appearance: store.preferences.appearance
         )
+        .renderCadence(renderActivity)
     } label: {
       // The accessibility label must live on the status-item label itself —
       // VoiceOver reads this view for the menu-bar item, not the popover
@@ -137,21 +161,16 @@ struct WavesApp: App {
   }
 
   /// VoiceOver label for the menu-bar item, mirroring the three states that
-  /// drive `store.menuBarIconName` (muted / playing / idle) so the icon-only
-  /// status is perceivable without sight.
+  /// drive the glyph so the icon-only status is perceivable without sight.
+  /// Shares `store.menuBarStatus` with the icon and the panel header, so the
+  /// spoken label can never contradict what is on screen.
   private var menuBarAccessibilityLabel: String {
-    if !store.isAudioRunning {
-      return "Waves, finish setup"
+    switch store.menuBarStatus {
+    case .setup: "Waves, finish setup"
+    case .playing: "Waves, playing"
+    case .muted: "Waves, muted"
+    case .idle: "Waves, idle"
     }
-    if store.visibleApps.contains(where: \.isMuted) {
-      return "Waves, muted"
-    }
-    // Mirror menuBarIconName: "playing" tracks the real signal, not the lingering
-    // Live list, so the icon and its label never disagree.
-    if store.hasLiveAudio {
-      return "Waves, playing"
-    }
-    return "Waves, idle"
   }
 }
 
@@ -271,12 +290,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var eventMonitor: Any?
   private var localEventMonitor: Any?
   private let terminationCoordinator = AppTerminationCoordinator()
+  /// Records what actually failed during cleanup, before the process goes away.
+  private let shutdownReportStore = ShutdownReportStore()
 
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "URLScheme")
   private let lifecycleLogger = Logger(subsystem: "com.jonathanreed.Waves", category: "Lifecycle")
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     store = Self.bootstrapStore
+    // Read before anything can overwrite it, so this launch's Diagnostics can
+    // report exactly how the previous one ended.
+    store?.previousShutdownReport = shutdownReportStore.load()
     store?.start()
     NSApp.setActivationPolicy(.regular)
     setupURLSchemeHandler()
@@ -327,7 +351,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let decision = terminationCoordinator.requestTermination(
       shutdown: { await store.shutdown() },
-      report: { [lifecycleLogger] outcome in
+      report: { [lifecycleLogger, shutdownReportStore] outcome in
+        // Persist first, log second. This runs before the reply that lets the
+        // process exit, and the write is synchronous, so the detail survives even
+        // when the log entries that describe it later age out of the log store —
+        // which is exactly how the 1.3.0 degraded cleanup became unexplainable.
+        shutdownReportStore.save(ShutdownReport(outcome: outcome))
+
         switch outcome {
         case .clean:
           lifecycleLogger.info("Termination cleanup completed cleanly")
@@ -335,6 +365,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           lifecycleLogger.error(
             "Termination cleanup degraded: \(result.persistenceDegradations.count, privacy: .public) persistence issue(s), backend \(String(describing: result.backendResult?.completion), privacy: .public)"
           )
+          for row in result.backendResult?.degradations ?? [] {
+            lifecycleLogger.error(
+              "Cleanup stage \(row.stage.name, privacy: .public) failed with native status \(row.nativeStatus.map(String.init) ?? "none", privacy: .public)"
+            )
+          }
         case .timedOut:
           lifecycleLogger.error(
             "Termination cleanup timed out after the bounded wait; termination will proceed")

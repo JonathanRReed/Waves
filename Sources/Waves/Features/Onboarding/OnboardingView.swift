@@ -243,7 +243,7 @@ struct OnboardingView: View {
               "Enable Adaptive Mix",
               isOn: Binding(
                 get: { store.preferences.adaptiveMixMode != .off },
-                set: { store.setAdaptiveMixMode($0 ? .both : .off) }
+                set: { store.setAdaptiveMixEnabled($0) }
               )
             )
             .disabled(!store.isAudioRunning)

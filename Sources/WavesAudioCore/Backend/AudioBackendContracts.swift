@@ -153,6 +153,21 @@ public enum CleanupStage: Hashable, Sendable {
   case aggregateDeviceDestroy
   case processTapDestroy
   case controllerDisposal
+
+  /// Stable identifier for diagnostics exports and the persisted shutdown
+  /// report. Treat these strings as a wire format: a stored report written by an
+  /// older build is read back by a newer one, and bug reports quote them.
+  public var name: String {
+    switch self {
+    case .authorizationProbe: "authorizationProbe"
+    case .listenerRemoval: "listenerRemoval"
+    case .ioProcStop: "ioProcStop"
+    case .ioProcDestroy: "ioProcDestroy"
+    case .aggregateDeviceDestroy: "aggregateDeviceDestroy"
+    case .processTapDestroy: "processTapDestroy"
+    case .controllerDisposal: "controllerDisposal"
+    }
+  }
 }
 
 public struct CleanupDegradation: Hashable, Sendable {
