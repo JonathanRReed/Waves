@@ -17,16 +17,20 @@ struct MainWindowView: View {
         .padding(.top, 12)
         .frame(maxWidth: .infinity, alignment: .topTrailing)
 
-      if store.isLoading && store.privacySetupPresentationState == .hidden {
+      // `isLoading` is false on the warm-start path (beginAudioStartupIfNeeded
+      // only sets it when the restored session was empty), so without the
+      // warming-up term the early mixer would give no sign it is still coming up.
+      if (store.isLoading || store.isWarmingUp) && store.privacySetupPresentationState == .hidden {
         HStack(spacing: 10) {
           ProgressView()
             .controlSize(.small)
-          Text("Refreshing")
+          Text(store.isWarmingUp ? "Starting audio" : "Refreshing")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Refreshing, in progress")
+        .accessibilityLabel(
+          store.isWarmingUp ? "Starting audio, in progress" : "Refreshing, in progress")
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
@@ -94,7 +98,14 @@ struct MainWindowView: View {
 
   @ViewBuilder
   private var primarySurface: some View {
-    if store.privacySetupPresentationState != .hidden {
+    if store.showsWarmStartMixer {
+      // A returning user's session is already in memory — `sessionStore.load()`
+      // is synchronous in `AppStore.init` — so making them watch a full-window
+      // "Starting Waves" splash was showing a spinner for data we already had,
+      // and then reflowing the entire window when the real surface replaced it.
+      // Go straight to the mixer; audio startup catches up underneath.
+      mixerNavigation
+    } else if store.privacySetupPresentationState != .hidden {
       PrivacySetupSurface()
     } else if !store.preferences.hasCompletedGuidedSetup {
       OnboardingView()
@@ -127,6 +138,10 @@ struct MainWindowView: View {
     .navigationSplitViewStyle(.balanced)
     .searchable(text: $searchText, placement: .sidebar, prompt: "Filter apps")
     .toolbar { mixerToolbar }
+    // During warm start the rows are real but the backend cannot act on them
+    // yet. Dimming says so honestly; leaving them live would answer a reasonable
+    // click with a "Finish setup" toast, which is both wrong and alarming.
+    .disabled(store.isWarmingUp)
   }
 
   @ToolbarContentBuilder

@@ -737,6 +737,37 @@ final class AppStore {
     }
   }
 
+  /// Whether the mixer can be shown immediately, before audio startup finishes.
+  ///
+  /// True only for a returning user: setup is complete and a previous session was
+  /// restored from disk, so there are real rows to draw. Startup then proceeds
+  /// underneath and the rows fill in, rather than the window showing a splash and
+  /// reflowing when it completes.
+  ///
+  /// Deliberately narrow. A first launch, a pending privacy prompt, an incomplete
+  /// guided setup, or a failed start all still get the surface that explains
+  /// itself — showing an empty mixer in those cases would be worse than a splash,
+  /// because it would look like Waves found nothing.
+  var showsWarmStartMixer: Bool {
+    guard preferences.hasCompletedPrivacySetup, preferences.hasCompletedGuidedSetup else {
+      return false
+    }
+    guard !session.apps.isEmpty else { return false }
+    switch startupState {
+    case .idle, .startingAudio, .running:
+      return true
+    case .awaitingPrivacy, .savingPrivacyConsent, .shuttingDown, .failed:
+      return false
+    }
+  }
+
+  /// True while the mixer is on screen but not yet able to act — the warm-start
+  /// window. Controls read as unavailable rather than firing a "Finish setup"
+  /// toast on a click that was reasonable to make.
+  var isWarmingUp: Bool {
+    showsWarmStartMixer && startupState != .running
+  }
+
   var hasActiveSessionMaintenance: Bool {
     sessionMaintenanceTask != nil
   }
@@ -912,7 +943,6 @@ final class AppStore {
     do {
       let warmSnapshot = session
       if !warmSnapshot.apps.isEmpty {
-        session = warmSnapshot
         syncOnboarding(using: session)
       }
 

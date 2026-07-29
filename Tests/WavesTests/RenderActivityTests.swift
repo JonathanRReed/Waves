@@ -274,7 +274,9 @@ private struct RenderActivityFixture {
 
 @MainActor
 private func makeRenderActivityFixture(
-  routingState: RoutingState = .managed
+  routingState: RoutingState = .managed,
+  startupState: AppStartupState = .running,
+  includeApp: Bool = true
 ) async -> RenderActivityFixture {
   let app = AudioApp(
     id: "runtime.render.app",
@@ -293,18 +295,20 @@ private func makeRenderActivityFixture(
     isManagedRouteAvailable: true
   )
   let snapshot = AudioSessionSnapshot(
-    apps: [app],
+    apps: includeApp ? [app] : [],
     currentDevice: device,
     recentDeviceIDs: [device.id],
     supportMatrix: SupportMatrix(
-      entries: [
-        SupportMatrixEntry(
-          appID: app.logicalID,
-          displayName: app.displayName,
-          category: app.category,
-          state: app.compatibility
-        )
-      ]),
+      entries: includeApp
+        ? [
+          SupportMatrixEntry(
+            appID: app.logicalID,
+            displayName: app.displayName,
+            category: app.category,
+            state: app.compatibility
+          )
+        ]
+        : []),
     backendStatus: BackendStatus(
       isAudioComponentInstalled: true,
       hasRequiredPermissions: true,
@@ -324,7 +328,7 @@ private func makeRenderActivityFixture(
     sessionStore: RenderActivitySessionStore(value: snapshot),
     loginItemService: RenderActivityLoginItemService(),
     deviceVolumePresetsStore: RenderActivityPresetsStore(),
-    initialStartupState: .running
+    initialStartupState: startupState
   )
   await store.drainPersistenceTasks()
   return RenderActivityFixture(store: store, backend: backend)
@@ -433,4 +437,40 @@ private final class RenderActivityLoginItemService: LoginItemServicing {
   }
   func setEnabled(_ enabled: Bool) throws {}
   func openSystemSettingsLoginItems() {}
+}
+
+// MARK: - Warm start (1.4 D2)
+
+@MainActor
+@Test func aReturningUserSeesTheMixerImmediatelyNotASplash() async {
+  // The restored session is loaded synchronously in AppStore.init, so a
+  // returning user's rows exist before the first frame. Showing a full-window
+  // "Starting Waves" splash meant spinning for data already in memory, then
+  // reflowing the whole window when the real surface replaced it.
+  let fixture = await makeRenderActivityFixture(startupState: .idle)
+
+  #expect(fixture.store.showsWarmStartMixer, "a restored session must render the mixer at once")
+  #expect(fixture.store.isWarmingUp, "...while still saying it is coming up")
+}
+
+@MainActor
+@Test func warmStartNeverHidesASurfaceThatExplainsItself() async {
+  // Deliberately narrow: an empty session, incomplete setup, or a failed start
+  // must still get the surface that says what is going on. An empty mixer would
+  // read as "Waves found nothing", which is worse than a splash.
+  let empty = await makeRenderActivityFixture(startupState: .idle, includeApp: false)
+  #expect(empty.store.showsWarmStartMixer == false)
+
+  let failed = await makeRenderActivityFixture(startupState: .failed("boom"))
+  #expect(failed.store.showsWarmStartMixer == false)
+
+  let awaiting = await makeRenderActivityFixture(startupState: .awaitingPrivacy)
+  #expect(awaiting.store.showsWarmStartMixer == false)
+}
+
+@MainActor
+@Test func warmingUpEndsOnceTheBackendIsRunning() async {
+  let fixture = await makeRenderActivityFixture(startupState: .running)
+  #expect(fixture.store.showsWarmStartMixer)
+  #expect(fixture.store.isWarmingUp == false, "a running store is not warming up")
 }
