@@ -770,6 +770,51 @@ final class AppStore {
 
   // MARK: - External control
 
+  /// Pushes a state change to subscribed control clients. Set by the app
+  /// delegate while the control socket is open, nil otherwise.
+  ///
+  /// A closure rather than a reference to the server, so the store stays
+  /// unaware of sockets and remains testable without one.
+  @ObservationIgnored var controlBroadcast: ((ControlResponse) -> Void)?
+
+  /// Surfaces a control-socket failure to the user. The plugin will show its own
+  /// "can't reach Waves" state, but the reason lives here, where it can be acted
+  /// on.
+  func reportExternalControlUnavailable() {
+    showToast(
+      title: "External control unavailable",
+      detail: "Waves could not open its control socket. Stream Deck control will not work.",
+      kind: .warning
+    )
+  }
+
+  /// Tells subscribers that an app's state moved, so a Stream Deck key shows the
+  /// truth even when the change was made in Waves itself.
+  func broadcastControlChange(forAppID logicalID: String) {
+    guard let controlBroadcast else { return }
+    guard let app = controlApp(forID: logicalID) else {
+      controlBroadcast(ControlResponse(ok: true, event: .appsChanged))
+      return
+    }
+    var response = ControlResponse(ok: true, event: .appChanged)
+    response.changed = ControlApp(
+      id: app.logicalID,
+      name: app.displayName,
+      running: app.pid != nil,
+      muted: app.isMuted,
+      volume: app.desiredVolume,
+      live: isLive(app),
+      managed: app.routingState == .managed
+    )
+    controlBroadcast(response)
+  }
+
+  /// Tells subscribers the roster itself changed — an app launched, quit, or was
+  /// excluded — so they re-list rather than being sent the whole set unprompted.
+  func broadcastControlRosterChange() {
+    controlBroadcast?(ControlResponse(ok: true, event: .appsChanged))
+  }
+
   /// The roster as the control surface describes it.
   ///
   /// Built from `visibleApps`, so an app the user has hidden from the mixer is

@@ -21,6 +21,14 @@ struct UserPreferences: Codable, Sendable {
   var autoRestoreDevice = true
   var enableURLScheme = false
   var urlSchemeAutomationAcknowledged = false
+  /// Whether Waves accepts commands over its control socket (the Stream Deck
+  /// plugin, `wavesctl`, and anything else local).
+  ///
+  /// Off by default, matching `enableURLScheme`. The socket is already
+  /// restricted to this user by filesystem permissions, but installing a plugin
+  /// should not silently hand every local process the ability to change what you
+  /// are hearing — that has to be a decision you made.
+  var enableExternalControl = false
   /// Logical IDs of apps the user has excluded from Waves' management — Waves
   /// will not tap or alter their audio (the escape hatch for DAWs, VoIP /
   /// echo-cancellation apps, and other audio tools that dislike being tapped).
@@ -77,6 +85,7 @@ struct UserPreferences: Codable, Sendable {
     case autoRestoreDevice
     case enableURLScheme
     case urlSchemeAutomationAcknowledged
+    case enableExternalControl
     case excludedAppIDs
     case pinnedAppIDs
     case appEqualizerSettings
@@ -119,6 +128,7 @@ struct UserPreferences: Codable, Sendable {
     enableURLScheme = try value(.enableURLScheme, defaults.enableURLScheme)
     urlSchemeAutomationAcknowledged = try value(
       .urlSchemeAutomationAcknowledged, defaults.urlSchemeAutomationAcknowledged)
+    enableExternalControl = try value(.enableExternalControl, defaults.enableExternalControl)
     excludedAppIDs = try value(.excludedAppIDs, defaults.excludedAppIDs)
     pinnedAppIDs = try value(.pinnedAppIDs, defaults.pinnedAppIDs)
     appEqualizerSettings = try value(.appEqualizerSettings, defaults.appEqualizerSettings)

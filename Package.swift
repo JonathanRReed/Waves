@@ -8,6 +8,7 @@ let package = Package(
   ],
   products: [
     .executable(name: "Waves", targets: ["Waves"]),
+    .executable(name: "wavesctl", targets: ["wavesctl"]),
     .library(name: "WavesAudioCore", targets: ["WavesAudioCore"]),
   ],
   dependencies: [
@@ -39,6 +40,14 @@ let package = Package(
     .target(
       name: "WavesAudioCore",
       path: "Sources/WavesAudioCore"
+    ),
+    // A terminal client for the control socket. Deliberately dependency-free
+    // and separate from the app so the control surface can be exercised without
+    // launching Waves's UI — and so a Stream Deck problem can be isolated to
+    // either the app or the plugin.
+    .executableTarget(
+      name: "wavesctl",
+      path: "Sources/wavesctl"
     ),
     .testTarget(
       name: "WavesTests",

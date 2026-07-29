@@ -272,6 +272,12 @@ private struct RenderActivityFixture {
   let backend: RenderActivityBackend
 }
 
+/// Shared with the control-surface tests: a running store with one managed app.
+@MainActor
+func makeControlStoreFixture() async -> AppStore {
+  await makeRenderActivityFixture().store
+}
+
 @MainActor
 private func makeRenderActivityFixture(
   routingState: RoutingState = .managed,

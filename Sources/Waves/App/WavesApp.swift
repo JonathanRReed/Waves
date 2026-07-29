@@ -292,6 +292,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private let terminationCoordinator = AppTerminationCoordinator()
   /// Records what actually failed during cleanup, before the process goes away.
   private let shutdownReportStore = ShutdownReportStore()
+  /// Accepts commands from the Stream Deck plugin, `wavesctl`, and anything else
+  /// local. Nil until the user turns external control on.
+  private var controlServer: ControlServer?
+  private var controlObservation: NSObjectProtocol?
 
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "URLScheme")
   private let lifecycleLogger = Logger(subsystem: "com.jonathanreed.Waves", category: "Lifecycle")
@@ -311,6 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     store?.previousShutdownReport = shutdownReportStore.load()
     shutdownReportStore.clear()
     store?.start()
+    reconcileControlServer()
     NSApp.setActivationPolicy(.regular)
     setupURLSchemeHandler()
     updateGlobalHotkeysState()
@@ -351,9 +356,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     self.store = store
   }
 
+  /// Starts or stops the control socket to match the preference.
+  ///
+  /// Called at launch and whenever the toggle changes, so turning external
+  /// control on takes effect immediately — a plugin that was showing "turn this
+  /// on in Waves" connects on its next retry rather than needing a relaunch.
+  func reconcileControlServer() {
+    guard let store else { return }
+    let shouldRun = store.preferences.enableExternalControl
+
+    if shouldRun, controlServer == nil {
+      let server = ControlServer(handler: ControlCommandHandler(store: store))
+      do {
+        try server.start()
+        controlServer = server
+        store.controlBroadcast = { [weak server] response in
+          server?.broadcast(response)
+        }
+      } catch {
+        lifecycleLogger.error(
+          "Could not open the control socket: \(String(describing: error), privacy: .public)")
+        store.reportExternalControlUnavailable()
+      }
+    } else if !shouldRun, let server = controlServer {
+      server.stop()
+      controlServer = nil
+      store.controlBroadcast = nil
+    }
+  }
+
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     removeGlobalHotkeys()
     removeURLSchemeHandler()
+    // Unlink the socket before anything else can block: a leftover file would
+    // make the next launch look like it is recovering from a crash.
+    controlServer?.stop()
+    controlServer = nil
 
     guard let store else { return .terminateNow }
     if store.shutdownResult != nil { return .terminateNow }
