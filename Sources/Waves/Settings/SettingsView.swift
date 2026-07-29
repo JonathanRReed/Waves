@@ -648,11 +648,29 @@ private struct ControlSettingsView: View {
           Text("Lets other apps and links send waves:// commands, like setting a volume or applying a profile.")
         }
         .disabled(!store.isAudioRunning)
+
+        Toggle(
+          isOn: Binding(
+            get: { store.preferences.enableExternalControl },
+            set: {
+              store.preferences.enableExternalControl = $0
+              store.persistPreferences()
+              // Start or stop the socket right now. Without this the toggle
+              // would only take effect on the next launch, and a plugin sitting
+              // on "turn this on in Waves" would keep saying so.
+              store.externalControlPreferenceChanged()
+            }
+          )
+        ) {
+          Text("Allow external control")
+          Text("Lets a Stream Deck plugin, or the wavesctl tool, read your apps and change their volume and mute.")
+        }
+        .disabled(!store.isAudioRunning)
       } header: {
         Text("Automation")
       } footer: {
         Text(
-          "Off by default. Turn it on only for automation you trust, and turn it back off when you're done. In the main window, keyboard control also works without this: arrow keys select an app, Space mutes, = and - adjust volume."
+          "Both are off by default. Turn them on only for automation you trust. External control listens on a private socket that only your user account can reach — never the network — and no other Mac can see it. In the main window, keyboard control also works without either: arrow keys select an app, Space mutes, = and - adjust volume."
         )
       }
     }

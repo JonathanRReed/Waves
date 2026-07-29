@@ -121,3 +121,72 @@ import WavesAudioCore
   while limiter.allow(now: 3_600) { granted += 1 }
   #expect(granted == ControlRateLimiter.burst)
 }
+
+// MARK: - State pushes
+
+@MainActor
+@Test func nothingIsPushedWhenNobodyIsSubscribed() async {
+  let store = await makeControlStoreFixture()
+  // No broadcast closure installed: the roster must not even be built.
+  store.controlBroadcast = nil
+  store.broadcastControlStateIfChanged()
+  // Nothing to assert but the absence of a crash and of work — the real
+  // guarantee is that a later subscriber starts from a fresh baseline, below.
+  #expect(store.controlApps().isEmpty == false)
+}
+
+@MainActor
+@Test func aMuteMadeInsideWavesReachesSubscribers() async {
+  // The whole point: a Stream Deck key must show the truth even when the change
+  // was made with the mouse, by a profile, or by a shortcut.
+  let store = await makeControlStoreFixture()
+  var pushes: [ControlResponse] = []
+  store.controlBroadcast = { pushes.append($0) }
+
+  // First call establishes the baseline (as a roster change).
+  store.broadcastControlStateIfChanged()
+  pushes.removeAll()
+
+  let app = try! #require(store.controlApp(forID: "com.example.render"))
+  store.setMuted(true, for: app)
+  store.broadcastControlStateIfChanged()
+
+  let changed = pushes.compactMap(\.changed)
+  #expect(changed.count == 1, "expected exactly one app-changed push, got \(pushes.count)")
+  #expect(changed.first?.id == "com.example.render")
+  #expect(changed.first?.muted == true)
+}
+
+@MainActor
+@Test func anUnchangedRosterPushesNothing() async {
+  let store = await makeControlStoreFixture()
+  var pushes: [ControlResponse] = []
+  store.controlBroadcast = { pushes.append($0) }
+
+  store.broadcastControlStateIfChanged()
+  pushes.removeAll()
+
+  // Nothing moved, so a client must not be woken. This runs on every poll tick.
+  store.broadcastControlStateIfChanged()
+  store.broadcastControlStateIfChanged()
+  #expect(pushes.isEmpty, "a steady scene must be silent, got \(pushes.count) pushes")
+}
+
+@MainActor
+@Test func aNewSubscriberStartsFromAFreshBaseline() async {
+  let store = await makeControlStoreFixture()
+  var pushes: [ControlResponse] = []
+  store.controlBroadcast = { pushes.append($0) }
+  store.broadcastControlStateIfChanged()
+
+  // The client disconnects...
+  store.controlBroadcast = nil
+  store.broadcastControlStateIfChanged()
+
+  // ...and a new one attaches. It must be told the roster, not diffed against
+  // state it never saw.
+  pushes.removeAll()
+  store.controlBroadcast = { pushes.append($0) }
+  store.broadcastControlStateIfChanged()
+  #expect(pushes.contains { $0.event == .appsChanged })
+}

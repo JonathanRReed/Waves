@@ -770,6 +770,14 @@ final class AppStore {
 
   // MARK: - External control
 
+  /// Called when the external-control preference changes, so the socket opens or
+  /// closes immediately rather than on the next launch. Set by the app delegate.
+  @ObservationIgnored var onExternalControlPreferenceChange: (() -> Void)?
+
+  func externalControlPreferenceChanged() {
+    onExternalControlPreferenceChange?()
+  }
+
   /// Pushes a state change to subscribed control clients. Set by the app
   /// delegate while the control socket is open, nil otherwise.
   ///
@@ -788,31 +796,43 @@ final class AppStore {
     )
   }
 
-  /// Tells subscribers that an app's state moved, so a Stream Deck key shows the
-  /// truth even when the change was made in Waves itself.
-  func broadcastControlChange(forAppID logicalID: String) {
-    guard let controlBroadcast else { return }
-    guard let app = controlApp(forID: logicalID) else {
+  /// Last state pushed to subscribers, so only real changes are sent.
+  @ObservationIgnored private var lastBroadcastControlApps: [String: ControlApp] = [:]
+
+  /// Pushes whatever actually changed since the last push.
+  ///
+  /// Driven by change detection rather than by instrumenting every mutation
+  /// site. A Stream Deck key has to reflect a mute made with the mouse, by a
+  /// profile apply, by a keyboard shortcut, or by the app quitting — and hooking
+  /// each of those individually is how one gets missed. Comparing the rendered
+  /// state catches all of them, including changes Waves makes to itself.
+  ///
+  /// Costs nothing when no one is listening: the roster is not even built.
+  func broadcastControlStateIfChanged() {
+    guard let controlBroadcast else {
+      // Nothing subscribed. Drop the baseline so a later subscriber gets a fresh
+      // picture rather than diffing against a stale one.
+      if !lastBroadcastControlApps.isEmpty { lastBroadcastControlApps = [:] }
+      return
+    }
+
+    let current = controlApps()
+    let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+
+    // Roster changes first: a client that learns an app appeared or vanished
+    // re-lists, which supersedes any per-app push for it.
+    if Set(currentByID.keys) != Set(lastBroadcastControlApps.keys) {
+      lastBroadcastControlApps = currentByID
       controlBroadcast(ControlResponse(ok: true, event: .appsChanged))
       return
     }
-    var response = ControlResponse(ok: true, event: .appChanged)
-    response.changed = ControlApp(
-      id: app.logicalID,
-      name: app.displayName,
-      running: app.pid != nil,
-      muted: app.isMuted,
-      volume: app.desiredVolume,
-      live: isLive(app),
-      managed: app.routingState == .managed
-    )
-    controlBroadcast(response)
-  }
 
-  /// Tells subscribers the roster itself changed — an app launched, quit, or was
-  /// excluded — so they re-list rather than being sent the whole set unprompted.
-  func broadcastControlRosterChange() {
-    controlBroadcast?(ControlResponse(ok: true, event: .appsChanged))
+    for app in current where lastBroadcastControlApps[app.id] != app {
+      var response = ControlResponse(ok: true, event: .appChanged)
+      response.changed = app
+      controlBroadcast(response)
+    }
+    lastBroadcastControlApps = currentByID
   }
 
   /// The roster as the control surface describes it.
@@ -2467,6 +2487,9 @@ final class AppStore {
           self.liveLevels = levels
         }
         self.refreshLiveLinger()
+        // Piggy-backs on the poll rather than adding a timer: this is already
+        // the cadence at which anything a control client cares about can move.
+        self.broadcastControlStateIfChanged()
         try? await Task.sleep(for: interval)
       }
     }

@@ -6,6 +6,20 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-28
+
+Everything in 1.3.1 below, plus the start of external control. 1.3.1 was never
+published, so this release carries both.
+
+### Added
+- Allow external control (Settings ▸ Shortcuts ▸ Automation, off by default).
+  Waves can accept commands from other software on your Mac — reading which apps
+  it manages, and changing their volume and mute. It listens on a private socket
+  that only your user account can reach; it is never on the network, and no
+  other Mac can see it. This is the foundation the Stream Deck plugin will use.
+- Add `wavesctl`, a small command-line tool for the same thing. `wavesctl apps`
+  lists what Waves manages; `wavesctl toggle <app>` mutes one.
+
 ## [1.3.1] - 2026-07-28
 
 A refinement release. No new features — Waves does the same things, using a

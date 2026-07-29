@@ -314,6 +314,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // that nothing was recorded.
     store?.previousShutdownReport = shutdownReportStore.load()
     shutdownReportStore.clear()
+    store?.onExternalControlPreferenceChange = { [weak self] in
+      self?.reconcileControlServer()
+    }
     store?.start()
     reconcileControlServer()
     NSApp.setActivationPolicy(.regular)
