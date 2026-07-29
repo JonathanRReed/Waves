@@ -229,7 +229,45 @@ head -12 ../Waves-site/src/data/CHANGELOG.md
 grep -c "sparkle:version" ../Waves-site/public/appcast.xml
 ```
 
-Review the site change, then deploy the site through its normal release process.
+Review the site change, then deploy the site through its normal release process
+(`bun run build && npx wrangler deploy`), and verify what is actually live —
+not what you uploaded:
+
+```bash
+curl -s https://waves.jonathanrreed.com/appcast.xml | grep -m1 shortVersionString
+curl -s https://waves.jonathanrreed.com/ | grep -o "releases/download/v[0-9.]*/Waves.dmg" | sort -u
+```
+
+## Update the Homebrew Tap
+
+`brew install --cask jonathanrreed/tap/waves` installs from
+[JonathanRReed/homebrew-tap](https://github.com/JonathanRReed/homebrew-tap),
+which is a separate repository from the `Casks/waves.rb` template in this one.
+Updating only the template updates nobody: the tap sat on 1.3.0 for the whole
+1.4.0 release, so every `brew install` served a two-releases-old build.
+
+In the tap's `Casks/waves.rb`, set `version` and `sha256` — the checksum of the
+**published** DMG, from the asset you downloaded back:
+
+```bash
+cut -d ' ' -f 1 /tmp/waves-release/Waves.dmg.sha256
+```
+
+Then confirm it parses and the checksum is the one users will fetch:
+
+```bash
+ruby -c Casks/waves.rb && brew audit --cask ./Casks/waves.rb
+```
+
+## Release Channels Checklist
+
+Four places carry a version, and a release is not finished until all four agree.
+Each has been missed at least once:
+
+- [ ] GitHub release (tag, DMG, checksum, dSYM)
+- [ ] `appcast.xml` on the site — Sparkle
+- [ ] `site.ts` and `src/data/CHANGELOG.md` on the site — the download button
+- [ ] `Casks/waves.rb` in the tap repo — Homebrew
 
 ## Rollback and Recovery
 
