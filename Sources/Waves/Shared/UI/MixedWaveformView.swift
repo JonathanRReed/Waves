@@ -51,7 +51,10 @@ final class WaveEngine {
     /// from looking mechanically mirrored.
     let speeds: [Double]
     let weights: [Double]
-    let color: Color
+    /// Index into `WavesTheme.waveVoiceColors`. Stored rather than resolved so an
+    /// app keeps the same voice across palette and appearance changes — the
+    /// identity is the slot, not the hue.
+    let colorIndex: Int
 
     init(seed: UInt64) {
       var rng = SplitMix64(seed: seed)
@@ -73,7 +76,7 @@ final class WaveEngine {
         rng.nextDouble() * 2 * .pi,
         rng.nextDouble() * 2 * .pi,
       ]
-      color = Self.palette[Int(seed % UInt64(Self.palette.count))]
+      colorIndex = Int(seed % UInt64(Self.voiceSlotCount))
     }
 
     /// The partial-weight mix an equalized voice eases toward: energy moves
@@ -81,14 +84,11 @@ final class WaveEngine {
     /// louder. Same total weight as the resting mix.
     static let equalizedWeights: [Double] = [0.42, 0.36, 0.22]
 
-    /// Cyan/teal family only, per DESIGN.md's Signal Rarity Rule — the voices
-    /// differ in temperature within the signal hue, never in hue family.
-    static let palette: [Color] = [
-      Color(red: 158.0 / 255.0, green: 247.0 / 255.0, blue: 1.0),
-      Color(red: 51.0 / 255.0, green: 222.0 / 255.0, blue: 242.0 / 255.0),
-      Color(red: 13.0 / 255.0, green: 184.0 / 255.0, blue: 199.0 / 255.0),
-      Color(red: 0.0, green: 148.0 / 255.0, blue: 168.0 / 255.0),
-    ]
+    /// How many distinct voice slots exist. The colours themselves live on
+    /// `WavesTheme.waveVoiceColors`, one family per palette and appearance, per
+    /// DESIGN.md's Signal Rarity Rule: voices differ in temperature within one
+    /// hue, never in hue family.
+    static let voiceSlotCount = 4
   }
 
   private(set) var voices: [String: Voice] = [:]
@@ -233,6 +233,11 @@ struct MixedWaveformView: View {
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.colorSchemeContrast) private var contrast
+  /// The waveform is the app's signature surface and was the only themed one
+  /// that ignored the theme: every colour was a compile-time constant tuned for
+  /// the dark palette, leaving it near-invisible on macOS Light — the default
+  /// appearance — and clashing with Graphite.
+  @Environment(\.wavesTheme) private var theme
   /// Paused while no Waves window is on screen; halved while Waves is visible
   /// but not frontmost. See `RenderActivityMonitor`.
   @Environment(\.renderCadence) private var cadence
@@ -312,6 +317,14 @@ struct MixedWaveformView: View {
   }
 
   // MARK: Drawing
+
+  /// Resolves a voice's slot to a colour from the current palette. Wraps
+  /// defensively so a future palette with fewer entries cannot trap.
+  private func voiceColor(_ voice: WaveEngine.Voice) -> Color {
+    let palette = theme.waveVoiceColors
+    guard !palette.isEmpty else { return theme.waveMid }
+    return palette[voice.colorIndex % palette.count]
+  }
 
   private func draw(_ context: GraphicsContext, size: CGSize) {
     let width = size.width
@@ -397,12 +410,12 @@ struct MixedWaveformView: View {
     baseline.addLine(to: CGPoint(x: width, y: midY))
     context.stroke(
       baseline,
-      with: .color(.white.opacity(increased ? 0.28 : 0.10)),
+      with: .color(theme.hairline(increasedContrast: increased)),
       lineWidth: 1
     )
 
     let coreGradient = GraphicsContext.Shading.linearGradient(
-      Gradient(colors: [Self.mid, Self.core, Self.mid]),
+      Gradient(colors: [theme.waveMid, theme.waveCore, theme.waveMid]),
       startPoint: CGPoint(x: 0, y: midY),
       endPoint: CGPoint(x: width, y: midY)
     )
@@ -433,7 +446,7 @@ struct MixedWaveformView: View {
     fillPath.closeSubpath()
     context.drawLayer { layer in
       layer.opacity = (0.05 + 0.09 * energy) * liveMix * Self.glow
-      layer.fill(fillPath, with: .color(Self.mid))
+      layer.fill(fillPath, with: .color(theme.waveMid))
     }
 
     // 4. The component voices — luminous threads, each in its own cyan
@@ -446,11 +459,11 @@ struct MixedWaveformView: View {
       context.drawLayer { layer in
         layer.addFilter(.blur(radius: 2.5))
         layer.opacity = (0.16 + 0.22 * voice.eased) * liveMix * Self.glow
-        layer.stroke(path, with: .color(voice.color), style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
+        layer.stroke(path, with: .color(voiceColor(voice)), style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
       }
       context.drawLayer { layer in
         layer.opacity = (0.32 + 0.38 * voice.eased) * liveMix
-        layer.stroke(path, with: .color(voice.color), style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
+        layer.stroke(path, with: .color(voiceColor(voice)), style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
       }
     }
 
@@ -507,8 +520,6 @@ struct MixedWaveformView: View {
     return path
   }
 
-  private static let core = Color(red: 140.0 / 255.0, green: 247.0 / 255.0, blue: 1.0)
-  private static let mid = Color(red: 0.0, green: 217.0 / 255.0, blue: 230.0 / 255.0)
   private static let glow = 1.0
 }
 
