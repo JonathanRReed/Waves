@@ -11,7 +11,20 @@ APP_BUILD="${APP_BUILD:-7}"
 # Baked into Info.plist so a diagnostic or crash report can name the exact
 # commit a binary came from. WAV-004's lesson: version and build alone could not
 # distinguish two different binaries once a rebuild reused 1.3.0 (6).
-APP_SOURCE_REVISION="${APP_SOURCE_REVISION:-$(git -C "$(dirname "$0")/.." rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
+# A "-dirty" suffix marks a build made from a modified working tree, so a
+# diagnostic can never name a commit that is not what actually shipped.
+resolve_source_revision() {
+  local root
+  root="$(cd "$(dirname "$0")/.." && pwd)"
+  local revision
+  revision="$(git -C "$root" rev-parse --short=12 HEAD 2>/dev/null)" || { echo unknown; return; }
+  [ -n "$revision" ] || { echo unknown; return; }
+  if ! git -C "$root" diff --quiet HEAD 2>/dev/null; then
+    revision="$revision-dirty"
+  fi
+  echo "$revision"
+}
+APP_SOURCE_REVISION="${APP_SOURCE_REVISION:-$(resolve_source_revision)}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 SWIFT_SDK="${SWIFT_SDK:-}"

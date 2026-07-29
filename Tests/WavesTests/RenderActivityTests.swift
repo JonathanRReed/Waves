@@ -91,10 +91,16 @@ import WavesAudioCore
   await fixture.backend.resetLevelCallCount()
   let elapsed = await quietWindow()
 
-  // Not zero: the menu-bar glyph is on screen even when every window is hidden,
-  // and it reads these levels. But the rate must collapse to the heartbeat.
+  // Bounded on BOTH sides. An upper bound alone would be satisfied by the poll
+  // stopping altogether — which is exactly the regression that made the
+  // menu-bar glyph claim "idle" during playback — so the lower bound is the
+  // half that actually protects the fix.
   let hiddenCalls = await fixture.backend.levelCallCount()
   let allowed = Int(elapsed.rounded(.up)) + 1
+  #expect(
+    hiddenCalls > 0,
+    "the heartbeat must keep running so the menu-bar glyph stays honest"
+  )
   #expect(
     hiddenCalls <= allowed,
     "hidden surfaces polled \(hiddenCalls) times in \(elapsed)s (allowed \(allowed))"
@@ -136,6 +142,9 @@ import WavesAudioCore
 
   let calls = await fixture.backend.levelCallCount()
   let allowed = Int(elapsed.rounded(.up)) + 1
+  // Both bounds again: releasing the last meter surface drops to the heartbeat,
+  // it does not stop the poll.
+  #expect(calls > 0, "the heartbeat must survive the last surface going away")
   #expect(calls <= allowed, "expected the heartbeat, got \(calls) calls in \(elapsed)s")
 }
 
@@ -170,13 +179,37 @@ import WavesAudioCore
   // actually exists.
   let fixture = await makeRenderActivityFixture(routingState: .managed)
   fixture.store.setAdaptiveMixMode(.both)
+  await fixture.backend.resetAdaptiveAnalysisCount()
 
-  // Several passes in quick succession is the signal; waiting for the count
-  // rather than the clock keeps this honest under a loaded suite.
-  #expect(
-    await waitUntil { await fixture.backend.adaptiveAnalysisCount() > 5 },
-    "managed routes must keep the full cadence"
-  )
+  // Assert a RATE, not a total: a bare "count exceeded N" would eventually be
+  // satisfied by the 1 s idle heartbeat too, given enough wall clock, so it
+  // would not distinguish the two cadences at all.
+  //
+  // The discriminator is the idle path's hard floor of one pass per second.
+  // Observing more passes than seconds elapsed is therefore impossible at the
+  // idle cadence no matter how fast the machine is — and a loaded machine can
+  // only ever *reduce* the count, so this cannot pass spuriously. Accumulating
+  // until the margin is proved (rather than sampling one fixed window) keeps a
+  // starved scheduler from failing it spuriously either.
+  let start = ContinuousClock.now
+  var provedFullCadence = false
+  var observed = 0
+  var seconds = 0.0
+  while seconds < 20 {
+    observed = await fixture.backend.adaptiveAnalysisCount()
+    let interval = ContinuousClock.now - start
+    seconds = Double(interval.components.seconds)
+      + Double(interval.components.attoseconds) / 1e18
+    if Double(observed) > seconds + 1.5 {
+      provedFullCadence = true
+      break
+    }
+    try? await Task.sleep(for: .milliseconds(100))
+  }
+
+  let detail = "managed routes must keep the full cadence: only \(observed) passes "
+    + "in \(seconds)s, which the 1 Hz idle heartbeat alone could account for"
+  #expect(provedFullCadence, "\(detail)")
 }
 
 @MainActor

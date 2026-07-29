@@ -494,3 +494,36 @@ private func hardeningSnapshot() -> AudioSessionSnapshot {
     )
   )
 }
+
+// MARK: - Route liveness (the 1.3.0 rebuild loop)
+
+@Test func silentRouteIsNotMistakenForADeadOne() {
+  // The whole point of the rule: an app holding its IO open while emitting
+  // digital silence keeps producing callbacks, so the tick advances and the
+  // route reads as alive. Judging by level instead is what made 1.3.0 destroy
+  // and rebuild a working route every six seconds, forever.
+  #expect(RouteLivenessJudgment.isRendering(currentTick: 5_001, previousTick: 5_000))
+  #expect(RouteLivenessJudgment.isRendering(currentTick: 1, previousTick: 0))
+}
+
+@Test func routeThatStoppedRenderingIsDetected() {
+  // A stalled IO proc leaves the count exactly where it was.
+  #expect(RouteLivenessJudgment.isRendering(currentTick: 5_000, previousTick: 5_000) == false)
+  #expect(RouteLivenessJudgment.isRendering(currentTick: 0, previousTick: 0) == false)
+}
+
+@Test func firstObservationNeverCondemnsARoute() {
+  // One sample cannot prove absence, and the caller has no baseline yet. Biased
+  // toward "alive" for exactly one poll: a wrong "dead" destroys a working
+  // route, a wrong "alive" costs one extra 250 ms poll.
+  #expect(RouteLivenessJudgment.isRendering(currentTick: 0, previousTick: nil))
+  #expect(RouteLivenessJudgment.isRendering(currentTick: .max, previousTick: nil))
+}
+
+@Test func rebuiltControllerAndCounterWraparoundBothReadAsRendering() {
+  // A fresh controller restarts its counter at 0 against a stale high baseline,
+  // and the counter wraps with &+= — both are "different", so neither can
+  // strand a live route as falsely dead.
+  #expect(RouteLivenessJudgment.isRendering(currentTick: 0, previousTick: 9_999))
+  #expect(RouteLivenessJudgment.isRendering(currentTick: 0, previousTick: .max))
+}

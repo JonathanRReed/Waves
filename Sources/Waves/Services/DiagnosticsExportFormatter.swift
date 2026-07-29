@@ -4,6 +4,10 @@ import WavesAudioCore
 struct DiagnosticsMetadata: Equatable {
   let shortVersion: String
   let buildVersion: String
+  /// The commit the running binary was built from, when the packaging script
+  /// stamped one. Version and build alone could not tell two binaries apart
+  /// once a rebuild reused 1.3.0 (6).
+  let sourceRevision: String?
   let operatingSystemVersion: String
 
   init(bundleInfo: [String: Any], operatingSystemVersion: String) {
@@ -15,6 +19,8 @@ struct DiagnosticsMetadata: Equatable {
       bundleInfo["CFBundleVersion"],
       fallback: "development"
     )
+    self.sourceRevision = (bundleInfo["WavesSourceRevision"] as? String)
+      .map { Self.normalized($0, fallback: "unknown") }
     self.operatingSystemVersion = Self.normalized(
       operatingSystemVersion,
       fallback: "unknown"
@@ -81,6 +87,7 @@ enum DiagnosticsExportFormatter {
       "Waves diagnostics",
       "Waves version (CFBundleShortVersionString): \(metadata.shortVersion)",
       "Waves build (CFBundleVersion): \(metadata.buildVersion)",
+      "Waves source revision (WavesSourceRevision): \(boundedOptional(metadata.sourceRevision, maximumLength: 64))",
       "macOS: \(metadata.operatingSystemVersion)",
       "Privacy note: Fields marked below may include app names, identifiers, device names, route states, or error text. This report contains no audio samples.",
       "",
@@ -149,6 +156,9 @@ enum DiagnosticsExportFormatter {
     lines.append("Recorded on macOS: \(bounded(report.osVersion, maximumLength: 128))")
     lines.append("Backend cleanup result: \(boundedOptional(report.backendCompletion, maximumLength: 64))")
     lines.append("Persistence issue count: \(report.persistenceIssues.count)")
+    for issue in report.persistenceIssues.prefix(maximumCleanupRows) {
+      lines.append("  Previous persistence issue [error text]: \(bounded(issue, maximumLength: 1_000))")
+    }
     if report.droppedPersistenceIssues > 0 {
       lines.append("Persistence issues omitted by bound: \(report.droppedPersistenceIssues)")
     }

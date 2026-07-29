@@ -2140,6 +2140,12 @@ final class AppStore {
         adaptiveGainsDBByAppID = [:]
         lastPublishedAdaptiveGains = [:]
         adaptiveGainRepublishCountdown = 0
+        // Reset the engine too, matching what the backend is now applying
+        // (unity for every controller). Leaving it frozen at its last
+        // attenuation meant the first pass after a route returned would resume
+        // from stale ducking — and it kept per-app state for apps that had since
+        // quit.
+        adaptivePolicyEngine.reset()
         await backend.setAdaptiveGains([:])
       }
       return false
@@ -3012,6 +3018,11 @@ final class AppStore {
         restartAdaptiveMixing()
       case .both:
         preferences.adaptiveMixMode = .loudnessBalance
+        // Record the downgrade as the mode to restore, so switching Adaptive
+        // Mix off and on again brings back Loudness Balance — what the user was
+        // last actually shown — rather than resurrecting Both, which would turn
+        // straight around and clear this auto-pause setting again.
+        lastActiveAdaptiveMixMode = .loudnessBalance
         restartAdaptiveMixing()
       case .off, .loudnessBalance:
         break
@@ -3869,15 +3880,29 @@ final class AppStore {
   /// profile's members: restoring only member levels would leave any app the
   /// user tweaked mid-session stranded at its session value.
   private func captureMixRestorePoint(before profile: Profile) {
-    let entries = visibleApps.map { app in
-      ProfileEntry(
+    let entries = visibleApps.map { app -> ProfileEntry in
+      // Only apps whose mix Waves actually owns get a level-bearing entry.
+      //
+      // Capturing levels for every visible app made Reset Mix a mass-enrollment
+      // button: a level-bearing entry has `hasLevels == true`, so applying the
+      // restore point sent a route intent for every running app — building a
+      // process tap, a private aggregate device, and a live IOProc for each one,
+      // for apps the user had never touched. Worse, `persistProfileRows` then
+      // wrote a durable intent for each, so every subsequent launch replayed the
+      // whole set. Untouched apps still need a membership-only entry so the
+      // restore point remembers they were present, but nothing about their
+      // levels needs restoring — they were never changed.
+      let isOwned = app.routingState == .managed
+        || preferences.appAudioIntents[app.logicalID] != nil
+      guard isOwned else { return ProfileEntry(appID: app.logicalID) }
+      return ProfileEntry(
         appID: app.logicalID,
         desiredVolume: app.desiredVolume,
         isMuted: app.isMuted,
         volumeBoost: app.volumeBoost
       )
     }
-    guard !entries.isEmpty else { return }
+    guard entries.contains(where: \.hasLevels) else { return }
     mixRestorePoint = MixRestorePoint(
       profileName: profile.name,
       entries: entries,
@@ -4697,16 +4722,28 @@ final class AppStore {
     NotificationCenter.default.post(name: .wavesKeyboardShortcutsPreferenceChanged, object: nil)
   }
 
-  /// Decorate-sort-undecorate: fold the case once per app instead of paying for
-  /// a full ICU collation on every one of the O(n log n) comparisons. This is
-  /// the default sort mode and runs on every `visibleApps` read, which the level
+  /// The key names are sorted by: case- and diacritic-folded, so "Ätna" lands
+  /// next to "Atna" rather than after "Zoom" the way a raw `lowercased()`
+  /// comparison would put it.
+  ///
+  /// `lowercased()` alone is not a substitute for ICU collation — it leaves
+  /// accented characters at their Unicode scalar values, which sorts them after
+  /// every unaccented letter. Folding diacritics too keeps the order a person
+  /// would expect while still reducing each comparison to a plain string compare.
+  static func displayNameSortKey(_ name: String) -> String {
+    name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+  }
+
+  /// Decorate-sort-undecorate: build each app's key once instead of paying for a
+  /// full ICU collation on every one of the O(n log n) comparisons. This is the
+  /// default sort mode and runs on every `visibleApps` read, which the level
   /// poll drives several times a second.
   private func sortedByFoldedDisplayName(_ apps: [AudioApp]) -> [AudioApp] {
     struct SortEntry {
       let key: String
       let app: AudioApp
     }
-    let decorated = apps.map { SortEntry(key: $0.displayName.lowercased(), app: $0) }
+    let decorated = apps.map { SortEntry(key: Self.displayNameSortKey($0.displayName), app: $0) }
     let sorted = decorated.sorted { lhs, rhs in
       if lhs.key != rhs.key { return lhs.key < rhs.key }
       return lhs.app.logicalID < rhs.app.logicalID
@@ -4765,8 +4802,15 @@ final class AppStore {
     return 4
   }
 
+  /// Shared by every sort mode's name ordering and tiebreak, so all four agree
+  /// on what "alphabetical" means. Falls back to `logicalID` for identical
+  /// names: Swift's sort is not stable, so two apps sharing a display name would
+  /// otherwise swap places between reads and make rows jump under the pointer.
   private func displayNameComparator(_ app1: AudioApp, _ app2: AudioApp) -> Bool {
-    app1.displayName.localizedCaseInsensitiveCompare(app2.displayName) == .orderedAscending
+    let key1 = Self.displayNameSortKey(app1.displayName)
+    let key2 = Self.displayNameSortKey(app2.displayName)
+    if key1 != key2 { return key1 < key2 }
+    return app1.logicalID < app2.logicalID
   }
 
   private var manualOrderComparator: (AudioApp, AudioApp) -> Bool {

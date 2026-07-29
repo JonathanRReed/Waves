@@ -129,6 +129,13 @@ struct RowLevelMeter: View {
             if Task.isCancelled { return }
             ticks += 1
           }
+          // Unconditional: the loop can also exit on its safety cap, or with
+          // the window having gone off screen partway through (this closure
+          // captured the cadence at task start and cannot see that change), and
+          // either way nothing further will advance the model. Resetting here is
+          // what actually guarantees the documented invariant that a later
+          // remount never inherits a stale peak.
+          if !model.isSettled { model.reset() }
           isAnimating = false
         }
       }

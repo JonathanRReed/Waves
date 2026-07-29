@@ -69,6 +69,13 @@ struct ProfileEditorSheet: View {
     .frame(width: 460, height: 560)
     .background(WavesBackground())
     .onAppear { resolveOfflineMembersIfNeeded() }
+    // A member's app can quit while the sheet is open. The roster only ever
+    // grows, so unticking stays reversible (the reason it is snapshotted at
+    // all) while an app that goes offline mid-edit keeps its row instead of
+    // vanishing from the sheet and being dropped by Save.
+    .onChange(of: store.visibleApps.map(\.logicalID)) { _, ids in
+      absorbNewlyOfflineMembers(visibleIDs: Set(ids))
+    }
   }
 
   private var header: some View {
@@ -236,6 +243,17 @@ struct ProfileEditorSheet: View {
 
   /// The roster is fixed for the life of the sheet: which members are offline
   /// depends on what is running, not on what is currently ticked.
+  /// Adds any still-selected member that has just left the visible list.
+  /// Additive only — nothing is ever removed, so a row the user unticked stays
+  /// on screen and can be re-ticked.
+  private func absorbNewlyOfflineMembers(visibleIDs: Set<String>) {
+    guard didResolveOfflineMembers else { return }
+    let known = Set(offlineMemberIDs)
+    let newlyOffline = selectedIDs.subtracting(visibleIDs).subtracting(known)
+    guard !newlyOffline.isEmpty else { return }
+    offlineMemberIDs = (offlineMemberIDs + newlyOffline).sorted()
+  }
+
   private func resolveOfflineMembersIfNeeded() {
     guard !didResolveOfflineMembers else { return }
     didResolveOfflineMembers = true

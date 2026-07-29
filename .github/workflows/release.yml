@@ -72,6 +72,23 @@ jobs:
         run: |
           set -euo pipefail
           ruby -c Casks/waves.rb
+
+          # RELEASE_BUILD and script/build_and_run.sh's APP_BUILD are two copies
+          # of one number, previously tied together only by a comment. If they
+          # drift, the packaged app and every local build disagree about which
+          # build this is — and the plist check downstream cannot catch it,
+          # because it validates the plist against the same value that generated
+          # it.
+          SCRIPT_BUILD="$(sed -n 's/^APP_BUILD="\${APP_BUILD:-\([0-9][0-9]*\)}"$/\1/p' script/build_and_run.sh)"
+          if [ -z "$SCRIPT_BUILD" ]; then
+            echo "::error::Could not read APP_BUILD from script/build_and_run.sh."
+            exit 1
+          fi
+          if [ "$SCRIPT_BUILD" != "$RELEASE_BUILD" ]; then
+            echo "::error::RELEASE_BUILD is $RELEASE_BUILD but script/build_and_run.sh has APP_BUILD $SCRIPT_BUILD. Bump both to the same integer."
+            exit 1
+          fi
+
           ruby <<'RUBY'
           version = ENV.fetch("RELEASE_VERSION")
           changelog = File.read("CHANGELOG.md")

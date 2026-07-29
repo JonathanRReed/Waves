@@ -299,8 +299,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     store = Self.bootstrapStore
     // Read before anything can overwrite it, so this launch's Diagnostics can
-    // report exactly how the previous one ended.
+    // report exactly how the previous one ended — then consume it.
+    //
+    // Clearing is what makes the report trustworthy. It is written only on a
+    // graceful quit, so leaving it behind means a force-quit, a panic, or a
+    // macOS resource-limit kill would show the *previous* graceful quit's
+    // "clean" result as if it described the crash. That is the exact incident
+    // class this release exists for, and a stale "clean" is worse than nothing.
+    // An abnormal exit now leaves no file, and the next launch honestly reports
+    // that nothing was recorded.
     store?.previousShutdownReport = shutdownReportStore.load()
+    shutdownReportStore.clear()
     store?.start()
     NSApp.setActivationPolicy(.regular)
     setupURLSchemeHandler()

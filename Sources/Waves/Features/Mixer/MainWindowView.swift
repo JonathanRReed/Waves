@@ -351,8 +351,11 @@ enum SourceFilter: String, CaseIterable, Identifiable {
     }
   }
 
-  func emptyMessage(searchText: String) -> String {
-    if !searchText.isEmpty {
+  /// Takes the caller's already-trimmed `isSearching` rather than raw text, so
+  /// the title, this message, and the Clear Search button cannot disagree about
+  /// whether a whitespace-only query counts as a search.
+  func emptyMessage(isSearching: Bool) -> String {
+    if isSearching {
       return "Try a different search term."
     }
     switch self {
@@ -767,7 +770,7 @@ private struct SourceListView: View {
       return "None of \(profile.name)'s \(profile.entries.count) \(profile.entries.count == 1 ? "app" : "apps") are running right now. Launch one to control it here."
     }
     if case .source(let filter) = scope {
-      return filter.emptyMessage(searchText: searchText)
+      return filter.emptyMessage(isSearching: isSearching)
     }
     return ""
   }

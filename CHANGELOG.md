@@ -12,6 +12,11 @@ A refinement release. No new features — Waves does the same things, using a
 small fraction of the energy, and tells you more when something goes wrong.
 
 ### Fixed
+- Stop Reset Mix from taking over every running app. Applying a profile
+  snapshotted the levels of *every* app on screen, so pressing Reset Mix sent a
+  volume change to all of them — building an audio tap and a private device for
+  apps you had never touched, and remembering that choice on every later launch.
+  It now snapshots only the apps Waves actually manages.
 - Stop rebuilding a working audio route every six seconds. Waves decided a route
   had died when it stopped hearing sound through it — but an app can hold its
   audio open and send silence indefinitely: a call with nobody talking, a stream
@@ -74,6 +79,27 @@ small fraction of the energy, and tells you more when something goes wrong.
   behind keeps its app silent, and nothing used to retry it.
 - Don't start the update checker inside the test suite, where its scheduled check
   could raise a dialog no one can answer and hang the run.
+- Keep a profile member visible if its app quits while the profile editor is
+  open. Its row used to disappear, and Save then wrote the profile without it.
+- Don't report the last clean quit as though it described a crash. The shutdown
+  record is written only on a normal quit, so after a force quit or a system kill
+  the previous quit's "clean" result was shown as if it were the crash's. Waves
+  now consumes the record at launch, and honestly reports nothing when there is
+  nothing to report.
+- Sort app names the way a person would read them. The faster sort added in this
+  release compared raw character values, which pushed accented names ("Ätna")
+  after every unaccented one. Names now fold accents as well as case, all four
+  sort orders agree, and apps sharing a name no longer swap places between
+  refreshes.
+- Stop clearing "pause music for conferencing" behind your back. Turning that on
+  downgrades Adaptive Mix from Both to Loudness Balance; switching Adaptive Mix
+  off and on then restored Both, which silently turned the setting back off.
+- Reset the adaptive engine when nothing is routed, so a returning route starts
+  clean instead of resuming from stale ducking.
+- Show the previous shutdown's persistence errors and the running build's source
+  revision in the diagnostics report. Both were recorded but never printed.
+- Say "Try a different search term" only when the query is a real search — a
+  whitespace-only query made the empty state's heading and message disagree.
 
 ### Added
 - Record what happened during shutdown. If cleanup finishes in a degraded state,

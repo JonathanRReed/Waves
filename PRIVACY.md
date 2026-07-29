@@ -28,6 +28,11 @@ Locally, in `~/Library/Application Support/Waves/` (or `~/.Waves` as a fallback)
 
 - Your preferences, profiles, per-app EQ and adaptive role settings, per-device
   volume settings, and the last session.
+- `Diagnostics/last-shutdown.json`: a small, bounded record of how Waves last
+  shut down, written at quit and replaced each time. When cleanup finishes in a
+  degraded state it names the stage that failed, its numeric status, and the app
+  identifier involved, so the next launch can explain what went wrong instead of
+  losing it with the process. Waves reads it back into the diagnostics report.
 
 These can include app names, bundle identifiers, route state, selected output
 device identifiers, diagnostic notes, and your volume/mute/boost choices. They

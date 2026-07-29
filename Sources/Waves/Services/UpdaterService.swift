@@ -19,21 +19,29 @@ final class UpdaterService {
     }
   }
 
-  /// True only in a real packaged Waves bundle.
+  /// Whether there is anything for Sparkle to check.
   ///
-  /// Sparkle has nothing to update in a test binary, but starting its updater
-  /// there still arms the scheduler — and when a check fires it puts up a modal
-  /// `NSAlert` on the main thread, which in a headless test host nobody can
-  /// dismiss. That deadlocks the entire run: `PhaseOneContractTests` constructs
-  /// `WavesApp`, which constructs this service, so the whole suite could hang
-  /// indefinitely once enough time had passed since the last check.
-  private static var isRunningInRealAppBundle: Bool {
-    Bundle.main.bundleIdentifier == "com.jonathanreed.Waves"
+  /// Keyed on the appcast URL rather than the bundle identifier: it is the exact
+  /// precondition for the updater doing useful work, and it cannot drift from
+  /// the packaging script the way a hardcoded bundle id could (`BUNDLE_ID` is
+  /// overridable in `script/build_and_run.sh`). A packaged Waves app has
+  /// `SUFeedURL`; a test binary or a bare `swift run` build does not.
+  ///
+  /// This matters because starting the updater without a feed still arms
+  /// Sparkle's scheduler, and when a check fires it puts up a modal `NSAlert` on
+  /// the main thread that a headless test host can never dismiss —
+  /// `PhaseOneContractTests` constructs `WavesApp`, which constructs this
+  /// service, so the entire suite could hang indefinitely.
+  private static var hasUpdateFeed: Bool {
+    guard let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String else {
+      return false
+    }
+    return !feed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   init() {
     let controller = SPUStandardUpdaterController(
-      startingUpdater: Self.isRunningInRealAppBundle,
+      startingUpdater: Self.hasUpdateFeed,
       updaterDelegate: nil,
       userDriverDelegate: nil
     )

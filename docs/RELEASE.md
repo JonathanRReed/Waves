@@ -12,6 +12,13 @@ Before creating a tag:
 - Move the release notes out of `Unreleased` into exactly one
   `## [X.Y.Z]` or `## [X.Y.Z] - YYYY-MM-DD` heading in `CHANGELOG.md`.
 - Set the matching version in `Casks/waves.rb`.
+- Bump the build number in **both** `script/build_and_run.sh` (`APP_BUILD`) and
+  `.github/workflows/release.yml` (`RELEASE_BUILD`) to the same new integer, and
+  make it strictly greater than the last published build. Sparkle compares
+  `sparkle:version` numerically, so a repeated or lower build is never offered —
+  which is how 1.3.0 shipped twice under build 6. The workflow now fails if the
+  two files disagree, and `make_appcast.sh` fails if the build is not higher
+  than everything already in the appcast.
 - Leave `sha256 "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"` unchanged. It is an
   intentionally invalid template value and cannot be used as a published cask
   checksum.
@@ -144,13 +151,33 @@ policy.
 
 ## Publish the Appcast
 
-After the GitHub release is public, generate the signed appcast and copy it to
-the site repository:
+After the GitHub release is public, sign **the published disk image** — not a
+local rebuild — and copy the appcast to the site repository.
+
+This matters: DMGs are not reproducible. `codesign` embeds a fresh RFC3161
+timestamp on every run, so a locally rebuilt `Waves.dmg` is never byte-identical
+to the one CI attached to the release. Signing the local copy produces an
+appcast whose EdDSA signature does not match the bytes users download, and
+Sparkle rejects the update. `make_appcast.sh` now requires `EXPECTED_SHA256` and
+refuses to sign anything else.
+
+Download both assets from the GitHub release, then:
 
 ```bash
-./script/make_appcast.sh X.Y.Z
+gh release download "vX.Y.Z" --pattern "Waves.dmg" --pattern "Waves.dmg.sha256" --dir /tmp/waves-release
+```
+
+```bash
+EXPECTED_SHA256="$(cut -d ' ' -f 1 /tmp/waves-release/Waves.dmg.sha256)" ./script/make_appcast.sh X.Y.Z /tmp/waves-release/Waves.dmg
+```
+
+```bash
 cp dist/appcast.xml ../Waves-site/public/appcast.xml
 ```
+
+The script also refuses a build number that is not strictly greater than every
+build already in the appcast, since Sparkle compares `sparkle:version`
+numerically and would silently never offer the update.
 
 Review the site change, then deploy the site through its normal release process.
 

@@ -3,6 +3,13 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 VERSION [DMG_PATH] [OUTPUT_PATH]" >&2
+  echo "" >&2
+  echo "EXPECTED_SHA256 must be set to the sha256 of the DMG that was actually" >&2
+  echo "published. The release workflow attaches Waves.dmg.sha256 alongside the" >&2
+  echo "DMG for exactly this purpose. Sign the published bytes, never a local" >&2
+  echo "rebuild: DMGs are not reproducible (codesign embeds a fresh RFC3161" >&2
+  echo "timestamp on every run), so a signature over a local build makes Sparkle" >&2
+  echo "reject the update it downloads." >&2
   exit 2
 }
 
@@ -31,6 +38,7 @@ DMG_PATH="${2:-$ROOT_DIR/dist/Waves.dmg}"
 OUTPUT_PATH="${3:-$ROOT_DIR/dist/appcast.xml}"
 CHANGELOG_PATH="$ROOT_DIR/CHANGELOG.md"
 SIGN_UPDATE="${SIGN_UPDATE:-}"
+EXPECTED_SHA256="${EXPECTED_SHA256:-}"
 MIN_SYSTEM_VERSION="14.2"
 DOWNLOAD_URL="https://github.com/JonathanRReed/Waves/releases/download/v$VERSION/Waves.dmg"
 
@@ -212,6 +220,40 @@ if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
 fi
 hdiutil detach "$MOUNT_POINT" -quiet
 MOUNTED=0
+
+# Bind the bytes we are about to sign to the bytes that were published. Without
+# this the appcast can carry a valid signature over a DMG nobody will ever
+# download, and every user's update fails signature verification.
+if [ -z "$EXPECTED_SHA256" ]; then
+  echo "Error: EXPECTED_SHA256 must be set to the published DMG's sha256." >&2
+  echo "       Download Waves.dmg and Waves.dmg.sha256 from the GitHub release." >&2
+  exit 2
+fi
+if [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "Error: EXPECTED_SHA256 is not a 64-character hex sha256 digest." >&2
+  exit 2
+fi
+ACTUAL_SHA256="$(shasum -a 256 "$DMG_PATH" | cut -d ' ' -f 1)"
+if [ "$(printf '%s' "$ACTUAL_SHA256" | tr 'A-F' 'a-f')" \
+     != "$(printf '%s' "$EXPECTED_SHA256" | tr 'A-F' 'a-f')" ]; then
+  echo "Error: $DMG_PATH has sha256 $ACTUAL_SHA256; expected $EXPECTED_SHA256." >&2
+  echo "       This is not the published disk image. Signing it would produce an" >&2
+  echo "       appcast whose signature does not match what users download." >&2
+  exit 1
+fi
+
+# Sparkle compares <sparkle:version> numerically, so a build number that is not
+# strictly greater than every published one is silently never offered.
+if [ -f "$OUTPUT_PATH" ]; then
+  HIGHEST_PUBLISHED="$(sed -n 's/.*<sparkle:version>\([0-9][0-9]*\)<\/sparkle:version>.*/\1/p' \
+    "$OUTPUT_PATH" | sort -n | tail -1)"
+  if [ -n "$HIGHEST_PUBLISHED" ] && [ "$BUILD_NUMBER" -le "$HIGHEST_PUBLISHED" ]; then
+    echo "Error: build $BUILD_NUMBER is not greater than published build $HIGHEST_PUBLISHED." >&2
+    echo "       Sparkle would never offer this update. Bump APP_BUILD in" >&2
+    echo "       script/build_and_run.sh and RELEASE_BUILD in the release workflow." >&2
+    exit 1
+  fi
+fi
 
 DMG_LENGTH="$(stat -f '%z' "$DMG_PATH")"
 ED_SIGNATURE="$("$SIGN_UPDATE" -p "$DMG_PATH")"
