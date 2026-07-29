@@ -271,6 +271,13 @@ final class AppStore {
   private var pendingVolumeTargets: [String: Float] = [:]
   private var pendingEqualizerSettings: [String: EqualizerSettings] = [:]
   private var pendingEqualizerDebounceTasks: [String: Task<Void, Never>] = [:]
+  /// In-flight slider nudges, so the audio follows the handle during a drag
+  /// instead of jumping when it is released. See `scheduleVolumeTransaction`.
+  private var pendingVolumeDebounceTasks: [String: Task<Void, Never>] = [:]
+  /// Trailing debounce for a drag. Short enough that the sound tracks the handle,
+  /// long enough that a fast sweep does not submit a transaction per frame —
+  /// matching the interval the equalizer already uses.
+  private static let volumeDragInterval = Duration.milliseconds(80)
   /// One current transaction task and generation per logical app. Cancelling a
   /// task stops store-side reconciliation; backend generation checks remain the
   /// authority for native route work already in flight.
@@ -1756,15 +1763,68 @@ final class AppStore {
       return
     }
 
-    pendingVolumeTargets[appID] = max(0, min(1, value))
+    let clamped = max(0, min(1, value))
+    pendingVolumeTargets[appID] = clamped
     applyPendingVolumeProjection(forAppID: appID)
     invalidateVisibleAppsCache()
+    scheduleVolumeTransaction(clamped, forAppID: appID)
+  }
+
+  /// Pushes an in-flight slider value to the audio engine while the drag is
+  /// still happening.
+  ///
+  /// Without this, `setDesiredVolume` only moved the on-screen projection and
+  /// nothing reached the backend until `commitDesiredVolume` fired on mouse-up —
+  /// so the *sound* did not follow the handle, it jumped once the user let go.
+  /// The equalizer already had this shape; volume, the far more frequently
+  /// dragged control, did not.
+  ///
+  /// Three deliberate differences from `commitDesiredVolume`, which remains the
+  /// only committing boundary:
+  ///
+  /// - Persists nothing. A drag is not a decision; the value the user settles on
+  ///   is what gets written.
+  /// - Shows no toast. One "Managed route active" per drag, not per frame.
+  /// - Does not clear `pendingVolumeTargets`. That entry is what marks the app as
+  ///   "being dragged right now" for the silent session refresh and for the
+  ///   projection, and clearing it mid-drag would let a background refresh
+  ///   overwrite the handle position.
+  private func scheduleVolumeTransaction(_ value: Float, forAppID appID: String) {
+    // Only nudge a route that already exists. Applying to an unmanaged app can
+    // fall into the branch that builds a tap and an aggregate device — and if a
+    // helper process appears mid-drag the same branch *rebuilds* them, which is
+    // an audible dropout in the middle of the gesture. The commit does that work
+    // once, at the end, where a brief interruption is expected.
+    guard session.apps.first(matchingAppKey: appID)?.routingState == .managed else { return }
+
+    pendingVolumeDebounceTasks[appID]?.cancel()
+    pendingVolumeDebounceTasks[appID] = Task { @MainActor [weak self] in
+      do {
+        try await Task.sleep(for: Self.volumeDragInterval)
+      } catch {
+        return
+      }
+      guard let self, !Task.isCancelled,
+            self.pendingVolumeTargets[appID] == value else { return }
+      self.pendingVolumeDebounceTasks.removeValue(forKey: appID)
+      self.startAppIntentTransaction(
+        forAppID: appID,
+        overrides: AppIntentOverrides(desiredVolume: value),
+        reason: .userEdit,
+        persistencePolicy: .none,
+        feedbackPolicy: .none,
+        optimistic: false
+      )
+    }
   }
 
   func commitDesiredVolume(for app: AudioApp) {
     guard requireAudioRunning() else { return }
     guard !isExcluded(app) else { return }
     let appID = app.logicalID
+    // The drag is over; no in-flight nudge should land after the commit and
+    // reinstate an intermediate value.
+    pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
     let target = pendingVolumeTargets.removeValue(forKey: appID)
       ?? session.apps.first(matchingAppKey: appID)?.desiredVolume
       ?? app.desiredVolume
@@ -1792,6 +1852,10 @@ final class AppStore {
     }
     pendingVolumeTargets = pendingVolumeTargets.filter { currentAppIDs.contains($0.key) }
     pendingEqualizerSettings = pendingEqualizerSettings.filter { currentAppIDs.contains($0.key) }
+    let staleVolumeIDs = pendingVolumeDebounceTasks.keys.filter { !currentAppIDs.contains($0) }
+    for appID in staleVolumeIDs {
+      pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
+    }
     let staleEqualizerIDs = pendingEqualizerDebounceTasks.keys.filter {
       !currentAppIDs.contains($0)
     }
@@ -2286,8 +2350,11 @@ final class AppStore {
     let interval = levelPollInterval
     activeLevelPollInterval = interval
     levelPollTask = Task { [weak self] in
+      // Read first, then sleep. Sleeping first meant every surface that started
+      // the poll — the menu-bar panel most visibly — showed stale or empty
+      // meters for a full interval before its first real reading, so opening the
+      // panel looked like nothing was playing for 300 ms.
       while !Task.isCancelled {
-        try? await Task.sleep(for: interval)
         guard let self, !Task.isCancelled, self.startupState == .running else { return }
         let levels = await self.backend.audioLevels()
         // Re-check after the await (the poll may have been cancelled while
@@ -2299,6 +2366,7 @@ final class AppStore {
           self.liveLevels = levels
         }
         self.refreshLiveLinger()
+        try? await Task.sleep(for: interval)
       }
     }
   }
@@ -2411,6 +2479,7 @@ final class AppStore {
     persistPreferences()
 
     pendingVolumeTargets.removeValue(forKey: appID)
+    pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
     pendingEqualizerSettings.removeValue(forKey: appID)
     pendingEqualizerDebounceTasks[appID]?.cancel()
     pendingEqualizerDebounceTasks.removeValue(forKey: appID)
@@ -2786,6 +2855,7 @@ final class AppStore {
     ].compactMap { $0 }
     mutationTasks.append(contentsOf: ownedOperationTasks.values)
     mutationTasks.append(contentsOf: pendingEqualizerDebounceTasks.values)
+    mutationTasks.append(contentsOf: pendingVolumeDebounceTasks.values)
     mutationTasks.append(contentsOf: profileApplyTasks.values)
     mutationTasks.append(contentsOf: toastDismissals.values)
     mutationTasks.append(contentsOf: lingerRemovalTasks.values)
@@ -2803,6 +2873,7 @@ final class AppStore {
     activeLevelPollInterval = nil
     ownedOperationTasks.removeAll()
     pendingEqualizerDebounceTasks.removeAll()
+    pendingVolumeDebounceTasks.removeAll()
     profileApplyTasks.removeAll()
     toastDismissals.removeAll()
     lingerRemovalTasks.removeAll()
@@ -2972,6 +3043,7 @@ final class AppStore {
       pendingEqualizerDebounceTasks.removeValue(forKey: id)
       pendingEqualizerSettings.removeValue(forKey: id)
       pendingVolumeTargets.removeValue(forKey: id)
+      pendingVolumeDebounceTasks.removeValue(forKey: id)?.cancel()
       supersedeAppIntentWork(forAppID: id)
       speechDetectionStates.removeValue(forKey: id)
       speechDuckingStates.removeValue(forKey: id)
@@ -3262,6 +3334,7 @@ final class AppStore {
       appIntentTasks[appID]?.cancel()
       appIntentTasks.removeValue(forKey: appID)
       pendingVolumeTargets.removeValue(forKey: appID)
+      pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
       pendingEqualizerSettings.removeValue(forKey: appID)
       pendingEqualizerDebounceTasks[appID]?.cancel()
       pendingEqualizerDebounceTasks.removeValue(forKey: appID)
@@ -4616,6 +4689,7 @@ final class AppStore {
   func drainAppIntentTransactions() async {
     while true {
       let debounceTasks = Array(pendingEqualizerDebounceTasks.values)
+        + Array(pendingVolumeDebounceTasks.values)
       for task in debounceTasks { await task.value }
       let transactionTasks = Array(appIntentTasks.values)
       let profileTasks = Array(profileApplyTasks.values)
@@ -4629,7 +4703,8 @@ final class AppStore {
   }
 
   var trackedAppIntentTaskCount: Int {
-    appIntentTasks.count + pendingEqualizerDebounceTasks.count + profileApplyTasks.count
+    appIntentTasks.count + pendingEqualizerDebounceTasks.count
+      + pendingVolumeDebounceTasks.count + profileApplyTasks.count
   }
 
   /// Explicit durable boundaries for future transaction/profile/privacy work.

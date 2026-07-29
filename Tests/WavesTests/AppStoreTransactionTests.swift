@@ -1733,3 +1733,82 @@ private final class TransactionLoginItemService: LoginItemServicing {
   }
   func openSystemSettingsLoginItems() {}
 }
+
+// MARK: - Slider drag latency (1.4 D1)
+
+@MainActor
+@Test func draggingTheVolumeSliderMovesAudioBeforeTheDragEnds() async {
+  // Through 1.3.1 setDesiredVolume only moved the on-screen projection; the sole
+  // path to the backend was commitDesiredVolume on mouse-up, so the *sound*
+  // jumped when the user let go instead of following the handle.
+  let device = transactionTestDevice()
+  let app = transactionTestApp(desiredVolume: 0.4)
+  let fixture = makeTransactionFixture(apps: [app], device: device)
+
+  fixture.store.setDesiredVolume(0.7, for: app)
+  await fixture.store.drainAppIntentTransactions()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(!intents.isEmpty, "a drag must reach the backend before it is committed")
+  #expect(intents.last?.desiredVolume == 0.7)
+
+  // ...but a drag is not a decision: nothing is persisted until the commit.
+  #expect(fixture.preferencesStore.value.appAudioIntents[app.logicalID] == nil)
+  #expect(fixture.store.toasts.isEmpty, "a drag must not toast per frame")
+}
+
+@MainActor
+@Test func onlyTheFinalDragValueSurvivesTheDebounce() async {
+  let device = transactionTestDevice()
+  let app = transactionTestApp(desiredVolume: 0.4)
+  let fixture = makeTransactionFixture(apps: [app], device: device)
+
+  // A sweep across the slider must not submit a transaction per frame.
+  for value: Float in [0.5, 0.55, 0.6, 0.65, 0.7] {
+    fixture.store.setDesiredVolume(value, for: app)
+  }
+  await fixture.store.drainAppIntentTransactions()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count < 5, "the sweep submitted \(intents.count) intents; expected coalescing")
+  #expect(intents.last?.desiredVolume == 0.7, "the value the user landed on must win")
+}
+
+@MainActor
+@Test func committingAfterADragPersistsExactlyOnce() async {
+  let device = transactionTestDevice()
+  let app = transactionTestApp(desiredVolume: 0.4)
+  let fixture = makeTransactionFixture(apps: [app], device: device)
+
+  fixture.store.setDesiredVolume(0.7, for: app)
+  fixture.store.commitDesiredVolume(for: app)
+  await fixture.store.drainAppIntentTransactions()
+
+  // The commit is still the only boundary that writes the user's intent.
+  #expect(fixture.preferencesStore.value.appAudioIntents[app.logicalID]?.desiredVolume == 0.7)
+  #expect(
+    fixture.store.toasts.count { $0.title == "Managed route active" } == 1,
+    "exactly one confirmation for the whole gesture"
+  )
+}
+
+@MainActor
+@Test func unmanagedAppsAreNotRoutedMidDrag() async {
+  // Applying to an unmanaged app can build — or rebuild — a tap and aggregate
+  // device. Mid-drag that is an audible dropout, so intermediate nudges are
+  // restricted to routes that already exist; the commit does that work once.
+  let device = transactionTestDevice()
+  var app = transactionTestApp(desiredVolume: 0.4)
+  app.routingState = .live
+  let fixture = makeTransactionFixture(apps: [app], device: device)
+
+  fixture.store.setDesiredVolume(0.7, for: app)
+  await fixture.store.drainAppIntentTransactions()
+
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+
+  // The commit still routes it, so nothing is lost.
+  fixture.store.commitDesiredVolume(for: app)
+  await fixture.store.drainAppIntentTransactions()
+  #expect(await fixture.backend.recordedIntents().last?.desiredVolume == 0.7)
+}
