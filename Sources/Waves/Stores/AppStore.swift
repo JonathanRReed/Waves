@@ -768,6 +768,32 @@ final class AppStore {
     showsWarmStartMixer && startupState != .running
   }
 
+  // MARK: - External control
+
+  /// The roster as the control surface describes it.
+  ///
+  /// Built from `visibleApps`, so an app the user has hidden from the mixer is
+  /// also absent from a Stream Deck's dropdown — one notion of "the apps Waves
+  /// shows you", not two that can disagree.
+  func controlApps() -> [ControlApp] {
+    visibleApps.map { app in
+      ControlApp(
+        id: app.logicalID,
+        name: app.displayName,
+        running: app.pid != nil,
+        muted: app.isMuted,
+        volume: app.desiredVolume,
+        live: isLive(app),
+        managed: app.routingState == .managed
+      )
+    }
+  }
+
+  /// Resolves a control-surface identifier back to a real app.
+  func controlApp(forID logicalID: String) -> AudioApp? {
+    visibleApps.first { $0.logicalID == logicalID }
+  }
+
   var hasActiveSessionMaintenance: Bool {
     sessionMaintenanceTask != nil
   }
