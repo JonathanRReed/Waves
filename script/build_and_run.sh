@@ -6,8 +6,8 @@ APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 LOG_SUBSYSTEM="com.jonathanreed.Waves"
 MIN_SYSTEM_VERSION="14.2"
-APP_VERSION="${APP_VERSION:-1.4.0}"
-APP_BUILD="${APP_BUILD:-8}"
+APP_VERSION="${APP_VERSION:-1.4.1}"
+APP_BUILD="${APP_BUILD:-9}"
 # Baked into Info.plist so a diagnostic or crash report can name the exact
 # commit a binary came from. WAV-004's lesson: version and build alone could not
 # distinguish two different binaries once a rebuild reused 1.3.0 (6).

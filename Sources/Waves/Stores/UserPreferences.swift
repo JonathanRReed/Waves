@@ -10,6 +10,16 @@ struct UserPreferences: Codable, Sendable {
   var customAppOrder: [String] = []
   var autoPauseMusicForConferencing = true
   var enableKeyboardShortcuts = false
+  /// Every keyboard shortcut, as data.
+  ///
+  /// Through 1.4.0 the three frontmost shortcuts were hard-coded and could not
+  /// be changed or turned off individually. They migrate into this set on first
+  /// launch (see `hotkeyMigrationVersion`), so nothing a user relies on
+  /// disappears, and per-app mute shortcuts join the same list.
+  var hotkeys = HotkeyBindingSet()
+  /// 0 = the hard-coded era. Bumped once the legacy shortcuts have been seeded,
+  /// so clearing them all does not resurrect them on the next launch.
+  var hotkeyMigrationVersion = 0
   var enablePerDeviceVolumePresets = true
   /// Whether switching the default output device should automatically restore
   /// that device's remembered per-app volumes (when `enablePerDeviceVolumePresets`
@@ -81,6 +91,8 @@ struct UserPreferences: Codable, Sendable {
     case customAppOrder
     case autoPauseMusicForConferencing
     case enableKeyboardShortcuts
+    case hotkeys
+    case hotkeyMigrationVersion
     case enablePerDeviceVolumePresets
     case autoRestoreDevice
     case enableURLScheme
@@ -122,6 +134,8 @@ struct UserPreferences: Codable, Sendable {
     autoPauseMusicForConferencing = try value(
       .autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
     enableKeyboardShortcuts = try value(.enableKeyboardShortcuts, defaults.enableKeyboardShortcuts)
+    hotkeys = try value(.hotkeys, defaults.hotkeys)
+    hotkeyMigrationVersion = try value(.hotkeyMigrationVersion, defaults.hotkeyMigrationVersion)
     enablePerDeviceVolumePresets = try value(
       .enablePerDeviceVolumePresets, defaults.enablePerDeviceVolumePresets)
     autoRestoreDevice = try value(.autoRestoreDevice, defaults.autoRestoreDevice)

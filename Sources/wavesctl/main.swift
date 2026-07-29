@@ -33,7 +33,7 @@ func usage() -> Never {
   The socket path can be overridden with WAVES_CONTROL_SOCKET.
 
   If this cannot connect, check that Waves is running and that
-  Settings > Advanced > "Allow external control" is on.
+  Settings > Shortcuts > Automation > "Allow external control" is on.
   """
   print(text)
   exit(2)
@@ -74,7 +74,7 @@ final class ControlClient {
         Could not connect to Waves at \(path)
 
         Check that Waves is running, and that
-        Settings > Advanced > "Allow external control" is turned on.
+        Settings > Shortcuts > Automation > "Allow external control" is turned on.
         """)
     }
   }

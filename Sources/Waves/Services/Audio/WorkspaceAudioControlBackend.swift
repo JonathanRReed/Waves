@@ -1,5 +1,4 @@
 import AppKit
-import ApplicationServices
 import AudioToolbox
 import Darwin
 import Foundation
@@ -883,13 +882,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           detail: captureAuthorizationDetail
         ),
         DiagnosticsCheck(
-          title: "Accessibility permission",
-          status: hasAccessibilityPermission ? .passed : .warning,
-          detail: hasAccessibilityPermission
-            ? "Accessibility is granted for global shortcuts and app control helpers."
-            : "Grant Accessibility in System Settings to enable global shortcuts. Per-app volume routing can still work without it."
-        ),
-        DiagnosticsCheck(
           title: "Route recovery",
           status: routeRecoveryStatus,
           detail: routeRecoveryDetail
@@ -942,10 +934,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     return false
-  }
-
-  private var hasAccessibilityPermission: Bool {
-    AXIsProcessTrusted()
   }
 
   /// The last structured result of the Core Audio capture-capability probe.

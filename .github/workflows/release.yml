@@ -32,7 +32,7 @@ permissions:
 
 env:
   # Bump per release; must match script/build_and_run.sh's APP_BUILD default.
-  RELEASE_BUILD: "8"
+  RELEASE_BUILD: "9"
 
 jobs:
   release:

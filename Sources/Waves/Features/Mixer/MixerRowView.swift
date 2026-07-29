@@ -273,6 +273,20 @@ private struct MixerRowContextMenuItems: View {
 
   private var isExcluded: Bool { store.isExcluded(app) }
 
+  /// Shows the current chord when there is one, so the menu doubles as the
+  /// answer to "did I already give this app a shortcut?".
+  private var muteShortcutTitle: String {
+    // Say where it opens when it isn't here. The Equalizer item directly above
+    // sets this convention, and without it the menu-bar panel silently yanks
+    // the full mixer window forward.
+    guard let binding = store.preferences.hotkeys.binding(for: .muteApp(app.logicalID)) else {
+      return opensMainWindow ? "Set Mute Shortcut in Waves…" : "Assign Mute Shortcut…"
+    }
+    return opensMainWindow
+      ? "Mute Shortcut in Waves: \(binding.displayString)…"
+      : "Mute Shortcut: \(binding.displayString)…"
+  }
+
   var body: some View {
     Button(opensMainWindow ? "Open Equalizer in Waves" : "Equalizer") {
       store.focusEqualizer(for: app, source: opensMainWindow ? .running : nil)
@@ -282,6 +296,18 @@ private struct MixerRowContextMenuItems: View {
       }
     }
     .disabled(isExcluded)
+
+    if !isExcluded {
+      Button(muteShortcutTitle) {
+        // The compact menu-bar panel has nowhere to put a sheet, so the request
+        // travels to the main window the same way the equalizer does.
+        store.requestMuteShortcutAssignment(for: app)
+        if opensMainWindow {
+          openWindow(id: AppSceneID.mainWindow)
+          NSApp.activate(ignoringOtherApps: true)
+        }
+      }
+    }
 
     Divider()
 

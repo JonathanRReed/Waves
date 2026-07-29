@@ -6,6 +6,49 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-29
+
+Keyboard shortcuts you choose yourself, and one less permission to think about.
+
+### Added
+- Set your own keyboard shortcuts in Settings ▸ Shortcuts. Click a shortcut to
+  record a new one; press Delete while recording to remove it. The three that
+  used to be fixed — ⌘⌥↑, ⌘⌥↓, ⌘⌥M — are still there, and are now yours to
+  change.
+- Control one specific app from anywhere, whatever app is in front: mute, volume
+  up, volume down. The app you most want a shortcut for is rarely the one you
+  are looking at. Add them in Settings ▸ Shortcuts, or right-click an app in the
+  mixer and choose Assign Mute Shortcut. Nothing is assigned by default, so
+  nothing collides with your launcher or key remapper, and hyper (⌃⌥⇧⌘)
+  combinations record correctly.
+- Bind an app that isn't running. **Choose App…** in Settings ▸ Shortcuts picks
+  any installed app, so "mute Spotify" no longer means launching Spotify first.
+- Add a Show Waves shortcut. In a full-screen game, call, or editor the menu bar
+  is hidden, which left a menu-bar app with no way in at all.
+- Say so when a combination is already taken, while you are still recording it —
+  naming the Waves shortcut that holds it, or reporting that macOS or another
+  app got there first. A shortcut the system refuses now shows in orange in
+  Settings instead of sitting there looking like it works.
+
+### Changed
+- Global shortcuts no longer need Accessibility permission, and Waves no longer
+  asks for it or checks whether you granted it. It registers only the exact
+  combinations you assign, through the system, and never observes any other
+  keystroke. The Accessibility rows in first-run setup, Setup Repair, and
+  Diagnostics are gone — they were asking for something Waves does not use.
+- Global shortcuts now consume the keystroke. ⌘⌥M used to mute the app in front
+  **and** pass the same keys through to it, firing whatever that app had bound.
+
+### Fixed
+- Hold a volume shortcut to ramp, instead of pressing it eight times to get from
+  100% to 20%.
+- Sort the app list without re-folding every name on every comparison. Three of
+  the four sort modes did, several times a second, and the VoiceOver rotor
+  rebuilt the entire sorted roster once per app on every level tick.
+- Answer a rate-limited or oversized control-socket request with the id it came
+  in on, so a client can tell which request was refused instead of waiting out
+  its timeout.
+
 ## [1.4.0] - 2026-07-28
 
 Everything in 1.3.1 below, plus the start of external control. 1.3.1 was never

@@ -199,6 +199,36 @@ The script also refuses a build number that is not strictly greater than every
 build already in the appcast, since Sparkle compares `sparkle:version`
 numerically and would silently never offer the update.
 
+## Update the Site Itself
+
+The appcast alone is not enough, and skipping the rest is not hypothetical — it
+already happened. The 1.4.0 publish touched only `public/appcast.xml` and
+`src/config/site.ts`, leaving the site's changelog page topped out at 1.3.0 for
+the whole release. Sparkle offered 1.4.0 to existing users while the site still
+described 1.3.0.
+
+Three files, every time:
+
+```bash
+cp CHANGELOG.md ../Waves-site/src/data/CHANGELOG.md
+```
+
+Then in `../Waves-site/src/config/site.ts` set `version`, `downloadUrl` (the
+`vX.Y.Z` tag in the URL), and `dmgSizeLabel` — read the real size from the
+downloaded asset rather than guessing:
+
+```bash
+ls -lh /tmp/waves-release/Waves.dmg
+```
+
+Confirm before deploying:
+
+```bash
+grep -n "version\|downloadUrl\|dmgSizeLabel" ../Waves-site/src/config/site.ts
+head -12 ../Waves-site/src/data/CHANGELOG.md
+grep -c "sparkle:version" ../Waves-site/public/appcast.xml
+```
+
 Review the site change, then deploy the site through its normal release process.
 
 ## Rollback and Recovery

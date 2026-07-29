@@ -17,10 +17,10 @@ no account, analytics, or telemetry.
   can show them in the mixer.
 - **Audio output devices.** Waves reads available output devices to show the
   current device and, optionally, switch it.
-- **Accessibility (optional).** Only required if you enable global keyboard
-  shortcuts. While enabled, Waves listens for system-wide key presses but ignores
-  everything except its supported shortcuts and does not store or transmit
-  keystrokes. Per-app routing works without it.
+- **Keyboard shortcuts.** Waves registers the exact key combinations you assign
+  with the system's own hot-key API. It is handed those combinations and nothing
+  else — it does not read, store, or transmit any other keystroke, and it needs
+  no Accessibility permission to do this.
 
 ## What Waves stores
 
@@ -65,6 +65,9 @@ be turned off in General Settings.
 | Permission | Why | Required? |
 | --- | --- | --- |
 | Audio capture | Per-app volume, mute, boost, EQ, and adaptive mixing via process taps | Yes, for control |
-| Accessibility | Global keyboard shortcuts | Optional |
+
+Waves requests no other permission. In particular it never asks for
+Accessibility: global keyboard shortcuts are registered through the system's
+hot-key API, which grants no ability to observe anything else.
 
 Questions or concerns: please open an issue.

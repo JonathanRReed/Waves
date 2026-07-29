@@ -27,14 +27,6 @@ struct SetupRepairView: View {
             action: repairCapturePermission
           )
           repairRow(
-            title: "Accessibility",
-            detail: accessibilityDetail,
-            state: store.onboarding.accessibilityPermissionGranted ? .ready : .attention,
-            actionTitle: store.onboarding.accessibilityPermissionGranted
-              ? nil : "Open Accessibility",
-            action: { SystemSettingsService().open(.accessibility) }
-          )
-          repairRow(
             title: "Output device",
             detail: outputDetail,
             state: store.onboarding.outputDeviceVisible ? .ready : .attention,
@@ -211,12 +203,6 @@ struct SetupRepairView: View {
     } else {
       store.refreshDiagnostics()
     }
-  }
-
-  private var accessibilityDetail: String {
-    store.onboarding.accessibilityPermissionGranted
-      ? "Accessibility is enabled for optional global shortcuts and app-control helpers."
-      : "Enable Waves in Privacy & Security > Accessibility if you use global shortcuts. Per-app routing works without it."
   }
 
   private var outputDetail: String {

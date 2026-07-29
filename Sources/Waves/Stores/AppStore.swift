@@ -1,6 +1,4 @@
-import Accessibility
 import AppKit
-import ApplicationServices
 import Foundation
 import Observation
 import OSLog
@@ -205,6 +203,11 @@ final class AppStore {
   private(set) var equalizerFocusToken = 0
   private(set) var settingsPaneRequest: SettingsPane?
   private(set) var settingsPaneToken = 0
+  /// The app whose mute shortcut the main window should offer to record. Same
+  /// request/token shape as the equalizer focus above, and for the same reason:
+  /// the menu-bar panel can raise this while the main window does not yet exist.
+  private(set) var muteShortcutRequest: String?
+  private(set) var muteShortcutToken = 0
   var onboarding = OnboardingState()
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
@@ -766,6 +769,206 @@ final class AppStore {
   /// toast on a click that was reasonable to make.
   var isWarmingUp: Bool {
     showsWarmStartMixer && startupState != .running
+  }
+
+  // MARK: - Keyboard shortcuts
+
+  /// Seeds the legacy shortcuts once, the first time this build runs.
+  ///
+  /// Version-gated rather than "seed if empty": someone who deliberately clears
+  /// every shortcut must not have ⌘⌥↑/↓/M reappear at the next launch.
+  func migrateHotkeysIfNeeded() {
+    guard preferences.hotkeyMigrationVersion < 1 else { return }
+    preferences.hotkeyMigrationVersion = 1
+    if preferences.hotkeys.bindings.isEmpty {
+      preferences.hotkeys.bindings = HotkeyBindingSet.legacyDefaults
+    }
+    persistPreferences()
+  }
+
+  /// Runs the action behind a pressed shortcut.
+  ///
+  /// Goes through the same public entry points the UI uses, so a shortcut and a
+  /// click are indistinguishable downstream.
+  func performHotkey(_ action: HotkeyAction) {
+    // Before the audio guard: wanting the window is *most* likely precisely when
+    // audio is not running, and this is the one action that can still do
+    // something useful in that state.
+    if case .showMixer = action {
+      onShowMixerRequested?()
+      return
+    }
+
+    guard isAudioRunning else {
+      promptToFinishSetup()
+      // A toast alone renders nowhere for a menu-bar-only user with no window
+      // open, and the keystroke was consumed, so the frontmost app never saw it
+      // either — the press would produce literally nothing. Put the setup
+      // surface on screen, the same way the URL-scheme path does.
+      onShowMixerRequested?()
+      return
+    }
+    switch action {
+    case .showMixer:
+      break  // handled above
+    case .frontmostVolumeUp:
+      increaseVolumeForFrontmostApp()
+    case .frontmostVolumeDown:
+      decreaseVolumeForFrontmostApp()
+    case .frontmostMute:
+      toggleMuteForFrontmostApp()
+    case .muteApp(let appID):
+      guard let app = resolveHotkeyApp(appID, verb: "mute") else { return }
+      setMuted(!app.isMuted, for: app)
+    case .volumeUpApp(let appID):
+      guard let app = resolveHotkeyApp(appID, verb: "adjust") else { return }
+      adjustVolume(for: app, by: Self.hotkeyVolumeStep)
+    case .volumeDownApp(let appID):
+      guard let app = resolveHotkeyApp(appID, verb: "adjust") else { return }
+      adjustVolume(for: app, by: -Self.hotkeyVolumeStep)
+    }
+  }
+
+  /// The app a per-app shortcut points at, or nil after explaining why not.
+  ///
+  /// A shortcut that silently does nothing is indistinguishable from a broken
+  /// one, and the keystroke was consumed, so saying nothing leaves the user with
+  /// no signal at all.
+  private func resolveHotkeyApp(_ appID: String, verb: String) -> AudioApp? {
+    guard let app = controlApp(forID: appID) else {
+      showToast(
+        title: "App not available",
+        detail: "\(FriendlyAppName.resolve(appID, in: session.apps)) isn't running, so Waves can't \(verb) it.",
+        kind: .warning
+      )
+      return nil
+    }
+    guard !isExcluded(app) else {
+      showToast(
+        title: "App excluded",
+        detail: "\(app.displayName) is excluded from Waves.",
+        kind: .warning
+      )
+      return nil
+    }
+    return app
+  }
+
+  /// Matches the frontmost volume shortcuts' step, so a per-app key and a
+  /// frontmost key move the slider by the same amount.
+  private static let hotkeyVolumeStep: Float = 0.1
+
+  private func adjustVolume(for app: AudioApp, by delta: Float) {
+    let target = min(max(app.desiredVolume + delta, 0), 1)
+    guard target != app.desiredVolume else { return }
+    setDesiredVolume(target, for: app)
+    // The complete-intent transaction owns the confirmation and error toasts,
+    // so this path stays silent and a keypress produces exactly one.
+    commitDesiredVolume(for: app)
+  }
+
+  /// Brings the mixer forward. Set by the app delegate, which owns the scene.
+  @ObservationIgnored var onShowMixerRequested: (() -> Void)?
+
+  /// Assigns a chord, or explains why it could not be assigned.
+  func assignHotkey(
+    _ chord: HotkeyChord,
+    to action: HotkeyAction,
+    replacing id: UUID? = nil
+  ) -> Result<HotkeyBinding, HotkeyAssignmentError> {
+    var set = preferences.hotkeys
+
+    // Waves's own rules first. A chord one of our other bindings holds must be
+    // reported by name, and the system check below would refuse it anyway —
+    // because *we* are the app already using it — under a message that blames
+    // some unnamed other app.
+    guard HotkeyModifiers.isAcceptable(carbon: chord.carbonModifiers) else {
+      return .failure(.needsModifier)
+    }
+    if let existing = set.conflict(for: chord, excluding: id) {
+      return .failure(.alreadyUsed(existing))
+    }
+
+    // Past that point the only binding that can still hold this chord is the row
+    // being re-recorded onto itself, which we already own and must not ask the
+    // system about for the same reason.
+    //
+    // Unless the system refused that binding — then we do *not* hold the chord,
+    // and skipping the probe would let the user "successfully" re-record the
+    // same dead shortcut over and over.
+    let alreadyOurs = set.bindings.contains { $0.chord == chord && !isHotkeyRejected($0) }
+    if !alreadyOurs, let isAvailable = isChordAvailable, !isAvailable(chord) {
+      return .failure(.claimedByAnotherApp(chord))
+    }
+
+    let result = set.assign(chord, to: action, replacing: id)
+    if case .success = result {
+      preferences.hotkeys = set
+      persistPreferences()
+      onHotkeysChanged?()
+    }
+    return result
+  }
+
+  /// Asks the system whether a chord is free. Set by the app delegate, which
+  /// owns the only object that can answer. Nil in tests and before launch
+  /// finishes, where every chord is treated as available and the registration
+  /// itself remains the backstop.
+  @ObservationIgnored var isChordAvailable: ((HotkeyChord) -> Bool)?
+
+  /// Releases and restores Waves's own registrations. Set by the app delegate.
+  ///
+  /// A recorder must call `setHotkeysSuspended(true)` while it is open. Waves's
+  /// hot keys are consumed by the system before any view sees them, so the one
+  /// chord a recorder most needs to capture — the one Waves already owns — is
+  /// otherwise the one chord it can never capture.
+  @ObservationIgnored var onHotkeySuspensionChange: ((Bool) -> Void)?
+
+  func setHotkeysSuspended(_ suspended: Bool) {
+    onHotkeySuspensionChange?(suspended)
+  }
+
+  func removeHotkey(id: UUID) {
+    preferences.hotkeys.remove(id: id)
+    persistPreferences()
+    onHotkeysChanged?()
+  }
+
+  /// Re-registers with the system. Set by the app delegate.
+  @ObservationIgnored var onHotkeysChanged: (() -> Void)?
+
+  /// The bindings macOS refused at registration, kept so Settings can mark those
+  /// rows instead of drawing them identically to working ones.
+  ///
+  /// Durable state, not just a toast: `AppToastStack` is mounted only in the
+  /// mixer window and the menu-bar panel, so turning shortcuts on from Settings
+  /// with the mixer closed showed nothing at all — and the row stayed a trap,
+  /// since re-recording the same chord takes the "we already own it"
+  /// short-circuit in `assignHotkey`, reports success, and is refused again.
+  private(set) var rejectedHotkeyIDs: Set<UUID> = []
+
+  /// Names the shortcuts macOS refused, so a chord another app already owns is
+  /// visible rather than mysteriously inert.
+  func reportRejectedHotkeys(_ rejected: [HotkeyBinding]) {
+    rejectedHotkeyIDs = Set(rejected.map(\.id))
+    guard !rejected.isEmpty else { return }
+    let chords = rejected.map(\.displayString).joined(separator: ", ")
+    showToast(
+      title: rejected.count == 1 ? "Shortcut unavailable" : "Shortcuts unavailable",
+      detail: "\(chords) \(rejected.count == 1 ? "is" : "are") already used by another app. Pick another in Settings.",
+      kind: .warning,
+      duration: .seconds(5)
+    )
+  }
+
+  func isHotkeyRejected(_ binding: HotkeyBinding) -> Bool {
+    rejectedHotkeyIDs.contains(binding.id)
+  }
+
+  /// Resolves a hot-key failure into words, naming the app behind a per-app
+  /// binding rather than its bundle ID.
+  func hotkeyMessage(for error: HotkeyAssignmentError) -> String {
+    error.message { [session] id in FriendlyAppName.resolve(id, in: session.apps) }
   }
 
   // MARK: - External control
@@ -4192,6 +4395,16 @@ final class AppStore {
     return equalizerFocusRequest
   }
 
+  func requestMuteShortcutAssignment(for app: AudioApp) {
+    muteShortcutRequest = app.logicalID
+    muteShortcutToken &+= 1
+  }
+
+  func consumeMuteShortcutRequest() -> String? {
+    defer { muteShortcutRequest = nil }
+    return muteShortcutRequest
+  }
+
   /// Asks the Settings scene to open on a specific pane. Same request/token
   /// shape as the equalizer and source focus requests, for the same reason: the
   /// Settings window may not exist yet when the request is made, so the token
@@ -4596,13 +4809,11 @@ final class AppStore {
   /// audible background app no longer steals the hotkey from a silent focused one.
   private func frontmostManagedApp() -> AudioApp? {
     let frontmost = NSWorkspace.shared.frontmostApplication
-    // The local hotkey monitor (unlike the global-only one it replaced) can
-    // now fire while Waves' own mixer/Settings window is frontmost. There is
-    // no single "the app the user is working in" in that case — falling
-    // through to the activeApps/visibleApps.first fallback below would
-    // silently act on an arbitrary row instead of the one the user actually
-    // has in view. Do nothing instead, matching the pre-local-monitor
-    // behavior for this specific case.
+    // A hot key fires even while Waves' own mixer/Settings window is frontmost.
+    // There is no single "the app the user is working in" in that case —
+    // falling through to the activeApps/visibleApps.first fallback below would
+    // silently act on an arbitrary row instead of the one the user actually has
+    // in view. Do nothing instead.
     guard frontmost?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
       return nil
     }
@@ -4951,27 +5162,58 @@ final class AppStore {
   }
 
   private func sortedApps(_ apps: [AudioApp]) -> [AudioApp] {
+    // Every mode falls back to the folded display name, and folding is a full
+    // ICU pass. Only `.name` used to decorate first, so the other three paid for
+    // one folding per operand of every O(n log n) comparison — on a list the
+    // level poll re-reads several times a second.
+    let nameKeys = Dictionary(
+      apps.map { ($0.logicalID, Self.displayNameSortKey($0.displayName)) },
+      uniquingKeysWith: { first, _ in first }
+    )
+    func byName(_ app1: AudioApp, _ app2: AudioApp) -> Bool {
+      let key1 = nameKeys[app1.logicalID] ?? app1.displayName
+      let key2 = nameKeys[app2.logicalID] ?? app2.displayName
+      if key1 != key2 { return key1 < key2 }
+      return app1.logicalID < app2.logicalID
+    }
+
     switch preferences.sortMode {
     case .name:
-      sortedByFoldedDisplayName(apps)
+      return sortedByFoldedDisplayName(apps)
     case .activity:
-      apps.sorted { app1, app2 in
-        let rank1 = activityRank(for: app1)
-        let rank2 = activityRank(for: app2)
-        if rank1 != rank2 {
-          return rank1 < rank2
-        }
-        return displayNameComparator(app1, app2)
+      // Rank once per app rather than once per comparison: activityRank consults
+      // the live-level poll and the linger window, so it is not free either.
+      let ranks = Dictionary(
+        apps.map { ($0.logicalID, activityRank(for: $0)) },
+        uniquingKeysWith: { first, _ in first }
+      )
+      return apps.sorted { app1, app2 in
+        let rank1 = ranks[app1.logicalID] ?? 0
+        let rank2 = ranks[app2.logicalID] ?? 0
+        if rank1 != rank2 { return rank1 < rank2 }
+        return byName(app1, app2)
       }
     case .category:
-      apps.sorted {
+      return apps.sorted {
         if $0.category.rawValue != $1.category.rawValue {
           return $0.category.rawValue < $1.category.rawValue
         }
-        return displayNameComparator($0, $1)
+        return byName($0, $1)
       }
     case .manual:
-      apps.sorted(by: manualOrderComparator)
+      // A position map, not `firstIndex(of:)` — that was a linear scan of the
+      // custom order inside the comparator, so manual sort was quadratic in the
+      // number of remembered apps.
+      let positions = Dictionary(
+        preferences.customAppOrder.enumerated().map { ($1, $0) },
+        uniquingKeysWith: { first, _ in first }
+      )
+      return apps.sorted { app1, app2 in
+        let index1 = positions[app1.logicalID] ?? Int.max
+        let index2 = positions[app2.logicalID] ?? Int.max
+        if index1 != index2 { return index1 < index2 }
+        return byName(app1, app2)
+      }
     }
   }
 
@@ -5089,7 +5331,6 @@ final class AppStore {
       onboarding.permissionsGranted = preferences.hasCompletedPrivacySetup
         && snapshot.backendStatus.hasRequiredPermissions
     }
-    onboarding.accessibilityPermissionGranted = AXIsProcessTrusted()
     onboarding.outputDeviceVisible = snapshot.currentDevice != nil
     onboarding.routeHealthReady = preferences.hasCompletedPrivacySetup
       && onboarding.permissionsGranted
@@ -5397,7 +5638,6 @@ struct OnboardingState {
   var captureAuthorization: CaptureAuthorizationResult?
   var audioComponentInstalled = false
   var permissionsGranted = false
-  var accessibilityPermissionGranted = false
   // Default false (matching the other flags' needs-action default) so the step
   // starts in needs-action until syncOnboarding confirms a live output device,
   // rather than optimistically asserting a device before the first sync.

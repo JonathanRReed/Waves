@@ -2,6 +2,8 @@ import SwiftUI
 import WavesAudioCore
 
 struct HelpView: View {
+  @Environment(AppStore.self) private var store
+
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
@@ -101,27 +103,32 @@ struct HelpView: View {
       Text("Global shortcuts")
         .font(.subheadline.weight(.semibold))
 
+      // Read from the live bindings rather than repeating the defaults: these
+      // are editable now, so hard-coded keys here would confidently name a
+      // shortcut the user had already changed.
       VStack(alignment: .leading, spacing: 8) {
-        shortcutRow(
-          action: "Increase volume",
-          keys: "⌘⌥↑"
-        )
-        shortcutRow(
-          action: "Decrease volume",
-          keys: "⌘⌥↓"
-        )
-        shortcutRow(
-          action: "Toggle mute",
-          keys: "⌘⌥M"
-        )
+        globalShortcutRow("Increase volume", .frontmostVolumeUp)
+        globalShortcutRow("Decrease volume", .frontmostVolumeDown)
+        globalShortcutRow("Toggle mute", .frontmostMute)
       }
       .font(.system(.body, design: .monospaced))
 
-      Text("Turn these on in Settings > Shortcuts. They act on the app in front.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      Text(
+        "Turn these on in Settings ▸ Shortcuts, then click any of them to record your own. They act on whichever app is in front."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
 
       Text("App shortcuts")
+        .font(.subheadline.weight(.semibold))
+
+      Text(
+        "Give one specific app its own mute shortcut and it works no matter what is in front. Add one under App Shortcuts in Settings ▸ Shortcuts, or right-click the app in the mixer and choose Assign Mute Shortcut. Nothing is assigned by default."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+
+      Text("In-window shortcuts")
         .font(.subheadline.weight(.semibold))
 
       VStack(alignment: .leading, spacing: 8) {
@@ -239,7 +246,7 @@ struct HelpView: View {
         troubleshootingItem(
           issue: "Keyboard shortcuts not working",
           solution:
-            "Open Setup & Repair, then use Open Accessibility to reach the matching macOS permission pane"
+            "Check Settings > Shortcuts: shortcuts must be turned on, and a combination another app already claimed is shown there in orange. An app shortcut also needs that app to be running"
         )
         troubleshootingItem(
           issue: "Device switching issues",
@@ -270,6 +277,13 @@ struct HelpView: View {
           .foregroundStyle(.secondary)
       }
     }
+  }
+
+  /// Names the chord actually bound to an action, or says plainly that there
+  /// isn't one — a blank would read as a rendering bug.
+  private func globalShortcutRow(_ title: String, _ action: HotkeyAction) -> some View {
+    let binding = store.preferences.hotkeys.bindings.first { $0.action == action }
+    return shortcutRow(action: title, keys: binding?.displayString ?? "Not set")
   }
 
   private func shortcutRow(action: String, keys: String) -> some View {

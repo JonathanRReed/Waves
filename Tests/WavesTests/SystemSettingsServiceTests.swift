@@ -5,7 +5,6 @@ import Testing
 
 @Test func systemSettingsDestinationsProduceExpectedDeepLinks() throws {
   let expectedQueries: [SystemSettingsDestination: String] = [
-    .accessibility: "Privacy_Accessibility",
     .audioCapture: "Privacy_AudioCapture",
     .loginItems: "com.apple.LoginItems-Settings.extension",
     .soundOutput: "com.apple.Sound-Settings.extension",

@@ -8,6 +8,7 @@ struct MainWindowView: View {
   // Restored across launches so the user returns to the scope they left.
   @SceneStorage("waves.selectedScope") private var selection: MixerScope = .source(.running)
   @State private var editorContext: ProfileEditorContext?
+  @State private var muteShortcutContext: MuteShortcutContext?
 
   var body: some View {
     ZStack(alignment: .top) {
@@ -45,6 +46,10 @@ struct MainWindowView: View {
       ProfileEditorSheet(context: context)
         .environment(store)
     }
+    .sheet(item: $muteShortcutContext) { context in
+      MuteShortcutSheet(appID: context.id)
+        .environment(store)
+    }
     .onOpenURL { url in
       store.handleURLScheme(url)
     }
@@ -63,6 +68,10 @@ struct MainWindowView: View {
         selection = .source(filter)
       }
       handleEqualizerFocusRequest()
+      // Same window-was-closed case as the source focus request above: the menu
+      // bar raised this before `openWindow`, so this fresh view never sees the
+      // token change.
+      handleMuteShortcutRequest()
     }
     .onChange(of: store.preferences.showRecentApps) { _, _ in
       validateSelection()
@@ -92,6 +101,9 @@ struct MainWindowView: View {
     }
     .onChange(of: store.equalizerFocusToken) { _, _ in
       handleEqualizerFocusRequest()
+    }
+    .onChange(of: store.muteShortcutToken) { _, _ in
+      handleMuteShortcutRequest()
     }
     .onDisappear { store.endLiveLevels() }
   }
@@ -209,6 +221,11 @@ struct MainWindowView: View {
   private func handleEqualizerFocusRequest() {
     guard store.equalizerFocusRequest != nil else { return }
     selection = .sound
+  }
+
+  private func handleMuteShortcutRequest() {
+    guard let appID = store.consumeMuteShortcutRequest() else { return }
+    muteShortcutContext = MuteShortcutContext(id: appID)
   }
 
   /// A persisted scope can become invalid: a `.recent` source after the user
@@ -574,6 +591,16 @@ private struct SourceListView: View {
     return store.profiles.first { $0.id == id }
   }
 
+  /// The "Playing apps" rotor's contents, with `liveApps` read exactly once.
+  ///
+  /// `store.liveApps` walks `visibleApps`, which reconciles pin state and sorts
+  /// the whole roster. Reading it from inside a `filter` closure ran all of that
+  /// once per app, on every level-poll tick, whether or not VoiceOver was on.
+  private var playingRotorApps: [AudioApp] {
+    let liveIDs = Set(store.liveApps.map(\.logicalID))
+    return apps.filter { liveIDs.contains($0.logicalID) }
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       if let profile {
@@ -716,7 +743,7 @@ private struct SourceListView: View {
         )
         // Jump straight to playing apps or apps needing attention.
         .accessibilityRotor("Playing apps") {
-          ForEach(apps.filter { store.liveApps.contains($0) }) { app in
+          ForEach(playingRotorApps) { app in
             AccessibilityRotorEntry(app.displayName, id: app.id)
           }
         }
@@ -804,7 +831,7 @@ private struct SourceListView: View {
   /// These are focused-window keys that work while the mixer window (this
   /// list) is focused, like the Help copy's ⌘N/⌘R. They are intentionally NOT
   /// gated on `preferences.enableKeyboardShortcuts` — that toggle governs the
-  /// global ⌘⌥ hotkeys (the NSEvent monitor), not in-list keys. Gating here
+  /// user-assignable global hotkeys, not in-list keys. Gating here
   /// would silently strip keyboard control of the mixer (including the only
   /// keyboard mute path) whenever a user disables global hotkeys.
   private func handleKey(_ action: (AudioApp) -> Void) -> KeyPress.Result {

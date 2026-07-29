@@ -606,6 +606,13 @@ private struct ProfileRow: View {
 
 private struct ControlSettingsView: View {
   @Environment(AppStore.self) private var store
+  /// Apps chosen from "Add App Shortcut" that have no chord yet.
+  ///
+  /// Held here rather than as an empty binding in the model: a binding with no
+  /// modifiers is not a shortcut, and writing one would hand `HotkeyCenter` an
+  /// unregisterable chord that comes straight back as a "shortcut unavailable"
+  /// warning the user did nothing to deserve.
+  @State private var pendingAppIDs: [String] = []
 
   var body: some View {
     SettingsForm {
@@ -621,15 +628,37 @@ private struct ControlSettingsView: View {
         }
         .disabled(!store.isAudioRunning)
         if store.preferences.enableKeyboardShortcuts {
-          shortcutRow("Increase volume", "⌘⌥↑")
-          shortcutRow("Decrease volume", "⌘⌥↓")
-          shortcutRow("Toggle mute", "⌘⌥M")
+          ForEach(Self.frontmostActions, id: \.action) { entry in
+            shortcutRow(entry.title, action: entry.action)
+          }
         }
       } header: {
         Text("Global Shortcuts")
       } footer: {
         Text(
-          "These shortcuts act on the frontmost app. The key listener only exists while this is on, and Waves ignores every key except its own ⌘⌥ shortcuts."
+          "The first three act on whichever app is in front; Show Waves brings the mixer forward, which is the only way in from a full-screen app. Click a shortcut to change it, or press Delete while recording to remove it. Waves registers only the combinations listed here — it never watches your other keystrokes."
+        )
+      }
+
+      Section {
+        if store.preferences.enableKeyboardShortcuts {
+          if appShortcutRows.isEmpty {
+            Text("No app shortcuts yet.")
+              .foregroundStyle(.secondary)
+          }
+          ForEach(appShortcutRows, id: \.self) { appID in
+            appShortcutRow(appID)
+          }
+          addAppShortcutMenu
+        } else {
+          Text("Turn on keyboard shortcuts above to control a specific app.")
+            .foregroundStyle(.secondary)
+        }
+      } header: {
+        Text("App Shortcuts")
+      } footer: {
+        Text(
+          "Mute or adjust one specific app from anywhere, whatever is in front — the app you most want a shortcut for is rarely the one you are looking at. Nothing is assigned by default, so nothing collides with your launcher or key remapper. You can also assign one from an app's row in the mixer."
         )
       }
 
@@ -676,11 +705,148 @@ private struct ControlSettingsView: View {
     }
   }
 
-  private func shortcutRow(_ title: String, _ keys: String) -> some View {
-    LabeledContent(title) {
-      Text(keys)
-        .font(.system(.body, design: .monospaced))
-        .foregroundStyle(.secondary)
+  private static let frontmostActions: [(title: String, action: HotkeyAction)] = [
+    ("Increase volume", .frontmostVolumeUp),
+    ("Decrease volume", .frontmostVolumeDown),
+    ("Toggle mute", .frontmostMute),
+    // Not a frontmost action, but it belongs with the global keys: it is the one
+    // shortcut that works from inside a full-screen app, where the menu bar is
+    // hidden and Waves is otherwise unreachable.
+    ("Show Waves", .showMixer),
+  ]
+
+  /// Bound apps first, sorted by name, then the rows still waiting for a chord.
+  ///
+  /// Sorting by name keeps the list from reshuffling as apps launch and quit;
+  /// pending rows stay at the end so the one just added doesn't jump away from
+  /// the pointer that added it.
+  private var appShortcutRows: [String] {
+    let bound = store.preferences.hotkeys.boundAppIDs
+      .sorted { appName($0).localizedCaseInsensitiveCompare(appName($1)) == .orderedAscending }
+    return bound + pendingAppIDs.filter { !bound.contains($0) }
+  }
+
+  /// Only apps with no shortcut and no pending row, so the menu can't offer a
+  /// duplicate that would silently replace what is already there.
+  private var assignableApps: [AudioApp] {
+    let taken = takenAppIDs
+    return store.visibleApps.filter { !taken.contains($0.logicalID) && !store.isExcluded($0) }
+  }
+
+  private var takenAppIDs: Set<String> {
+    var taken = Set(store.preferences.hotkeys.boundAppIDs)
+    taken.formUnion(pendingAppIDs)
+    return taken
+  }
+
+  @ViewBuilder
+  private var addAppShortcutMenu: some View {
+    Menu {
+      ForEach(assignableApps) { app in
+        Button(app.displayName) {
+          pendingAppIDs.append(app.logicalID)
+        }
+      }
+      if assignableApps.isEmpty {
+        // Name the actual reason. "Every running app already has a shortcut" was
+        // shown even when the real cause was that every app is excluded, or that
+        // nothing is running yet — three different situations, one wrong answer.
+        Text(emptyAppMenuReason)
+      }
+      Divider()
+      // Running apps only would be the wrong roster: a shortcut is stored
+      // against a bundle ID and works the moment that app launches, so binding
+      // one for an app you have quit — the common case for "mute Spotify" —
+      // should not require launching it first.
+      Button("Choose App…") { chooseAppForShortcut() }
+    } label: {
+      Label("Add App Shortcut", systemImage: "plus")
+    }
+    .menuStyle(.borderlessButton)
+    .fixedSize()
+  }
+
+  private var emptyAppMenuReason: String {
+    if store.visibleApps.isEmpty { return "No apps are running yet" }
+    if store.visibleApps.allSatisfy(store.isExcluded) { return "Every running app is excluded" }
+    return "Every running app already has a shortcut"
+  }
+
+  private func chooseAppForShortcut() {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.application]
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+    panel.prompt = "Choose"
+    panel.message = "Pick an app to give a keyboard shortcut."
+    guard panel.runModal() == .OK,
+          let url = panel.url,
+          let bundleID = Bundle(url: url)?.bundleIdentifier
+    else { return }
+    guard !takenAppIDs.contains(bundleID) else { return }
+    pendingAppIDs.append(bundleID)
+  }
+
+  private func appName(_ appID: String) -> String {
+    FriendlyAppName.resolve(appID, in: store.session.apps)
+  }
+
+  /// One app's three shortcuts, grouped under its name.
+  ///
+  /// Mute first because it is what people come for, but volume belongs here too:
+  /// the release's whole premise is that the app you want a shortcut for is
+  /// rarely the one in front, and leaving per-app volume out would have left
+  /// exactly that gap open.
+  @ViewBuilder
+  private func appShortcutRow(_ appID: String) -> some View {
+    let name = appName(appID)
+    // The ✕ on the mute row removes the whole app group, so a row added by
+    // mistake can be taken back before any chord is recorded into it.
+    shortcutRow(
+      name,
+      action: .muteApp(appID),
+      canRemoveWhenUnset: true,
+      onRemoved: { removeAppShortcuts(appID) }
+    )
+    shortcutRow("\(name) volume up", action: .volumeUpApp(appID))
+    shortcutRow("\(name) volume down", action: .volumeDownApp(appID))
+  }
+
+  private func removeAppShortcuts(_ appID: String) {
+    pendingAppIDs.removeAll { $0 == appID }
+    for binding in store.preferences.hotkeys.bindings where binding.action.appID == appID {
+      store.removeHotkey(id: binding.id)
+    }
+  }
+
+  private func shortcutRow(
+    _ title: String,
+    action: HotkeyAction,
+    canRemoveWhenUnset: Bool = false,
+    onRemoved: @escaping () -> Void = {}
+  ) -> some View {
+    let binding = store.preferences.hotkeys.bindings.first { $0.action == action }
+    return LabeledContent(title) {
+      ShortcutRecorder(
+        binding: binding,
+        canRemoveWhenUnset: canRemoveWhenUnset,
+        isUnavailable: binding.map(store.isHotkeyRejected) ?? false,
+        onRecord: { chord in
+          switch store.assignHotkey(chord, to: action, replacing: binding?.id) {
+          case .success:
+            // The row is a real binding now, so it no longer needs holding open.
+            onRemoved()
+            return nil
+          case .failure(let error):
+            return store.hotkeyMessage(for: error)
+          }
+        },
+        onClear: {
+          if let binding { store.removeHotkey(id: binding.id) }
+          onRemoved()
+        }
+      )
     }
   }
 }

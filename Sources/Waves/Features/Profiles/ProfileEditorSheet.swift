@@ -298,29 +298,12 @@ struct ProfileEditorSheet: View {
     }
   }
 
+  /// Names a member that may not be running — the seeded default profiles
+  /// include apps ("us.zoom.xos", "com.spotify.client") that a new user has not
+  /// launched yet, and the raw bundle ID on the very first profile they open
+  /// would look broken.
   private func friendlyName(for id: String) -> String {
-    // Prefer a remembered display name from the session (the app has run at
-    // some point this session, so Waves already knows its real name).
-    if let app = store.session.apps.first(where: { $0.logicalID == id }) {
-      return app.displayName
-    }
-    // Otherwise ask Launch Services for the real name of the installed app —
-    // this is the case for the seeded default profiles' members before their
-    // first launch (e.g. "Focus" includes "us.zoom.xos" and
-    // "com.spotify.client"). Far more reliable than guessing from the bundle
-    // ID's shape: the naive "last dot-component, capitalized" fallback below
-    // turns those into "XOS" and "Client" — wrong on the very first profile a
-    // new user sees. Cached (FriendlyNameCache) because this view's body
-    // re-evaluates on every keystroke in the name field, and an uncached
-    // lookup would re-hit Launch Services for every offline member on every
-    // keystroke.
-    if let cached = FriendlyNameCache.name(forBundleID: id) {
-      return cached
-    }
-    // Last resort, for an app that isn't installed at all: the last
-    // dot-component of the bundle id (e.g. "com.tinyspeck.slackmacgap" →
-    // "slackmacgap") — imperfect, but better than showing the raw bundle id.
-    return id.split(separator: ".").last.map(String.init) ?? id
+    FriendlyAppName.resolve(id, in: store.session.apps)
   }
 
   private func save() {
@@ -337,43 +320,6 @@ struct ProfileEditorSheet: View {
       captureLevels: captureLevels
     )
     dismiss()
-  }
-}
-
-/// Caches Launch Services name lookups so `friendlyName(for:)` doesn't re-hit
-/// `NSWorkspace`/`Bundle` on every SwiftUI body re-evaluation — which happens
-/// on every keystroke in the profile name field, since `name` and `appPicker`
-/// live in the same view body. Mirrors `AppIconCache` in MixerRowView.swift.
-@MainActor
-private enum FriendlyNameCache {
-  /// Match `AudioApp`'s bound for display metadata before caching or rendering
-  /// names supplied by an installed app's Info.plist.
-  private static let maxNameLength = 256
-
-  /// The value is itself optional so a miss (uninstalled bundle id, or a bundle
-  /// with no usable name) is cached as `nil` too — otherwise every keystroke in
-  /// the name field would re-hit Launch Services for each unresolvable member.
-  private static var storage: [String: String?] = [:]
-
-  static func name(forBundleID id: String) -> String? {
-    if let cached = storage[id] {
-      return cached
-    }
-
-    let resolved = lookup(id)
-    storage[id] = resolved
-    return resolved
-  }
-
-  private static func lookup(_ id: String) -> String? {
-    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id),
-          let bundle = Bundle(url: url)
-    else { return nil }
-
-    return (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-      .flatMap { $0.isEmpty ? nil : String($0.prefix(maxNameLength)) }
-      ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
-      .flatMap { $0.isEmpty ? nil : String($0.prefix(maxNameLength)) }
   }
 }
 

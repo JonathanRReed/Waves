@@ -62,6 +62,17 @@ struct WavesApp: App {
         .renderCadence(renderActivity)
         .task {
           appDelegate.setStore(store)
+          // Captured here rather than in the delegate because `openWindow` is a
+          // SwiftUI scene action with no AppKit equivalent, and the whole point
+          // of the Show Waves shortcut is that it works when this window is
+          // *closed* — from a full-screen app, where the menu bar is hidden and
+          // there is otherwise no way to reach Waves at all. This task runs at
+          // launch, while the window exists; the captured action stays valid
+          // afterwards and re-creates the scene on demand.
+          store.onShowMixerRequested = {
+            openWindow(id: AppSceneID.mainWindow)
+            NSApp.activate(ignoringOtherApps: true)
+          }
           store.start()
         }
     }
@@ -287,8 +298,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   static var bootstrapStore: AppStore?
 
   private var store: AppStore?
-  private var eventMonitor: Any?
-  private var localEventMonitor: Any?
+  /// Carbon hot keys: they consume the keystroke and need no Accessibility
+  /// permission, unlike the NSEvent monitors this replaced.
+  private let hotkeyCenter = HotkeyCenter()
   private let terminationCoordinator = AppTerminationCoordinator()
   /// Records what actually failed during cleanup, before the process goes away.
   private let shutdownReportStore = ShutdownReportStore()
@@ -314,6 +326,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // that nothing was recorded.
     store?.previousShutdownReport = shutdownReportStore.load()
     shutdownReportStore.clear()
+    // Seed the shortcuts that used to be hard-coded, before anything registers.
+    store?.migrateHotkeysIfNeeded()
+    store?.onHotkeysChanged = { [weak self] in
+      self?.updateGlobalHotkeysState()
+    }
+    store?.isChordAvailable = { [weak self] chord in
+      // No delegate means no registration either, so nothing can be blocked.
+      self?.isHotkeyChordAvailable(chord) ?? true
+    }
+    store?.onHotkeySuspensionChange = { [weak self] suspended in
+      if suspended {
+        self?.hotkeyCenter.pause()
+      } else {
+        self?.hotkeyCenter.resume()
+      }
+    }
+    hotkeyCenter.onRejected = { [weak store] rejected in
+      store?.reportRejectedHotkeys(rejected)
+    }
     store?.onExternalControlPreferenceChange = { [weak self] in
       self?.reconcileControlServer()
     }
@@ -344,8 +375,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     store?.reconcileLoginItemStatus()
   }
 
-  /// Installs the system-wide key monitor only while the user has keyboard
-  /// shortcuts enabled, so Waves never observes global keystrokes otherwise.
+  /// Registers Waves's hot keys only while the user has keyboard shortcuts
+  /// enabled, and re-registers from scratch whenever the bindings change.
   private func updateGlobalHotkeysState() {
     let enabled = store?.preferences.enableKeyboardShortcuts ?? false
     if enabled {
@@ -475,73 +506,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func setupGlobalHotkeys() {
-    guard eventMonitor == nil else { return }
-    eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-      _ = self?.handleGlobalKeyEvent(event)
+    guard let store else { return }
+    hotkeyCenter.onPress = { [weak store] action in
+      store?.performHotkey(action)
     }
-    // Global monitors never see events while Waves itself is frontmost, so a
-    // local monitor covers the hotkeys with the mixer/Settings focused.
-    // Returning nil consumes a handled event, keeping ⌘⌥M from also firing
-    // the Window menu's "Minimize All".
-    localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) {
-      [weak self] event in
-      if self?.handleGlobalKeyEvent(event) == true {
-        return nil
-      }
-      return event
-    }
+    let rejected = hotkeyCenter.apply(store.preferences.hotkeys.bindings)
+    guard !rejected.isEmpty else { return }
+    // Another app already owns those chords. Say which, once — a shortcut that
+    // silently never fires is the worst possible outcome here.
+    store.reportRejectedHotkeys(rejected)
   }
 
   private func removeGlobalHotkeys() {
-    if let monitor = eventMonitor {
-      NSEvent.removeMonitor(monitor)
-      eventMonitor = nil
-    }
-    if let monitor = localEventMonitor {
-      NSEvent.removeMonitor(monitor)
-      localEventMonitor = nil
-    }
+    hotkeyCenter.unregisterAll()
   }
 
-  /// Returns `true` when the event matched a Waves hotkey and was acted on.
-  private func handleGlobalKeyEvent(_ event: NSEvent) -> Bool {
-    guard let store = store,
-      store.preferences.enableKeyboardShortcuts
-    else { return false }
-
-    // Check if user is typing in a text field
-    if let focusedElement = NSApp.keyWindow?.firstResponder,
-      focusedElement.isKind(of: NSTextView.self) || focusedElement.isKind(of: NSTextField.self)
-    {
-      return false
-    }
-
-    let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-    // `contains` (not equality) because the arrow keys carry .function/
-    // .numericPad flags; .control/.shift are excluded so third-party chords
-    // like ⌃⌥⌘↓ don't also trigger Waves.
-    let isCmdOption =
-      modifiers.contains(.command) && modifiers.contains(.option)
-      && !modifiers.contains(.control) && !modifiers.contains(.shift)
-
-    guard isCmdOption, [126, 125, 46].contains(event.keyCode) else { return false }
-    guard store.isAudioRunning else {
-      store.promptToFinishSetup()
-      presentSetupWindowIfAvailable()
-      return true
-    }
-
-    switch event.keyCode {
-    case 126:  // Up arrow
-      store.increaseVolumeForFrontmostApp()
-    case 125:  // Down arrow
-      store.decreaseVolumeForFrontmostApp()
-    case 46:  // M key
-      store.toggleMuteForFrontmostApp()
-    default:
-      break
-    }
-    return true
+  /// True when the system would accept this chord, used by the recorder so a
+  /// clash with another app is reported while the field is still open.
+  func isHotkeyChordAvailable(_ chord: HotkeyChord) -> Bool {
+    hotkeyCenter.isChordAvailable(chord)
   }
 
   // URL-scheme delivery is handled authoritatively by the manual kAEGetURL

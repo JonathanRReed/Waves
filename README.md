@@ -32,7 +32,7 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 - **Per-Device Volume Memory**: Remember volume settings for each app across different audio devices
 
 ### Automation & Integration
-- **Keyboard Shortcuts**: Global hotkeys for quick volume adjustments (⌘⌥↑/↓ for volume, ⌘⌥M for mute)
+- **Keyboard Shortcuts**: Global hotkeys you assign yourself — volume and mute for the app in front, plus a mute shortcut for any specific app. No Accessibility permission required
 - **URL Scheme Automation**: Opt-in custom URL schemes for integration with other tools
 - **Auto-Pause Music**: Automatically pause music apps when conferencing apps become active
 
@@ -83,8 +83,8 @@ better fit.
 ## System Requirements
 
 - macOS 14.2 or later (Apple Silicon or Intel — release builds are universal)
-- Accessibility permission is only required for global shortcuts
 - Audio capture permission when macOS prompts for Core Audio process taps
+- No Accessibility permission — Waves never asks for it
 
 ## Installation
 
@@ -156,11 +156,24 @@ See `docs/RELEASE.md` for the full release checklist.
 
 ### Keyboard Shortcuts
 
-When keyboard shortcuts are enabled in Settings:
+Enable them in **Settings ▸ Shortcuts**, then click any shortcut to record your own.
+Press Delete while recording to remove it.
 
-- **⌘⌥↑**: Increase volume for frontmost app
-- **⌘⌥↓**: Decrease volume for frontmost app
-- **⌘⌥M**: Toggle mute for frontmost app
+Acting on the app in front, with these defaults:
+
+- **⌘⌥↑**: Increase volume
+- **⌘⌥↓**: Decrease volume
+- **⌘⌥M**: Toggle mute
+
+You can also give one specific app its own mute shortcut, so it works no matter
+what is in front — add it under **App Shortcuts**, or right-click the app in the
+mixer and choose **Assign Mute Shortcut**. Nothing is bound by default, so
+nothing collides with a launcher or key remapper; hyper (⌃⌥⇧⌘) combinations
+record correctly.
+
+Waves registers only the combinations you assign, through the system's own
+hot-key API. It needs no Accessibility permission and never observes any other
+keystroke.
 
 ### URL Scheme Automation
 
@@ -225,9 +238,10 @@ When switching audio devices:
 - Ensure macOS 14.2+ is installed for per-app routing
 
 ### Keyboard shortcuts not working
-- Verify "Enable keyboard shortcuts" is enabled in Settings
-- Check that Waves has accessibility permissions
-- Ensure no other apps are using the same shortcuts
+- Verify "Enable keyboard shortcuts" is on in Settings ▸ Shortcuts
+- A combination another app already claimed is marked in orange there — record a different one
+- An app shortcut only fires while that app is running
+- No permission is involved; Waves never asks for Accessibility
 
 ### Device switching issues
 - Managed routes re-establish automatically; if one didn't, recover routes manually from the Advanced tab

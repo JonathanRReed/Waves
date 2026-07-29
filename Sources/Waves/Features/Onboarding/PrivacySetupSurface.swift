@@ -60,7 +60,7 @@ struct PrivacySetupSurface: View {
           compactFact("Selected app audio is processed locally in real time.", systemImage: "waveform")
           compactFact("Audio is not recorded or transmitted.", systemImage: "externaldrive.badge.xmark")
           compactFact("macOS may ask for audio-capture/Microphone permission after Continue.", systemImage: "hand.raised.fill")
-          compactFact("Accessibility is optional and separate.", systemImage: "accessibility")
+          compactFact("Waves never asks for Accessibility.", systemImage: "accessibility")
         }
         .padding(12)
         .wavesCard(cornerRadius: 12)
@@ -116,8 +116,8 @@ struct PrivacySetupSurface: View {
           systemImage: "hand.raised.fill"
         )
         privacyFact(
-          "Accessibility stays optional",
-          detail: "Accessibility is separate and is only useful for optional global shortcuts and app-control helpers. Waves will not request it automatically.",
+          "No Accessibility permission",
+          detail: "Waves never asks for Accessibility, and does not need it — global keyboard shortcuts are registered with the system directly, so Waves never sees any keystroke except the combinations you assign it.",
           systemImage: "accessibility"
         )
       }
