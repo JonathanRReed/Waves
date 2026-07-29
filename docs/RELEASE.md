@@ -24,9 +24,35 @@ Before creating a tag:
   checksum.
 - Confirm the intended release commit is the current `origin/main` commit.
 
-The workflow accepts only tags that exactly match `vX.Y.Z` with numeric
-components and no leading zeroes. It requires the tagged commit to equal the
-fetched `origin/main` commit before reading any signing or notarization secret.
+## How a release is signed
+
+Releases are built, signed and notarized **on the maintainer's Mac**, using the
+Developer ID identity in that machine's keychain and a `notarytool` keychain
+profile. The signing key never leaves that Mac and is not stored in GitHub
+Actions secrets.
+
+That is deliberate. With a single maintainer, putting a Developer ID private key
+in CI adds a large blast radius — anything that can read repository secrets can
+sign software as you, and revoking a leaked identity invalidates everything
+already shipped — in exchange for convenience this project does not need.
+
+One-time setup, which prompts for an app-specific password from appleid.apple.com:
+
+```bash
+xcrun notarytool store-credentials waves-notary --apple-id "<apple-id>" --team-id AJ9VWBRNZN
+```
+
+Then, for each release:
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Jonathan Reed (AJ9VWBRNZN)" NOTARY_PROFILE=waves-notary ./script/build_and_run.sh --notarize
+```
+
+`.github/workflows/release.yml` is therefore **manual-only** (`workflow_dispatch`,
+taking an existing tag). Pushing a tag does not start a build. The workflow
+remains runnable if CI signing is ever wanted: add the secrets it documents and
+dispatch it against a tag. It accepts only tags matching `vX.Y.Z` exactly, and
+requires the tagged commit to equal `origin/main` before reading any secret.
 
 ## Unsigned or Ad Hoc Local Validation
 
@@ -74,12 +100,6 @@ signature or the DMG lacks notarization. It is not approval for publication.
 
 ## Credential-Dependent Publication Validation
 
-The release workflow currently has no signing secrets configured. A tag-driven
-run will fail at the signing gate until all seven repository secrets are added:
-`DEVELOPER_ID_CERT_P12`, `DEVELOPER_ID_CERT_PASSWORD`, `SIGN_IDENTITY`,
-`KEYCHAIN_PASSWORD`, `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, and
-`NOTARY_PASSWORD`.
-
 Public builds must be signed with a Developer ID Application certificate and
 notarized. Confirm credentials are installed:
 
@@ -120,7 +140,7 @@ requires:
 - Gatekeeper acceptance of the app.
 - A valid stapled notarization ticket and Gatekeeper acceptance of the DMG.
 
-The tag-driven workflow performs tests and unsigned checks before importing
+The dispatched workflow performs tests and unsigned checks before importing
 credentials. After notarization it runs publication validation and package
 smoke, then produces and uploads these workflow artifacts:
 
