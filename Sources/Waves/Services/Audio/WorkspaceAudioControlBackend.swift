@@ -1247,6 +1247,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         AudioHardwareCreateAggregateDevice(aggregateDeviceDescription as CFDictionary, &aggregateID),
         action: "create aggregate device"
       )
+      let callbackFrameCount = try bufferFrameCount(for: aggregateID)
 
       let controller = try PerAppTapController(
         appID: app.id,
@@ -1260,7 +1261,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         equalizerSettings: equalizerSettings,
         managedAudioEqualizerSettings: managedAudioEqualizerSettings,
         adaptiveGainDB: adaptiveGainDBByAppID[app.logicalID] ?? 0,
-        audioFormatPlan: audioFormatPlan
+        audioFormatPlan: audioFormatPlan,
+        callbackFrameCount: callbackFrameCount
       )
 
       controllerOwnsResources = true
@@ -1368,6 +1370,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyDataSize(tapID, &address, 0, nil, &uidSize),
       action: "read tap uid size"
     )
+    let expectedSize = UInt32(MemoryLayout<CFString?>.size)
+    guard uidSize == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Process tap UID returned \(uidSize) bytes; expected \(expectedSize)."
+      )
+    }
 
     var rawUID: CFString?
     let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
@@ -1398,6 +1406,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyDataSize(deviceID, &uidAddress, 0, nil, &uidSize),
       action: "read default output uid size"
     )
+    let expectedSize = UInt32(MemoryLayout<CFString?>.size)
+    guard uidSize == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Output device UID returned \(uidSize) bytes; expected \(expectedSize)."
+      )
+    }
 
     var rawUID: CFString?
     let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
@@ -1563,6 +1577,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
     var size: UInt32 = 0
     guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return nil }
+    guard size == UInt32(MemoryLayout<CFString?>.size) else { return nil }
     var rawUID: CFString?
     let status = withUnsafeMutablePointer(to: &rawUID) {
       AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, $0)
@@ -1587,6 +1602,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyDataSize(objectID, &address, 0, nil, &propertySize),
       action: "\(action) size"
     )
+    let expectedSize = UInt32(MemoryLayout<CFString?>.size)
+    guard propertySize == expectedSize else {
+      throw BackendError.managedRouteUnavailable(
+        "\(action) returned \(propertySize) bytes; expected \(expectedSize)."
+      )
+    }
 
     var rawValue: CFString?
     let status = withUnsafeMutablePointer(to: &rawValue) {
@@ -1837,6 +1858,26 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }
     return plan
+  }
+
+  private func bufferFrameCount(for deviceID: AudioObjectID) throws -> Int {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyBufferFrameSize,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var frameCount: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    try withStatusCheck(
+      AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &frameCount),
+      action: "read aggregate device buffer frame size"
+    )
+    guard size == UInt32(MemoryLayout<UInt32>.size), frameCount > 0 else {
+      throw BackendError.managedRouteUnavailable(
+        "Aggregate device returned an invalid buffer frame size."
+      )
+    }
+    return Int(frameCount)
   }
 
   private func buildSnapshot(merging previousSnapshot: AudioSessionSnapshot?) async -> AudioSessionSnapshot {
@@ -2913,6 +2954,7 @@ private final class PerAppTapController: @unchecked Sendable {
 
   private let stateBox: TapRenderStateBox
   private let audioFormatPlan: AudioFormatPlan
+  private let callbackByteCount: Int
   private let equalizerDSP: EqualizerDSP
   private let managedAudioEqualizerDSP: EqualizerDSP
   private let voiceBandAnalyzer: VoiceBandEnergyAnalyzer
@@ -2944,7 +2986,8 @@ private final class PerAppTapController: @unchecked Sendable {
     equalizerSettings: EqualizerSettings,
     managedAudioEqualizerSettings: GlobalEqualizerSettings,
     adaptiveGainDB: Float,
-    audioFormatPlan: AudioFormatPlan
+    audioFormatPlan: AudioFormatPlan,
+    callbackFrameCount: Int
   ) throws {
     self.appID = appID
     self.appName = appName
@@ -2952,6 +2995,13 @@ private final class PerAppTapController: @unchecked Sendable {
     self.tapID = tapID
     self.aggregateDeviceID = aggregateDeviceID
     self.audioFormatPlan = audioFormatPlan
+    let callbackBytes = callbackFrameCount.multipliedReportingOverflow(
+      by: audioFormatPlan.bytesPerFrame
+    )
+    guard !callbackBytes.overflow, callbackBytes.partialValue > 0 else {
+      throw BackendError.managedRouteUnavailable("Invalid Core Audio callback buffer geometry.")
+    }
+    self.callbackByteCount = callbackBytes.partialValue
     self.equalizerDSP = EqualizerDSP(
       sampleRate: audioFormatPlan.sampleRate,
       channelCount: audioFormatPlan.channelCount,
@@ -3100,7 +3150,6 @@ private final class PerAppTapController: @unchecked Sendable {
     ) { _, inputData, _, outOutputData, _ in
       guard self.validatesCallbackGeometry(inputData, outputData: outOutputData) else {
         self.stateBox.flagGeometryMismatch()
-        self.zeroOutput(outOutputData)
         return
       }
 
@@ -3388,6 +3437,7 @@ private final class PerAppTapController: @unchecked Sendable {
       guard Int(inputBuffer.mNumberChannels) == expectedChannels,
             Int(outputBuffer.mNumberChannels) == expectedChannels,
             inputByteCount == outputByteCount,
+            inputByteCount == callbackByteCount,
             inputByteCount.isMultiple(of: audioFormatPlan.bytesPerFrame),
             inputByteCount == 0 || (inputBuffer.mData != nil && outputBuffer.mData != nil) else {
         return false
@@ -3526,10 +3576,25 @@ private final class PerAppTapController: @unchecked Sendable {
   }
 
   private func zeroOutput(_ outOutputData: UnsafeMutablePointer<AudioBufferList>) {
+    guard validatesOutputGeometry(outOutputData) else { return }
     let buffers = UnsafeMutableAudioBufferListPointer(outOutputData)
     for buffer in buffers {
       guard let data = buffer.mData else { continue }
       memset(data, 0, Int(buffer.mDataByteSize))
+    }
+  }
+
+  private func validatesOutputGeometry(
+    _ outputData: UnsafeMutablePointer<AudioBufferList>
+  ) -> Bool {
+    let expectedBufferCount = audioFormatPlan.isInterleaved ? 1 : audioFormatPlan.channelCount
+    guard Int(outputData.pointee.mNumberBuffers) == expectedBufferCount else { return false }
+    let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
+    let expectedChannels = audioFormatPlan.isInterleaved ? audioFormatPlan.channelCount : 1
+    return outputBuffers.allSatisfy {
+      Int($0.mNumberChannels) == expectedChannels
+        && Int($0.mDataByteSize) == callbackByteCount
+        && $0.mData != nil
     }
   }
 
