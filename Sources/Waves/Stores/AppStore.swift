@@ -2114,6 +2114,10 @@ final class AppStore {
   ///   projection, and clearing it mid-drag would let a background refresh
   ///   overwrite the handle position.
   private func scheduleVolumeTransaction(_ value: Float, forAppID appID: String) {
+    // Always retire the previous nudge, even when the route has stopped being
+    // managed since the last slider event.
+    pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
+
     // Only nudge a route that already exists. Applying to an unmanaged app can
     // fall into the branch that builds a tap and an aggregate device — and if a
     // helper process appears mid-drag the same branch *rebuilds* them, which is
@@ -2121,16 +2125,20 @@ final class AppStore {
     // once, at the end, where a brief interruption is expected.
     guard session.apps.first(matchingAppKey: appID)?.routingState == .managed else { return }
 
-    pendingVolumeDebounceTasks[appID]?.cancel()
     pendingVolumeDebounceTasks[appID] = Task { @MainActor [weak self] in
       do {
         try await Task.sleep(for: Self.volumeDragInterval)
       } catch {
         return
       }
-      guard let self, !Task.isCancelled,
-            self.pendingVolumeTargets[appID] == value else { return }
+      guard let self, !Task.isCancelled else { return }
       self.pendingVolumeDebounceTasks.removeValue(forKey: appID)
+      let routeIsManaged = self.session.apps
+        .first(matchingAppKey: appID)?.routingState == .managed
+      guard self.pendingVolumeTargets[appID] == value,
+            routeIsManaged else {
+        return
+      }
       self.startAppIntentTransaction(
         forAppID: appID,
         overrides: AppIntentOverrides(desiredVolume: value),
