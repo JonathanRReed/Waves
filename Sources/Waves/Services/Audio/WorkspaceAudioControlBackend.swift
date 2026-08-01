@@ -952,17 +952,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return captureAuthorization
     }
 
-    // A live managed route is stronger evidence of the capture grant than this
-    // probe: it *is* a process tap, already created and rendering. Re-probing
-    // behind one meant building and tearing down a system-wide tap against
-    // coreaudiod twice every 8 seconds — the silent session refresh calls
-    // `refresh()` and `diagnosticsReport()`, and both used to probe — for the
-    // entire life of the process.
-    if captureAuthorization == .authorized,
-       controllers.values.contains(where: \.isActive) {
-      return captureAuthorization
-    }
-
     // A probe tap whose destroy failed is a private system-wide tap stranded in
     // coreaudiod. Retry those before creating another one.
     retryLeakedProbeTapDestroys()
