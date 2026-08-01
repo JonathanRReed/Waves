@@ -84,6 +84,12 @@ final class ControlServer {
 
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { throw ControlServerError.socketFailed(errno) }
+    let flags = fcntl(fd, F_GETFL, 0)
+    guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
+      let configurationError = errno
+      close(fd)
+      throw ControlServerError.socketConfigurationFailed(configurationError)
+    }
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
@@ -224,6 +230,7 @@ final class ControlServer {
 enum ControlServerError: Error, Equatable {
   case pathTooLong
   case socketFailed(Int32)
+  case socketConfigurationFailed(Int32)
   case bindFailed(Int32)
   case listenFailed(Int32)
 }
