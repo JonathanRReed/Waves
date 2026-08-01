@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 import WavesAudioCore
@@ -10,6 +11,16 @@ import WavesAudioCore
 // provable here, without a device.
 
 // MARK: - Framing
+
+@Test func controlServerMakesItsListenerNonblocking() {
+  let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+  #expect(fd >= 0)
+  defer { if fd >= 0 { close(fd) } }
+
+  #expect(ControlServer.setNonBlocking(fd))
+  let flags = fcntl(fd, F_GETFL, 0)
+  #expect(flags & O_NONBLOCK != 0)
+}
 
 @Test func codecSplitsOnNewlinesAndToleratesPartialWrites() throws {
   var codec = ControlCodec()

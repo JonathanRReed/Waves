@@ -84,6 +84,11 @@ final class ControlServer {
 
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { throw ControlServerError.socketFailed(errno) }
+    guard Self.setNonBlocking(fd) else {
+      let configurationError = errno
+      close(fd)
+      throw ControlServerError.socketFailed(configurationError)
+    }
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
@@ -164,6 +169,15 @@ final class ControlServer {
   }
 
   // MARK: Accept
+
+  /// The dispatch source only promises that at least one connection is ready.
+  /// The listener must be nonblocking so draining that backlog stops at EAGAIN
+  /// instead of waiting for another client on the main actor.
+  nonisolated static func setNonBlocking(_ fd: Int32) -> Bool {
+    let flags = fcntl(fd, F_GETFL, 0)
+    guard flags >= 0 else { return false }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0
+  }
 
   /// Runs on `ioQueue`. Drains the accept backlog, rejecting anything that
   /// fails the uid check before it becomes a connection at all.
