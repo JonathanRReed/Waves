@@ -217,6 +217,21 @@ public enum AppDiscoveryPolicy {
     return nil
   }
 
+  /// Returns whether an executable's outermost app bundle is the specific app
+  /// bundle discovered by the workspace. Bundle identifiers are deliberately
+  /// not involved because they are untrusted, self-declared Info.plist data.
+  public static func executablePath(
+    _ executablePath: String,
+    belongsToAppBundleAt appBundlePath: String
+  ) -> Bool {
+    guard let enclosingPath = topLevelAppBundlePath(forExecutablePath: executablePath) else { return false }
+    let enclosingURL = URL(fileURLWithPath: enclosingPath)
+      .standardizedFileURL.resolvingSymlinksInPath()
+    let appURL = URL(fileURLWithPath: appBundlePath)
+      .standardizedFileURL.resolvingSymlinksInPath()
+    return enclosingURL.path == appURL.path
+  }
+
   public static func bundleFamilyMatches(appBundleID: String, candidateBundleID: String?) -> Bool {
     guard let candidateBundleID, !candidateBundleID.isEmpty else { return false }
     if candidateBundleID == appBundleID {

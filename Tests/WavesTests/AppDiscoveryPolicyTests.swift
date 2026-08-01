@@ -143,6 +143,12 @@ import Testing
   #expect(AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: "") == nil)
 }
 
+@Test func helperExecutableMustBelongToDiscoveredBundlePath() {
+  let helper = "/Applications/Impostor.app/Contents/MacOS/Audio Helper"
+  #expect(AppDiscoveryPolicy.executablePath(helper, belongsToAppBundleAt: "/Applications/Impostor.app"))
+  #expect(!AppDiscoveryPolicy.executablePath(helper, belongsToAppBundleAt: "/Applications/Google Chrome.app"))
+}
+
 @Test func bundleFamilyMatchesChromiumHelperToParent() {
   // The attribution path resolves a helper to the parent .app, whose bundle id
   // must family-match the discovered app so the audio is credited to it.
