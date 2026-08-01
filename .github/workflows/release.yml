@@ -55,9 +55,10 @@ jobs:
       - name: Validate strict tag and origin/main ancestry
         id: version
         shell: bash
+        env:
+          TAG_NAME: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          TAG_NAME="${{ inputs.tag }}"
           if [[ ! "$TAG_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::Release tags must exactly match vX.Y.Z with numeric components and no leading zeroes."
             exit 1
