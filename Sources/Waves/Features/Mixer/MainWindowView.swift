@@ -21,7 +21,9 @@ struct MainWindowView: View {
       // `isLoading` is false on the warm-start path (beginAudioStartupIfNeeded
       // only sets it when the restored session was empty), so without the
       // warming-up term the early mixer would give no sign it is still coming up.
-      if (store.isLoading || store.isWarmingUp) && store.privacySetupPresentationState == .hidden {
+      if store.isWarmingUp
+        || (store.isLoading && store.privacySetupPresentationState == .hidden)
+      {
         HStack(spacing: 10) {
           ProgressView()
             .controlSize(.small)
