@@ -419,6 +419,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }
 
+    if let detail = competingAudioRouterConflictDetail(for: snapshot.apps[acceptedIndex]) {
+      suspendManagedRouteForConflict(at: acceptedIndex, detail: detail)
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unsupported,
+        resultingApp: snapshot.apps[acceptedIndex],
+        backendStatus: snapshot.backendStatus,
+        detail: detail
+      )
+    }
+
     if !supportsPerAppRouting || snapshot.apps[acceptedIndex].compatibility == .unsupported {
       let detail = supportsPerAppRouting
         ? "This app does not support managed audio controls."
@@ -1182,6 +1196,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
     guard supportsPerAppRouting else {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
+    }
+    if let detail = competingAudioRouterConflictDetail(for: app) {
+      throw BackendError.unsupportedOperation(detail)
     }
 
     if let generationContext {
@@ -2755,6 +2772,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func updateAudioLevels() async {
     guard !isShuttingDown else { return }
+    suspendManagedRoutesForCompetingAudioRouter()
     // With no controllers left there are no levels to read — but there may still
     // be a parked teardown to retry, and that is exactly the case where one
     // exists: disposing the last controller removes it from `controllers` before
@@ -2850,6 +2868,51 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // trying to release it rather than leaving the app silent for the session.
       retryOrphanedControllerDisposals()
       await maintainManagedRoutes(forceRebuildIDs: routeIDsNeedingRebuild)
+    }
+  }
+
+  private func competingAudioRouterConflictDetail(for app: AudioApp) -> String? {
+    guard let routerName = AppDiscoveryPolicy.competingAudioRouterName(
+      for: app.bundleID,
+      among: snapshot.apps
+    ) else {
+      return nil
+    }
+    return "\(routerName) is already routing this app's audio. "
+      + "Waves left it untouched to prevent two copies. "
+      + "Quit \(routerName) before controlling this app in Waves."
+  }
+
+  private func suspendManagedRouteForConflict(at index: Int, detail: String) {
+    let app = snapshot.apps[index]
+    if let controller = controllers.removeValue(forKey: app.id) {
+      retainCleanupDegradations(disposeController(controller))
+    }
+    controllerGenerationByRuntimeID.removeValue(forKey: app.id)
+    staleRouteTicks.removeValue(forKey: app.logicalID)
+    lastRenderTickByAppID.removeValue(forKey: app.logicalID)
+    snapshot.apps[index].routingState = .monitorOnly
+    snapshot.apps[index].appliedVolume = nil
+    snapshot.apps[index].peakLevel = 0
+    snapshot.apps[index].rmsLevel = 0
+    snapshot.apps[index].notes = detail
+  }
+
+  private func suspendManagedRoutesForCompetingAudioRouter() {
+    var changed = false
+    for index in snapshot.apps.indices {
+      let app = snapshot.apps[index]
+      guard
+        app.routingState == .managed || controllers[app.id] != nil,
+        let detail = competingAudioRouterConflictDetail(for: app)
+      else {
+        continue
+      }
+      suspendManagedRouteForConflict(at: index, detail: detail)
+      changed = true
+    }
+    if changed {
+      snapshot.updatedAt = .now
     }
   }
 

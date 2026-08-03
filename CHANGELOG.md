@@ -6,6 +6,16 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-08-03
+
+A compatibility patch for Macs that use Elgato Wave Link 3.
+
+### Fixed
+- Detect when Wave Link is actively routing app audio and leave those upstream
+  sources untouched instead of creating a second process-tap renderer. Existing
+  Waves routes are released, and new route attempts explain that Wave Link must
+  be closed first, preventing every source from playing twice with a delay.
+
 ## [1.4.2] - 2026-08-03
 
 A reliability and security patch for real app audio routes and local control.

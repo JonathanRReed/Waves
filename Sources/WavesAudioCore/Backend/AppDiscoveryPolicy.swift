@@ -133,6 +133,31 @@ public enum AppDiscoveryPolicy {
     return true
   }
 
+  /// Returns the user-facing name of a live third-party router that would
+  /// replay the same upstream app audio as Waves.
+  ///
+  /// Wave Link 3 uses Core Audio process taps for per-app routing. If both apps
+  /// tap Zoom, a browser, or another source, each router renders its own copy to
+  /// the output device. Waves must leave the upstream source untouched while
+  /// Wave Link's monitor mix is active.
+  public static func competingAudioRouterName(
+    for targetBundleID: String?,
+    among apps: [AudioApp]
+  ) -> String? {
+    let normalizedTarget = targetBundleID?.lowercased()
+    for app in apps where app.isActive {
+      guard
+        let bundleID = app.bundleID?.lowercased(),
+        let routerName = competingAudioRouterBundleIDs[bundleID],
+        bundleID != normalizedTarget
+      else {
+        continue
+      }
+      return routerName
+    }
+    return nil
+  }
+
   public static func isNestedAppBundlePath(_ bundlePath: String) -> Bool {
     let bundleURL = URL(fileURLWithPath: bundlePath).standardizedFileURL
     guard bundleURL.pathExtension == "app",
@@ -313,4 +338,6 @@ public enum AppDiscoveryPolicy {
     "content synchronizer",
     "extension helper",
   ]
+
+  private static let competingAudioRouterBundleIDs = ["com.elgato.wavelink3": "Elgato Wave Link"]
 }

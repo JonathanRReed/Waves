@@ -126,6 +126,62 @@ import WavesAudioCore
   #expect(resultingApp.appliedVolume == nil)
 }
 
+@Test func activeWaveLinkPreventsASecondManagedRenderer() async {
+  let zoom = AudioApp(
+    id: "runtime.zoom",
+    logicalID: "us.zoom.xos",
+    pid: 101,
+    bundleID: "us.zoom.xos",
+    displayName: "zoom.us",
+    category: .conferencing,
+    isActive: true,
+    desiredVolume: 1,
+    appliedVolume: 1,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let waveLink = AudioApp(
+    id: "runtime.wave-link",
+    logicalID: "com.elgato.WaveLink3",
+    pid: 202,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "WaveLink",
+    category: .unknown,
+    isActive: true,
+    desiredVolume: 1,
+    appliedVolume: nil,
+    routingState: .live,
+    compatibility: .supported
+  )
+  let recorder = AppliedIntentRecorder()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [zoom, waveLink]),
+    intentRouteApplyOverride: { stagedApp, equalizer in
+      await recorder.record(app: stagedApp, equalizer: equalizer)
+    }
+  )
+
+  let result = await backend.applyAppIntent(AppRouteIntent(
+    appID: zoom.logicalID,
+    desiredVolume: 0.5,
+    isMuted: false,
+    volumeBoost: 1,
+    equalizerSettings: EqualizerSettings(),
+    targetDeviceUID: nil,
+    generation: 1,
+    reason: .userEdit
+  ))
+  let resultingZoom = await backend.currentSnapshot().apps[0]
+
+  #expect(result.outcome == .unsupported)
+  #expect(result.detail?.contains("Wave Link") == true)
+  #expect(result.detail?.contains("two copies") == true)
+  #expect(resultingZoom.routingState == .monitorOnly)
+  #expect(resultingZoom.desiredVolume == 1)
+  #expect(resultingZoom.appliedVolume == nil)
+  #expect(await recorder.count() == 0)
+}
+
 @Test func workspaceIntentDoesNotCommitStaleWorkAfterSuspension() async {
   let gate = IntentRouteSuspensionGate()
   let app = managedTestApp(desiredVolume: 0.5)
