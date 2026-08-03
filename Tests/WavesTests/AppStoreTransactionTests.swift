@@ -1812,3 +1812,46 @@ private final class TransactionLoginItemService: LoginItemServicing {
   await fixture.store.drainAppIntentTransactions()
   #expect(await fixture.backend.recordedIntents().last?.desiredVolume == 0.7)
 }
+
+@MainActor
+@Test func volumeDragStopsWhenItsManagedRouteDisappears() async {
+  let device = transactionTestDevice()
+  let managedApp = transactionTestApp(desiredVolume: 0.4)
+  var liveApp = managedApp
+  liveApp.routingState = .live
+  let fixture = makeTransactionFixture(
+    apps: [managedApp],
+    device: device,
+    refreshApps: [liveApp]
+  )
+
+  fixture.store.setDesiredVolume(0.6, for: managedApp)
+  fixture.store.refresh(announce: false)
+  await waitForRefresh(fixture.store)
+  await fixture.store.drainAppIntentTransactions()
+
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(fixture.store.trackedAppIntentTaskCount == 0)
+}
+
+@MainActor
+@Test func unmanagedVolumeEventCancelsAnEarlierManagedDebounce() async {
+  let device = transactionTestDevice()
+  let managedApp = transactionTestApp(desiredVolume: 0.4)
+  var liveApp = managedApp
+  liveApp.routingState = .live
+  let fixture = makeTransactionFixture(
+    apps: [managedApp],
+    device: device,
+    refreshApps: [liveApp]
+  )
+
+  fixture.store.setDesiredVolume(0.6, for: managedApp)
+  fixture.store.refresh(announce: false)
+  await waitForRefresh(fixture.store)
+  fixture.store.setDesiredVolume(0.7, for: liveApp)
+  await fixture.store.drainAppIntentTransactions()
+
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(fixture.store.trackedAppIntentTaskCount == 0)
+}
