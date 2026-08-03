@@ -314,7 +314,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     staleRouteTicks.removeAll()
     lastRenderTickByAppID.removeAll()
     routeMaintenanceTick = 0
-    appBundleIDByPath.removeAll()
     audibleCache = nil
     outputDeviceReadinessError = nil
     snapshot = .empty
@@ -1458,10 +1457,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // renderer process that owns the real output stream. Without this the tap
       // would capture only the main process, which for browsers and Electron
       // apps emits no audio, so volume/mute/boost would silently do nothing.
+      let targetBundlePaths = Set(
+        NSWorkspace.shared.runningApplications.compactMap { runningApp -> String? in
+          guard let appPID = app.pid, runningApp.processIdentifier == appPID else { return nil }
+          return runningApp.bundleURL?.path
+        }
+      )
       for pid in cachedAudibleProcesses().pids {
-        guard let parentBundleID = enclosingAppBundleID(forPID: pid),
-              AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: parentBundleID)
-        else { continue }
+        guard targetBundlePaths.contains(where: {
+          executableForPID(pid, belongsToAppBundleAt: $0)
+        }) else { continue }
         candidatePIDs.insert(pid)
       }
     }
@@ -1527,16 +1532,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyDataSize(tapID, &address, 0, nil, &uidSize),
       action: "read tap uid size"
     )
-
-    var rawUID: CFString?
-    let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
-      AudioObjectGetPropertyData(tapID, &address, 0, nil, &uidSize, $0)
-    }
-    try withStatusCheck(uidStatus, action: "read tap uid")
     let expectedUIDSize = UInt32(MemoryLayout<CFString?>.size)
     guard uidSize == expectedUIDSize else {
       throw BackendError.managedRouteUnavailable(
         "Process tap UID returned \(uidSize) bytes; expected \(expectedUIDSize)."
+      )
+    }
+
+    var readSize = expectedUIDSize
+    var rawUID: CFString?
+    let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
+      AudioObjectGetPropertyData(tapID, &address, 0, nil, &readSize, $0)
+    }
+    try withStatusCheck(uidStatus, action: "read tap uid")
+    guard readSize == expectedUIDSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Process tap UID returned \(readSize) bytes; expected \(expectedUIDSize)."
       )
     }
 
@@ -1563,16 +1574,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       AudioObjectGetPropertyDataSize(deviceID, &uidAddress, 0, nil, &uidSize),
       action: "read default output uid size"
     )
-
-    var rawUID: CFString?
-    let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
-      AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, $0)
-    }
-    try withStatusCheck(uidStatus, action: "read default output uid")
     let expectedUIDSize = UInt32(MemoryLayout<CFString?>.size)
     guard uidSize == expectedUIDSize else {
       throw BackendError.managedRouteUnavailable(
         "Default output UID returned \(uidSize) bytes; expected \(expectedUIDSize)."
+      )
+    }
+
+    var readSize = expectedUIDSize
+    var rawUID: CFString?
+    let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
+      AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &readSize, $0)
+    }
+    try withStatusCheck(uidStatus, action: "read default output uid")
+    guard readSize == expectedUIDSize else {
+      throw BackendError.managedRouteUnavailable(
+        "Default output UID returned \(readSize) bytes; expected \(expectedUIDSize)."
       )
     }
 
@@ -1851,21 +1868,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   /// The set of processes currently producing audio output, indexed both by raw
-  /// PID and by the bundle identifier of the enclosing top-level `.app`. The
-  /// bundle index is what lets a Chromium/Electron helper's audio be attributed
-  /// to the parent app (see `enclosingAppBundleID`).
+  /// PID and by the path of the enclosing top-level `.app`. Using the actual
+  /// bundle path prevents an unrelated app from claiming a trusted bundle ID.
   struct AudibleProcessIndex: Sendable {
     var pids: Set<pid_t> = []
-    /// Bundle IDs of the top-level apps that own the audible processes. For a
-    /// browser this is `com.google.Chrome` even though the audible PID is a
-    /// nested "… Helper (Renderer)" process.
-    var parentBundleIDs: Set<String> = []
+    var parentBundlePaths: Set<String> = []
   }
-
-  /// Caches the resolved top-level-app bundle ID per app-bundle path so repeated
-  /// `Bundle` loads (which read Info.plist from disk) are avoided. Keyed by the
-  /// stable bundle path rather than PID, so PID reuse can't poison it.
-  private var appBundleIDByPath: [String: String] = [:]
 
   /// Short-lived cache of the audible-process scan. A volume drag fires many
   /// throttled applies in quick succession; without this each one would re-walk
@@ -1887,13 +1895,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return index
   }
 
-  /// Resolves the bundle identifier of the outermost `.app` that contains the
-  /// given PID's executable. This is the public, App-Store-safe way (used by
-  /// AudioCap) to map a sandboxed audio helper back to its user-facing app —
-  /// browsers and Electron apps render audio in helper subprocesses that aren't
-  /// in `NSWorkspace.runningApplications`, so their executable path is the only
-  /// reliable link back to the parent.
-  private func enclosingAppBundleID(forPID pid: pid_t) -> String? {
+  private func executablePath(forPID pid: pid_t) -> String? {
     // PROC_PIDPATHINFO_MAXSIZE (4 * MAXPATHLEN) isn't surfaced to Swift, so the
     // value is inlined. proc_pidpath never writes more than this.
     let maxPathSize = 4 * 1024
@@ -1903,18 +1905,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let executablePath = pathBuffer.withUnsafeBufferPointer { buffer in
       buffer.baseAddress.map { String(cString: $0) } ?? ""
     }
-    guard let appPath = AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: executablePath) else {
-      return nil
-    }
-    if let cached = appBundleIDByPath[appPath] {
-      return cached
-    }
-    guard let bundle = Bundle(url: URL(fileURLWithPath: appPath)),
-          let identifier = bundle.bundleIdentifier else {
-      return nil
-    }
-    appBundleIDByPath[appPath] = identifier
-    return identifier
+    return executablePath
+  }
+
+  private func executableForPID(_ pid: pid_t, belongsToAppBundleAt bundlePath: String) -> Bool {
+    guard let executablePath = executablePath(forPID: pid) else { return false }
+    return AppDiscoveryPolicy.executablePath(executablePath, belongsToAppBundleAt: bundlePath)
   }
 
   private func getAudibleProcesses() -> AudibleProcessIndex {
@@ -1978,8 +1974,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       guard let pid = readProcessPID(processObjectID, stale: &stale) else { continue }
       index.pids.insert(pid)
       // Attribute helper/utility audio (browsers, Electron) to the parent app.
-      if let parentBundleID = enclosingAppBundleID(forPID: pid) {
-        index.parentBundleIDs.insert(parentBundleID)
+      if let executablePath = executablePath(forPID: pid),
+        let parentBundlePath = AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: executablePath)
+      {
+        index.parentBundlePaths.insert(parentBundlePath)
       }
     }
     if !stale.isEmpty {
@@ -2105,7 +2103,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       Self.discoverRunningApps(
         currentBundleID: currentBundleID,
         audiblePIDs: audible.pids,
-        audibleParentBundleIDs: audible.parentBundleIDs,
+        audibleParentBundlePaths: audible.parentBundlePaths,
         knownIconData: knownIcons
       )
     }.value
@@ -2313,7 +2311,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private static func discoverRunningApps(
     currentBundleID: String?,
     audiblePIDs: Set<pid_t>,
-    audibleParentBundleIDs: Set<String>,
+    audibleParentBundlePaths: Set<String>,
     knownIconData: [String: Data] = [:]
   ) -> [AudioApp] {
     let runningApps = NSWorkspace.shared.runningApplications
@@ -2328,7 +2326,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let candidateApps = runningApps
       .filter { app in
         let localizedName = app.localizedName ?? ""
-        guard AppDiscoveryPolicy.isManageableApp(named: localizedName, bundleID: app.bundleIdentifier) else { return false }
+        guard AppDiscoveryPolicy.isManageableApp(
+          named: localizedName,
+          bundleID: app.bundleIdentifier,
+          bundlePath: app.bundleURL?.path
+        ) else { return false }
         return true
       }
       .sorted {
@@ -2363,9 +2365,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         // the only signal that lights up browsers, whose audio is emitted by a
         // sandboxed "Audio Service" helper that never appears in the family set.
         let isAudibleByPID = !audiblePIDs.isEmpty && !familyPIDs.isDisjoint(with: audiblePIDs)
-        let isAudibleByBundle = bundleID.map { bid in
-          audibleParentBundleIDs.contains { candidate in
-            AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bid, candidateBundleID: candidate)
+        let isAudibleByBundle = app.bundleURL.map { bundleURL in
+          audibleParentBundlePaths.contains { candidate in
+            URL(fileURLWithPath: candidate).standardizedFileURL.resolvingSymlinksInPath().path
+              == bundleURL.standardizedFileURL.resolvingSymlinksInPath().path
           }
         } ?? false
         let isAudible = isAudibleByPID || isAudibleByBundle

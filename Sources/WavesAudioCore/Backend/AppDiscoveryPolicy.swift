@@ -111,14 +111,35 @@ public enum AppDiscoveryPolicy {
       .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
   }
 
-  public static func isManageableApp(named displayName: String, bundleID: String?) -> Bool {
+  public static func isManageableApp(
+    named displayName: String,
+    bundleID: String?,
+    bundlePath: String? = nil
+  ) -> Bool {
     let token = [bundleID ?? "", displayName].joined(separator: " ").lowercased()
+
+    // Nested app bundles are helpers owned by the outer app, not independent
+    // mixer sources. Zoom's caphost.app is the concrete failure this prevents:
+    // exposing both caphost and zoom.us created two controllers for the same
+    // Core Audio process and played the call twice with a small delay.
+    if let bundlePath, isNestedAppBundlePath(bundlePath) {
+      return false
+    }
 
     if excludedProcessMarkers.contains(where: { token.contains($0) }) {
       return false
     }
 
     return true
+  }
+
+  public static func isNestedAppBundlePath(_ bundlePath: String) -> Bool {
+    let bundleURL = URL(fileURLWithPath: bundlePath).standardizedFileURL
+    guard bundleURL.pathExtension == "app",
+          let outerPath = topLevelAppBundlePath(forExecutablePath: bundleURL.path) else {
+      return false
+    }
+    return URL(fileURLWithPath: outerPath).standardizedFileURL.path != bundleURL.path
   }
 
   public static func isCompanionAudioProcess(named displayName: String, bundleID: String?) -> Bool {
@@ -215,6 +236,20 @@ public enum AppDiscoveryPolicy {
       }
     }
     return nil
+  }
+
+  /// Verifies helper attribution by the executable's actual enclosing bundle,
+  /// not by an Info.plist identifier that another local app can self-declare.
+  public static func executablePath(
+    _ executablePath: String,
+    belongsToAppBundleAt appBundlePath: String
+  ) -> Bool {
+    guard let enclosingPath = topLevelAppBundlePath(forExecutablePath: executablePath) else { return false }
+    let enclosingURL = URL(fileURLWithPath: enclosingPath)
+      .standardizedFileURL.resolvingSymlinksInPath()
+    let appURL = URL(fileURLWithPath: appBundlePath)
+      .standardizedFileURL.resolvingSymlinksInPath()
+    return enclosingURL.path == appURL.path
   }
 
   public static func bundleFamilyMatches(appBundleID: String, candidateBundleID: String?) -> Bool {

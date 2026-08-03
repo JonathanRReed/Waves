@@ -103,20 +103,14 @@ final class ControlConnection {
     }
 
     for line in lines {
-      // Decode first, so a refusal can still carry the request's id.
-      //
-      // Rate-limiting ahead of the decode meant every refusal came back with
-      // `id: null`, which no client keying pending requests by id can match —
-      // it waits out its timeout instead of seeing the answer it was sent. And
-      // this is reachable in ordinary use: a Stream Deck dial spends two
-      // commands per tick, so a few seconds of continuous twisting drains the
-      // burst allowance.
-      let request = ControlCodec.decode(line)
-
+      // Bound parser work before decoding attacker-controlled JSON. The small
+      // prefix scan keeps ordinary client correlation without letting traffic
+      // beyond the token budget trigger repeated full allocations and decodes.
       guard limiter.allow(now: Date().timeIntervalSinceReferenceDate) else {
-        send(.failure(id: request?.id, .rateLimited))
+        send(.failure(id: ControlCodec.requestIDPrefix(line), .rateLimited))
         continue
       }
+      let request = ControlCodec.decode(line)
       guard let request else {
         // Malformed input is refused without disturbing the connection — a
         // client recovering from a bad frame should not have to reconnect.

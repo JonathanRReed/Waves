@@ -6,6 +6,31 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-08-03
+
+A reliability and security patch for real app audio routes and local control.
+
+### Fixed
+- Stop nested audio helpers such as Zoom's `caphost.app` from appearing as a
+  second mixer source while their audio is already attributed to the parent
+  app. This removes the delayed duplicate copy heard when Waves managed both
+  `caphost` and `zoom.us` at once.
+- Stop a delayed volume-drag update from rebuilding a route after that app is no
+  longer managed.
+- Show warm-start progress while the restored mixer is becoming ready.
+- Make the external-control listener nonblocking so a client connection cannot
+  freeze the main actor while the accept backlog is drained.
+
+### Security
+- Attribute audible helper processes by their actual enclosing app bundle path,
+  not a self-declared bundle identifier.
+- Rate-limit control requests before full JSON decoding while preserving a
+  request ID through a bounded top-level prefix scan.
+- Validate Core Audio string property sizes before writing into fixed-size
+  destinations.
+- Pass manually dispatched release tags through the workflow environment before
+  shell validation, avoiding direct expression interpolation in the script.
+
 ## [1.4.1] - 2026-07-29
 
 Keyboard shortcuts you choose yourself, and one less permission to think about.

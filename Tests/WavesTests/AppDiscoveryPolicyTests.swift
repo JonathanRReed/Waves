@@ -89,6 +89,26 @@ import Testing
   #expect(!AppDiscoveryPolicy.isManageableApp(named: "Google Chrome Helper (Renderer)", bundleID: "com.google.Chrome.helper.renderer"))
 }
 
+@Test func nestedZoomAudioHostIsNotManagedSeparatelyFromZoom() {
+  let zoomPath = "/Applications/zoom.us.app"
+  let caphostPath = zoomPath + "/Contents/Frameworks/caphost.app"
+
+  #expect(
+    AppDiscoveryPolicy.isManageableApp(
+      named: "zoom.us",
+      bundleID: "us.zoom.xos",
+      bundlePath: zoomPath
+    )
+  )
+  #expect(
+    !AppDiscoveryPolicy.isManageableApp(
+      named: "caphost",
+      bundleID: "us.zoom.caphost",
+      bundlePath: caphostPath
+    )
+  )
+}
+
 @Test func missingAudioProcessIsRetryableForHeliumAndUserFacingApps() {
   #expect(
     !AppDiscoveryPolicy.treatsMissingAudioProcessAsPermanent(
@@ -141,6 +161,12 @@ import Testing
 @Test func topLevelAppBundlePathReturnsNilForNonBundledExecutable() {
   #expect(AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: "/usr/bin/some-daemon") == nil)
   #expect(AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: "") == nil)
+}
+
+@Test func helperExecutableMustBelongToDiscoveredBundlePath() {
+  let helper = "/Applications/Impostor.app/Contents/MacOS/Audio Helper"
+  #expect(AppDiscoveryPolicy.executablePath(helper, belongsToAppBundleAt: "/Applications/Impostor.app"))
+  #expect(!AppDiscoveryPolicy.executablePath(helper, belongsToAppBundleAt: "/Applications/Google Chrome.app"))
 }
 
 @Test func bundleFamilyMatchesChromiumHelperToParent() {

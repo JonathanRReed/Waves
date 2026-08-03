@@ -162,6 +162,12 @@ enum ControlEvent: String, Codable, Equatable, Sendable {
 /// Kept separate from the socket so the framing rules — which are where line
 /// protocols usually go wrong — can be tested directly.
 struct ControlCodec {
+  /// A throttled request must not pay the cost of full JSON decoding, but a
+  /// normal client still needs the response id to resolve its pending command.
+  /// Requests are flat objects, so a small top-level prefix scan preserves that
+  /// correlation while keeping hostile work strictly bounded.
+  static let maximumRequestIDScanBytes = 512
+
   private var buffer = Data()
 
   /// Feeds received bytes and returns whatever complete lines they produced.
@@ -191,6 +197,73 @@ struct ControlCodec {
 
   static func decode(_ line: Data) -> ControlRequest? {
     try? JSONDecoder().decode(ControlRequest.self, from: line)
+  }
+
+  static func requestIDPrefix(_ line: Data) -> Int? {
+    let bytes = Array(line.prefix(maximumRequestIDScanBytes))
+    var index = 0
+    var depth = 0
+
+    func isWhitespace(_ byte: UInt8) -> Bool {
+      byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+    }
+
+    while index < bytes.count {
+      let byte = bytes[index]
+      if byte == 0x7B || byte == 0x5B {
+        depth += 1
+        index += 1
+        continue
+      }
+      if byte == 0x7D || byte == 0x5D {
+        depth = max(0, depth - 1)
+        index += 1
+        continue
+      }
+      guard byte == 0x22 else {
+        index += 1
+        continue
+      }
+
+      index += 1
+      var key: [UInt8] = []
+      var hasEscape = false
+      while index < bytes.count, bytes[index] != 0x22 {
+        if bytes[index] == 0x5C {
+          hasEscape = true
+          index += 1
+          guard index < bytes.count else { return nil }
+        }
+        if key.count < 3 { key.append(bytes[index]) }
+        index += 1
+      }
+      guard index < bytes.count else { return nil }
+      index += 1
+
+      guard depth == 1, !hasEscape, key == [0x69, 0x64] else { continue }
+      while index < bytes.count, isWhitespace(bytes[index]) { index += 1 }
+      guard index < bytes.count, bytes[index] == 0x3A else { continue }
+      index += 1
+      while index < bytes.count, isWhitespace(bytes[index]) { index += 1 }
+
+      let numberStart = index
+      if index < bytes.count, bytes[index] == 0x2D { index += 1 }
+      let digitStart = index
+      while index < bytes.count, bytes[index] >= 0x30, bytes[index] <= 0x39 {
+        index += 1
+      }
+      guard index > digitStart else { return nil }
+      if index < bytes.count {
+        let terminator = bytes[index]
+        guard isWhitespace(terminator) || terminator == 0x2C || terminator == 0x7D else {
+          return nil
+        }
+      }
+
+      return Int(String(decoding: bytes[numberStart..<index], as: UTF8.self))
+    }
+
+    return nil
   }
 
   static func encode(_ response: ControlResponse) -> Data? {

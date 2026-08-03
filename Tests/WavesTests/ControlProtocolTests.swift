@@ -61,6 +61,19 @@ import WavesAudioCore
   #expect(ControlCodec.decode(Data(#"{"id":1}"#.utf8)) == nil)
 }
 
+@Test func boundedRequestIDScanPreservesCorrelationWithoutDecoding() {
+  #expect(ControlCodec.requestIDPrefix(Data(#"{"id":42,"cmd":"hello"}"#.utf8)) == 42)
+  #expect(ControlCodec.requestIDPrefix(Data(#"{"cmd":"hello","id":-7}"#.utf8)) == -7)
+  #expect(ControlCodec.requestIDPrefix(Data(#"{"id":"42","cmd":"hello"}"#.utf8)) == nil)
+  #expect(ControlCodec.requestIDPrefix(Data(#"{"cmd":"hello"}"#.utf8)) == nil)
+}
+
+@Test func requestIDScanHasABoundedWorkLimit() {
+  let padding = String(repeating: " ", count: ControlCodec.maximumRequestIDScanBytes)
+  let line = Data("{\"client\":\"\(padding)\",\"id\":99,\"cmd\":\"hello\"}".utf8)
+  #expect(ControlCodec.requestIDPrefix(line) == nil)
+}
+
 @Test func everyCommandRoundTripsThroughTheWire() throws {
   for command in ControlCommand.allCases {
     let request = ControlRequest(id: 7, cmd: command, app: "com.example.app")
