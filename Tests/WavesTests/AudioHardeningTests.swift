@@ -5,6 +5,72 @@ import WavesAudioCore
 
 @testable import Waves
 
+@Test func mutingTapTeardownRestoresOriginalAudioBeforeStoppingTheRenderer() {
+  var events: [String] = []
+
+  let result = MutingTapTeardownPreparation.perform(
+    makeOriginalAudioAudible: {
+      events.append("unmute-tap")
+      return noErr
+    },
+    stopIOProc: {
+      events.append("stop-io")
+      return noErr
+    },
+    deactivateRenderer: {
+      events.append("deactivate-renderer")
+    }
+  )
+
+  #expect(events == ["unmute-tap", "stop-io", "deactivate-renderer"])
+  #expect(result.canDestroyNativeResources)
+  #expect(result.originalAudioIsFailOpen)
+}
+
+@Test func failedMutingTapStopKeepsTheRendererLiveEvenAfterAnUnmuteRequest() {
+  var bothFailedEvents: [String] = []
+  let bothFailed = MutingTapTeardownPreparation.perform(
+    makeOriginalAudioAudible: {
+      bothFailedEvents.append("unmute-tap")
+      return -1
+    },
+    stopIOProc: {
+      bothFailedEvents.append("stop-io")
+      return -2
+    },
+    deactivateRenderer: {
+      bothFailedEvents.append("deactivate-renderer")
+    }
+  )
+
+  #expect(bothFailedEvents == ["unmute-tap", "stop-io"])
+  #expect(!bothFailed.canDestroyNativeResources)
+  #expect(!bothFailed.originalAudioIsFailOpen)
+
+  var unmutedEvents: [String] = []
+  let unmutedBeforeStopFailure = MutingTapTeardownPreparation.perform(
+    makeOriginalAudioAudible: {
+      unmutedEvents.append("unmute-tap")
+      return noErr
+    },
+    stopIOProc: {
+      unmutedEvents.append("stop-io")
+      return -2
+    },
+    deactivateRenderer: {
+      unmutedEvents.append("deactivate-renderer")
+    }
+  )
+
+  #expect(unmutedEvents == ["unmute-tap", "stop-io"])
+  #expect(!unmutedBeforeStopFailure.canDestroyNativeResources)
+  #expect(unmutedBeforeStopFailure.originalAudioIsFailOpen)
+}
+
+@Test func processTapAggregateStartsImmediatelyWithoutWaitingForSourceAudio() {
+  #expect(!ProcessTapAggregatePolicy.autoStartEnabled)
+}
+
 @Test func captureAuthorizationDiagnosticsFormattingKeepsEveryStructuredStateDistinct() async {
   #expect(DiagnosticsExportFormatter.captureAuthorizationDescription(.authorized) == "authorized")
   #expect(DiagnosticsExportFormatter.captureAuthorizationDescription(.notGranted) == "notGranted")

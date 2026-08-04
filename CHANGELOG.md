@@ -6,6 +6,31 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-08-03
+
+A fail-open audio-routing patch for reliable coexistence with Elgato Wave Link.
+
+### Fixed
+- Never wrap Wave Link's mixed output in a Waves renderer. One incompatible
+  nested route could otherwise mute every application carried by the personal
+  mix at once.
+- For ordinary apps, treat Wave Link as a competing router only while it has a
+  live audio stream. Merely opening or focusing Wave Link no longer tears down
+  unrelated Waves routes.
+- Release a process tap's hardware mute before stopping its renderer. If Core
+  Audio refuses to stop, keep the renderer and callback state alive so the app
+  remains audible while teardown is retried.
+- Stop teardown at the first failed native dependency instead of destroying an
+  aggregate device or process tap beneath a possibly live callback. Failed
+  callback owners remain retained through shutdown to prevent late access to
+  released state.
+
+### Performance
+- Start managed-route IO immediately instead of asking Core Audio to wait for
+  the tapped application to emit its first audio buffer.
+- Skip the four-times-per-second competing-router scan when Waves has no managed
+  renderers to suspend.
+
 ## [1.4.3] - 2026-08-03
 
 A compatibility patch for Macs that use Elgato Wave Link 3.

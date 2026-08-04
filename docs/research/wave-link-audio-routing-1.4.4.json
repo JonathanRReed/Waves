@@ -1,0 +1,339 @@
+{
+  "decision": {
+    "question": "What routing and teardown lifecycle should Waves 1.4.4 use on macOS 14.2 or later to coexist with Elgato Wave Link without duplicate audio, total silence, global output damage, or avoidable route-start latency?",
+    "audience": "Waves maintainers and release reviewers",
+    "scope": {
+      "geography": "not applicable",
+      "timeframe": "Waves 1.4.3 incident through the 1.4.4 release candidate",
+      "asOf": "2026-08-03"
+    },
+    "criteria": [
+      "Original application audio remains audible during every recoverable teardown outcome",
+      "Waves and Wave Link do not both render the same source or nested mixed output",
+      "A merely frontmost but silent router does not disable unrelated Waves routes",
+      "Native callback resources remain alive after failed stop or destroy operations",
+      "Route creation does not wait for a source to emit its first audio buffer",
+      "The chosen behavior is covered by focused regressions and the full test suite"
+    ],
+    "sourceBudget": {
+      "unit": "unique substantive sources",
+      "limit": 14,
+      "allocation": "Direct Waves and Wave Link artifacts first, Apple Core Audio authority second, Elgato first-party behavior third, and Chromium implementation plus challenge tests last."
+    },
+    "decisionThreshold": "The mute mechanism is reproduced in the 1.4.3 code, Apple documentation establishes the intended tap semantics, the Wave Link artifact establishes its competing muting renderer, a hardened independent implementation confirms failed-stop callback risk, and focused failing regressions distinguish the proposed lifecycle from 1.4.3.",
+    "stopCondition": "Stop when the decision threshold is met or the source budget is exhausted."
+  },
+  "sources": [
+    {
+      "id": "S1",
+      "title": "Waves 1.4.3 WorkspaceAudioControlBackend",
+      "publisher": "Waves project",
+      "locator": "git:a9d39f2e6fac703bc3c9e017cfffd9cfeceabf59:Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift",
+      "type": "direct-artifact",
+      "dates": { "published": "2026-08-03", "updated": null, "event": "2026-08-03", "accessed": "2026-08-03" },
+      "status": "verified-historical",
+      "rights": { "status": "open-license", "note": "Project source is covered by the repository MIT license." },
+      "snapshot": { "location": "git object a9d39f2", "capturedAt": "2026-08-03", "hash": "sha256:ab30ca3efc390d64b0c148dbfcad56d510b15619c25506287d508985b853b248" },
+      "uncertainty": "This is the exact published 1.4.3 source, not a live hardware trace."
+    },
+    {
+      "id": "S2",
+      "title": "Waves 1.4.3 competing router policy",
+      "publisher": "Waves project",
+      "locator": "git:a9d39f2e6fac703bc3c9e017cfffd9cfeceabf59:Sources/WavesAudioCore/Backend/AppDiscoveryPolicy.swift",
+      "type": "direct-artifact",
+      "dates": { "published": "2026-08-03", "updated": null, "event": "2026-08-03", "accessed": "2026-08-03" },
+      "status": "verified-historical",
+      "rights": { "status": "open-license", "note": "Project source is covered by the repository MIT license." },
+      "snapshot": { "location": "git object a9d39f2", "capturedAt": "2026-08-03", "hash": "sha256:9c9a0254578cfbd37cf7498aa03a2ddbddc48c268dabf7d6758c372e3e633951" },
+      "uncertainty": "The policy used the app model's isActive field, which the discovery source shows can mean audible or frontmost."
+    },
+    {
+      "id": "S3",
+      "title": "Waves 1.4.4 working tree diff and regression results",
+      "publisher": "Waves project",
+      "locator": "local:/Users/jonathanreed/Downloads/Waves",
+      "type": "direct-artifact",
+      "dates": { "published": null, "updated": "2026-08-03", "event": "2026-08-03", "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "open-license", "note": "Project source is covered by the repository MIT license." },
+      "snapshot": { "location": "local working tree and swift test output", "capturedAt": "2026-08-03", "hash": null },
+      "uncertainty": "The exact release commit hash will exist only after review and commit."
+    },
+    {
+      "id": "S4",
+      "title": "CATapDescription.h from the installed macOS SDK",
+      "publisher": "Apple",
+      "locator": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreAudio.framework/Versions/A/Headers/CATapDescription.h",
+      "type": "controlling-authority",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "copyright-limited-use", "note": "Used only to establish API semantics; no extended reproduction." },
+      "snapshot": { "location": "installed macOS 26.2 SDK", "capturedAt": "2026-08-03", "hash": "sha256:6f13f17c25e80c52ef3e490fc1b2c236e37c6b4ab5506c8c9962fb2da34e4ca8" },
+      "uncertainty": "The header is newer than Waves' minimum macOS target, but the cited mute behavior API is available on that target."
+    },
+    {
+      "id": "S5",
+      "title": "AudioHardware.h from the installed macOS SDK",
+      "publisher": "Apple",
+      "locator": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreAudio.framework/Versions/A/Headers/AudioHardware.h",
+      "type": "controlling-authority",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "copyright-limited-use", "note": "Used only to establish aggregate tap and property semantics; no extended reproduction." },
+      "snapshot": { "location": "installed macOS 26.2 SDK", "capturedAt": "2026-08-03", "hash": "sha256:910e8e0fa8da940bdafdbeb15cfb928bdbde1c36229234072fb82da161c63c25" },
+      "uncertainty": "The header is newer than Waves' minimum macOS target, but the cited aggregate tap keys are available on that target."
+    },
+    {
+      "id": "S6",
+      "title": "Capturing system audio with Core Audio taps",
+      "publisher": "Apple Developer Documentation",
+      "locator": "https://developer.apple.com/documentation/CoreAudio/capturing-system-audio-with-core-audio-taps",
+      "type": "official-docs",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "copyright-limited-use", "note": "Used for technical summary and API intent only." },
+      "snapshot": { "location": null, "capturedAt": null, "hash": null },
+      "uncertainty": "Apple does not publish a visible page revision date."
+    },
+    {
+      "id": "S7",
+      "title": "CATapMuteBehavior",
+      "publisher": "Apple Developer Documentation",
+      "locator": "https://developer.apple.com/documentation/coreaudio/catapmutebehavior?language=objc",
+      "type": "official-docs",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "copyright-limited-use", "note": "Used for technical summary and API constants only." },
+      "snapshot": { "location": null, "capturedAt": null, "hash": null },
+      "uncertainty": "Apple does not publish a visible page revision date."
+    },
+    {
+      "id": "S8",
+      "title": "kAudioTapPropertyDescription",
+      "publisher": "Apple Developer Documentation",
+      "locator": "https://developer.apple.com/documentation/coreaudio/kaudiotappropertydescription?language=objc",
+      "type": "official-docs",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "copyright-limited-use", "note": "Used to identify the supported tap description property." },
+      "snapshot": { "location": null, "capturedAt": null, "hash": null },
+      "uncertainty": "The public page exposes the constant but little behavioral discussion."
+    },
+    {
+      "id": "S9",
+      "title": "AudioDeviceStop",
+      "publisher": "Apple Developer Documentation",
+      "locator": "https://developer.apple.com/documentation/coreaudio/audiodevicestop%28_%3A_%3A%29?language=objc",
+      "type": "official-docs",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "copyright-limited-use", "note": "Used for function contract and return status semantics only." },
+      "snapshot": { "location": null, "capturedAt": null, "hash": null },
+      "uncertainty": "The API page states success or failure but does not define callback behavior after a failed stop."
+    },
+    {
+      "id": "S10",
+      "title": "Wave Link 3.0 software initial setup",
+      "publisher": "Elgato",
+      "locator": "https://help.elgato.com/hc/en-us/articles/46941178829585-Wave-Link-3-0-Software-Initial-Setup",
+      "type": "first-party-statement",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "copyright-limited-use", "note": "Used to summarize Wave Link's input and multi-mix model." },
+      "snapshot": { "location": null, "capturedAt": null, "hash": null },
+      "uncertainty": "The support article describes product behavior, not the underlying Core Audio implementation."
+    },
+    {
+      "id": "S11",
+      "title": "Wave Link 3.0 Discord screensharing audio echo issues",
+      "publisher": "Elgato",
+      "locator": "https://help.elgato.com/hc/en-us/articles/46471850961297-Wave-Link-3-0-Discord-Screensharing-Audio-Echo-Issues",
+      "type": "first-party-statement",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "copyright-limited-use", "note": "Used to establish Elgato's documented duplicate-path failure mode." },
+      "snapshot": { "location": null, "capturedAt": null, "hash": null },
+      "uncertainty": "The example concerns Discord screensharing, so it supports the duplicate-path mechanism rather than proving the Waves incident by itself."
+    },
+    {
+      "id": "S12",
+      "title": "Elgato Wave Link 3.1.0 application binary",
+      "publisher": "Elgato",
+      "locator": "ElgatoWaveLink-3.1.0.2334.dmg:Elgato Wave Link.app/Contents/MacOS/WaveLinkMacOS",
+      "type": "direct-artifact",
+      "dates": { "published": null, "updated": null, "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "restricted", "note": "Locally inspected for imported Core Audio symbols and one mute-behavior call; no redistribution." },
+      "snapshot": { "location": "/tmp/wave-link-research-mount-3.1.0/Elgato Wave Link.app/Contents/MacOS/WaveLinkMacOS", "capturedAt": "2026-08-03", "hash": "sha256:2468200465337654007a1260f98b298bd5d4e1ea8da346c87e1ae82c7b8f7cf4" },
+      "uncertainty": "Static disassembly proves the process-tap mute constant at the inspected call site, but does not describe every runtime branch."
+    },
+    {
+      "id": "S13",
+      "title": "Chromium CATap audio input stream implementation",
+      "publisher": "Chromium project",
+      "locator": "https://chromium.googlesource.com/chromium/src/+/HEAD/media/audio/mac/catap_audio_input_stream.mm",
+      "type": "original-research",
+      "dates": { "published": null, "updated": "2026-08-03", "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "open-license", "note": "Chromium source is used as a BSD-licensed implementation reference." },
+      "snapshot": { "location": "Chromium HEAD fetched 2026-08-03", "capturedAt": "2026-08-03", "hash": null },
+      "uncertainty": "Chromium captures rather than rerenders per-app output, so only lifecycle and Core Audio configuration patterns transfer directly."
+    },
+    {
+      "id": "S14",
+      "title": "Chromium CATap audio input stream unit tests",
+      "publisher": "Chromium project",
+      "locator": "https://chromium.googlesource.com/chromium/src/+/HEAD/media/audio/mac/catap_audio_input_stream_unittest.mm",
+      "type": "original-research",
+      "dates": { "published": null, "updated": "2026-08-03", "event": null, "accessed": "2026-08-03" },
+      "status": "verified-current",
+      "rights": { "status": "open-license", "note": "Chromium tests are used as a BSD-licensed failure-mode reference." },
+      "snapshot": { "location": "Chromium HEAD fetched 2026-08-03", "capturedAt": "2026-08-03", "hash": null },
+      "uncertainty": "The test simulates a late callback after stop failure rather than exercising Elgato hardware."
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "text": "Waves 1.4.3 created per-app taps with mutedWhenTapped, deactivated the renderer before AudioDeviceStop, and continued destroying dependent resources even when native teardown stages failed.",
+      "importance": "decision-critical",
+      "temporality": "historical",
+      "requiresCitation": true,
+      "status": "supported",
+      "evidence": [{ "sourceId": "S1", "stance": "supports", "note": "The published dispose method sets the render state inactive first, then stops and destroys resources without gating later stages on success." }],
+      "citationSourceIds": ["S1"],
+      "uncertainty": "None for the source-level sequence.",
+      "primarySourceGap": null,
+      "currentFactCheck": null
+    },
+    {
+      "id": "C2",
+      "text": "A mutedWhenTapped process remains audible through its original hardware path only until another client reads the tap; while read activity continues, that original path is suppressed.",
+      "importance": "decision-critical",
+      "temporality": "timeless",
+      "requiresCitation": true,
+      "status": "supported",
+      "evidence": [
+        { "sourceId": "S4", "stance": "supports", "note": "The SDK header defines the three mute behaviors and the read-activity transition." },
+        { "sourceId": "S7", "stance": "supports", "note": "Apple's public API page identifies the same behavior contract." }
+      ],
+      "citationSourceIds": ["S4", "S7"],
+      "uncertainty": "None for the documented contract.",
+      "primarySourceGap": null,
+      "currentFactCheck": null
+    },
+    {
+      "id": "C3",
+      "text": "Waves 1.4.3 treated isActive as proof of a competing router even though discovery sets isActive for either audible output or being frontmost, and it exempted the router process itself.",
+      "importance": "decision-critical",
+      "temporality": "historical",
+      "requiresCitation": true,
+      "status": "supported",
+      "evidence": [
+        { "sourceId": "S1", "stance": "supports", "note": "Discovery combines audible and frontmost signals into isActive." },
+        { "sourceId": "S2", "stance": "supports", "note": "The policy iterates isActive apps and excludes a target whose bundle ID equals the router." }
+      ],
+      "citationSourceIds": ["S1", "S2"],
+      "uncertainty": "None for the source-level condition.",
+      "primarySourceGap": null,
+      "currentFactCheck": null
+    },
+    {
+      "id": "C4",
+      "text": "The inspected Wave Link 3.1.0 binary creates Core Audio process taps and calls setMuteBehavior with the numeric CATapMuted value, making Wave Link an owner of the upstream hardware playback path rather than a passive observer.",
+      "importance": "decision-critical",
+      "temporality": "current",
+      "requiresCitation": true,
+      "status": "qualified",
+      "evidence": [
+        { "sourceId": "S12", "stance": "supports", "note": "Imported symbols and arm64 disassembly show process-tap creation followed by setMuteBehavior with value 1." },
+        { "sourceId": "S4", "stance": "supports", "note": "Apple defines numeric value 1 as CATapMuted." }
+      ],
+      "citationSourceIds": ["S12", "S4"],
+      "uncertainty": "The artifact establishes the inspected implementation path, not every configuration or future Wave Link version.",
+      "primarySourceGap": null,
+      "currentFactCheck": { "checkedAt": "2026-08-03", "status": "verified-current", "sourceIds": ["S12", "S4"], "blockedRefreshId": null }
+    },
+    {
+      "id": "C5",
+      "text": "Wave Link exposes application inputs and multiple output mixes, including a monitored personal mix, so wrapping its mixed output in another muting renderer can affect every app carried by that process.",
+      "importance": "decision-critical",
+      "temporality": "current",
+      "requiresCitation": true,
+      "status": "supported",
+      "evidence": [
+        { "sourceId": "S10", "stance": "supports", "note": "Elgato documents software inputs, multiple mixes, and monitored personal mix selection." },
+        { "sourceId": "S11", "stance": "supports", "note": "Elgato documents duplicate audio when the same computer output enters two paths." }
+      ],
+      "citationSourceIds": ["S10", "S11"],
+      "uncertainty": "The exact set of apps in a user's personal mix is configuration-dependent.",
+      "primarySourceGap": null,
+      "currentFactCheck": { "checkedAt": "2026-08-03", "status": "verified-current", "sourceIds": ["S10", "S11"], "blockedRefreshId": null }
+    },
+    {
+      "id": "C6",
+      "text": "A failed AudioDeviceStop cannot be treated as proof that Core Audio has relinquished the callback pointer, so teardown must retain callback state and must not destroy dependent native resources until stop succeeds.",
+      "importance": "decision-critical",
+      "temporality": "current",
+      "requiresCitation": true,
+      "status": "supported",
+      "evidence": [
+        { "sourceId": "S9", "stance": "qualifies", "note": "Apple exposes an OSStatus failure result rather than guaranteeing stop success." },
+        { "sourceId": "S13", "stance": "supports", "note": "Chromium tracks stop failure and intentionally retains callback proxy memory when stop or destroy fails." },
+        { "sourceId": "S14", "stance": "supports", "note": "Chromium has a direct regression that invokes a rogue late callback after forced stop failure." }
+      ],
+      "citationSourceIds": ["S9", "S13", "S14"],
+      "uncertainty": "Apple's public page does not spell out late-callback behavior, so Chromium provides the tested implementation evidence.",
+      "primarySourceGap": "Apple does not publish a detailed callback-lifetime contract for the failed-stop path.",
+      "currentFactCheck": { "checkedAt": "2026-08-03", "status": "verified-current", "sourceIds": ["S9", "S13", "S14"], "blockedRefreshId": null }
+    },
+    {
+      "id": "C7",
+      "text": "Enabling kAudioAggregateDeviceTapAutoStartKey makes aggregate-device start wait until a tapped process first receives audio, while an explicit IO proc can start immediately when that key is disabled.",
+      "importance": "supporting",
+      "temporality": "timeless",
+      "requiresCitation": true,
+      "status": "supported",
+      "evidence": [
+        { "sourceId": "S5", "stance": "supports", "note": "The SDK header defines the waiting behavior for a nonzero auto-start value." },
+        { "sourceId": "S13", "stance": "supports", "note": "Chromium configures the aggregate tap auto-start key to false and starts its IO proc explicitly." }
+      ],
+      "citationSourceIds": ["S5", "S13"],
+      "uncertainty": "The exact latency depends on when the target app next emits audio.",
+      "primarySourceGap": null,
+      "currentFactCheck": null
+    },
+    {
+      "id": "C8",
+      "text": "The 1.4.4 candidate meets the decision criteria by blocking Wave Link's own mixed output, using live audio rather than frontmost state for ordinary conflicts, releasing tap mute before stop, retaining live render state and native resources after stop failure, and disabling tap auto-start waiting.",
+      "importance": "decision-critical",
+      "temporality": "current",
+      "requiresCitation": true,
+      "status": "supported",
+      "evidence": [
+        { "sourceId": "S3", "stance": "supports", "note": "The working-tree implementation and focused regressions cover each branch, and the full suite passed 329 tests." },
+        { "sourceId": "S8", "stance": "supports", "note": "Apple exposes the active tap description property used to release the mute before teardown." },
+        { "sourceId": "S6", "stance": "supports", "note": "Apple's process-tap documentation supports the routing model used by the fix." }
+      ],
+      "citationSourceIds": ["S3", "S8", "S6"],
+      "uncertainty": "An acoustic confirmation with actual Wave Link hardware remains necessary because this Mac does not have a running Wave Link device configuration.",
+      "primarySourceGap": null,
+      "currentFactCheck": { "checkedAt": "2026-08-03", "status": "verified-current", "sourceIds": ["S3", "S8", "S6"], "blockedRefreshId": null }
+    }
+  ],
+  "conflicts": [],
+  "blockedRefreshes": [],
+  "citationCoverage": {
+    "externallyVerifiable": { "total": 8, "cited": 8 },
+    "decisionCritical": { "total": 7, "cited": 7 },
+    "gaps": []
+  },
+  "outcome": {
+    "stopReason": "threshold-met",
+    "thresholdAssessment": "The source-level mute mechanism, Apple API contract, Wave Link ownership behavior, failed-stop callback risk, and focused regressions all converge on one fail-open lifecycle and router policy. Additional sources would not change the implementation decision.",
+    "sourcesUsed": 14,
+    "completedAsOf": "2026-08-03",
+    "decisionStatus": "decided"
+  }
+}

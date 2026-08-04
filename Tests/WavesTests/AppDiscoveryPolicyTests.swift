@@ -136,6 +136,50 @@ import Testing
   )
 }
 
+// MARK: - Competing audio routers
+
+@Test func silentFrontmostWaveLinkDoesNotSuspendOrdinaryManagedApps() {
+  let waveLink = AudioApp(
+    id: "runtime.wave-link",
+    logicalID: "com.elgato.WaveLink3",
+    pid: 202,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "WaveLink",
+    category: .unknown,
+    isActive: true,
+    routingState: .monitorOnly,
+    compatibility: .supported
+  )
+
+  #expect(
+    AppDiscoveryPolicy.competingAudioRouterName(
+      for: "us.zoom.xos",
+      among: [waveLink]
+    ) == nil
+  )
+}
+
+@Test func waveLinkMixedOutputIsNeverEligibleForAWavesManagedRoute() {
+  let waveLink = AudioApp(
+    id: "runtime.wave-link",
+    logicalID: "com.elgato.WaveLink3",
+    pid: 202,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "WaveLink",
+    category: .unknown,
+    isActive: false,
+    routingState: .monitorOnly,
+    compatibility: .supported
+  )
+
+  #expect(
+    AppDiscoveryPolicy.competingAudioRouterName(
+      for: "com.elgato.WaveLink3",
+      among: [waveLink]
+    ) == "Elgato Wave Link"
+  )
+}
+
 // MARK: - Helper-process audio attribution (Chromium / Electron)
 
 @Test func topLevelAppBundlePathResolvesChromiumHelperToParentApp() {

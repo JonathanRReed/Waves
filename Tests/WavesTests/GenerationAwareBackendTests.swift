@@ -182,6 +182,49 @@ import WavesAudioCore
   #expect(await recorder.count() == 0)
 }
 
+@Test func waveLinkMixedOutputCannotBeWrappedInAWavesRenderer() async {
+  let waveLink = AudioApp(
+    id: "runtime.wave-link",
+    logicalID: "com.elgato.WaveLink3",
+    pid: 202,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "WaveLink",
+    category: .unknown,
+    isActive: false,
+    desiredVolume: 1,
+    appliedVolume: nil,
+    routingState: .monitorOnly,
+    compatibility: .supported
+  )
+  let recorder = AppliedIntentRecorder()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [waveLink]),
+    intentRouteApplyOverride: { stagedApp, equalizer in
+      await recorder.record(app: stagedApp, equalizer: equalizer)
+    }
+  )
+
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: waveLink.logicalID,
+      desiredVolume: 0.5,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .userEdit
+    )
+  )
+
+  #expect(result.outcome == .unsupported)
+  #expect(result.detail?.contains("Wave Link") == true)
+  #expect(result.detail?.contains("mixed output") == true)
+  #expect(result.detail?.contains("silence the whole mix") == true)
+  #expect(await recorder.count() == 0)
+  #expect(await backend.currentSnapshot().apps[0].routingState == .monitorOnly)
+}
+
 @Test func workspaceIntentDoesNotCommitStaleWorkAfterSuspension() async {
   let gate = IntentRouteSuspensionGate()
   let app = managedTestApp(desiredVolume: 0.5)

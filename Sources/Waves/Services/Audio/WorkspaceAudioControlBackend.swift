@@ -38,6 +38,53 @@ func checkedCleanupDegradations(
   }
 }
 
+struct MutingTapTeardownPreparationResult: Equatable, Sendable {
+  let tapMuteReleaseStatus: OSStatus
+  let ioProcStopStatus: OSStatus
+
+  /// Native resources are safe to destroy only after Core Audio confirms that
+  /// the IO proc stopped. An unmuted tap is fail-open for sound, but a failed
+  /// stop can still deliver a late callback and therefore cannot be destroyed.
+  var canDestroyNativeResources: Bool { ioProcStopStatus == noErr }
+
+  /// Either an unmuted tap or a stopped reader restores the process's original
+  /// hardware playback path.
+  var originalAudioIsFailOpen: Bool {
+    tapMuteReleaseStatus == noErr || ioProcStopStatus == noErr
+  }
+}
+
+/// Makes a `.mutedWhenTapped` route fail open before its renderer is disabled.
+///
+/// The order is part of the safety contract. If both native calls fail, the
+/// renderer stays live so the muting tap cannot strand the target app in
+/// silence. A successful mute-property write may still be applied by HAL
+/// asynchronously, so the renderer is deactivated only after stop succeeds.
+enum MutingTapTeardownPreparation {
+  static func perform(
+    makeOriginalAudioAudible: () -> OSStatus,
+    stopIOProc: () -> OSStatus,
+    deactivateRenderer: () -> Void
+  ) -> MutingTapTeardownPreparationResult {
+    let muteReleaseStatus = makeOriginalAudioAudible()
+    let stopStatus = stopIOProc()
+    let result = MutingTapTeardownPreparationResult(
+      tapMuteReleaseStatus: muteReleaseStatus,
+      ioProcStopStatus: stopStatus
+    )
+    if result.canDestroyNativeResources {
+      deactivateRenderer()
+    }
+    return result
+  }
+}
+
+enum ProcessTapAggregatePolicy {
+  /// `true` makes AudioDeviceStart wait until the target emits its first audio.
+  /// Waves starts an explicit IO proc, so waiting only blocks route creation.
+  static let autoStartEnabled = false
+}
+
 /// What a Core Audio property read on a specific object actually means.
 ///
 /// Core Audio hands out object IDs that can stop being valid at any instant: an
@@ -162,8 +209,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let maxProbeTapDestroyRetries = 5
   /// Controllers whose native teardown failed, awaiting another attempt.
   private var orphanedControllers: [PerAppTapController] = []
-  private var orphanDisposeAttempts: [String: Int] = [:]
-  private static let maxOrphanedControllers = 16
+  private var orphanDisposeAttempts: [ObjectIdentifier: Int] = [:]
   private static let maxOrphanDisposeRetries = 5
   private let routeMaintenanceTickInterval = 20
   private let staleRouteThresholdTicks = 24
@@ -276,11 +322,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       let controllerDegradations = controller.dispose()
       record(controllerDegradations)
       if !controllerDegradations.isEmpty {
-        record([CleanupDegradation(
-          appID: controller.appID,
-          stage: .controllerDisposal,
-          detail: "Controller disposal completed with \(controllerDegradations.count) checked native cleanup failure(s)."
-        )])
+        // A failed stop or IO-proc destroy can still be followed by a native
+        // callback. Keep its Swift callback state alive until process exit.
+        orphanedControllers.append(controller)
+        record([
+          CleanupDegradation(
+            appID: controller.appID,
+            stage: .controllerDisposal,
+            detail:
+              "Controller disposal completed with \(controllerDegradations.count) checked native cleanup failure(s)."
+          )
+        ])
       }
     }
     if let shutdownCleanupOverride {
@@ -290,11 +342,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // One last attempt at anything a previous teardown could not release, so a
     // stranded tap does not outlive the process if it can be avoided.
     let parked = orphanedControllers
-    orphanedControllers.removeAll()
-    orphanDisposeAttempts.removeAll()
+    orphanedControllers.removeAll(keepingCapacity: true)
     for controller in parked {
-      record(controller.retryDispose())
+      let controllerDegradations = controller.retryDispose()
+      record(controllerDegradations)
+      if
+        !controllerDegradations.isEmpty,
+        !orphanedControllers.contains(where: { $0 === controller })
+      {
+        orphanedControllers.append(controller)
+      }
     }
+    orphanDisposeAttempts.removeAll()
 
     // Never let the buffer's cap hide the fact that it capped: a truncated
     // report that looks complete is worse than one that admits the gap.
@@ -1403,7 +1462,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         kAudioAggregateDeviceClockDeviceKey: outputDeviceUID,
         kAudioAggregateDeviceIsPrivateKey: true,
         kAudioAggregateDeviceIsStackedKey: false,
-        kAudioAggregateDeviceTapAutoStartKey: true,
+        kAudioAggregateDeviceTapAutoStartKey: ProcessTapAggregatePolicy.autoStartEnabled,
         kAudioAggregateDeviceSubDeviceListKey: [
           [
             kAudioSubDeviceUIDKey: outputDeviceUID,
@@ -1427,6 +1486,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         appID: app.id,
         appName: app.displayName,
         targetProcessObjectIDs: processObjectIDs,
+        tapDescription: tapDescription,
         tapID: tapID,
         aggregateDeviceID: aggregateID,
         volume: app.desiredVolume,
@@ -2600,7 +2660,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func disposeController(_ controller: PerAppTapController) -> [CleanupDegradation] {
     let degradations = controller.dispose()
     guard !degradations.isEmpty else { return degradations }
-    guard orphanedControllers.count < Self.maxOrphanedControllers else { return degradations }
     orphanedControllers.append(controller)
     return degradations
   }
@@ -2612,22 +2671,33 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard !orphanedControllers.isEmpty else { return }
     var stillOrphaned: [PerAppTapController] = []
     for controller in orphanedControllers {
+      let controllerID = ObjectIdentifier(controller)
+      // A controller whose native IO proc never relinquished its callback must
+      // remain alive for the lifetime of this backend. Dropping it after the
+      // retry budget would free callback state that Core Audio may still use.
+      if (orphanDisposeAttempts[controllerID] ?? 0) >= Self.maxOrphanDisposeRetries {
+        stillOrphaned.append(controller)
+        continue
+      }
       let degradations = controller.retryDispose()
       if degradations.isEmpty {
         // Released at last — drop its attempt count too, so a later controller
         // that happens to reuse this appID starts from a full retry budget.
-        orphanDisposeAttempts.removeValue(forKey: controller.appID)
+        orphanDisposeAttempts.removeValue(forKey: controllerID)
         continue
       }
-      let attempts = (orphanDisposeAttempts[controller.appID] ?? 0) + 1
-      orphanDisposeAttempts[controller.appID] = attempts
+      let attempts = (orphanDisposeAttempts[controllerID] ?? 0) + 1
+      orphanDisposeAttempts[controllerID] = attempts
       if attempts >= Self.maxOrphanDisposeRetries {
-        retainCleanupDegradations([CleanupDegradation(
-          appID: controller.appID,
-          stage: .controllerDisposal,
-          detail: "Gave up releasing native audio resources after \(attempts) attempts; the app may stay silent until Waves restarts."
-        )])
-        orphanDisposeAttempts.removeValue(forKey: controller.appID)
+        retainCleanupDegradations([
+          CleanupDegradation(
+            appID: controller.appID,
+            stage: .controllerDisposal,
+            detail:
+              "Native audio resources still had not released after \(attempts) attempts. Waves retained the controller to keep callbacks safe and original audio fail-open until restart."
+          )
+        ])
+        stillOrphaned.append(controller)
         continue
       }
       stillOrphaned.append(controller)
@@ -2772,7 +2842,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func updateAudioLevels() async {
     guard !isShuttingDown else { return }
-    suspendManagedRoutesForCompetingAudioRouter()
+    // Most of the app's lifetime has no managed renderers. Avoid rescanning the
+    // entire app snapshot four times per second when there is nothing a router
+    // conflict could suspend.
+    if !controllers.isEmpty {
+      suspendManagedRoutesForCompetingAudioRouter()
+    }
     // With no controllers left there are no levels to read — but there may still
     // be a parked teardown to retry, and that is exactly the case where one
     // exists: disposing the last controller removes it from `controllers` before
@@ -2872,10 +2947,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func competingAudioRouterConflictDetail(for app: AudioApp) -> String? {
-    guard let routerName = AppDiscoveryPolicy.competingAudioRouterName(
+    if let routerName = AppDiscoveryPolicy.competingAudioRouterName(
       for: app.bundleID,
-      among: snapshot.apps
-    ) else {
+      among: []
+    ) {
+      return "\(routerName)'s mixed output can carry every monitored app. "
+        + "Waves leaves this router untouched so one nested route cannot duplicate or silence the whole mix. "
+        + "Control the upstream apps inside \(routerName)."
+    }
+    guard
+      let routerName = AppDiscoveryPolicy.competingAudioRouterName(
+        for: app.bundleID,
+        among: snapshot.apps
+      )
+    else {
       return nil
     }
     return "\(routerName) is already routing this app's audio. "
@@ -3385,6 +3470,7 @@ private final class PerAppTapController: @unchecked Sendable {
   private(set) var tapID: AudioObjectID
   private(set) var aggregateDeviceID: AudioObjectID
 
+  private let tapDescription: CATapDescription
   private let stateBox: TapRenderStateBox
   private let audioFormatPlan: AudioFormatPlan
   private let equalizerDSP: EqualizerDSP
@@ -3410,6 +3496,7 @@ private final class PerAppTapController: @unchecked Sendable {
     appID: String,
     appName: String,
     targetProcessObjectIDs: [AudioObjectID],
+    tapDescription: CATapDescription,
     tapID: AudioObjectID,
     aggregateDeviceID: AudioObjectID,
     volume: Float,
@@ -3423,6 +3510,7 @@ private final class PerAppTapController: @unchecked Sendable {
     self.appID = appID
     self.appName = appName
     self.targetProcessObjectIDs = targetProcessObjectIDs
+    self.tapDescription = tapDescription
     self.tapID = tapID
     self.aggregateDeviceID = aggregateDeviceID
     self.audioFormatPlan = audioFormatPlan
@@ -3800,10 +3888,86 @@ private final class PerAppTapController: @unchecked Sendable {
     return dispose()
   }
 
+  @available(macOS 14.2, *)
+  private func makeOriginalAudioAudible() -> OSStatus {
+    guard tapID != .unknown else { return noErr }
+
+    tapDescription.muteBehavior = .unmuted
+    var descriptionReference: CFTypeRef = tapDescription
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioTapPropertyDescription,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    return withUnsafePointer(to: &descriptionReference) { pointer in
+      AudioObjectSetPropertyData(
+        tapID,
+        &address,
+        0,
+        nil,
+        UInt32(MemoryLayout<CFTypeRef>.size),
+        pointer
+      )
+    }
+  }
+
   func dispose() -> [CleanupDegradation] {
     disposeOnce.run { [self] in
-      stateBox.setInactive()
       var observations: [CleanupStatusObservation] = []
+
+      func finish() -> [CleanupDegradation] {
+        let result =
+          retainedCleanupDegradations
+          + checkedCleanupDegradations(from: observations)
+        retainedCleanupDegradations.removeAll()
+        return result
+      }
+
+      // A `.mutedWhenTapped` tap suppresses the process's direct hardware path
+      // while this IO proc reads it. Release that mute before stopping or
+      // deactivating the renderer. If both native operations fail, leave the
+      // renderer active and retain every resource so the app remains audible.
+      let shouldStop = didStartIOProc && ioProcID != nil && aggregateDeviceID != .unknown
+      let preparation = MutingTapTeardownPreparation.perform(
+        makeOriginalAudioAudible: {
+          guard #available(macOS 14.2, *) else { return noErr }
+          return makeOriginalAudioAudible()
+        },
+        stopIOProc: {
+          guard shouldStop, let procID = ioProcID else { return noErr }
+          return AudioDeviceStop(aggregateDeviceID, procID)
+        },
+        deactivateRenderer: {
+          stateBox.setInactive()
+        }
+      )
+
+      if #available(macOS 14.2, *), tapID != .unknown {
+        observations.append(
+          CleanupStatusObservation(
+            appID: appID,
+            stage: .processTapReleaseMute,
+            nativeStatus: preparation.tapMuteReleaseStatus,
+            detail: "Release process tap mute before teardown"
+          )
+        )
+      }
+      if shouldStop {
+        observations.append(
+          CleanupStatusObservation(
+            appID: appID,
+            stage: .ioProcStop,
+            nativeStatus: preparation.ioProcStopStatus,
+            detail: "Stop controller IO proc"
+          )
+        )
+      }
+      guard preparation.canDestroyNativeResources else {
+        return finish()
+      }
+      didStartIOProc = false
+      drainCallbackQueue()
+
       // Each handle is forgotten only once its own destroy has SUCCEEDED, so a
       // retry re-attempts exactly the stages that failed and never re-destroys
       // one that already went away. Without this, a retry after (say) a failed
@@ -3811,56 +3975,49 @@ private final class PerAppTapController: @unchecked Sendable {
       // Core Audio reuses object IDs, so the second destroy could hit an
       // unrelated device.
       if let procID = ioProcID, aggregateDeviceID != .unknown {
-        if didStartIOProc {
-          observations.append(CleanupStatusObservation(
-            appID: appID,
-            stage: .ioProcStop,
-            nativeStatus: AudioDeviceStop(aggregateDeviceID, procID),
-            detail: "Stop controller IO proc"
-          ))
-        }
-        didStartIOProc = false
-        drainCallbackQueue()
         let destroyStatus = AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
-        observations.append(CleanupStatusObservation(
-          appID: appID,
-          stage: .ioProcDestroy,
-          nativeStatus: destroyStatus,
-          detail: "Destroy controller IO proc"
-        ))
-        if destroyStatus == noErr { ioProcID = nil }
+        observations.append(
+          CleanupStatusObservation(
+            appID: appID,
+            stage: .ioProcDestroy,
+            nativeStatus: destroyStatus,
+            detail: "Destroy controller IO proc"
+          )
+        )
+        guard destroyStatus == noErr else { return finish() }
+        ioProcID = nil
       } else {
-        didStartIOProc = false
-        drainCallbackQueue()
         ioProcID = nil
       }
 
       if aggregateDeviceID != .unknown {
         let destroyStatus = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-        observations.append(CleanupStatusObservation(
-          appID: appID,
-          stage: .aggregateDeviceDestroy,
-          nativeStatus: destroyStatus,
-          detail: "Destroy controller aggregate device"
-        ))
-        if destroyStatus == noErr { aggregateDeviceID = .unknown }
+        observations.append(
+          CleanupStatusObservation(
+            appID: appID,
+            stage: .aggregateDeviceDestroy,
+            nativeStatus: destroyStatus,
+            detail: "Destroy controller aggregate device"
+          )
+        )
+        guard destroyStatus == noErr else { return finish() }
+        aggregateDeviceID = .unknown
       }
 
       if #available(macOS 14.2, *), tapID != .unknown {
         let destroyStatus = AudioHardwareDestroyProcessTap(tapID)
-        observations.append(CleanupStatusObservation(
-          appID: appID,
-          stage: .processTapDestroy,
-          nativeStatus: destroyStatus,
-          detail: "Destroy controller process tap"
-        ))
+        observations.append(
+          CleanupStatusObservation(
+            appID: appID,
+            stage: .processTapDestroy,
+            nativeStatus: destroyStatus,
+            detail: "Destroy controller process tap"
+          )
+        )
         if destroyStatus == noErr { tapID = .unknown }
       }
 
-      let result = retainedCleanupDegradations
-        + checkedCleanupDegradations(from: observations)
-      retainedCleanupDegradations.removeAll()
-      return result
+      return finish()
     }
   }
 

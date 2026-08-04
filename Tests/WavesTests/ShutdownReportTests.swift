@@ -232,6 +232,7 @@ private func degradedOutcome(
     .ioProcStop,
     .ioProcDestroy,
     .aggregateDeviceDestroy,
+    .processTapReleaseMute,
     .processTapDestroy,
     .controllerDisposal,
   ].map(\.name)
@@ -239,5 +240,6 @@ private func degradedOutcome(
   #expect(Set(names).count == names.count)
   #expect(names.allSatisfy { !$0.isEmpty })
   #expect(names.contains("processTapDestroy"))
+  #expect(names.contains("processTapReleaseMute"))
   #expect(names.contains("aggregateDeviceDestroy"))
 }

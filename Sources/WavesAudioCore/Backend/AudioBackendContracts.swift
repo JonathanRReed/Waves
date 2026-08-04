@@ -151,6 +151,7 @@ public enum CleanupStage: Hashable, Sendable {
   case ioProcStop
   case ioProcDestroy
   case aggregateDeviceDestroy
+  case processTapReleaseMute
   case processTapDestroy
   case controllerDisposal
 
@@ -164,6 +165,7 @@ public enum CleanupStage: Hashable, Sendable {
     case .ioProcStop: "ioProcStop"
     case .ioProcDestroy: "ioProcDestroy"
     case .aggregateDeviceDestroy: "aggregateDeviceDestroy"
+    case .processTapReleaseMute: "processTapReleaseMute"
     case .processTapDestroy: "processTapDestroy"
     case .controllerDisposal: "controllerDisposal"
     }
