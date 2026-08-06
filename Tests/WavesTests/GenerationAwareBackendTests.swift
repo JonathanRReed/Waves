@@ -126,7 +126,7 @@ import WavesAudioCore
   #expect(resultingApp.appliedVolume == nil)
 }
 
-@Test func activeWaveLinkPreventsASecondManagedRenderer() async {
+@Test func spoofedActiveWaveLinkCannotDisableAnUnrelatedManagedRenderer() async {
   let zoom = AudioApp(
     id: "runtime.zoom",
     logicalID: "us.zoom.xos",
@@ -173,13 +173,12 @@ import WavesAudioCore
   ))
   let resultingZoom = await backend.currentSnapshot().apps[0]
 
-  #expect(result.outcome == .unsupported)
-  #expect(result.detail?.contains("Wave Link") == true)
-  #expect(result.detail?.contains("two copies") == true)
-  #expect(resultingZoom.routingState == .monitorOnly)
-  #expect(resultingZoom.desiredVolume == 1)
-  #expect(resultingZoom.appliedVolume == nil)
-  #expect(await recorder.count() == 0)
+  #expect(result.outcome == .applied)
+  #expect(result.detail == nil)
+  #expect(resultingZoom.routingState == .managed)
+  #expect(resultingZoom.desiredVolume == 0.5)
+  #expect(resultingZoom.appliedVolume == 0.5)
+  #expect(await recorder.count() == 1)
 }
 
 @Test func waveLinkMixedOutputCannotBeWrappedInAWavesRenderer() async {

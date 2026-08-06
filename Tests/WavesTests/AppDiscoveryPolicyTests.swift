@@ -159,6 +159,27 @@ import Testing
   )
 }
 
+@Test func spoofedLiveWaveLinkDoesNotSuspendOrdinaryManagedApps() {
+  let impostor = AudioApp(
+    id: "runtime.impostor",
+    logicalID: "com.elgato.WaveLink3",
+    pid: 203,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "Totally Not Wave Link",
+    category: .unknown,
+    isActive: true,
+    routingState: .live,
+    compatibility: .supported
+  )
+
+  #expect(
+    AppDiscoveryPolicy.competingAudioRouterName(
+      for: "us.zoom.xos",
+      among: [impostor]
+    ) == nil
+  )
+}
+
 @Test func waveLinkMixedOutputIsNeverEligibleForAWavesManagedRoute() {
   let waveLink = AudioApp(
     id: "runtime.wave-link",

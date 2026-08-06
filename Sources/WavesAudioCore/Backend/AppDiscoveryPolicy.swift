@@ -134,15 +134,16 @@ public enum AppDiscoveryPolicy {
   }
 
   /// Returns the user-facing name of a third-party router that Waves must not
-  /// wrap, or of a live router that would replay the same upstream app audio.
+  /// wrap.
   ///
   /// Wave Link 3 uses Core Audio process taps for per-app routing. If both apps
-  /// tap Zoom, a browser, or another source, each router renders its own copy to
-  /// the output device. Waves must leave the upstream source untouched while
-  /// Wave Link's monitor mix is active.
+  /// tap Zoom, a browser, or another source, each router can render its own copy
+  /// to the output device. Running-app metadata cannot prove that Wave Link is
+  /// genuine or that it is routing the target, however, so it must not be used
+  /// to disable Waves controls for an unrelated app.
   public static func competingAudioRouterName(
     for targetBundleID: String?,
-    among apps: [AudioApp]
+    among _: [AudioApp]
   ) -> String? {
     let normalizedTarget = targetBundleID?.lowercased()
     // Never put Waves around the router's mixed output. Wave Link can carry
@@ -151,20 +152,6 @@ public enum AppDiscoveryPolicy {
     if let normalizedTarget,
       let routerName = competingAudioRouterBundleIDs[normalizedTarget]
     {
-      return routerName
-    }
-
-    // `AudioApp.isActive` also means frontmost. Opening Wave Link's window is
-    // not proof that it is monitoring audio and must not tear down every Waves
-    // route. `.live` is the discovery signal backed by a running Core Audio
-    // output stream.
-    for app in apps where app.routingState == .live {
-      guard
-        let bundleID = app.bundleID?.lowercased(),
-        let routerName = competingAudioRouterBundleIDs[bundleID]
-      else {
-        continue
-      }
       return routerName
     }
     return nil
