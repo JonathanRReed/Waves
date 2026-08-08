@@ -30,6 +30,7 @@ let package = Package(
       name: "Waves",
       dependencies: [
         "WavesAudioCore",
+        "WavesRealtimeSupport",
         .product(name: "Sparkle", package: "Sparkle"),
       ],
       path: "Sources/Waves",
@@ -40,6 +41,11 @@ let package = Package(
     .target(
       name: "WavesAudioCore",
       path: "Sources/WavesAudioCore"
+    ),
+    .target(
+      name: "WavesRealtimeSupport",
+      path: "Sources/WavesRealtimeSupport",
+      publicHeadersPath: "include"
     ),
     // A terminal client for the control socket. Deliberately dependency-free
     // and separate from the app so the control surface can be exercised without
