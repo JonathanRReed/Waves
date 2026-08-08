@@ -3381,10 +3381,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         guard app.routingState == .managed || controllers[app.id] != nil,
           let detail
         else { continue }
-        let routerName = verifiedRouterConflictProvider?(app)?.routerName ?? "A competing audio router"
-        let decision = CompetingRouterConflictDecision.make(routerName: routerName, isVerified: true)
-        guard decision.routeDisposition == .monitorOnly else { continue }
-        suspendManagedRouteForConflict(at: index, detail: decision.detail.isEmpty ? detail : decision.detail)
+        suspendManagedRouteForConflict(at: index, detail: detail)
         changed = true
       case .conflictReleased:
         guard snapshot.apps[index].routingState == .monitorOnly,

@@ -122,6 +122,52 @@ import WavesAudioCore
   #expect(observation.advance(to: .milliseconds(550)) == .conflictReleased)
 }
 
+@Test func routerObservationPreservesVerifiedProviderFallbackDetailInTheStoredNote() async {
+  let app = AudioApp(
+    id: "router.target",
+    logicalID: "router.target",
+    pid: 101,
+    bundleID: "com.example.router-target",
+    displayName: "Router Target",
+    category: .media,
+    isActive: true,
+    desiredVolume: 1,
+    appliedVolume: 1,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let providerDetail =
+    "Core Audio cannot publicly attribute this private or unreadable tap to verified Wave Link. Waves is monitoring only."
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: AudioSessionSnapshot(
+      apps: [app],
+      currentDevice: nil,
+      recentDeviceIDs: [],
+      supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(
+        isAudioComponentInstalled: true,
+        hasRequiredPermissions: true,
+        isRouteRecoveryHealthy: true
+      )
+    ),
+    intentRouteApplyOverride: { _, _ in },
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .privateOrUnreadableTapFallback,
+        detail: providerDetail
+      )
+    }
+  )
+
+  await backend.updateAudioLevels(at: Duration.zero)
+  await backend.updateAudioLevels(at: Duration.milliseconds(250))
+
+  let storedApp = await backend.currentSnapshot().apps[0]
+  #expect(storedApp.routingState == RoutingState.monitorOnly)
+  #expect(storedApp.notes == providerDetail)
+}
+
 @Test func routerListenerLifecycleReportsFailureRetriesAndRemovesOnlyInstalledSelectors() {
   let recorder = RouterListenerCallRecorder()
   let lifecycle = RouterObservationListenerLifecycle(

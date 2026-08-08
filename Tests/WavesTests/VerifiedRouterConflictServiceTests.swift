@@ -3,14 +3,30 @@ import WavesAudioCore
 
 @testable import Waves
 
-@Test func publicTapMembershipYieldsOnlyTheClaimedProcessFamily() {
+@Test func verifiedActiveWaveLinkUsesCoreAudioOutputFallbackWhenSystemTapOwnershipIsUnavailable() {
   let target = routerTestApp(id: "target", pid: 101)
-  let unrelated = routerTestApp(id: "unrelated", pid: 102)
   let service = verifiedRouterService(
     snapshot: .init(
       processObjects: [
         .init(id: 1, pid: 101, isRunningOutput: true),
-        .init(id: 2, pid: 102, isRunningOutput: true),
+        .init(id: 3, pid: 202, isRunningOutput: true),
+      ],
+      taps: []
+    )
+  )
+
+  let conflict = try! #require(service.conflict(for: target))
+  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.detail.contains("cannot publicly attribute"))
+  #expect(conflict.detail.contains("Core Audio output"))
+}
+
+@Test func unrelatedReadableTapDoesNotBecomeAWaveLinkPublicMembershipClaim() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let service = verifiedRouterService(
+    snapshot: .init(
+      processObjects: [
+        .init(id: 1, pid: 101, isRunningOutput: true),
         .init(id: 3, pid: 202, isRunningOutput: true),
       ],
       taps: [
@@ -19,11 +35,13 @@ import WavesAudioCore
     )
   )
 
-  #expect(service.conflict(for: target)?.kind == .publicTapMembership)
-  #expect(service.conflict(for: unrelated) == nil)
+  let conflict = try! #require(service.conflict(for: target))
+  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.detail.contains("cannot publicly attribute"))
+  #expect(conflict.detail.contains("monitoring only"))
 }
 
-@Test func privateVerifiedTapFallbackYieldsConservativelyWithAnExplanation() {
+@Test func unrelatedUnreadableTapDoesNotBecomeAWaveLinkMembershipClaim() {
   let target = routerTestApp(id: "target", pid: 101)
   let service = verifiedRouterService(
     snapshot: .init(
@@ -32,21 +50,35 @@ import WavesAudioCore
         .init(id: 3, pid: 202, isRunningOutput: true),
       ],
       taps: [
-        .init(id: 10, description: .privateTap)
+        .init(id: 10, description: .unreadable)
       ]
     )
   )
 
   let conflict = try! #require(service.conflict(for: target))
   #expect(conflict.kind == .privateOrUnreadableTapFallback)
-  #expect(conflict.detail.contains("could not read"))
-  #expect(conflict.detail.contains("tap membership"))
-  #expect(conflict.detail.contains("monitoring only"))
+  #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
-@Test func exclusiveTapClaimsEveryCurrentProcessExceptItsExcludedMembership() {
-  let claimed = routerTestApp(id: "claimed", pid: 101)
-  let excluded = routerTestApp(id: "excluded", pid: 102)
+@Test func wavesCreatedPrivateTapDoesNotBecomeAWaveLinkMembershipClaim() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let service = verifiedRouterService(
+    snapshot: .init(
+      processObjects: [
+        .init(id: 1, pid: 101, isRunningOutput: true),
+        .init(id: 3, pid: 202, isRunningOutput: true),
+      ],
+      taps: [.init(id: 10, description: .privateTap)]
+    )
+  )
+
+  let conflict = try! #require(service.conflict(for: target))
+  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.detail.contains("cannot publicly attribute"))
+}
+
+@Test func unrelatedExclusiveTapDoesNotBecomeAWaveLinkPublicMembershipClaim() {
+  let target = routerTestApp(id: "target", pid: 101)
   let service = verifiedRouterService(
     snapshot: .init(
       processObjects: [
@@ -60,8 +92,30 @@ import WavesAudioCore
     )
   )
 
-  #expect(service.conflict(for: claimed)?.kind == .publicTapMembership)
-  #expect(service.conflict(for: excluded) == nil)
+  let conflict = try! #require(service.conflict(for: target))
+  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.detail.contains("cannot publicly attribute"))
+}
+
+@Test func multipleUnrelatedTapOwnersDoNotCreateAWaveLinkMembershipClaim() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let service = verifiedRouterService(
+    snapshot: .init(
+      processObjects: [
+        .init(id: 1, pid: 101, isRunningOutput: true),
+        .init(id: 2, pid: 102, isRunningOutput: true),
+        .init(id: 3, pid: 202, isRunningOutput: true),
+      ],
+      taps: [
+        .init(id: 10, description: .readable(.init(processObjectIDs: [1], isExclusive: false))),
+        .init(id: 11, description: .readable(.init(processObjectIDs: [2], isExclusive: false))),
+      ]
+    )
+  )
+
+  let conflict = try! #require(service.conflict(for: target))
+  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
 @Test func spoofedWaveLinkBundleMetadataCannotDisableAnOrdinaryRoute() {
@@ -121,7 +175,7 @@ import WavesAudioCore
     VerifiedRouterProcessIdentity(pid: 404, teamIdentifier: "Y93VXCB8Q5", matchesDesignatedRequirement: true),
   ] {
     let service = VerifiedRouterConflictService(
-      descriptors: [.waveLink3_1_1],
+      descriptors: [.waveLink3_2_2],
       snapshotProvider: { snapshot },
       identityVerifier: { _, _ in identity }
     )
@@ -129,7 +183,7 @@ import WavesAudioCore
   }
 }
 
-@Test func multipleVerifiedRouterProcessesUnionPublicClaimsAndConservativelyHandlePrivateTaps() {
+@Test func multipleVerifiedRouterProcessesPreserveTheUnattributableFallbackExplanation() {
   let target = routerTestApp(id: "target", pid: 101)
   let publicSnapshot = VerifiedRouterObservationSnapshot(
     processObjects: [
@@ -147,7 +201,7 @@ import WavesAudioCore
   )
   let makeService: (VerifiedRouterObservationSnapshot) -> VerifiedRouterConflictService = { snapshot in
     VerifiedRouterConflictService(
-      descriptors: [.waveLink3_1_1],
+      descriptors: [.waveLink3_2_2],
       snapshotProvider: { snapshot },
       identityVerifier: { pid, _ in
         guard pid == 202 || pid == 303 else { return nil }
@@ -156,13 +210,13 @@ import WavesAudioCore
     )
   }
 
-  #expect(makeService(publicSnapshot).conflict(for: target)?.kind == .publicTapMembership)
+  #expect(makeService(publicSnapshot).conflict(for: target)?.kind == .privateOrUnreadableTapFallback)
   let fallback = try! #require(makeService(privateSnapshot).conflict(for: target))
   #expect(fallback.kind == .privateOrUnreadableTapFallback)
   #expect(fallback.detail.contains("more than one verified routing process"))
 }
 
-@Test func emptyPublicMembershipDoesNotClaimAnOrdinaryRoute() {
+@Test func emptyTapMembershipDoesNotInhibitVerifiedOutputFallback() {
   let target = routerTestApp(id: "target", pid: 101)
   let snapshot = VerifiedRouterObservationSnapshot(
     processObjects: [
@@ -172,15 +226,17 @@ import WavesAudioCore
     taps: [.init(id: 10, description: .readable(.init(processObjectIDs: [], isExclusive: false)))]
   )
   let service = VerifiedRouterConflictService(
-    descriptors: [.waveLink3_1_1],
+    descriptors: [.waveLink3_2_2],
     snapshotProvider: { snapshot },
     identityVerifier: { pid, descriptor in
-      guard pid == 202, descriptor == .waveLink3_1_1 else { return nil }
+      guard pid == 202, descriptor == .waveLink3_2_2 else { return nil }
       return .init(pid: 202, teamIdentifier: "Y93VXCB8Q5", matchesDesignatedRequirement: true)
     }
   )
 
-  #expect(service.conflict(for: target) == nil)
+  let conflict = try! #require(service.conflict(for: target))
+  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
 @Test func everySupportedDescriptorHasAConstructibleRequirement() {
@@ -216,14 +272,14 @@ import WavesAudioCore
     }
   )
 
-  #expect(capturedProvider?(target)?.kind == .publicTapMembership)
+  #expect(capturedProvider?(target)?.kind == .privateOrUnreadableTapFallback)
 }
 
 private func verifiedRouterService(
   snapshot: VerifiedRouterObservationSnapshot
 ) -> VerifiedRouterConflictService {
   VerifiedRouterConflictService(
-    descriptors: [.waveLink3_1_1],
+    descriptors: [.waveLink3_2_2],
     snapshotProvider: { snapshot },
     identityVerifier: { pid, _ in
       guard pid == 202 else { return nil }

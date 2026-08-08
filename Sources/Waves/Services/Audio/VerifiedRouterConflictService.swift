@@ -9,7 +9,7 @@ struct VerifiedRouterDescriptor: Hashable, Sendable {
   let teamIdentifier: String
   let designatedRequirement: String
 
-  static let waveLink3_1_1 = VerifiedRouterDescriptor(
+  static let waveLink3_2_2 = VerifiedRouterDescriptor(
     displayName: "Elgato Wave Link",
     bundleIdentifier: "com.elgato.WaveLink3",
     teamIdentifier: "Y93VXCB8Q5",
@@ -21,7 +21,7 @@ struct VerifiedRouterDescriptor: Hashable, Sendable {
       + "certificate leaf[subject.OU] = Y93VXCB8Q5)"
   )
 
-  static let supported = [waveLink3_1_1]
+  static let supported = [waveLink3_2_2]
 
   var hasConstructibleRequirement: Bool {
     var requirement: SecRequirement?
@@ -117,7 +117,7 @@ final class VerifiedRouterConflictService: @unchecked Sendable {
     )
     guard !currentRouters.isEmpty else { return nil }
     guard
-      let targetProcess = currentSnapshot.processObjects.first(where: {
+      currentSnapshot.processObjects.contains(where: {
         $0.pid == targetPID && $0.isRunningOutput
       })
     else {
@@ -135,33 +135,21 @@ final class VerifiedRouterConflictService: @unchecked Sendable {
       )
     }
 
-    let hasPublicMembershipClaim = currentSnapshot.taps.contains { tap in
-      guard case .readable(let description) = tap.description else { return false }
-      if description.isExclusive {
-        return !description.processObjectIDs.contains(targetProcess.id)
-      }
-      return description.processObjectIDs.contains(targetProcess.id)
-    }
-    if hasPublicMembershipClaim, let router = currentRouters.sorted(by: { $0.pid < $1.pid }).first {
-      return VerifiedRouterConflict(
-        routerName: router.descriptor.displayName,
-        kind: .publicTapMembership,
-        detail:
-          "\(router.descriptor.displayName) is already routing this app's audio. "
-          + "Waves left it untouched to prevent two copies. "
-          + "Quit \(router.descriptor.displayName) before controlling this app in Waves."
-      )
+    // Bundle metadata is never a positive identity signal. It is only used
+    // here to preserve the spoofing boundary: an unverified process that
+    // claims Wave Link's bundle identifier must not turn the fallback into a
+    // way to disable an unrelated route.
+    if descriptors.contains(where: { $0.bundleIdentifier == app.bundleID }) {
+      return nil
     }
 
-    let hasPrivateOrUnreadableTap = currentSnapshot.taps.contains { tap in
-      switch tap.description {
-      case .privateTap, .unreadable:
-        true
-      case .readable:
-        false
-      }
-    }
-    if hasPrivateOrUnreadableTap, let router = currentRouters.sorted(by: { $0.pid < $1.pid }).first {
+    // kAudioHardwarePropertyTapList is system-wide. The public description has
+    // no creator PID or other stable router association, so even a readable
+    // membership cannot honestly identify the tap as Wave Link's. Do not turn
+    // a verified Wave Link PID plus an arbitrary system tap into a claim about
+    // this target. Instead, use only the verified router's active Core Audio
+    // output as the conservative coexistence signal.
+    if let router = currentRouters.sorted(by: { $0.pid < $1.pid }).first {
       let ambiguityDetail =
         currentRouters.count > 1
         ? " Waves found more than one verified routing process, so it cannot narrow the affected app safely."
@@ -170,9 +158,9 @@ final class VerifiedRouterConflictService: @unchecked Sendable {
         routerName: router.descriptor.displayName,
         kind: .privateOrUnreadableTapFallback,
         detail:
-          "Waves could not read \(router.descriptor.displayName)'s tap membership while its verified "
-          + "routing process is actively outputting audio. Waves is monitoring only to avoid duplicate or "
-          + "silent playback until that router releases the path.\(ambiguityDetail)"
+          "Core Audio cannot publicly attribute the system tap list to verified \(router.descriptor.displayName). "
+          + "Because its verified routing process owns active Core Audio output, Waves is monitoring only to avoid "
+          + "duplicate or silent playback until that router releases the path.\(ambiguityDetail)"
       )
     }
 
