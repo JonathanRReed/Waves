@@ -63,24 +63,30 @@ import WavesAudioCore
 }
 
 @Test func muteRollbackFailureDegradationReachesTheBackendCleanupReport() async throws {
-  let preparation = MutingTapTeardownPreparation.perform(
-    makeOriginalAudioAudible: { noErr },
-    stopIOProc: { -1 },
-    restoreTapMuting: { -2 },
-    deactivateRenderer: {}
+  let controller = try PerAppTapController.testingController(
+    appID: "app.test",
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: { noErr },
+      stopIOProc: { -1 },
+      restoreTapMuting: { -2 }
+    )
   )
-  let degradation = try #require(preparation.cleanupDegradation(appID: "app.test"))
   let backend = WorkspaceAudioControlBackend(
     testingSnapshot: AudioSessionSnapshot.empty,
     intentRouteApplyOverride: { _, _ in },
-    shutdownCleanupOverride: { [degradation] }
+    testingControllers: [controller]
   )
 
   let cleanupReport = await backend.shutdownWithResult()
 
   #expect(cleanupReport.completion == .degraded)
-  #expect(cleanupReport.degradations == [degradation])
-  #expect(cleanupReport.degradations.map(\.stage) == [.controllerDisposal])
+  #expect(
+    cleanupReport.degradations.contains {
+      $0.appID == "app.test"
+        && $0.stage == .controllerDisposal
+        && $0.nativeStatus == -2
+        && $0.detail?.contains("mute rollback failed") == true
+    })
 }
 
 @Test func geometryMismatchCoalescesIntoOneAsynchronousRecovery() {
@@ -116,7 +122,7 @@ import WavesAudioCore
   #expect(observation.advance(to: .milliseconds(550)) == .conflictReleased)
 }
 
-@Test func routerListenerLifecycleReportsFailureRetriesAndRemovesOnlyInstalledSelectors() async {
+@Test func routerListenerLifecycleReportsFailureRetriesAndRemovesOnlyInstalledSelectors() {
   let recorder = RouterListenerCallRecorder()
   let lifecycle = RouterObservationListenerLifecycle(
     nativeCalls: RouterObservationListenerNativeCalls(
@@ -133,7 +139,7 @@ import WavesAudioCore
   )
   let deliveries = ListenerDeliveryRecorder()
 
-  let first = lifecycle.install { Task { await deliveries.record() } }
+  let first = lifecycle.install { deliveries.record() }
 
   #expect(first.count == 1)
   #expect(first[0].stage == CleanupStage.listenerInstallation)
@@ -141,13 +147,12 @@ import WavesAudioCore
   #expect(recorder.addedSelectors == [kAudioHardwarePropertyProcessObjectList, kAudioHardwarePropertyTapList])
 
   recorder.deliver(selector: kAudioHardwarePropertyProcessObjectList)
-  let deliveryCount = await deliveries.waitForDelivery()
-  #expect(deliveryCount == 1)
+  #expect(deliveries.count == 1)
 
   #expect(!lifecycle.consumeFallbackReobservationTick())
   #expect(lifecycle.consumeFallbackReobservationTick())
 
-  let second = lifecycle.install { Task { await deliveries.record() } }
+  let second = lifecycle.install { deliveries.record() }
 
   #expect(second.isEmpty)
   #expect(!lifecycle.requiresFallbackReobservation)
@@ -277,17 +282,20 @@ private final class RouterListenerCallRecorder: @unchecked Sendable {
   }
 }
 
-private actor ListenerDeliveryRecorder {
+private final class ListenerDeliveryRecorder: @unchecked Sendable {
+  private let lock = NSLock()
   private var deliveries = 0
 
-  func record() { deliveries += 1 }
-
-  func waitForDelivery() async -> Int {
-    for _ in 0..<100 {
-      if deliveries > 0 { return deliveries }
-      await Task.yield()
-    }
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
     return deliveries
+  }
+
+  func record() {
+    lock.lock()
+    deliveries += 1
+    lock.unlock()
   }
 }
 

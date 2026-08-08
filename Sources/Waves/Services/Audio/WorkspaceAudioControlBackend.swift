@@ -3930,6 +3930,12 @@ private final class TapRenderStateBox {
   }
 }
 
+struct PerAppTapControllerTeardownNativeCalls: Sendable {
+  let makeOriginalAudioAudible: @Sendable () -> OSStatus
+  let stopIOProc: @Sendable () -> OSStatus
+  let restoreTapMuting: @Sendable () -> OSStatus
+}
+
 final class PerAppTapController: @unchecked Sendable {
   let appID: String
   let appName: String
@@ -3961,6 +3967,9 @@ final class PerAppTapController: @unchecked Sendable {
   /// first. Accessed only on `callbackQueue`, like the gain itself.
   private var equalizerHeadroomReleaseGeneration: UInt64 = 0
   private var adaptiveGain: Float
+  /// Testing reaches the controller's real disposal sequence while replacing
+  /// only the Core Audio calls that require a live tap and renderer.
+  private let teardownNativeCalls: PerAppTapControllerTeardownNativeCalls?
 
   init(
     appID: String,
@@ -3975,7 +3984,8 @@ final class PerAppTapController: @unchecked Sendable {
     equalizerSettings: EqualizerSettings,
     managedAudioEqualizerSettings: GlobalEqualizerSettings,
     adaptiveGainDB: Float,
-    audioFormatPlan: AudioFormatPlan
+    audioFormatPlan: AudioFormatPlan,
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls? = nil
   ) throws {
     self.appID = appID
     self.appName = appName
@@ -3984,6 +3994,7 @@ final class PerAppTapController: @unchecked Sendable {
     self.tapID = tapID
     self.aggregateDeviceID = aggregateDeviceID
     self.audioFormatPlan = audioFormatPlan
+    self.teardownNativeCalls = teardownNativeCalls
     self.equalizerDSP = EqualizerDSP(
       sampleRate: audioFormatPlan.sampleRate,
       channelCount: audioFormatPlan.channelCount,
@@ -4022,7 +4033,10 @@ final class PerAppTapController: @unchecked Sendable {
     self.callbackQueue.setSpecific(key: callbackQueueKey, value: callbackQueueToken)
   }
 
-  static func testingController(appID: String) throws -> PerAppTapController {
+  static func testingController(
+    appID: String,
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls? = nil
+  ) throws -> PerAppTapController {
     let description = CATapDescription(stereoMixdownOfProcesses: [])
     description.name = "Waves-Testing"
     description.uuid = UUID()
@@ -4053,7 +4067,8 @@ final class PerAppTapController: @unchecked Sendable {
       equalizerSettings: EqualizerSettings(),
       managedAudioEqualizerSettings: GlobalEqualizerSettings(),
       adaptiveGainDB: 0,
-      audioFormatPlan: format
+      audioFormatPlan: format,
+      teardownNativeCalls: teardownNativeCalls
     )
   }
 
@@ -4463,17 +4478,27 @@ final class PerAppTapController: @unchecked Sendable {
       // while this IO proc reads it. Release that mute before stopping or
       // deactivating the renderer. If both native operations fail, leave the
       // renderer active and retain every resource so the app remains audible.
-      let shouldStop = didStartIOProc && ioProcID != nil && aggregateDeviceID != .unknown
+      let shouldStop =
+        teardownNativeCalls != nil || (didStartIOProc && ioProcID != nil && aggregateDeviceID != .unknown)
       let preparation = MutingTapTeardownPreparation.perform(
         makeOriginalAudioAudible: {
+          if let teardownNativeCalls {
+            return teardownNativeCalls.makeOriginalAudioAudible()
+          }
           guard #available(macOS 14.2, *) else { return noErr }
           return makeOriginalAudioAudible()
         },
         stopIOProc: {
+          if let teardownNativeCalls {
+            return teardownNativeCalls.stopIOProc()
+          }
           guard shouldStop, let procID = ioProcID else { return noErr }
           return AudioDeviceStop(aggregateDeviceID, procID)
         },
         restoreTapMuting: {
+          if let teardownNativeCalls {
+            return teardownNativeCalls.restoreTapMuting()
+          }
           guard #available(macOS 14.2, *) else { return noErr }
           return restoreTapMuting()
         },
