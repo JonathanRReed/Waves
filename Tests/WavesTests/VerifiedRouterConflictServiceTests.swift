@@ -16,7 +16,7 @@ import WavesAudioCore
   )
 
   let conflict = try! #require(service.conflict(for: target))
-  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.kind == .unattributableTapFallback)
   #expect(conflict.detail.contains("cannot publicly attribute"))
   #expect(conflict.detail.contains("Core Audio output"))
 }
@@ -36,7 +36,7 @@ import WavesAudioCore
   )
 
   let conflict = try! #require(service.conflict(for: target))
-  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.kind == .unattributableTapFallback)
   #expect(conflict.detail.contains("cannot publicly attribute"))
   #expect(conflict.detail.contains("monitoring only"))
 }
@@ -56,7 +56,7 @@ import WavesAudioCore
   )
 
   let conflict = try! #require(service.conflict(for: target))
-  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.kind == .unattributableTapFallback)
   #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
@@ -73,7 +73,7 @@ import WavesAudioCore
   )
 
   let conflict = try! #require(service.conflict(for: target))
-  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.kind == .unattributableTapFallback)
   #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
@@ -93,7 +93,7 @@ import WavesAudioCore
   )
 
   let conflict = try! #require(service.conflict(for: target))
-  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.kind == .unattributableTapFallback)
   #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
@@ -114,7 +114,7 @@ import WavesAudioCore
   )
 
   let conflict = try! #require(service.conflict(for: target))
-  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.kind == .unattributableTapFallback)
   #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
@@ -210,9 +210,9 @@ import WavesAudioCore
     )
   }
 
-  #expect(makeService(publicSnapshot).conflict(for: target)?.kind == .privateOrUnreadableTapFallback)
+  #expect(makeService(publicSnapshot).conflict(for: target)?.kind == .unattributableTapFallback)
   let fallback = try! #require(makeService(privateSnapshot).conflict(for: target))
-  #expect(fallback.kind == .privateOrUnreadableTapFallback)
+  #expect(fallback.kind == .unattributableTapFallback)
   #expect(fallback.detail.contains("more than one verified routing process"))
 }
 
@@ -235,7 +235,7 @@ import WavesAudioCore
   )
 
   let conflict = try! #require(service.conflict(for: target))
-  #expect(conflict.kind == .privateOrUnreadableTapFallback)
+  #expect(conflict.kind == .unattributableTapFallback)
   #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
@@ -272,7 +272,7 @@ import WavesAudioCore
     }
   )
 
-  #expect(capturedProvider?(target)?.kind == .privateOrUnreadableTapFallback)
+  #expect(capturedProvider?(target)?.kind == .unattributableTapFallback)
 }
 
 private func verifiedRouterService(

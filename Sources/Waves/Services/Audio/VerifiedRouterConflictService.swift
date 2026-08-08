@@ -69,7 +69,7 @@ struct VerifiedRouterProcessIdentity: Hashable, Sendable {
 struct VerifiedRouterConflict: Hashable, Sendable {
   enum Kind: Hashable, Sendable {
     case publicTapMembership
-    case privateOrUnreadableTapFallback
+    case unattributableTapFallback
     case routerMixedOutput
   }
 
@@ -156,7 +156,7 @@ final class VerifiedRouterConflictService: @unchecked Sendable {
         : ""
       return VerifiedRouterConflict(
         routerName: router.descriptor.displayName,
-        kind: .privateOrUnreadableTapFallback,
+        kind: .unattributableTapFallback,
         detail:
           "Core Audio cannot publicly attribute the system tap list to verified \(router.descriptor.displayName). "
           + "Because its verified routing process owns active Core Audio output, Waves is monitoring only to avoid "

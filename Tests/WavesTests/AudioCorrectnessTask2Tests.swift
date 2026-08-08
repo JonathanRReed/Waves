@@ -154,7 +154,7 @@ import WavesAudioCore
     verifiedRouterConflictProvider: { _ in
       VerifiedRouterConflict(
         routerName: "Elgato Wave Link",
-        kind: .privateOrUnreadableTapFallback,
+        kind: .unattributableTapFallback,
         detail: providerDetail
       )
     }
