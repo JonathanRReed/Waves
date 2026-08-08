@@ -368,7 +368,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
   private let routerObservationListeners: RouterObservationListenerLifecycle
-  private var lastKnownDefaultOutputDeviceUID: String?
+  private var defaultOutputDeviceChange = DefaultOutputDeviceChange()
   private var outputDeviceReadinessError: String?
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "AudioBackend")
 
@@ -437,7 +437,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard !isStarted else { return }
     snapshot = await buildSnapshot(merging: snapshot)
     try ensureAcceptingOperations()
-    lastKnownDefaultOutputDeviceUID = try? currentDefaultOutputDeviceUID()
+    defaultOutputDeviceChange.recordInitialUID(try? currentDefaultOutputDeviceUID())
     isStarted = true
     startLevelUpdateTask()
     addDeviceChangeListener()
@@ -499,7 +499,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     record(removeDeviceChangeListener())
     record(removeRouterObservationListeners())
-    lastKnownDefaultOutputDeviceUID = nil
+    defaultOutputDeviceChange.recordInitialUID(nil)
 
     let installedControllers = controllers.sorted { $0.key < $1.key }
     controllers.removeAll()
@@ -1904,7 +1904,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return AudioDevice(
       id: uid,
       name: name,
-      kind: deviceKind(uid: uid, name: name),
+      kind: OutputDeviceInventory.kind(uid: uid, name: name),
       isCurrent: true,
       isManagedRouteAvailable: supportsPerAppRouting
     )
@@ -1935,13 +1935,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard !isShuttingDown, supportsPerAppRouting else { return [] }
     let currentUID = try? currentDefaultOutputDeviceUID()
     var devices: [AudioDevice] = []
-    for deviceID in allDeviceIDs() where hasOutputStreams(deviceID) {
-      guard let uid = deviceUID(deviceID) else { continue }
+    for deviceID in allDeviceIDs() where OutputDeviceInventory.hasOutputStreams(deviceID) {
+      guard let uid = OutputDeviceInventory.deviceUID(deviceID) else { continue }
       // Skip Waves' own private aggregate devices so they never appear as
       // user-selectable outputs.
       if uid.hasPrefix("com.waves.aggregate.") { continue }
       let name = (try? stringProperty(deviceID, selector: kAudioObjectPropertyName, action: "read device name")) ?? "Output Device"
-      let kind = deviceKind(uid: uid, name: name)
+      let kind = OutputDeviceInventory.kind(uid: uid, name: name)
       // Note: do NOT also filter on a "waves" name substring. This app's own
       // aggregates are reliably identified by the com.waves.aggregate. UID prefix
       // above; a name-based test would wrongly hide legitimate third-party
@@ -1960,7 +1960,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   func setDefaultOutputDevice(uid: String) async throws {
     try ensureAcceptingOperations()
-    guard let deviceID = allDeviceIDs().first(where: { deviceUID($0) == uid }) else {
+    guard let deviceID = allDeviceIDs().first(where: { OutputDeviceInventory.deviceUID($0) == uid }) else {
       throw BackendError.managedRouteUnavailable("That output device is no longer available.")
     }
 
@@ -2004,67 +2004,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func isDeviceAvailable(uid: String) -> Bool {
-    allDeviceIDs().contains { deviceUID($0) == uid }
+    allDeviceIDs().contains { OutputDeviceInventory.deviceUID($0) == uid }
   }
 
   private func allDeviceIDs() -> [AudioObjectID] {
-    let elementSize = UInt32(MemoryLayout<AudioObjectID>.size)
-    let maximumDeviceCount = 256
-    var address = AudioObjectPropertyAddress(
-      mSelector: kAudioHardwarePropertyDevices,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-    var size: UInt32 = 0
-    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else {
-      return []
+    OutputDeviceInventory.allDeviceIDs { message in
+      logger.warning("\(message, privacy: .public)")
     }
-    guard size % elementSize == 0 else {
-      logger.warning("Ignoring malformed device list byte size \(size); expected a multiple of \(elementSize).")
-      return []
-    }
-    let count = Int(size / elementSize)
-    guard count <= maximumDeviceCount else { return [] }
-    guard count > 0 else { return [] }
-    let expectedSize = size
-    var readSize = expectedSize
-    var ids = [AudioObjectID](repeating: .unknown, count: count)
-    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &readSize, &ids) == noErr else {
-      return []
-    }
-    guard readSize == expectedSize else {
-      logger.warning("Ignoring device list read that returned \(readSize) bytes; expected \(expectedSize).")
-      return []
-    }
-    return ids.filter { $0 != .unknown }
-  }
-
-  private func hasOutputStreams(_ deviceID: AudioObjectID) -> Bool {
-    var address = AudioObjectPropertyAddress(
-      mSelector: kAudioDevicePropertyStreams,
-      mScope: kAudioObjectPropertyScopeOutput,
-      mElement: kAudioObjectPropertyElementMain
-    )
-    var size: UInt32 = 0
-    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return false }
-    return size > 0
-  }
-
-  private func deviceUID(_ deviceID: AudioObjectID) -> String? {
-    var address = AudioObjectPropertyAddress(
-      mSelector: kAudioDevicePropertyDeviceUID,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-    var size: UInt32 = 0
-    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return nil }
-    guard size == UInt32(MemoryLayout<CFString?>.size) else { return nil }
-    var rawUID: CFString?
-    let status = withUnsafeMutablePointer(to: &rawUID) {
-      AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, $0)
-    }
-    guard status == noErr, size == UInt32(MemoryLayout<CFString?>.size), let rawUID else { return nil }
-    return rawUID as String
   }
 
   private func stringProperty(
@@ -2107,26 +2053,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     return rawValue as String
-  }
-
-  private func deviceKind(uid: String, name: String) -> DeviceKind {
-    let token = "\(uid) \(name)".lowercased()
-    if token.contains("bluetooth") || token.contains("airpods") || token.contains("beats") {
-      return .bluetooth
-    }
-    if token.contains("display") || token.contains("hdmi") || token.contains("usb-c") {
-      return .display
-    }
-    if token.contains("aggregate") || token.contains("multi-output") {
-      return .aggregate
-    }
-    if token.contains("waves") || token.contains("blackhole") || token.contains("soundflower") || token.contains("eqmac") {
-      return .virtual
-    }
-    if token.contains("speaker") || token.contains("built-in") || token.contains("macbook") {
-      return .builtInOutput
-    }
-    return .unknown
   }
 
   private func translateProcessID(forPID pid: pid_t) throws -> AudioObjectID? {
@@ -3269,10 +3195,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func handleDeviceChange(selectors: [AudioObjectPropertySelector]) async {
     guard !isShuttingDown else { return }
     let currentDefaultUID = try? currentDefaultOutputDeviceUID()
-    let defaultOutputChanged =
-      selectors.contains(kAudioHardwarePropertyDefaultOutputDevice)
-      || (lastKnownDefaultOutputDeviceUID != nil && currentDefaultUID != lastKnownDefaultOutputDeviceUID)
-    lastKnownDefaultOutputDeviceUID = currentDefaultUID
+    let defaultOutputChanged = defaultOutputDeviceChange.didChange(
+      selectors: selectors,
+      currentUID: currentDefaultUID
+    )
 
     if defaultOutputChanged {
       // Re-tap managed routes only when the effective default output changed.
@@ -3297,7 +3223,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func reconcilePinnedRoutesAfterDeviceInventoryChange() async {
-    let availableUIDs = Set(allDeviceIDs().compactMap(deviceUID))
+    let availableUIDs = Set(allDeviceIDs().compactMap(OutputDeviceInventory.deviceUID))
     guard !availableUIDs.isEmpty else { return }
 
     var lastError: String?
