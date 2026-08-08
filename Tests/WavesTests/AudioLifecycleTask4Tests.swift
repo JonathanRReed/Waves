@@ -102,6 +102,7 @@ import WavesAudioCore
   #expect(beforeShutdown.retainedCallbackOwners == 1)
   #expect(beforeShutdown.routerListenerRegistrations == 2)
   #expect(beforeShutdown.pendingGeometryRecoveries == 0)
+  #expect(beforeShutdown.retainedGeometryRecoveryStates == 1)
 
   _ = await backend.shutdownWithResult()
   let afterShutdown = await backend.lifecycleDebugSnapshot()
@@ -110,6 +111,7 @@ import WavesAudioCore
   #expect(afterShutdown.retainedCallbackOwners == 0)
   #expect(afterShutdown.routerListenerRegistrations == 0)
   #expect(afterShutdown.pendingGeometryRecoveries == 0)
+  #expect(afterShutdown.retainedGeometryRecoveryStates == 0)
 }
 
 private enum LifecycleHarnessError: Error {

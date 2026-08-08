@@ -32,6 +32,7 @@ struct AudioBackendLifecycleDebugSnapshot: Equatable, Sendable {
   let retainedCallbackOwners: Int
   let routerListenerRegistrations: Int
   let pendingGeometryRecoveries: Int
+  let retainedGeometryRecoveryStates: Int
 }
 
 func checkedCleanupDegradations(
@@ -486,7 +487,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       orphanedControllers: orphanedControllers.count,
       retainedCallbackOwners: controllers.count + orphanedControllers.count,
       routerListenerRegistrations: routerObservationListeners.installedSelectorCount,
-      pendingGeometryRecoveries: geometryRecoveryByRuntimeID.values.count(where: \.hasPendingRecoveryWork)
+      pendingGeometryRecoveries: geometryRecoveryByRuntimeID.values.count(where: \.hasPendingRecoveryWork),
+      retainedGeometryRecoveryStates: geometryRecoveryByRuntimeID.count
     )
   }
 
@@ -616,6 +618,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     stagedIntentByLogicalID.removeAll()
     staleRouteTicks.removeAll()
     lastRenderTickByAppID.removeAll()
+    geometryRecoveryByRuntimeID.removeAll()
+    routerConflictObservationByRuntimeID.removeAll()
     routeMaintenanceTick = 0
     routerObservationListenerFailureDetail = nil
     audibleCache = nil
