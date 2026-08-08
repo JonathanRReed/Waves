@@ -7,7 +7,8 @@ import Foundation
 // no Stream Deck and no plugin. When something does not work, it answers the
 // only question that matters first: is it Waves, or is it the client?
 
-let socketPath = ProcessInfo.processInfo.environment["WAVES_CONTROL_SOCKET"]
+let socketPath =
+  ProcessInfo.processInfo.environment["WAVES_CONTROL_SOCKET"]
   ?? NSHomeDirectory() + "/Library/Application Support/Waves/control.sock"
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -17,24 +18,24 @@ func fail(_ message: String, code: Int32 = 1) -> Never {
 
 func usage() -> Never {
   let text = """
-  usage: wavesctl <command> [options]
+    usage: wavesctl <command> [options]
 
-  Commands:
-    apps                       List the apps Waves knows about
-    icon <app-id>              Base64 PNG icon for one app
-    volume <app-id> <0..1>     Set an app's volume
-    nudge  <app-id> <delta>    Change an app's volume by a delta (what a dial sends)
-    mute   <app-id>            Mute an app
-    unmute <app-id>            Unmute an app
-    toggle <app-id>            Toggle an app's mute
-    watch                      Subscribe and print state changes until interrupted
-    raw '<json>'               Send one raw request line
+    Commands:
+      apps                       List the apps Waves knows about
+      icon <app-id>              Base64 PNG icon for one app
+      volume <app-id> <0..1>     Set an app's volume
+      nudge  <app-id> <delta>    Change an app's volume by a delta (what a dial sends)
+      mute   <app-id>            Mute an app
+      unmute <app-id>            Unmute an app
+      toggle <app-id>            Toggle an app's mute
+      watch                      Subscribe and print state changes until interrupted
+      raw '<json>'               Send one raw request line
 
-  The socket path can be overridden with WAVES_CONTROL_SOCKET.
+    The socket path can be overridden with WAVES_CONTROL_SOCKET.
 
-  If this cannot connect, check that Waves is running and that
-  Settings > Shortcuts > Automation > "Allow external control" is on.
-  """
+    If this cannot connect, check that Waves is running and that
+    Settings > Shortcuts > Automation > "Allow external control" is on.
+    """
   print(text)
   exit(2)
 }
@@ -70,7 +71,8 @@ final class ControlClient {
       )
     }
     guard result == 0 else {
-      fail("""
+      fail(
+        """
         Could not connect to Waves at \(path)
 
         Check that Waves is running, and that
@@ -226,7 +228,7 @@ case "watch":
 
 case "raw":
   guard let line = arguments.first,
-        let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+    let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
   else {
     fail("usage: wavesctl raw '{\"id\":1,\"cmd\":\"list-apps\"}'")
   }

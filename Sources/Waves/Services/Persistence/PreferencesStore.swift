@@ -5,7 +5,7 @@ final class PreferencesStore: @unchecked Sendable {
   private let url: URL
   private let decoder = JSONDecoder()
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
-  private let maxFileSize: Int64 = 10 * 1024 * 1024 // 10MB
+  private let maxFileSize: Int64 = 10 * 1024 * 1024  // 10MB
   private let queue: DispatchQueue
   private let writer: CoalescingPersistenceWriter<UserPreferences>
 

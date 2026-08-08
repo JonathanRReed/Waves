@@ -49,10 +49,11 @@ import WavesAudioCore
   #expect(loadedSession.apps.first?.desiredVolume == 0.45)
   #expect(loadedSession.apps.first?.iconTIFFData == nil)
   #expect(loadedSession.recentDeviceIDs == ["device.test"])
-  #expect(presetsStore.load().getVolumeSettings(
-    for: "com.example.editor",
-    deviceID: "device.test"
-  ) == settings)
+  #expect(
+    presetsStore.load().getVolumeSettings(
+      for: "com.example.editor",
+      deviceID: "device.test"
+    ) == settings)
 
   #expect(try persistencePermissions(at: directory) == 0o700)
   for filename in [

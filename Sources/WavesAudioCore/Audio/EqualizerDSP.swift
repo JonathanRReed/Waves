@@ -194,9 +194,10 @@ public final class EqualizerDSP {
   ) {
     let localChannelCount = max(1, bufferChannelCount)
     guard byteCount > 0,
-          channelOffset >= 0,
-          channelOffset + localChannelCount <= channelCount,
-          !isBypassed else { return }
+      channelOffset >= 0,
+      channelOffset + localChannelCount <= channelCount,
+      !isBypassed
+    else { return }
 
     switch format {
     case .float32:
@@ -286,7 +287,8 @@ public final class EqualizerDSP {
           let index = stateIndex(section: section, channel: channel)
           let coefficients = channelCoefficients[index]
           var delay = delayStates[index]
-          let output = coefficients.b0 * sample
+          let output =
+            coefficients.b0 * sample
             + coefficients.b1 * delay.x1
             + coefficients.b2 * delay.x2
             - coefficients.a1 * delay.y1

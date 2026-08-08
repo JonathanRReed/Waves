@@ -173,7 +173,8 @@ public enum AppDiscoveryPolicy {
   public static func isNestedAppBundlePath(_ bundlePath: String) -> Bool {
     let bundleURL = URL(fileURLWithPath: bundlePath).standardizedFileURL
     guard bundleURL.pathExtension == "app",
-          let outerPath = topLevelAppBundlePath(forExecutablePath: bundleURL.path) else {
+      let outerPath = topLevelAppBundlePath(forExecutablePath: bundleURL.path)
+    else {
       return false
     }
     return URL(fileURLWithPath: outerPath).standardizedFileURL.path != bundleURL.path

@@ -781,8 +781,8 @@ private struct ControlSettingsView: View {
     panel.prompt = "Choose"
     panel.message = "Pick an app to give a keyboard shortcut."
     guard panel.runModal() == .OK,
-          let url = panel.url,
-          let bundleID = Bundle(url: url)?.bundleIdentifier
+      let url = panel.url,
+      let bundleID = Bundle(url: url)?.bundleIdentifier
     else { return }
     guard !takenAppIDs.contains(bundleID) else { return }
     pendingAppIDs.append(bundleID)

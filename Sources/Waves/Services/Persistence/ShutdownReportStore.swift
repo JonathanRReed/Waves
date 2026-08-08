@@ -167,7 +167,8 @@ final class ShutdownReportStore: @unchecked Sendable {
     let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
     let directory: URL
     if let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-      directory = supportDirectory
+      directory =
+        supportDirectory
         .appendingPathComponent("Waves", isDirectory: true)
         .appendingPathComponent("Diagnostics", isDirectory: true)
     } else {

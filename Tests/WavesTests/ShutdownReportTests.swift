@@ -116,10 +116,12 @@ private func degradedOutcome(
     )
   }
   let manyIssues = (0..<100).map { "persistence failure \($0)" }
-  store.save(ShutdownReport(outcome: degradedOutcome(
-    cleanupRows: manyRows,
-    persistenceIssues: manyIssues
-  )))
+  store.save(
+    ShutdownReport(
+      outcome: degradedOutcome(
+        cleanupRows: manyRows,
+        persistenceIssues: manyIssues
+      )))
 
   let loaded = try #require(store.load())
   #expect(loaded.cleanupRows.count == ShutdownReport.maxCleanupRows)
@@ -136,9 +138,11 @@ private func degradedOutcome(
   defer { try? FileManager.default.removeItem(at: directory) }
   let store = ShutdownReportStore(directory: directory)
 
-  store.save(ShutdownReport(outcome: degradedOutcome(cleanupRows: [
-    CleanupDegradation(stage: .ioProcStop, nativeStatus: -1)
-  ])))
+  store.save(
+    ShutdownReport(
+      outcome: degradedOutcome(cleanupRows: [
+        CleanupDegradation(stage: .ioProcStop, nativeStatus: -1)
+      ])))
   store.save(ShutdownReport(outcome: degradedOutcome(cleanupRows: [])))
 
   // A clean quit after a degraded one must not leave the old failure on disk to
@@ -170,14 +174,16 @@ private func degradedOutcome(
   let directory = makeTemporaryDirectory()
   defer { try? FileManager.default.removeItem(at: directory) }
   let store = ShutdownReportStore(directory: directory)
-  store.save(ShutdownReport(outcome: degradedOutcome(cleanupRows: [
-    CleanupDegradation(
-      appID: "com.example.reported",
-      stage: .ioProcDestroy,
-      nativeStatus: -66_748,
-      detail: "IOProc destroy failed"
-    )
-  ])))
+  store.save(
+    ShutdownReport(
+      outcome: degradedOutcome(cleanupRows: [
+        CleanupDegradation(
+          appID: "com.example.reported",
+          stage: .ioProcDestroy,
+          nativeStatus: -66_748,
+          detail: "IOProc destroy failed"
+        )
+      ])))
   let report = try #require(store.load())
 
   let text = DiagnosticsExportFormatter.format(

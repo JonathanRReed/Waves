@@ -27,7 +27,8 @@ enum PersistedSchema {
   ) throws -> Payload {
     let json = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
     if let object = json as? [String: Any],
-       object.keys.contains("schemaVersion") || object.keys.contains("payload") {
+      object.keys.contains("schemaVersion") || object.keys.contains("payload")
+    {
       // Once either envelope key appears, decode strictly as an envelope. Falling
       // back to a legacy payload here can turn a damaged wrapper into valid-looking
       // defaults and overwrite the only recoverable copy on the next save.

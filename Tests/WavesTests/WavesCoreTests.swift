@@ -341,7 +341,7 @@ import Testing
         displayName: "App 2",
         category: .browser,
         volumeBoost: 2.0
-      )
+      ),
     ],
     currentDevice: AudioDevice(
       id: "device1",
@@ -375,7 +375,7 @@ import Testing
     name: "Test Profile",
     entries: [
       ProfileEntry(appID: "app1", desiredVolume: 0.5, isMuted: false),
-      ProfileEntry(appID: "app2", desiredVolume: 0.75, isMuted: true, volumeBoost: 2.0)
+      ProfileEntry(appID: "app2", desiredVolume: 0.75, isMuted: true, volumeBoost: 2.0),
     ],
     createdAt: .now,
     updatedAt: .now

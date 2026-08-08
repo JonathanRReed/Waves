@@ -229,8 +229,7 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
 struct DeviceVolumePresets: Codable, Sendable {
   var deviceVolumes: [String: [String: AppVolumeSettings]] = [:]
 
-  mutating func saveVolumeSettings(for appID: String, deviceID: String, settings: AppVolumeSettings)
-  {
+  mutating func saveVolumeSettings(for appID: String, deviceID: String, settings: AppVolumeSettings) {
     if deviceVolumes[deviceID] == nil {
       deviceVolumes[deviceID] = [:]
     }

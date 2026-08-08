@@ -198,7 +198,8 @@ import WavesAudioCore
   while seconds < 20 {
     observed = await fixture.backend.adaptiveAnalysisCount()
     let interval = ContinuousClock.now - start
-    seconds = Double(interval.components.seconds)
+    seconds =
+      Double(interval.components.seconds)
       + Double(interval.components.attoseconds) / 1e18
     if Double(observed) > seconds + 1.5 {
       provedFullCadence = true
@@ -207,7 +208,8 @@ import WavesAudioCore
     try? await Task.sleep(for: .milliseconds(100))
   }
 
-  let detail = "managed routes must keep the full cadence: only \(observed) passes "
+  let detail =
+    "managed routes must keep the full cadence: only \(observed) passes "
     + "in \(seconds)s, which the 1 Hz idle heartbeat alone could account for"
   #expect(provedFullCadence, "\(detail)")
 }

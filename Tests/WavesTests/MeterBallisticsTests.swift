@@ -30,7 +30,7 @@ import WavesAudioCore
 @Test func meterNormalizeLiftsQuietAudioAboveLinear() {
   // The whole point of the dB map: a quiet -20 dBFS signal that a linear meter
   // would barely show (0.1 width) should register as a clearly-visible reading.
-  let quiet = pow(10.0, -20.0 / 20.0) // 0.1 linear, −20 dBFS
+  let quiet = pow(10.0, -20.0 / 20.0)  // 0.1 linear, −20 dBFS
   let mapped = MeterBallistics.normalize(quiet)
   #expect(mapped > 0.5)
   #expect(mapped < 1.0)

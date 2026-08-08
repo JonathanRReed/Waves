@@ -524,30 +524,34 @@ import WavesAudioCore
   let result = try? #require(fixture.store.lastProfileApplyResult)
   #expect(result?.rows.map(\.entryIndex) == [0, 1, 2, 3, 4])
   #expect(result?.rows.map(\.appID) == profile.entries.map(\.appID))
-  #expect(result?.rows.map(\.outcome) == [
-    .applied,
-    .unavailable,
-    .excluded,
-    .failed,
-    .membershipOnly,
-  ])
+  #expect(
+    result?.rows.map(\.outcome) == [
+      .applied,
+      .unavailable,
+      .excluded,
+      .failed,
+      .membershipOnly,
+    ])
   #expect(result?.rows.allSatisfy { $0.generation == calls.first?.generation } == true)
 
   #expect(fixture.store.session.apps.first { $0.logicalID == live.logicalID }?.desiredVolume == 0.21)
   #expect(fixture.store.preferences.appAudioIntents[live.logicalID]?.desiredVolume == 0.21)
   #expect(fixture.store.preferences.appAudioIntents[live.logicalID]?.volumeBoost == live.volumeBoost)
-  #expect(fixture.store.preferences.appAudioIntents["profile.offline"] == PersistedAppAudioIntent(
-    appID: "profile.offline",
-    desiredVolume: 0.33,
-    isMuted: true,
-    volumeBoost: 1
-  ))
+  #expect(
+    fixture.store.preferences.appAudioIntents["profile.offline"]
+      == PersistedAppAudioIntent(
+        appID: "profile.offline",
+        desiredVolume: 0.33,
+        isMuted: true,
+        volumeBoost: 1
+      ))
   #expect(fixture.store.preferences.appAudioIntents[excluded.logicalID] == excludedIntent)
   #expect(fixture.store.preferences.appAudioIntents[failed.logicalID] == failedIntent)
   #expect(fixture.store.preferences.appAudioIntents[membership.logicalID] == nil)
   #expect(
     fixture.store.deviceVolumePresets
-      .getVolumeSettings(for: "profile.offline", deviceID: device.id) == AppVolumeSettings(
+      .getVolumeSettings(for: "profile.offline", deviceID: device.id)
+      == AppVolumeSettings(
         desiredVolume: 0.33,
         isMuted: true,
         volumeBoost: 1
@@ -560,12 +564,13 @@ import WavesAudioCore
   #expect(fixture.preferencesStore.saveCount == 1)
   #expect(fixture.presetsStore.saveCount == 1)
   #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
-  #expect(fixture.store.toasts.contains {
-    $0.title == "Profile applied with errors"
-      && $0.detail?.contains("1 saved for later") == true
-      && $0.detail?.contains("1 excluded") == true
-      && $0.detail?.contains("1 failed") == true
-  })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile applied with errors"
+        && $0.detail?.contains("1 saved for later") == true
+        && $0.detail?.contains("1 excluded") == true
+        && $0.detail?.contains("1 failed") == true
+    })
 }
 
 @MainActor
@@ -579,22 +584,25 @@ import WavesAudioCore
   let profile = Profile(
     name: "Later",
     entries: [
-      ProfileEntry(appID: "offline.new", desiredVolume: 0.46, volumeBoost: 2.75),
+      ProfileEntry(appID: "offline.new", desiredVolume: 0.46, volumeBoost: 2.75)
     ]
   )
 
   fixture.store.applyProfile(profile)
   await fixture.store.drainAppIntentTransactions()
 
-  #expect(fixture.store.preferences.appAudioIntents["offline.new"] == PersistedAppAudioIntent(
-    appID: "offline.new",
-    desiredVolume: 0.46,
-    isMuted: false,
-    volumeBoost: 2.75
-  ))
+  #expect(
+    fixture.store.preferences.appAudioIntents["offline.new"]
+      == PersistedAppAudioIntent(
+        appID: "offline.new",
+        desiredVolume: 0.46,
+        isMuted: false,
+        volumeBoost: 2.75
+      ))
   #expect(
     fixture.store.deviceVolumePresets
-      .getVolumeSettings(for: "offline.new", deviceID: device.id) == AppVolumeSettings(
+      .getVolumeSettings(for: "offline.new", deviceID: device.id)
+      == AppVolumeSettings(
         desiredVolume: 0.46,
         isMuted: false,
         volumeBoost: 2.75
@@ -668,11 +676,12 @@ import WavesAudioCore
   fixture.store.applyProfile(profile)
   await fixture.store.drainAppIntentTransactions()
 
-  #expect(fixture.store.lastProfileApplyResult?.rows.map(\.outcome) == [
-    .failed,
-    .excluded,
-    .superseded,
-  ])
+  #expect(
+    fixture.store.lastProfileApplyResult?.rows.map(\.outcome) == [
+      .failed,
+      .excluded,
+      .superseded,
+    ])
   #expect(fixture.store.preferences.appAudioIntents == beforePreferences)
   #expect(fixture.store.deviceVolumePresets.deviceVolumes == beforePresets)
   #expect(fixture.preferencesStore.saveCount == 0)
@@ -700,11 +709,12 @@ import WavesAudioCore
   await fixture.store.drainAppIntentTransactions()
 
   #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
-  #expect(fixture.store.toasts.contains {
-    $0.title == "Profile partly applied"
-      && $0.detail?.contains("1 applied") == true
-      && $0.detail?.contains("1 saved for later") == true
-  })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied"
+        && $0.detail?.contains("1 applied") == true
+        && $0.detail?.contains("1 saved for later") == true
+    })
 }
 
 @MainActor
@@ -729,10 +739,11 @@ import WavesAudioCore
     profileOutcomes: [.applied]
   )
 
-  fixture.store.applyProfile(Profile(
-    name: "Confirmed",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2, isMuted: true)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Confirmed",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2, isMuted: true)]
+    ))
   await fixture.store.drainAppIntentTransactions()
 
   let durable = fixture.store.preferences.appAudioIntents[app.logicalID]
@@ -767,10 +778,11 @@ import WavesAudioCore
   )
 
   await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: true)
-  fixture.store.applyProfile(Profile(
-    name: "Volume only",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.24)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Volume only",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.24)]
+    ))
   await fixture.store.drainAppIntentTransactions()
 
   #expect(fixture.store.session.apps.first?.isMuted == true)
@@ -813,10 +825,11 @@ import WavesAudioCore
   fixture.store.setDesiredVolume(0.1, for: app)
   fixture.store.commitDesiredVolume(for: app)
   await fixture.backend.waitUntilFirstIntentIsSuspended()
-  fixture.store.applyProfile(Profile(
-    name: "Newer profile",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.72)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Newer profile",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.72)]
+    ))
   await waitUntil { fixture.store.lastProfileApplyResult != nil }
   await fixture.backend.resumeFirstIntent()
   await fixture.store.drainAppIntentTransactions()
@@ -849,10 +862,11 @@ import WavesAudioCore
     suspendFirstProfile: true
   )
 
-  fixture.store.applyProfile(Profile(
-    name: "Older profile",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Older profile",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)]
+    ))
   await fixture.backend.waitUntilFirstProfileIsSuspended()
   fixture.store.setVolumeBoost(3, for: app)
   await waitUntil {
@@ -888,10 +902,11 @@ import WavesAudioCore
   )
   fixture.preferencesStore.configureFailingSaves(count: 0, suspendFirst: true)
 
-  fixture.store.applyProfile(Profile(
-    name: "Await save",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.27)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Await save",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.27)]
+    ))
   await fixture.preferencesStore.waitUntilFirstSaveIsSuspended()
 
   #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
@@ -925,10 +940,11 @@ import WavesAudioCore
   fixture.preferencesStore.saveError = TransactionTestError.writeFailed
   fixture.presetsStore.saveError = TransactionTestError.writeFailed
 
-  fixture.store.applyProfile(Profile(
-    name: "Save failure",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.19, isMuted: true)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Save failure",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.19, isMuted: true)]
+    ))
   await fixture.store.drainAppIntentTransactions()
 
   #expect(fixture.store.session.apps.first?.desiredVolume == 0.19)
@@ -940,11 +956,12 @@ import WavesAudioCore
   )
   #expect(fixture.store.persistenceFailureCount == 2)
   #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
-  #expect(fixture.store.toasts.contains {
-    $0.title == "Profile applied with errors"
-      && $0.detail?.contains("settings not saved") == true
-      && $0.detail?.contains("device preset not saved") == true
-  })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile applied with errors"
+        && $0.detail?.contains("settings not saved") == true
+        && $0.detail?.contains("device preset not saved") == true
+    })
 }
 
 @MainActor
@@ -1380,7 +1397,8 @@ private actor TransactionBackend: AudioControlBackend {
     intents.append(intent)
     let callNumber = intents.count
     let baseApp = snapshot.apps.first { $0.logicalID == intent.appID }
-    let outcome = outcomes.isEmpty
+    let outcome =
+      outcomes.isEmpty
       ? (intent.isExcluded ? AppIntentApplyOutcome.excluded : .applied)
       : outcomes.removeFirst()
     let latestGeneration = latestGenerationByAppID[intent.appID] ?? 0
@@ -1505,31 +1523,34 @@ private actor TransactionBackend: AudioControlBackend {
     var rows: [ProfileRowApplyResult] = []
     for (entryIndex, entry) in profile.entries.enumerated() {
       guard entry.hasLevels else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .membershipOnly,
-          resultingApp: nil
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .membershipOnly,
+            resultingApp: nil
+          ))
         continue
       }
 
       if latestGenerationByAppID[entry.appID].map({ $0 > generation }) == true {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .superseded,
-          resultingApp: snapshot.apps.first { $0.logicalID == entry.appID },
-          detail: "A newer deterministic transaction superseded this profile row."
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .superseded,
+            resultingApp: snapshot.apps.first { $0.logicalID == entry.appID },
+            detail: "A newer deterministic transaction superseded this profile row."
+          ))
         continue
       }
 
       let outcome: ProfileRowApplyOutcome
       if profileOutcomes.isEmpty {
-        outcome = snapshot.apps.contains(where: { $0.logicalID == entry.appID })
+        outcome =
+          snapshot.apps.contains(where: { $0.logicalID == entry.appID })
           ? .applied
           : .unavailable
       } else {
@@ -1548,7 +1569,8 @@ private actor TransactionBackend: AudioControlBackend {
           if let volumeBoost = entry.volumeBoost {
             snapshot.apps[index].volumeBoost = volumeBoost
           }
-          snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted
+          snapshot.apps[index].appliedVolume =
+            snapshot.apps[index].isMuted
             ? 0
             : snapshot.apps[index].desiredVolume
           snapshot.apps[index].routingState = .managed
@@ -1576,14 +1598,15 @@ private actor TransactionBackend: AudioControlBackend {
       case .membershipOnly, .superseded, .unsupported:
         break
       }
-      rows.append(ProfileRowApplyResult(
-        entryIndex: entryIndex,
-        appID: entry.appID,
-        generation: generation,
-        outcome: outcome,
-        resultingApp: resultingApp,
-        detail: outcome == .failed ? "Deterministic profile failure" : nil
-      ))
+      rows.append(
+        ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: outcome,
+          resultingApp: resultingApp,
+          detail: outcome == .failed ? "Deterministic profile failure" : nil
+        ))
     }
     return ProfileApplyResult(rows: rows, backendStatus: snapshot.backendStatus)
   }
@@ -1662,7 +1685,8 @@ private final class TransactionPreferencesStore: PreferencesPersisting, @uncheck
     let state = lock.withLock { () -> (attempt: Int, suspend: Bool, error: Error?) in
       saveAttempts += 1
       let attempt = saveAttempts
-      let error = saveErrors.indices.contains(attempt - 1)
+      let error =
+        saveErrors.indices.contains(attempt - 1)
         ? saveErrors[attempt - 1]
         : saveError
       return (attempt, shouldSuspendFirstSave && attempt == 1, error)

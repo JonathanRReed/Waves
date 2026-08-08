@@ -50,7 +50,7 @@ enum FriendlyAppName {
 
   private static func lookup(_ id: String) -> String? {
     guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id),
-          let bundle = Bundle(url: url)
+      let bundle = Bundle(url: url)
     else { return nil }
 
     return (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)

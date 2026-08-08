@@ -116,9 +116,10 @@ struct WavesApp: App {
         // Otherwise this opens Settings on whichever pane it last showed —
         // usually General — leaving the user to go find Help themselves, which
         // is exactly what this menu item promised to do for them.
-        .simultaneousGesture(TapGesture().onEnded {
-          store.requestSettingsPane(.help)
-        })
+        .simultaneousGesture(
+          TapGesture().onEnded {
+            store.requestSettingsPane(.help)
+          })
       }
     }
 

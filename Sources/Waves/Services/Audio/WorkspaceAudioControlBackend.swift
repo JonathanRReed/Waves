@@ -280,10 +280,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let task = Task { [weak self] in
       guard let self else {
         return BackendShutdownResult(
-          checkedDegradations: [CleanupDegradation(
-            stage: .controllerDisposal,
-            detail: "The audio backend was released before cleanup could be verified."
-          )]
+          checkedDegradations: [
+            CleanupDegradation(
+              stage: .controllerDisposal,
+              detail: "The audio backend was released before cleanup could be verified."
+            )
+          ]
         )
       }
       return await self.performCheckedShutdown()
@@ -346,8 +348,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     for controller in parked {
       let controllerDegradations = controller.retryDispose()
       record(controllerDegradations)
-      if
-        !controllerDegradations.isEmpty,
+      if !controllerDegradations.isEmpty,
         !orphanedControllers.contains(where: { $0 === controller })
       {
         orphanedControllers.append(controller)
@@ -358,10 +359,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // Never let the buffer's cap hide the fact that it capped: a truncated
     // report that looks complete is worse than one that admits the gap.
     if droppedCleanupDegradations > 0 {
-      record([CleanupDegradation(
-        stage: .controllerDisposal,
-        detail: "\(droppedCleanupDegradations) earlier cleanup failure(s) were dropped once the in-session buffer reached \(Self.maxRetainedCleanupDegradations) rows."
-      )])
+      record([
+        CleanupDegradation(
+          stage: .controllerDisposal,
+          detail: "\(droppedCleanupDegradations) earlier cleanup failure(s) were dropped once the in-session buffer reached \(Self.maxRetainedCleanupDegradations) rows."
+        )
+      ])
       droppedCleanupDegradations = 0
     }
 
@@ -445,7 +448,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     if let latestGeneration = latestAcceptedGenerationByLogicalID[logicalID],
-       intent.generation < latestGeneration {
+      intent.generation < latestGeneration
+    {
       return supersededResult(for: intent, logicalID: logicalID)
     }
     latestAcceptedGenerationByLogicalID[logicalID] = intent.generation
@@ -493,7 +497,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     if !supportsPerAppRouting || snapshot.apps[acceptedIndex].compatibility == .unsupported {
-      let detail = supportsPerAppRouting
+      let detail =
+        supportsPerAppRouting
         ? "This app does not support managed audio controls."
         : "Per-app routing requires macOS 14.2 or newer."
       snapshot.apps[acceptedIndex].routingState = .monitorOnly
@@ -521,7 +526,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     stagedApp.targetDeviceUID = intent.targetDeviceUID
 
     let expectedAppliedVolume: Float = intent.isMuted ? 0 : intent.desiredVolume
-    let hasNoChanges = previousApp.desiredVolume == intent.desiredVolume
+    let hasNoChanges =
+      previousApp.desiredVolume == intent.desiredVolume
       && previousApp.isMuted == intent.isMuted
       && previousApp.volumeBoost == intent.volumeBoost
       && previousApp.targetDeviceUID == intent.targetDeviceUID
@@ -651,16 +657,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
     let app = try legacyApp(forAppID: appID)
     let values = intentControlValues(for: app)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: volume,
-      isMuted: values.isMuted,
-      volumeBoost: values.volumeBoost,
-      equalizerSettings: values.equalizerSettings,
-      targetDeviceUID: values.targetDeviceUID,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: volume,
+        isMuted: values.isMuted,
+        volumeBoost: values.volumeBoost,
+        equalizerSettings: values.equalizerSettings,
+        targetDeviceUID: values.targetDeviceUID,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
@@ -668,16 +675,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
     let app = try legacyApp(forAppID: appID)
     let values = intentControlValues(for: app)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: values.desiredVolume,
-      isMuted: isMuted,
-      volumeBoost: values.volumeBoost,
-      equalizerSettings: values.equalizerSettings,
-      targetDeviceUID: values.targetDeviceUID,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: values.desiredVolume,
+        isMuted: isMuted,
+        volumeBoost: values.volumeBoost,
+        equalizerSettings: values.equalizerSettings,
+        targetDeviceUID: values.targetDeviceUID,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
@@ -685,16 +693,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
     let app = try legacyApp(forAppID: appID)
     let values = intentControlValues(for: app)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: values.desiredVolume,
-      isMuted: values.isMuted,
-      volumeBoost: boost,
-      equalizerSettings: values.equalizerSettings,
-      targetDeviceUID: values.targetDeviceUID,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: values.desiredVolume,
+        isMuted: values.isMuted,
+        volumeBoost: boost,
+        equalizerSettings: values.equalizerSettings,
+        targetDeviceUID: values.targetDeviceUID,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
@@ -702,16 +711,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
     let app = try legacyApp(forAppID: appID)
     let values = intentControlValues(for: app)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: values.desiredVolume,
-      isMuted: values.isMuted,
-      volumeBoost: values.volumeBoost,
-      equalizerSettings: settings,
-      targetDeviceUID: values.targetDeviceUID,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: values.desiredVolume,
+        isMuted: values.isMuted,
+        volumeBoost: values.volumeBoost,
+        equalizerSettings: settings,
+        targetDeviceUID: values.targetDeviceUID,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
@@ -793,48 +803,52 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     for (entryIndex, entry) in profile.entries.enumerated() {
       guard entry.hasLevels else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .membershipOnly,
-          resultingApp: nil
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .membershipOnly,
+            resultingApp: nil
+          ))
         continue
       }
 
       guard let appIndex = snapshot.apps.firstIndex(matchingAppKey: entry.appID) else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .unavailable,
-          resultingApp: nil,
-          detail: "The app is not available in the current audio session."
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .unavailable,
+            resultingApp: nil,
+            detail: "The app is not available in the current audio session."
+          ))
         continue
       }
 
       let app = snapshot.apps[appIndex]
       let values = intentControlValues(for: app)
-      let result = await applyAppIntent(AppRouteIntent(
-        appID: entry.appID,
-        desiredVolume: entry.desiredVolume ?? values.desiredVolume,
-        isMuted: entry.isMuted ?? values.isMuted,
-        volumeBoost: entry.volumeBoost ?? values.volumeBoost,
-        equalizerSettings: values.equalizerSettings,
-        targetDeviceUID: values.targetDeviceUID,
-        generation: generation,
-        reason: .profileApply
-      ))
-      rows.append(ProfileRowApplyResult(
-        entryIndex: entryIndex,
-        appID: entry.appID,
-        generation: generation,
-        outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
-        resultingApp: result.resultingApp,
-        detail: result.detail
-      ))
+      let result = await applyAppIntent(
+        AppRouteIntent(
+          appID: entry.appID,
+          desiredVolume: entry.desiredVolume ?? values.desiredVolume,
+          isMuted: entry.isMuted ?? values.isMuted,
+          volumeBoost: entry.volumeBoost ?? values.volumeBoost,
+          equalizerSettings: values.equalizerSettings,
+          targetDeviceUID: values.targetDeviceUID,
+          generation: generation,
+          reason: .profileApply
+        ))
+      rows.append(
+        ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
+          resultingApp: result.resultingApp,
+          detail: result.detail
+        ))
     }
 
     return ProfileApplyResult(rows: rows, backendStatus: snapshot.backendStatus)
@@ -1031,7 +1045,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // `refresh()` and `diagnosticsReport()`, and both used to probe — for the
     // entire life of the process.
     if captureAuthorization == .authorized,
-       controllers.values.contains(where: \.isActive) {
+      controllers.values.contains(where: \.isActive)
+    {
       return captureAuthorization
     }
 
@@ -1264,7 +1279,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       try ensureGenerationCurrent(generationContext)
     }
     let processObjectIDs = try resolveProcessObjectIDs(for: app)
-    let stagedEqualizer = equalizerSettings
+    let stagedEqualizer =
+      equalizerSettings
       ?? equalizerSettingsByAppID[app.logicalID]
       ?? EqualizerSettings()
 
@@ -1272,9 +1288,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // every process we'd tap now. A target-device change explicitly forces a new
     // controller, while volume/mute/boost/EQ changes stay on the current route.
     if !forceRebuild,
-       let controller = controllers[app.id],
-       controller.isActive,
-       controller.covers(processObjectIDs) {
+      let controller = controllers[app.id],
+      controller.isActive,
+      controller.covers(processObjectIDs)
+    {
       if let generationContext {
         try ensureGenerationCurrent(generationContext)
       }
@@ -1300,7 +1317,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       if let generationContext {
         try ensureGenerationCurrent(generationContext)
         if let installedGeneration = controllerGenerationByRuntimeID[app.id],
-           installedGeneration > generationContext.generation {
+          installedGeneration > generationContext.generation
+        {
           throw IntentSupersededError()
         }
         // Keep this check immediately adjacent to installation. If newer work ran
@@ -1376,7 +1394,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           // Re-resolve process object IDs after suspension. A transient resolution
           // failure is left for the next retry to report with the friendly error.
           if let refreshedProcessObjectIDs = try? resolveProcessObjectIDs(for: app),
-             refreshedProcessObjectIDs != currentProcessObjectIDs {
+            refreshedProcessObjectIDs != currentProcessObjectIDs
+          {
             logger.info("Process object IDs changed for \(app.displayName) during retry")
             currentProcessObjectIDs = refreshedProcessObjectIDs
           }
@@ -1429,20 +1448,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         if !controllerOwnsResources {
           var observations: [CleanupStatusObservation] = []
           if aggregateID != .unknown {
-            observations.append(CleanupStatusObservation(
-              appID: app.logicalID,
-              stage: .aggregateDeviceDestroy,
-              nativeStatus: AudioHardwareDestroyAggregateDevice(aggregateID),
-              detail: "Destroy partially-created aggregate device"
-            ))
+            observations.append(
+              CleanupStatusObservation(
+                appID: app.logicalID,
+                stage: .aggregateDeviceDestroy,
+                nativeStatus: AudioHardwareDestroyAggregateDevice(aggregateID),
+                detail: "Destroy partially-created aggregate device"
+              ))
           }
           if tapID != .unknown {
-            observations.append(CleanupStatusObservation(
-              appID: app.logicalID,
-              stage: .processTapDestroy,
-              nativeStatus: AudioHardwareDestroyProcessTap(tapID),
-              detail: "Destroy partially-created process tap"
-            ))
+            observations.append(
+              CleanupStatusObservation(
+                appID: app.logicalID,
+                stage: .processTapDestroy,
+                nativeStatus: AudioHardwareDestroyProcessTap(tapID),
+                detail: "Destroy partially-created process tap"
+              ))
           }
           retainCleanupDegradations(checkedCleanupDegradations(from: observations))
         }
@@ -1467,13 +1488,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           [
             kAudioSubDeviceUIDKey: outputDeviceUID,
             kAudioSubDeviceDriftCompensationKey: false,
-          ],
+          ]
         ],
         kAudioAggregateDeviceTapListKey: [
           [
             kAudioSubTapDriftCompensationKey: true,
             kAudioSubTapUIDKey: tapUID,
-          ],
+          ]
         ],
       ]
 
@@ -1541,9 +1562,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         }
       )
       for pid in cachedAudibleProcesses().pids {
-        guard targetBundlePaths.contains(where: {
-          executableForPID(pid, belongsToAppBundleAt: $0)
-        }) else { continue }
+        guard
+          targetBundlePaths.contains(where: {
+            executableForPID(pid, belongsToAppBundleAt: $0)
+          })
+        else { continue }
         candidatePIDs.insert(pid)
       }
     }
@@ -1552,7 +1575,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       candidatePIDs.insert(pid)
     }
 
-    let processObjectIDs = candidatePIDs
+    let processObjectIDs =
+      candidatePIDs
       .compactMap { pid -> AudioObjectID? in
         // A sibling PID may have no Core Audio process object yet (transient
         // helper/renderer in a browser family), which makes translateProcessID
@@ -1680,11 +1704,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func currentOutputDevice() throws -> AudioDevice {
     let deviceID = try currentDefaultOutputDeviceID()
     let uid = try outputDeviceUID(for: deviceID)
-    let name = (try? stringProperty(
-      deviceID,
-      selector: kAudioObjectPropertyName,
-      action: "read default output name"
-    )) ?? "System Output"
+    let name =
+      (try? stringProperty(
+        deviceID,
+        selector: kAudioObjectPropertyName,
+        action: "read default output name"
+      )) ?? "System Output"
 
     return AudioDevice(
       id: uid,
@@ -1731,13 +1756,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // aggregates are reliably identified by the com.waves.aggregate. UID prefix
       // above; a name-based test would wrongly hide legitimate third-party
       // hardware from Waves Audio (a real vendor) whose names contain "waves".
-      devices.append(AudioDevice(
-        id: uid,
-        name: name,
-        kind: kind,
-        isCurrent: uid == currentUID,
-        isManagedRouteAvailable: supportsPerAppRouting
-      ))
+      devices.append(
+        AudioDevice(
+          id: uid,
+          name: name,
+          kind: kind,
+          isCurrent: uid == currentUID,
+          isManagedRouteAvailable: supportsPerAppRouting
+        ))
     }
     return devices.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
   }
@@ -1773,16 +1799,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
     let app = try legacyApp(forAppID: appID)
     let values = intentControlValues(for: app)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: values.desiredVolume,
-      isMuted: values.isMuted,
-      volumeBoost: values.volumeBoost,
-      equalizerSettings: values.equalizerSettings,
-      targetDeviceUID: uid,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: values.desiredVolume,
+        isMuted: values.isMuted,
+        volumeBoost: values.volumeBoost,
+        equalizerSettings: values.equalizerSettings,
+        targetDeviceUID: uid,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
@@ -2270,7 +2297,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     retainCleanupDegradations(disposeControllers(keeping: runningIDs))
 
     let hasRouteErrors = hasBlockingRouteErrors(in: mergedApps)
-    let routeError = hasRouteErrors
+    let routeError =
+      hasRouteErrors
       ? mergedApps.first(where: { $0.routingState == .error && $0.notes != nil })?.notes
         ?? snapshot.backendStatus.lastError
       : nil
@@ -2400,14 +2428,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         return true
       }
 
-    let candidateApps = runningApps
+    let candidateApps =
+      runningApps
       .filter { app in
         let localizedName = app.localizedName ?? ""
-        guard AppDiscoveryPolicy.isManageableApp(
-          named: localizedName,
-          bundleID: app.bundleIdentifier,
-          bundlePath: app.bundleURL?.path
-        ) else { return false }
+        guard
+          AppDiscoveryPolicy.isManageableApp(
+            named: localizedName,
+            bundleID: app.bundleIdentifier,
+            bundlePath: app.bundleURL?.path
+          )
+        else { return false }
         return true
       }
       .sorted {
@@ -2442,12 +2473,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         // the only signal that lights up browsers, whose audio is emitted by a
         // sandboxed "Audio Service" helper that never appears in the family set.
         let isAudibleByPID = !audiblePIDs.isEmpty && !familyPIDs.isDisjoint(with: audiblePIDs)
-        let isAudibleByBundle = app.bundleURL.map { bundleURL in
-          audibleParentBundlePaths.contains { candidate in
-            URL(fileURLWithPath: candidate).standardizedFileURL.resolvingSymlinksInPath().path
-              == bundleURL.standardizedFileURL.resolvingSymlinksInPath().path
-          }
-        } ?? false
+        let isAudibleByBundle =
+          app.bundleURL.map { bundleURL in
+            audibleParentBundlePaths.contains { candidate in
+              URL(fileURLWithPath: candidate).standardizedFileURL.resolvingSymlinksInPath().path
+                == bundleURL.standardizedFileURL.resolvingSymlinksInPath().path
+            }
+          } ?? false
         let isAudible = isAudibleByPID || isAudibleByBundle
         let isFrontmost = familyApps.contains(where: \.isActive)
         let routeState: RoutingState = isAudible ? .live : .monitorOnly
@@ -2486,7 +2518,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     if let bundleID = app.bundleIdentifier,
-       let bundleURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+      let bundleURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+    {
       return iconPNGData(from: NSWorkspace.shared.icon(forFile: bundleURL.path))
     }
 
@@ -2501,7 +2534,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     resized.unlockFocus()
 
     guard let tiffData = resized.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: tiffData) else {
+      let bitmap = NSBitmapImageRep(data: tiffData)
+    else {
       return nil
     }
 
@@ -2619,14 +2653,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     stage: CleanupStage,
     detail: String
   ) {
-    retainCleanupDegradations(checkedCleanupDegradations(from: [
-      CleanupStatusObservation(
-        appID: appID,
-        stage: stage,
-        nativeStatus: status,
-        detail: detail
-      )
-    ]))
+    retainCleanupDegradations(
+      checkedCleanupDegradations(from: [
+        CleanupStatusObservation(
+          appID: appID,
+          stage: stage,
+          nativeStatus: status,
+          detail: detail
+        )
+      ]))
   }
 
   /// Records cleanup failures for diagnostics, bounded in both size and noise.
@@ -2727,12 +2762,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let hasRouteErrors = hasBlockingRouteErrors(in: snapshot.apps)
     let deviceIsReady = snapshot.currentDevice != nil
     snapshot.backendStatus.hasRequiredPermissions = captureAuthorization == .authorized
-    snapshot.backendStatus.isRouteRecoveryHealthy = supportsPerAppRouting
+    snapshot.backendStatus.isRouteRecoveryHealthy =
+      supportsPerAppRouting
       && captureAuthorization == .authorized
       && deviceIsReady
       && !hasRouteErrors
 
-    let routeError = hasRouteErrors
+    let routeError =
+      hasRouteErrors
       ? latestError
         ?? snapshot.apps.first(where: { $0.routingState == .error && $0.notes != nil })?.notes
         ?? snapshot.backendStatus.lastError
@@ -2829,7 +2866,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     levelUpdateTask?.cancel()
     levelUpdateTask = Task { [weak self] in
       while !Task.isCancelled {
-        try? await Task.sleep(nanoseconds: 250_000_000) // 0.25 seconds (optimized from 0.1s)
+        try? await Task.sleep(nanoseconds: 250_000_000)  // 0.25 seconds (optimized from 0.1s)
         await self?.updateAudioLevels()
       }
     }
@@ -2921,10 +2958,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         lastRenderTickByAppID[app.logicalID] = renderTick
 
         if app.routingState == .managed,
-           !app.isMuted,
-           !isVolumeZero,
-           sourceIsRunningOutput,
-           !isRendering {
+          !app.isMuted,
+          !isVolumeZero,
+          sourceIsRunningOutput,
+          !isRendering
+        {
           let ticks = (staleRouteTicks[app.logicalID] ?? 0) + 1
           staleRouteTicks[app.logicalID] = ticks
           if ticks >= staleRouteThresholdTicks {
@@ -3023,9 +3061,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       do {
         let processObjectIDs = try resolveProcessObjectIDs(for: app)
         if !shouldForceRebuild,
-           let controller = controllers[app.id],
-           controller.isActive,
-           controller.covers(processObjectIDs) {
+          let controller = controllers[app.id],
+          controller.isActive,
+          controller.covers(processObjectIDs)
+        {
           continue
         }
 
@@ -3122,16 +3161,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         mElement: kAudioObjectPropertyElementMain
       )
 
-      observations.append(CleanupStatusObservation(
-        stage: .listenerRemoval,
-        nativeStatus: AudioObjectRemovePropertyListenerBlock(
-          AudioObjectID(kAudioObjectSystemObject),
-          &address,
-          DispatchQueue.main,
-          listenerBlock
-        ),
-        detail: "Remove device listener selector \(selector)"
-      ))
+      observations.append(
+        CleanupStatusObservation(
+          stage: .listenerRemoval,
+          nativeStatus: AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            listenerBlock
+          ),
+          detail: "Remove device listener selector \(selector)"
+        ))
     }
 
     deviceChangeListenerSelectors.removeAll()
@@ -3142,7 +3182,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private func handleDeviceChange(selectors: [AudioObjectPropertySelector]) async {
     guard !isShuttingDown else { return }
     let currentDefaultUID = try? currentDefaultOutputDeviceUID()
-    let defaultOutputChanged = selectors.contains(kAudioHardwarePropertyDefaultOutputDevice)
+    let defaultOutputChanged =
+      selectors.contains(kAudioHardwarePropertyDefaultOutputDevice)
       || (lastKnownDefaultOutputDeviceUID != nil && currentDefaultUID != lastKnownDefaultOutputDeviceUID)
     lastKnownDefaultOutputDeviceUID = currentDefaultUID
 
@@ -3712,14 +3753,15 @@ private final class PerAppTapController: @unchecked Sendable {
 
     if status != noErr {
       if let procID {
-        retainedCleanupDegradations.append(contentsOf: checkedCleanupDegradations(from: [
-          CleanupStatusObservation(
-            appID: appID,
-            stage: .ioProcDestroy,
-            nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
-            detail: "Destroy IO proc returned by a failed create call"
-          )
-        ]))
+        retainedCleanupDegradations.append(
+          contentsOf: checkedCleanupDegradations(from: [
+            CleanupStatusObservation(
+              appID: appID,
+              stage: .ioProcDestroy,
+              nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
+              detail: "Destroy IO proc returned by a failed create call"
+            )
+          ]))
       }
       throw BackendError.managedRouteUnavailable(
         "Failed to create IO proc for \(appName) (OSStatus: \(status))."
@@ -3739,14 +3781,15 @@ private final class PerAppTapController: @unchecked Sendable {
     let startStatus = AudioDeviceStart(aggregateDeviceID, procID)
     if startStatus != noErr {
       stateBox.setInactive()
-      retainedCleanupDegradations.append(contentsOf: checkedCleanupDegradations(from: [
-        CleanupStatusObservation(
-          appID: appID,
-          stage: .ioProcDestroy,
-          nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
-          detail: "Destroy IO proc after aggregate-device start failure"
-        )
-      ]))
+      retainedCleanupDegradations.append(
+        contentsOf: checkedCleanupDegradations(from: [
+          CleanupStatusObservation(
+            appID: appID,
+            stage: .ioProcDestroy,
+            nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
+            detail: "Destroy IO proc after aggregate-device start failure"
+          )
+        ]))
       ioProcID = nil
       throw BackendError.managedRouteUnavailable(
         "Failed to start aggregate device for \(appName) (OSStatus: \(startStatus))."
@@ -3772,7 +3815,8 @@ private final class PerAppTapController: @unchecked Sendable {
       mElement: kAudioObjectPropertyElementMain
     )
 
-    let usageSize = MemoryLayout<AudioHardwareIOProcStreamUsage>.size
+    let usageSize =
+      MemoryLayout<AudioHardwareIOProcStreamUsage>.size
       + (Int(streamCount) - 1) * MemoryLayout<UInt32>.stride
     let usagePointer = UnsafeMutableRawPointer.allocate(
       byteCount: usageSize,
@@ -3786,7 +3830,8 @@ private final class PerAppTapController: @unchecked Sendable {
     typedUsage.pointee.mNumberStreams = streamCount
 
     let streamsOffset = MemoryLayout<AudioHardwareIOProcStreamUsage>.offset(of: \.mStreamIsOn) ?? 0
-    let streams = usagePointer
+    let streams =
+      usagePointer
       .advanced(by: streamsOffset)
       .assumingMemoryBound(to: UInt32.self)
     for index in 0..<Int(streamCount) {
@@ -3860,21 +3905,23 @@ private final class PerAppTapController: @unchecked Sendable {
     stateBox.setInactive()
     var observations: [CleanupStatusObservation] = []
     if didStartIOProc {
-      observations.append(CleanupStatusObservation(
-        appID: appID,
-        stage: .ioProcStop,
-        nativeStatus: AudioDeviceStop(aggregateDeviceID, procID),
-        detail: "Stop controller IO proc during invalidation"
-      ))
+      observations.append(
+        CleanupStatusObservation(
+          appID: appID,
+          stage: .ioProcStop,
+          nativeStatus: AudioDeviceStop(aggregateDeviceID, procID),
+          detail: "Stop controller IO proc during invalidation"
+        ))
     }
     didStartIOProc = false
     drainCallbackQueue()
-    observations.append(CleanupStatusObservation(
-      appID: appID,
-      stage: .ioProcDestroy,
-      nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
-      detail: "Destroy controller IO proc during invalidation"
-    ))
+    observations.append(
+      CleanupStatusObservation(
+        appID: appID,
+        stage: .ioProcDestroy,
+        nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
+        detail: "Destroy controller IO proc during invalidation"
+      ))
     ioProcID = nil
     return checkedCleanupDegradations(from: observations)
   }
@@ -4034,7 +4081,8 @@ private final class PerAppTapController: @unchecked Sendable {
     let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
     let expectedBufferCount = audioFormatPlan.isInterleaved ? 1 : audioFormatPlan.channelCount
     guard inputBuffers.count == expectedBufferCount,
-          outputBuffers.count == expectedBufferCount else {
+      outputBuffers.count == expectedBufferCount
+    else {
       return false
     }
 
@@ -4042,16 +4090,18 @@ private final class PerAppTapController: @unchecked Sendable {
     for index in 0..<expectedBufferCount {
       let inputBuffer = inputBuffers[index]
       let outputBuffer = outputBuffers[index]
-      let expectedChannels = audioFormatPlan.isInterleaved
+      let expectedChannels =
+        audioFormatPlan.isInterleaved
         ? audioFormatPlan.channelCount
         : 1
       let inputByteCount = Int(inputBuffer.mDataByteSize)
       let outputByteCount = Int(outputBuffer.mDataByteSize)
       guard Int(inputBuffer.mNumberChannels) == expectedChannels,
-            Int(outputBuffer.mNumberChannels) == expectedChannels,
-            inputByteCount == outputByteCount,
-            inputByteCount.isMultiple(of: audioFormatPlan.bytesPerFrame),
-            inputByteCount == 0 || (inputBuffer.mData != nil && outputBuffer.mData != nil) else {
+        Int(outputBuffer.mNumberChannels) == expectedChannels,
+        inputByteCount == outputByteCount,
+        inputByteCount.isMultiple(of: audioFormatPlan.bytesPerFrame),
+        inputByteCount == 0 || (inputBuffer.mData != nil && outputBuffer.mData != nil)
+      else {
         return false
       }
 
@@ -4176,7 +4226,8 @@ private final class PerAppTapController: @unchecked Sendable {
       finalSampleCount += bufferSamples
     }
 
-    let voiceBandEnergy = voiceSampleCount > 0
+    let voiceBandEnergy =
+      voiceSampleCount > 0
       ? voiceEnergySum / Float(voiceSampleCount)
       : 0
     stateBox.writeLevels(

@@ -33,7 +33,8 @@ struct MainWindowView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-          store.isWarmingUp ? "Starting audio, in progress" : "Refreshing, in progress")
+          store.isWarmingUp ? "Starting audio, in progress" : "Refreshing, in progress"
+        )
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
@@ -317,10 +318,12 @@ enum MixerScope: Hashable, RawRepresentable {
     if rawValue == "sound" {
       self = .sound
     } else if rawValue.hasPrefix("source:"),
-       let filter = SourceFilter(rawValue: String(rawValue.dropFirst("source:".count))) {
+      let filter = SourceFilter(rawValue: String(rawValue.dropFirst("source:".count)))
+    {
       self = .source(filter)
     } else if rawValue.hasPrefix("profile:"),
-              let id = UUID(uuidString: String(rawValue.dropFirst("profile:".count))) {
+      let id = UUID(uuidString: String(rawValue.dropFirst("profile:".count)))
+    {
       self = .profile(id)
     } else {
       return nil

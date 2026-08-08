@@ -97,13 +97,14 @@ public struct AudioFormatPlan: Hashable, Sendable {
     bytesPerPacket: Int? = nil
   ) {
     guard sampleFormat != .unknown,
-          sampleRate.isFinite,
-          sampleRate > 0,
-          channelCount > 0,
-          channelCount <= Self.maximumChannelCount,
-          bytesPerSample > 0,
-          bytesPerFrame > 0,
-          framesPerPacket > 0 else {
+      sampleRate.isFinite,
+      sampleRate > 0,
+      channelCount > 0,
+      channelCount <= Self.maximumChannelCount,
+      bytesPerSample > 0,
+      bytesPerFrame > 0,
+      framesPerPacket > 0
+    else {
       return nil
     }
 
@@ -145,13 +146,14 @@ public struct AudioFormatPlan: Hashable, Sendable {
 
   public init?(validating description: LinearPCMFormatDescription) {
     guard description.isLinearPCM,
-          description.isPacked,
-          !description.isAlignedHigh,
-          description.isNativeEndian,
-          !description.hasUnsupportedFormatFlags,
-          description.hasValidReservedField,
-          description.bitsPerChannel > 0,
-          description.bitsPerChannel.isMultiple(of: 8) else {
+      description.isPacked,
+      !description.isAlignedHigh,
+      description.isNativeEndian,
+      !description.hasUnsupportedFormatFlags,
+      description.hasValidReservedField,
+      description.bitsPerChannel > 0,
+      description.bitsPerChannel.isMultiple(of: 8)
+    else {
       return nil
     }
 
@@ -189,9 +191,10 @@ public struct AudioFormatPlan: Hashable, Sendable {
 
     if isInterleaved {
       guard buffers.count == 1,
-            buffers[0].channelCount == channelCount,
-            buffers[0].byteCount >= 0,
-            buffers[0].byteCount.isMultiple(of: bytesPerFrame) else {
+        buffers[0].channelCount == channelCount,
+        buffers[0].byteCount >= 0,
+        buffers[0].byteCount.isMultiple(of: bytesPerFrame)
+      else {
         return false
       }
       return true
@@ -201,8 +204,9 @@ public struct AudioFormatPlan: Hashable, Sendable {
     var expectedByteCount: Int?
     for buffer in buffers {
       guard buffer.channelCount == 1,
-            buffer.byteCount >= 0,
-            buffer.byteCount.isMultiple(of: bytesPerFrame) else {
+        buffer.byteCount >= 0,
+        buffer.byteCount.isMultiple(of: bytesPerFrame)
+      else {
         return false
       }
       if let expectedByteCount {

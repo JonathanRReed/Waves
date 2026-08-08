@@ -59,61 +59,65 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
 
   public func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws {
     let app = try legacyApp(forAppID: appID)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: volume,
-      isMuted: app.isMuted,
-      volumeBoost: app.volumeBoost,
-      equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
-      targetDeviceUID: app.targetDeviceUID,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: volume,
+        isMuted: app.isMuted,
+        volumeBoost: app.volumeBoost,
+        equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+        targetDeviceUID: app.targetDeviceUID,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
   public func setMuted(_ isMuted: Bool, forAppID appID: String) async throws {
     let app = try legacyApp(forAppID: appID)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: app.desiredVolume,
-      isMuted: isMuted,
-      volumeBoost: app.volumeBoost,
-      equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
-      targetDeviceUID: app.targetDeviceUID,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: app.desiredVolume,
+        isMuted: isMuted,
+        volumeBoost: app.volumeBoost,
+        equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+        targetDeviceUID: app.targetDeviceUID,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
   public func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws {
     let app = try legacyApp(forAppID: appID)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: app.desiredVolume,
-      isMuted: app.isMuted,
-      volumeBoost: boost,
-      equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
-      targetDeviceUID: app.targetDeviceUID,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: app.desiredVolume,
+        isMuted: app.isMuted,
+        volumeBoost: boost,
+        equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+        targetDeviceUID: app.targetDeviceUID,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
   public func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws {
     let app = try legacyApp(forAppID: appID)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: app.desiredVolume,
-      isMuted: app.isMuted,
-      volumeBoost: app.volumeBoost,
-      equalizerSettings: settings,
-      targetDeviceUID: app.targetDeviceUID,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: app.desiredVolume,
+        isMuted: app.isMuted,
+        volumeBoost: app.volumeBoost,
+        equalizerSettings: settings,
+        targetDeviceUID: app.targetDeviceUID,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 
@@ -182,7 +186,8 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     }
 
     if let latestGeneration = latestAcceptedGenerationByLogicalID[logicalID],
-       intent.generation < latestGeneration {
+      intent.generation < latestGeneration
+    {
       return AppIntentApplyResult(
         appID: intent.appID,
         generation: intent.generation,
@@ -234,7 +239,8 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
     }
 
     let previousEqualizer = equalizerSettings[logicalID] ?? EqualizerSettings()
-    let hasNoChanges = snapshot.apps[index].desiredVolume == intent.desiredVolume
+    let hasNoChanges =
+      snapshot.apps[index].desiredVolume == intent.desiredVolume
       && snapshot.apps[index].isMuted == intent.isMuted
       && snapshot.apps[index].volumeBoost == intent.volumeBoost
       && snapshot.apps[index].targetDeviceUID == intent.targetDeviceUID
@@ -274,47 +280,51 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
 
     for (entryIndex, entry) in profile.entries.enumerated() {
       guard entry.hasLevels else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .membershipOnly,
-          resultingApp: nil
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .membershipOnly,
+            resultingApp: nil
+          ))
         continue
       }
 
       guard let appIndex = snapshot.apps.firstIndex(matchingAppKey: entry.appID) else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .unavailable,
-          resultingApp: nil,
-          detail: "The app is not available in the current audio session."
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .unavailable,
+            resultingApp: nil,
+            detail: "The app is not available in the current audio session."
+          ))
         continue
       }
 
       let app = snapshot.apps[appIndex]
-      let result = await applyAppIntent(AppRouteIntent(
-        appID: entry.appID,
-        desiredVolume: entry.desiredVolume ?? app.desiredVolume,
-        isMuted: entry.isMuted ?? app.isMuted,
-        volumeBoost: entry.volumeBoost ?? app.volumeBoost,
-        equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
-        targetDeviceUID: app.targetDeviceUID,
-        generation: generation,
-        reason: .profileApply
-      ))
-      rows.append(ProfileRowApplyResult(
-        entryIndex: entryIndex,
-        appID: entry.appID,
-        generation: generation,
-        outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
-        resultingApp: result.resultingApp,
-        detail: result.detail
-      ))
+      let result = await applyAppIntent(
+        AppRouteIntent(
+          appID: entry.appID,
+          desiredVolume: entry.desiredVolume ?? app.desiredVolume,
+          isMuted: entry.isMuted ?? app.isMuted,
+          volumeBoost: entry.volumeBoost ?? app.volumeBoost,
+          equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+          targetDeviceUID: app.targetDeviceUID,
+          generation: generation,
+          reason: .profileApply
+        ))
+      rows.append(
+        ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
+          resultingApp: result.resultingApp,
+          detail: result.detail
+        ))
     }
 
     return ProfileApplyResult(rows: rows, backendStatus: snapshot.backendStatus)
@@ -382,16 +392,17 @@ public actor PreviewAudioControlBackend: AudioControlBackend {
 
   public func setOutputDevice(uid: String?, forAppID appID: String) async throws {
     let app = try legacyApp(forAppID: appID)
-    let result = await applyAppIntent(AppRouteIntent(
-      appID: app.logicalID,
-      desiredVolume: app.desiredVolume,
-      isMuted: app.isMuted,
-      volumeBoost: app.volumeBoost,
-      equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
-      targetDeviceUID: uid,
-      generation: nextLegacyGeneration(),
-      reason: .userEdit
-    ))
+    let result = await applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: app.desiredVolume,
+        isMuted: app.isMuted,
+        volumeBoost: app.volumeBoost,
+        equalizerSettings: equalizerSettings[app.logicalID] ?? EqualizerSettings(),
+        targetDeviceUID: uid,
+        generation: nextLegacyGeneration(),
+        reason: .userEdit
+      ))
     try validateLegacyApplyResult(result)
   }
 

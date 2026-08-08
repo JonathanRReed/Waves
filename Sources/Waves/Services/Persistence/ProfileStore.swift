@@ -9,7 +9,7 @@ final class ProfileStore: @unchecked Sendable {
   private let legacyURL: URL
   private let decoder = JSONDecoder()
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
-  private let maxFileSize: Int64 = 10 * 1024 * 1024 // 10MB
+  private let maxFileSize: Int64 = 10 * 1024 * 1024  // 10MB
   private let queue: DispatchQueue
   private let writeData: PersistenceDataWrite
   private let writer: CoalescingPersistenceWriter<[Profile]>
@@ -78,7 +78,8 @@ final class ProfileStore: @unchecked Sendable {
       // First launch after the Presets→Profiles rename: adopt the old file if a
       // new one doesn't exist yet, so saved mixes survive the upgrade.
       if !fileManager.fileExists(atPath: url.path),
-         fileManager.fileExists(atPath: legacyURL.path) {
+        fileManager.fileExists(atPath: legacyURL.path)
+      {
         if let migrated = loadFile(at: legacyURL) {
           // Persist synchronously while this queue is serialized, and retire the
           // legacy file only after the new atomic write succeeds. A failed write

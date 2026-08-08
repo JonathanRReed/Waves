@@ -153,7 +153,8 @@ struct AppShutdownResult: Hashable, Sendable {
     self.persistenceDegradations = persistenceDegradations
     self.backendResult = backendResult
     let backendIsClean = backendResult.map { $0.completion == .clean } ?? true
-    self.completion = persistenceDegradations.isEmpty && backendIsClean
+    self.completion =
+      persistenceDegradations.isEmpty && backendIsClean
       ? .clean
       : .degraded
   }
@@ -478,7 +479,7 @@ final class AppStore {
     )
     confirmedEqualizerByLogicalID = preferences.appAudioIntents.mapValues(\.equalizerSettings)
     for (appID, equalizer) in preferences.appEqualizerSettings
-      where confirmedEqualizerByLogicalID[appID] == nil {
+    where confirmedEqualizerByLogicalID[appID] == nil {
       confirmedEqualizerByLogicalID[appID] = equalizer
     }
     loginItemStatus = loginItemService.status
@@ -583,7 +584,7 @@ final class AppStore {
     var energy = 0.0
     for app in visibleApps where !app.isMuted && isLive(app) {
       let measured = liveLevels[app.logicalID].map { Double(max($0.rms, $0.peak * 0.8)) } ?? 0
-      let contribution = measured > 0.001 ? measured : 0.12 // floor for unmetered live apps
+      let contribution = measured > 0.001 ? measured : 0.12  // floor for unmetered live apps
       energy += contribution * contribution
     }
     guard energy > 0 else { return 0 }
@@ -608,17 +609,20 @@ final class AppStore {
       // EQ shaping and adaptive gain only act on streams Waves actually
       // processes, so both indicators require a managed route.
       let isManaged = app.routingState == .managed
-      let isEqualized = isManaged
+      let isEqualized =
+        isManaged
         && (managedEQActive || equalizerSettings(for: app).isEnabled)
-      let adaptiveGainDB = isManaged
+      let adaptiveGainDB =
+        isManaged
         ? Double(adaptiveGainsDBByAppID[app.logicalID] ?? 0)
         : 0
-      components.append(WaveComponent(
-        id: app.logicalID,
-        level: min(1, pow(level, 0.5)),
-        isEqualized: isEqualized,
-        adaptiveGainDB: adaptiveGainDB
-      ))
+      components.append(
+        WaveComponent(
+          id: app.logicalID,
+          level: min(1, pow(level, 0.5)),
+          isEqualized: isEqualized,
+          adaptiveGainDB: adaptiveGainDB
+        ))
     }
     guard components.count > 6 else { return components }
     return Array(components.sorted { $0.level > $1.level }.prefix(6))
@@ -1254,7 +1258,8 @@ final class AppStore {
       cleanupStaleEntries()
       await reapplyRestoredAudioState()
       if preferences.adaptiveMixMode.usesSpeechFocus,
-         preferences.autoPauseMusicForConferencing {
+        preferences.autoPauseMusicForConferencing
+      {
         preferences.autoPauseMusicForConferencing = false
         persistPreferences()
       }
@@ -1416,11 +1421,12 @@ final class AppStore {
 
   private func performSilentSessionRefresh() async {
     guard startupState == .running,
-          !isRefreshing,
-          !isRecovering,
-          !isLoading,
-          !isRunningSessionMaintenance,
-          pendingVolumeTargets.isEmpty else {
+      !isRefreshing,
+      !isRecovering,
+      !isLoading,
+      !isRunningSessionMaintenance,
+      pendingVolumeTargets.isEmpty
+    else {
       return
     }
 
@@ -1458,8 +1464,9 @@ final class AppStore {
     }
 
     guard url.scheme == "waves",
-          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          let host = components.host, !host.isEmpty else {
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      let host = components.host, !host.isEmpty
+    else {
       return
     }
 
@@ -1505,12 +1512,13 @@ final class AppStore {
 
   private func handleURLSetVolume(_ components: URLComponents) {
     guard let appID = components.queryItems?.first(where: { $0.name == "app" })?.value,
-          let volumeValue = components.queryItems?.first(where: { $0.name == "volume" })?.value,
-          appID.count <= 256,
-          volumeValue.count <= 32,
-          let volume = Float(volumeValue),
-          volume >= 0,
-          volume <= 1 else {
+      let volumeValue = components.queryItems?.first(where: { $0.name == "volume" })?.value,
+      appID.count <= 256,
+      volumeValue.count <= 32,
+      let volume = Float(volumeValue),
+      volume >= 0,
+      volume <= 1
+    else {
       showToast(title: "URL command blocked", detail: "Set-volume command was invalid.", kind: .warning)
       return
     }
@@ -1531,10 +1539,11 @@ final class AppStore {
 
   private func handleURLMute(_ components: URLComponents) {
     guard let appID = components.queryItems?.first(where: { $0.name == "app" })?.value,
-          let muteValue = components.queryItems?.first(where: { $0.name == "muted" })?.value,
-          appID.count <= 256,
-          muteValue.count <= 16,
-          let shouldMute = Bool(muteValue) else {
+      let muteValue = components.queryItems?.first(where: { $0.name == "muted" })?.value,
+      appID.count <= 256,
+      muteValue.count <= 16,
+      let shouldMute = Bool(muteValue)
+    else {
       showToast(title: "URL command blocked", detail: "Mute command was invalid.", kind: .warning)
       return
     }
@@ -1554,7 +1563,8 @@ final class AppStore {
 
   private func handleURLApplyProfile(_ components: URLComponents) {
     guard let profileName = components.queryItems?.first(where: { $0.name == "name" })?.value,
-          profileName.count <= 256 else {
+      profileName.count <= 256
+    else {
       showToast(title: "URL command blocked", detail: "Profile command was invalid.", kind: .warning)
       return
     }
@@ -1644,7 +1654,8 @@ final class AppStore {
       generation: generation,
       reason: reason
     )
-    let projectedMuteSource = overrides.muteSource
+    let projectedMuteSource =
+      overrides.muteSource
       ?? (overrides.isMuted == nil
         ? session.apps.first(matchingAppKey: appID)?.muteSource
         : nil)
@@ -1687,12 +1698,14 @@ final class AppStore {
     generation: UInt64,
     reason: AppRouteIntentReason
   ) -> AppRouteIntent {
-    let confirmed = confirmedAppsByLogicalID[appID]
+    let confirmed =
+      confirmedAppsByLogicalID[appID]
       ?? session.apps.first(matchingAppKey: appID)
     var desiredVolume = confirmed?.desiredVolume ?? 1
     var isMuted = confirmed?.isMuted ?? false
     var volumeBoost = confirmed?.volumeBoost ?? 1
-    var equalizer = confirmedEqualizerByLogicalID[appID]
+    var equalizer =
+      confirmedEqualizerByLogicalID[appID]
       ?? preferences.appAudioIntents[appID]?.equalizerSettings
       ?? preferences.appEqualizerSettings[appID]
       ?? EqualizerSettings()
@@ -1702,8 +1715,9 @@ final class AppStore {
     // fields from the transaction it supersedes; a slider-only pending target is
     // intentionally excluded until commitDesiredVolume establishes a boundary.
     if let projection = optimisticAppIntentProjections[appID],
-       currentAppIntentGeneration[appID] == projection.generation,
-       !projection.intent.isExcluded {
+      currentAppIntentGeneration[appID] == projection.generation,
+      !projection.intent.isExcluded
+    {
       desiredVolume = projection.intent.desiredVolume
       isMuted = projection.intent.isMuted
       volumeBoost = projection.intent.volumeBoost
@@ -1820,14 +1834,16 @@ final class AppStore {
       resultingApp.isPinned = preferences.pinnedAppIDs.contains(resultingApp.logicalID)
       if resultingApp.isMuted {
         let accepted = result.outcome == .applied || result.outcome == .noChange
-        resultingApp.muteSource = intent.reason == .automation && !accepted
+        resultingApp.muteSource =
+          intent.reason == .automation && !accepted
           ? (cachedMuteSource ?? resultingApp.muteSource)
           : (projectedMuteSource ?? resultingApp.muteSource)
       } else {
         resultingApp.muteSource = .user
       }
       if preferences.excludedAppIDs.contains(resultingApp.logicalID)
-        || result.outcome == .excluded {
+        || result.outcome == .excluded
+      {
         makeExcludedPresentation(&resultingApp)
       }
       if let index = session.apps.firstIndex(matchingAppKey: intent.appID) {
@@ -1859,7 +1875,8 @@ final class AppStore {
       session.apps[index].targetDeviceUID = projection.intent.targetDeviceUID
       session.apps[index].muteSource = projection.muteSource ?? session.apps[index].muteSource
       if session.apps[index].routingState == .managed {
-        session.apps[index].appliedVolume = projection.intent.isMuted
+        session.apps[index].appliedVolume =
+          projection.intent.isMuted
           ? 0
           : projection.intent.desiredVolume
       }
@@ -1869,8 +1886,9 @@ final class AppStore {
 
   private func applyPendingVolumeProjection(forAppID appID: String) {
     guard let target = pendingVolumeTargets[appID],
-          let index = session.apps.firstIndex(matchingAppKey: appID),
-          !preferences.excludedAppIDs.contains(appID) else { return }
+      let index = session.apps.firstIndex(matchingAppKey: appID),
+      !preferences.excludedAppIDs.contains(appID)
+    else { return }
     session.apps[index].desiredVolume = target
     if session.apps[index].routingState == .managed {
       session.apps[index].appliedVolume = session.apps[index].isMuted ? 0 : target
@@ -1941,8 +1959,9 @@ final class AppStore {
     durableIntentMutationGeneration.removeValue(forKey: appID)
 
     guard updateDevicePreset,
-          preferences.enablePerDeviceVolumePresets,
-          let deviceID = deviceIDAtSubmission else {
+      preferences.enablePerDeviceVolumePresets,
+      let deviceID = deviceIDAtSubmission
+    else {
       return .saved
     }
 
@@ -1961,8 +1980,10 @@ final class AppStore {
       try await saveDeviceVolumePresetsDurably()
     } catch {
       if devicePresetMutationGeneration[mutationKey] == intent.generation {
-        if let savedPreset = durablySavedDeviceVolumePresets
-          .getVolumeSettings(for: appID, deviceID: deviceID) {
+        if let savedPreset =
+          durablySavedDeviceVolumePresets
+          .getVolumeSettings(for: appID, deviceID: deviceID)
+        {
           deviceVolumePresets.saveVolumeSettings(
             for: appID,
             deviceID: deviceID,
@@ -2050,7 +2071,8 @@ final class AppStore {
     case let .reinclusion(appName, announce):
       guard announce else { return }
       if (result.outcome == .applied || result.outcome == .noChange),
-         result.resultingApp?.routingState == .managed {
+        result.resultingApp?.routingState == .managed
+      {
         showToast(
           title: "Managed by Waves",
           detail: appName,
@@ -2133,10 +2155,12 @@ final class AppStore {
       }
       guard let self, !Task.isCancelled else { return }
       self.pendingVolumeDebounceTasks.removeValue(forKey: appID)
-      let routeIsManaged = self.session.apps
+      let routeIsManaged =
+        self.session.apps
         .first(matchingAppKey: appID)?.routingState == .managed
       guard self.pendingVolumeTargets[appID] == value,
-            routeIsManaged else {
+        routeIsManaged
+      else {
         return
       }
       self.startAppIntentTransaction(
@@ -2157,7 +2181,8 @@ final class AppStore {
     // The drag is over; no in-flight nudge should land after the commit and
     // reinstate an intermediate value.
     pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
-    let target = pendingVolumeTargets.removeValue(forKey: appID)
+    let target =
+      pendingVolumeTargets.removeValue(forKey: appID)
       ?? session.apps.first(matchingAppKey: appID)?.desiredVolume
       ?? app.desiredVolume
     startAppIntentTransaction(
@@ -2241,7 +2266,8 @@ final class AppStore {
       return pending
     }
     if let projection = optimisticAppIntentProjections[app.logicalID],
-       currentAppIntentGeneration[app.logicalID] == projection.generation {
+      currentAppIntentGeneration[app.logicalID] == projection.generation
+    {
       return projection.intent.equalizerSettings
     }
     return confirmedEqualizerByLogicalID[app.logicalID]
@@ -2456,7 +2482,8 @@ final class AppStore {
         return
       }
       guard let self, !Task.isCancelled,
-            self.pendingEqualizerSettings[appID] == settings else { return }
+        self.pendingEqualizerSettings[appID] == settings
+      else { return }
       self.pendingEqualizerSettings.removeValue(forKey: appID)
       self.pendingEqualizerDebounceTasks.removeValue(forKey: appID)
       self.startAppIntentTransaction(
@@ -2576,7 +2603,8 @@ final class AppStore {
     let gainsDB = adaptivePolicyEngine.update(inputs: inputs, elapsed: elapsed)
 
     guard !Task.isCancelled, startupState == .running,
-          preferences.adaptiveMixMode == mode else { return }
+      preferences.adaptiveMixMode == mode
+    else { return }
     // Publish only meaningful corrections (> ~0.05 dB) so the UI's "adaptive
     // is acting" indicators don't flicker on numerical dust.
     let significant = gainsDB.filter { abs($0.value) >= 0.05 }
@@ -2834,11 +2862,12 @@ final class AppStore {
         optimistic: true
       )
     } else {
-      let overrides = effectiveRestorationOverrides(
-        forAppID: appID,
-        deviceID: currentDeviceID,
-        includeDevicePreset: preferences.enablePerDeviceVolumePresets
-      ) ?? AppIntentOverrides(isExcluded: false, muteSource: .user)
+      let overrides =
+        effectiveRestorationOverrides(
+          forAppID: appID,
+          deviceID: currentDeviceID,
+          includeDevicePreset: preferences.enablePerDeviceVolumePresets
+        ) ?? AppIntentOverrides(isExcluded: false, muteSource: .user)
       startAppIntentTransaction(
         forAppID: appID,
         overrides: overrides,
@@ -2966,56 +2995,57 @@ final class AppStore {
   }
 
   private func performDeviceChangePass() async {
-      // The lightweight refresh below must run on EVERY device-change event:
-      // session.currentDevice, the device list, diagnostics, and onboarding would
-      // otherwise go stale (picker label / checkmark stuck on the old device)
-      // until some unrelated event refreshes them. This shared state sync is
-      // unconditional; only per-device preset restore is gated, on its own toggle.
-      //
-      // The backend has already re-established managed routes before emitting the
-      // event, so read the current snapshot rather than restoring again.
-      let previousDeviceID = currentDeviceID
-      // Merge cached-only fields (like the .autoConferencing muteSource tag,
-      // which the backend never knows about) instead of reassigning wholesale
-      // — a bare reassignment resets muteSource to .user, so auto-paused
-      // media could never auto-resume after a device change.
-      let backendSnapshot = await backend.currentSnapshot()
-      guard !Task.isCancelled, startupState == .running else { return }
-      session = mergedSession(with: backendSnapshot, cached: session)
-      invalidateVisibleAppsCache()
+    // The lightweight refresh below must run on EVERY device-change event:
+    // session.currentDevice, the device list, diagnostics, and onboarding would
+    // otherwise go stale (picker label / checkmark stuck on the old device)
+    // until some unrelated event refreshes them. This shared state sync is
+    // unconditional; only per-device preset restore is gated, on its own toggle.
+    //
+    // The backend has already re-established managed routes before emitting the
+    // event, so read the current snapshot rather than restoring again.
+    let previousDeviceID = currentDeviceID
+    // Merge cached-only fields (like the .autoConferencing muteSource tag,
+    // which the backend never knows about) instead of reassigning wholesale
+    // — a bare reassignment resets muteSource to .user, so auto-paused
+    // media could never auto-resume after a device change.
+    let backendSnapshot = await backend.currentSnapshot()
+    guard !Task.isCancelled, startupState == .running else { return }
+    session = mergedSession(with: backendSnapshot, cached: session)
+    invalidateVisibleAppsCache()
 
-      // Per-device preset restore additionally requires "Auto-restore device" —
-      // it IS the auto-restore behavior for saved per-app volumes, so honoring
-      // the per-device-presets toggle alone while ignoring the opt-out would
-      // restore levels the user explicitly asked Waves not to apply automatically.
-      if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice,
-         let newDeviceID = currentDeviceID, previousDeviceID != newDeviceID {
-        await restoreDeviceVolumePresets(for: newDeviceID)
-      }
+    // Per-device preset restore additionally requires "Auto-restore device" —
+    // it IS the auto-restore behavior for saved per-app volumes, so honoring
+    // the per-device-presets toggle alone while ignoring the opt-out would
+    // restore levels the user explicitly asked Waves not to apply automatically.
+    if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice,
+      let newDeviceID = currentDeviceID, previousDeviceID != newDeviceID
+    {
+      await restoreDeviceVolumePresets(for: newDeviceID)
+    }
 
-      persistSessionSnapshot()
-      diagnostics = await backend.diagnosticsReport()
-      onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-      availableDevices = await backend.availableOutputDevices()
-      syncOnboarding(using: session)
-      let didDefaultDeviceChange = previousDeviceID != currentDeviceID
+    persistSessionSnapshot()
+    diagnostics = await backend.diagnosticsReport()
+    onboarding.captureAuthorization = await backend.captureAuthorizationResult()
+    availableDevices = await backend.availableOutputDevices()
+    syncOnboarding(using: session)
+    let didDefaultDeviceChange = previousDeviceID != currentDeviceID
 
-      // Suppress the info toast when this change was triggered by our own
-      // selectOutputDevice (which already showed an "Output switched" success
-      // toast). Clearing the flag here makes it one-shot, so the next genuinely
-      // external device change still announces itself.
-      let wasSelfInitiated = didDefaultDeviceChange && pendingSelfInitiatedDeviceID == currentDeviceID
-      if didDefaultDeviceChange {
-        pendingSelfInitiatedDeviceID = nil
-      }
-      if didDefaultDeviceChange && !wasSelfInitiated {
-        showToast(
-          title: "Output device changed",
-          detail: currentDeviceName,
-          kind: .info,
-          duration: .seconds(1.5)
-        )
-      }
+    // Suppress the info toast when this change was triggered by our own
+    // selectOutputDevice (which already showed an "Output switched" success
+    // toast). Clearing the flag here makes it one-shot, so the next genuinely
+    // external device change still announces itself.
+    let wasSelfInitiated = didDefaultDeviceChange && pendingSelfInitiatedDeviceID == currentDeviceID
+    if didDefaultDeviceChange {
+      pendingSelfInitiatedDeviceID = nil
+    }
+    if didDefaultDeviceChange && !wasSelfInitiated {
+      showToast(
+        title: "Output device changed",
+        detail: currentDeviceName,
+        kind: .info,
+        duration: .seconds(1.5)
+      )
+    }
   }
 
   private func effectiveRestorationOverrides(
@@ -3028,8 +3058,9 @@ final class AppStore {
     var isMuted = durable.isMuted
     var volumeBoost = durable.volumeBoost
     if includeDevicePreset,
-       let deviceID,
-       let preset = deviceVolumePresets.getVolumeSettings(for: appID, deviceID: deviceID) {
+      let deviceID,
+      let preset = deviceVolumePresets.getVolumeSettings(for: appID, deviceID: deviceID)
+    {
       desiredVolume = preset.desiredVolume
       isMuted = preset.isMuted
       volumeBoost = preset.volumeBoost
@@ -3053,13 +3084,15 @@ final class AppStore {
     includeDevicePreset: Bool
   ) async -> AppIntentApplyResult? {
     guard !preferences.excludedAppIDs.contains(appID),
-          session.apps.contains(where: { $0.logicalID == appID }),
-          let overrides = effectiveRestorationOverrides(
-            forAppID: appID,
-            deviceID: deviceID,
-            includeDevicePreset: includeDevicePreset
-          ) else { return nil }
-    let hasPreset = includeDevicePreset
+      session.apps.contains(where: { $0.logicalID == appID }),
+      let overrides = effectiveRestorationOverrides(
+        forAppID: appID,
+        deviceID: deviceID,
+        includeDevicePreset: includeDevicePreset
+      )
+    else { return nil }
+    let hasPreset =
+      includeDevicePreset
       && deviceID.map {
         deviceVolumePresets.getVolumeSettings(for: appID, deviceID: $0) != nil
       } == true
@@ -3082,16 +3115,19 @@ final class AppStore {
     pausedMusicApps.removeAll()
 
     let deviceID = currentDeviceID
-    let includePreset = preferences.enablePerDeviceVolumePresets
+    let includePreset =
+      preferences.enablePerDeviceVolumePresets
       && preferences.autoRestoreDevice
     var failedPinnedAppIDs: [String] = []
     for appID in session.apps.map(\.logicalID) {
-      guard let result = await restoreConfiguredApp(
-        appID: appID,
-        defaultReason: .startupRestore,
-        deviceID: deviceID,
-        includeDevicePreset: includePreset
-      ) else { continue }
+      guard
+        let result = await restoreConfiguredApp(
+          appID: appID,
+          defaultReason: .startupRestore,
+          deviceID: deviceID,
+          includeDevicePreset: includePreset
+        )
+      else { continue }
       let accepted = result.outcome == .applied || result.outcome == .noChange
       if !accepted, preferences.appAudioIntents[appID]?.targetDeviceUID != nil {
         failedPinnedAppIDs.append(appID)
@@ -3113,7 +3149,8 @@ final class AppStore {
   private func restoreNewlyAppearedConfiguredApps(excluding knownAppIDs: Set<String>) async {
     let newAppIDs = session.apps.map(\.logicalID).filter { !knownAppIDs.contains($0) }
     guard !newAppIDs.isEmpty else { return }
-    let includePreset = preferences.enablePerDeviceVolumePresets
+    let includePreset =
+      preferences.enablePerDeviceVolumePresets
       && preferences.autoRestoreDevice
     for appID in newAppIDs {
       _ = await restoreConfiguredApp(
@@ -3544,9 +3581,10 @@ final class AppStore {
           optimistic: false
         )
         guard (result.outcome == .applied || result.outcome == .noChange),
-              result.resultingApp?.isMuted == true,
-              session.apps.first(matchingAppKey: app.logicalID)?.isMuted == true,
-              currentAppIntentGeneration[app.logicalID] == result.generation else {
+          result.resultingApp?.isMuted == true,
+          session.apps.first(matchingAppKey: app.logicalID)?.isMuted == true,
+          currentAppIntentGeneration[app.logicalID] == result.generation
+        else {
           logger.error(
             "Auto-pause did not commit for \(app.displayName, privacy: .public): \(String(describing: result.outcome), privacy: .public)"
           )
@@ -3576,9 +3614,10 @@ final class AppStore {
           optimistic: false
         )
         guard (result.outcome == .applied || result.outcome == .noChange),
-              result.resultingApp?.isMuted == false,
-              session.apps.first(matchingAppKey: app.logicalID)?.isMuted == false,
-              currentAppIntentGeneration[app.logicalID] == result.generation else {
+          result.resultingApp?.isMuted == false,
+          session.apps.first(matchingAppKey: app.logicalID)?.isMuted == false,
+          currentAppIntentGeneration[app.logicalID] == result.generation
+        else {
           logger.error(
             "Auto-resume did not commit for \(app.displayName, privacy: .public): \(String(describing: result.outcome), privacy: .public)"
           )
@@ -3599,7 +3638,8 @@ final class AppStore {
     syncOnboarding(using: session)
 
     if !pausedNames.isEmpty {
-      let detail = pausedNames.count == 1
+      let detail =
+        pausedNames.count == 1
         ? "\(pausedNames[0]) muted for your call."
         : "\(pausedNames.count) apps muted for your call."
       showToast(
@@ -3609,7 +3649,8 @@ final class AppStore {
         duration: .seconds(2.4)
       )
     } else {
-      let detail = resumedNames.count == 1
+      let detail =
+        resumedNames.count == 1
         ? "\(resumedNames[0]) resumed."
         : "\(resumedNames.count) apps resumed."
       showToast(
@@ -3658,9 +3699,10 @@ final class AppStore {
         : entry
     }
     let liveAppIDs = Set(session.apps.map(\.logicalID))
-    let affectedLiveAppIDs = Set(profile.entries.compactMap { entry in
-      entry.hasLevels && liveAppIDs.contains(entry.appID) ? entry.appID : nil
-    })
+    let affectedLiveAppIDs = Set(
+      profile.entries.compactMap { entry in
+        entry.hasLevels && liveAppIDs.contains(entry.appID) ? entry.appID : nil
+      })
 
     // A batch owns the same generation for every live actionable row. Cancel all
     // older store-side work before calling the backend so an old direct result or
@@ -3853,50 +3895,56 @@ final class AppStore {
 
     for (entryIndex, entry) in profile.entries.enumerated() {
       guard entry.hasLevels else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .membershipOnly,
-          resultingApp: nil
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .membershipOnly,
+            resultingApp: nil
+          ))
         continue
       }
 
       if currentProfileGeneration != generation
-        || currentAppIntentGeneration[entry.appID].map({ $0 != generation }) == true {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .superseded,
-          resultingApp: nil,
-          detail: "A newer AppStore transaction superseded this profile row."
-        ))
+        || currentAppIntentGeneration[entry.appID].map({ $0 != generation }) == true
+      {
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .superseded,
+            resultingApp: nil,
+            detail: "A newer AppStore transaction superseded this profile row."
+          ))
         continue
       }
 
       guard let backendRow = rowsByIndex[entryIndex]?.first,
-            backendRow.appID == entry.appID else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .failed,
-          resultingApp: nil,
-          detail: "The backend did not return the matching ordered profile row."
-        ))
+        backendRow.appID == entry.appID
+      else {
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .failed,
+            resultingApp: nil,
+            detail: "The backend did not return the matching ordered profile row."
+          ))
         continue
       }
       guard backendRow.generation == generation else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .superseded,
-          resultingApp: nil,
-          detail: "The backend returned this profile row for a different generation."
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .superseded,
+            resultingApp: nil,
+            detail: "The backend returned this profile row for a different generation."
+          ))
         continue
       }
 
@@ -3919,15 +3967,17 @@ final class AppStore {
         let repaired = await backend.applyAppIntent(exclusionIntent)
         backendStatus = repaired.backendStatus
         guard currentProfileGeneration == generation,
-              currentAppIntentGeneration[entry.appID] == generation else {
-          rows.append(ProfileRowApplyResult(
-            entryIndex: entryIndex,
-            appID: entry.appID,
-            generation: generation,
-            outcome: .superseded,
-            resultingApp: nil,
-            detail: "A newer transaction superseded exclusion restoration for this profile row."
-          ))
+          currentAppIntentGeneration[entry.appID] == generation
+        else {
+          rows.append(
+            ProfileRowApplyResult(
+              entryIndex: entryIndex,
+              appID: entry.appID,
+              generation: generation,
+              outcome: .superseded,
+              resultingApp: nil,
+              detail: "A newer transaction superseded exclusion restoration for this profile row."
+            ))
           continue
         }
         if repaired.generation == generation, repaired.outcome == .excluded {
@@ -3970,7 +4020,8 @@ final class AppStore {
         continue
       case .unavailable:
         if affectedLiveAppIDs.contains(entry.appID),
-           currentAppIntentGeneration[entry.appID] == generation {
+          currentAppIntentGeneration[entry.appID] == generation
+        {
           session.apps.removeAll { $0.logicalID == entry.appID || $0.id == entry.appID }
           confirmedAppsByLogicalID.removeValue(forKey: entry.appID)
         }
@@ -3983,7 +4034,8 @@ final class AppStore {
         if row.outcome == .excluded || preferences.excludedAppIDs.contains(resultingApp.logicalID) {
           makeExcludedPresentation(&resultingApp)
         } else if resultingApp.isMuted {
-          resultingApp.muteSource = entry.isMuted != nil
+          resultingApp.muteSource =
+            entry.isMuted != nil
             ? .user
             : (cachedMuteSource == .autoConferencing ? .autoConferencing : resultingApp.muteSource)
         } else {
@@ -4013,10 +4065,11 @@ final class AppStore {
 
     for (entry, row) in zip(profile.entries, result.rows) {
       guard entry.hasLevels,
-            row.outcome == .applied || row.outcome == .noChange || row.outcome == .unavailable,
-            currentProfileGeneration == generation,
-            currentAppIntentGeneration[entry.appID].map({ $0 == generation }) ?? true,
-            let durableIntent = durableIntent(for: entry, row: row) else { continue }
+        row.outcome == .applied || row.outcome == .noChange || row.outcome == .unavailable,
+        currentProfileGeneration == generation,
+        currentAppIntentGeneration[entry.appID].map({ $0 == generation }) ?? true,
+        let durableIntent = durableIntent(for: entry, row: row)
+      else { continue }
 
       durableIntentMutationGeneration[entry.appID] = generation
       preferences.appAudioIntents[entry.appID] = durableIntent
@@ -4024,14 +4077,16 @@ final class AppStore {
       preferenceAppIDs.insert(entry.appID)
 
       if let deviceID {
-        var preset = deviceVolumePresets.getVolumeSettings(
-          for: entry.appID,
-          deviceID: deviceID
-        ) ?? AppVolumeSettings(
-          desiredVolume: durableIntent.desiredVolume,
-          isMuted: durableIntent.isMuted,
-          volumeBoost: durableIntent.volumeBoost
-        )
+        var preset =
+          deviceVolumePresets.getVolumeSettings(
+            for: entry.appID,
+            deviceID: deviceID
+          )
+          ?? AppVolumeSettings(
+            desiredVolume: durableIntent.desiredVolume,
+            isMuted: durableIntent.isMuted,
+            volumeBoost: durableIntent.volumeBoost
+          )
         if entry.desiredVolume != nil { preset.desiredVolume = durableIntent.desiredVolume }
         if entry.isMuted != nil { preset.isMuted = durableIntent.isMuted }
         if entry.volumeBoost != nil { preset.volumeBoost = durableIntent.volumeBoost }
@@ -4118,7 +4173,8 @@ final class AppStore {
     row: ProfileRowApplyResult
   ) -> PersistedAppAudioIntent? {
     let existing = preferences.appAudioIntents[entry.appID]
-    let equalizer = existing?.equalizerSettings
+    let equalizer =
+      existing?.equalizerSettings
       ?? confirmedEqualizerByLogicalID[entry.appID]
       ?? preferences.appEqualizerSettings[entry.appID]
       ?? EqualizerSettings()
@@ -4130,7 +4186,8 @@ final class AppStore {
       // fields the source row omitted. The sole exception is an automatic
       // conferencing mute: a volume/boost-only profile must never make that
       // transient mute durable.
-      let isAutomaticMute = entry.isMuted == nil
+      let isAutomaticMute =
+        entry.isMuted == nil
         && session.apps.first(matchingAppKey: entry.appID)?.muteSource == .autoConferencing
       return PersistedAppAudioIntent(
         appID: entry.appID,
@@ -4161,7 +4218,8 @@ final class AppStore {
   ) -> ProfileApplyResult {
     let rows = zip(profile.entries, result.rows).map { entry, row in
       guard entry.hasLevels,
-            currentAppIntentGeneration[entry.appID].map({ $0 != generation }) == true else {
+        currentAppIntentGeneration[entry.appID].map({ $0 != generation }) == true
+      else {
         return row
       }
       return ProfileRowApplyResult(
@@ -4202,7 +4260,8 @@ final class AppStore {
     let unsupportedCount = count(.unsupported)
     let supersededCount = count(.superseded)
     let hasOutcomeWarning = excludedCount + failedCount + unsupportedCount + supersededCount > 0
-    let isFullSuccess = appliedCount == actionableRows.count
+    let isFullSuccess =
+      appliedCount == actionableRows.count
       && unavailableCount == 0
       && !hasOutcomeWarning
       && persistenceResult.isFullySaved
@@ -4238,7 +4297,8 @@ final class AppStore {
     let title: String
     let kind: AppToast.Kind
     if failedCount > 0 || persistenceResult.settingsError != nil {
-      title = appliedCount == 0 && unavailableCount == 0
+      title =
+        appliedCount == 0 && unavailableCount == 0
         ? "Profile apply failed"
         : "Profile applied with errors"
       kind = .error
@@ -4300,7 +4360,8 @@ final class AppStore {
       // whole set. Untouched apps still need a membership-only entry so the
       // restore point remembers they were present, but nothing about their
       // levels needs restoring — they were never changed.
-      let isOwned = app.routingState == .managed
+      let isOwned =
+        app.routingState == .managed
         || preferences.appAudioIntents[app.logicalID] != nil
       guard isOwned else { return ProfileEntry(appID: app.logicalID) }
       return ProfileEntry(
@@ -4454,13 +4515,15 @@ final class AppStore {
 
     // Resolve which existing profile (if any) this save targets: an explicit id
     // wins (an edit, even across a rename), otherwise fall back to a name match.
-    let targetIndex = id.flatMap { id in profiles.firstIndex(where: { $0.id == id }) }
+    let targetIndex =
+      id.flatMap { id in profiles.firstIndex(where: { $0.id == id }) }
       ?? profiles.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame })
 
     // Reject a rename that would collide with a *different* existing profile, so
     // an edit can't silently produce two profiles with the same name.
     if let collision = profiles.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame }),
-       collision != targetIndex {
+      collision != targetIndex
+    {
       showToast(title: "Name already used", detail: "A profile named “\(trimmedName)” already exists.", kind: .warning)
       return
     }
@@ -4473,11 +4536,13 @@ final class AppStore {
     // When editing without re-capturing, keep each existing member's stored
     // levels rather than discarding them — so adding one app to "Focus" doesn't
     // wipe the saved mix. Only an explicit "Capture current levels" re-snapshots.
-    let existingEntries: [String: ProfileEntry] = targetIndex.map {
-      Dictionary(profiles[$0].entries.map { ($0.appID, $0) }, uniquingKeysWith: { first, _ in first })
-    } ?? [:]
+    let existingEntries: [String: ProfileEntry] =
+      targetIndex.map {
+        Dictionary(profiles[$0].entries.map { ($0.appID, $0) }, uniquingKeysWith: { first, _ in first })
+      } ?? [:]
     var seen = Set<String>()
-    let entries: [ProfileEntry] = appIDs
+    let entries: [ProfileEntry] =
+      appIDs
       .filter { !excluded.contains($0) && seen.insert($0).inserted }
       .map { appID in
         if captureLevels, let app = appByID[appID] {
@@ -4605,7 +4670,8 @@ final class AppStore {
           // memory in the Data(contentsOf:) allocation. resourceValues is a cheap
           // stat that doesn't load the file.
           if let reportedSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-             reportedSize > sizeCap {
+            reportedSize > sizeCap
+          {
             showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
             return
           }
@@ -4842,7 +4908,7 @@ final class AppStore {
   /// the foreground process is unmanaged or Waves itself.
   private func frontmostManagedAppIDForAdaptiveMix(in apps: [AudioApp]) -> String? {
     guard let frontmost = NSWorkspace.shared.frontmostApplication,
-          frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier
+      frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier
     else {
       return nil
     }
@@ -5031,7 +5097,8 @@ final class AppStore {
 
   func drainAppIntentTransactions() async {
     while true {
-      let debounceTasks = Array(pendingEqualizerDebounceTasks.values)
+      let debounceTasks =
+        Array(pendingEqualizerDebounceTasks.values)
         + Array(pendingVolumeDebounceTasks.values)
       for task in debounceTasks { await task.value }
       let transactionTasks = Array(appIntentTasks.values)
@@ -5120,7 +5187,8 @@ final class AppStore {
 
     let now = Date()
     if let lastPersistenceWarningDate,
-       now.timeIntervalSince(lastPersistenceWarningDate) < persistenceWarningDebounceInterval {
+      now.timeIntervalSince(lastPersistenceWarningDate) < persistenceWarningDebounceInterval
+    {
       return
     }
     lastPersistenceWarningDate = now
@@ -5286,7 +5354,8 @@ final class AppStore {
     // session mutation has shrunk the list since SwiftUI computed the drop,
     // bail safely instead of trapping in Array.move.
     guard destination >= 0, destination <= displayedIDs.count,
-          source.allSatisfy({ $0 >= 0 && $0 < displayedIDs.count }) else {
+      source.allSatisfy({ $0 >= 0 && $0 < displayedIDs.count })
+    else {
       return
     }
 
@@ -5336,11 +5405,13 @@ final class AppStore {
     case .some(.notGranted), .some(.undetermined), .some(.unsupported), .some(.probeFailed):
       onboarding.permissionsGranted = false
     case .none:
-      onboarding.permissionsGranted = preferences.hasCompletedPrivacySetup
+      onboarding.permissionsGranted =
+        preferences.hasCompletedPrivacySetup
         && snapshot.backendStatus.hasRequiredPermissions
     }
     onboarding.outputDeviceVisible = snapshot.currentDevice != nil
-    onboarding.routeHealthReady = preferences.hasCompletedPrivacySetup
+    onboarding.routeHealthReady =
+      preferences.hasCompletedPrivacySetup
       && onboarding.permissionsGranted
       && snapshot.backendStatus.isRouteRecoveryHealthy
     reconcileLoginItemStatus()
@@ -5385,7 +5456,8 @@ final class AppStore {
     for app in session.apps where preferences.appAudioIntents[app.logicalID] == nil {
       let equalizer = preferences.appEqualizerSettings[app.logicalID] ?? defaultEqualizer
       let userMuted = app.muteSource == .user && app.isMuted
-      let isCustomized = abs(app.desiredVolume - 1) > 0.001
+      let isCustomized =
+        abs(app.desiredVolume - 1) > 0.001
         || userMuted
         || abs(app.volumeBoost - 1) > 0.001
         || app.targetDeviceUID != nil
@@ -5405,7 +5477,7 @@ final class AppStore {
     // EQ was durable before the unified intent model and may belong to an app
     // that is not present in the cached live session.
     for (appID, equalizer) in preferences.appEqualizerSettings
-      where preferences.appAudioIntents[appID] == nil && equalizer != defaultEqualizer {
+    where preferences.appAudioIntents[appID] == nil && equalizer != defaultEqualizer {
       preferences.appAudioIntents[appID] = PersistedAppAudioIntent(
         appID: appID,
         equalizerSettings: equalizer
@@ -5415,7 +5487,7 @@ final class AppStore {
     // Keep the legacy map synchronized for one compatibility release so existing
     // EQ call sites and downgrades preserve values during the additive schema-1 rollout.
     for (appID, intent) in preferences.appAudioIntents
-      where preferences.appEqualizerSettings[appID] != intent.equalizerSettings {
+    where preferences.appEqualizerSettings[appID] != intent.equalizerSettings {
       preferences.appEqualizerSettings[appID] = intent.equalizerSettings
     }
 
@@ -5457,7 +5529,8 @@ final class AppStore {
       // The backend owns whether the app is muted. The store owns only the
       // transient explanation for an already-confirmed mute.
       if mergedApps[index].isMuted,
-         cachedByLogicalID[appID]?.muteSource == .autoConferencing {
+        cachedByLogicalID[appID]?.muteSource == .autoConferencing
+      {
         mergedApps[index].muteSource = .autoConferencing
       }
 
@@ -5467,14 +5540,16 @@ final class AppStore {
       }
 
       if let projection = optimisticAppIntentProjections[appID],
-         currentAppIntentGeneration[appID] == projection.generation {
+        currentAppIntentGeneration[appID] == projection.generation
+      {
         mergedApps[index].desiredVolume = projection.intent.desiredVolume
         mergedApps[index].isMuted = projection.intent.isMuted
         mergedApps[index].volumeBoost = projection.intent.volumeBoost
         mergedApps[index].targetDeviceUID = projection.intent.targetDeviceUID
         mergedApps[index].muteSource = projection.muteSource ?? mergedApps[index].muteSource
         if mergedApps[index].routingState == .managed {
-          mergedApps[index].appliedVolume = projection.intent.isMuted
+          mergedApps[index].appliedVolume =
+            projection.intent.isMuted
             ? 0
             : projection.intent.desiredVolume
         }

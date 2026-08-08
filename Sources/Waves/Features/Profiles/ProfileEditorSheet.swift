@@ -311,7 +311,8 @@ struct ProfileEditorSheet: View {
     // Keep the editor's display order: running (selected-first) then offline.
     // Offline members are filtered by the selection the same way running ones
     // are, so unticking one actually removes it — and leaving it ticked keeps it.
-    let orderedIDs = runningApps.map(\.logicalID).filter { selectedIDs.contains($0) }
+    let orderedIDs =
+      runningApps.map(\.logicalID).filter { selectedIDs.contains($0) }
       + offlineMemberIDs.filter { selectedIDs.contains($0) }
     store.saveProfile(
       id: context.profile?.id,

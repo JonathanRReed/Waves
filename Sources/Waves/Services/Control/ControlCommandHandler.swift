@@ -146,18 +146,20 @@ struct ControlCommandHandler {
   static func base64PNG(_ tiffData: Data, side: CGFloat = 144) -> String? {
     guard let image = NSImage(data: tiffData) else { return nil }
     let target = NSSize(width: side, height: side)
-    guard let rep = NSBitmapImageRep(
-      bitmapDataPlanes: nil,
-      pixelsWide: Int(side),
-      pixelsHigh: Int(side),
-      bitsPerSample: 8,
-      samplesPerPixel: 4,
-      hasAlpha: true,
-      isPlanar: false,
-      colorSpaceName: .deviceRGB,
-      bytesPerRow: 0,
-      bitsPerPixel: 0
-    ) else { return nil }
+    guard
+      let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: Int(side),
+        pixelsHigh: Int(side),
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+      )
+    else { return nil }
 
     NSGraphicsContext.saveGraphicsState()
     defer { NSGraphicsContext.restoreGraphicsState() }

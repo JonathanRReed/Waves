@@ -305,8 +305,7 @@ public struct EqualizerSettings: Codable, Hashable, Sendable {
     }
   }
 
-  public mutating func applyPreset(_ preset: EqualizerPreset, mode targetMode: EqualizerMode? = nil)
-  {
+  public mutating func applyPreset(_ preset: EqualizerPreset, mode targetMode: EqualizerMode? = nil) {
     guard preset != .custom else { return }
     let targetMode = targetMode ?? mode
     let curve = Self.curve(for: preset, mode: targetMode)

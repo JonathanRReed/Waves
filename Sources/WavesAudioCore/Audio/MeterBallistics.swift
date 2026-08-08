@@ -31,7 +31,7 @@ public enum MeterBallistics {
   /// 0 and negative amplitudes map to 0 and ≥1.0 maps to 1.
   public static func normalize(_ amplitude: Double, floorDB dbFloor: Double = floorDB) -> Double {
     let db = 20 * log10(max(amplitude, 1e-5))
-    let span = max(1e-6, -dbFloor) // floor is negative; span = 0 dBFS − floor
+    let span = max(1e-6, -dbFloor)  // floor is negative; span = 0 dBFS − floor
     let position = (db - dbFloor) / span
     return pow(min(1, max(0, position)), topGamma)
   }

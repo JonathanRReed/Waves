@@ -319,8 +319,7 @@ private struct MixerRowContextMenuItems: View {
         Button {
           store.setOutputDevice(nil, for: app)
         } label: {
-          if app.targetDeviceUID == nil { Label("System Default", systemImage: "checkmark") }
-          else { Text("System Default") }
+          if app.targetDeviceUID == nil { Label("System Default", systemImage: "checkmark") } else { Text("System Default") }
         }
         if store.availableDevices.isEmpty {
           Divider()
@@ -335,8 +334,7 @@ private struct MixerRowContextMenuItems: View {
             Button {
               store.setOutputDevice(device, for: app)
             } label: {
-              if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") }
-              else { Text(device.name) }
+              if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") } else { Text(device.name) }
             }
           }
         }

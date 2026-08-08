@@ -14,7 +14,8 @@ final class UpdaterService {
   var automaticallyChecksForUpdates: Bool {
     didSet {
       guard !isSynchronizingAutomaticChecks,
-            automaticallyChecksForUpdates != controller.updater.automaticallyChecksForUpdates else { return }
+        automaticallyChecksForUpdates != controller.updater.automaticallyChecksForUpdates
+      else { return }
       controller.updater.automaticallyChecksForUpdates = automaticallyChecksForUpdates
     }
   }

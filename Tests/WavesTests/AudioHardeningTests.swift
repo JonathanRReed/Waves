@@ -85,14 +85,16 @@ import WavesAudioCore
       == "undetermined (no live authorization probe result retained in this process)"
   )
 
-  #expect(CaptureAuthorizationResult.fromProbe(
-    isPlatformSupported: false,
-    nativeStatus: noErr
-  ) == .unsupported)
-  #expect(CaptureAuthorizationResult.fromProbe(
-    isPlatformSupported: true,
-    nativeStatus: noErr
-  ) == .authorized)
+  #expect(
+    CaptureAuthorizationResult.fromProbe(
+      isPlatformSupported: false,
+      nativeStatus: noErr
+    ) == .unsupported)
+  #expect(
+    CaptureAuthorizationResult.fromProbe(
+      isPlatformSupported: true,
+      nativeStatus: noErr
+    ) == .authorized)
 
   for nativeStatus: Int32 in [-50, -108, Int32.min] {
     let result = CaptureAuthorizationResult.fromProbe(
@@ -131,16 +133,17 @@ import WavesAudioCore
     captureAuthorization: .probeFailed(nativeStatus: -50),
     intentRouteApplyOverride: { _, _ in }
   )
-  let applyResult = await routeBackend.applyAppIntent(AppRouteIntent(
-    appID: app.logicalID,
-    desiredVolume: 0.8,
-    isMuted: false,
-    volumeBoost: 1,
-    equalizerSettings: EqualizerSettings(),
-    targetDeviceUID: nil,
-    generation: 1,
-    reason: .automation
-  ))
+  let applyResult = await routeBackend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .automation
+    ))
   #expect(applyResult.outcome == .applied)
   #expect(!applyResult.backendStatus.hasRequiredPermissions)
   #expect(!applyResult.backendStatus.isRouteRecoveryHealthy)
@@ -223,25 +226,29 @@ import WavesAudioCore
   #expect(interleavedFloat.sampleFormat == .float32)
   #expect(interleavedFloat.isInterleaved)
 
-  let noninterleavedInt16 = try #require(AudioFormatPlan(validating: linearPCMDescription(
-    isFloat: false,
-    isSignedInteger: true,
-    isNonInterleaved: true,
-    bitsPerChannel: 16,
-    bytesPerFrame: 2,
-    bytesPerPacket: 2
-  )))
+  let noninterleavedInt16 = try #require(
+    AudioFormatPlan(
+      validating: linearPCMDescription(
+        isFloat: false,
+        isSignedInteger: true,
+        isNonInterleaved: true,
+        bitsPerChannel: 16,
+        bytesPerFrame: 2,
+        bytesPerPacket: 2
+      )))
   #expect(noninterleavedInt16.sampleFormat == .int16)
   #expect(!noninterleavedInt16.isInterleaved)
 
-  let noninterleavedInt32 = try #require(AudioFormatPlan(validating: linearPCMDescription(
-    isFloat: false,
-    isSignedInteger: true,
-    isNonInterleaved: true,
-    bitsPerChannel: 32,
-    bytesPerFrame: 4,
-    bytesPerPacket: 4
-  )))
+  let noninterleavedInt32 = try #require(
+    AudioFormatPlan(
+      validating: linearPCMDescription(
+        isFloat: false,
+        isSignedInteger: true,
+        isNonInterleaved: true,
+        bitsPerChannel: 32,
+        bytesPerFrame: 4,
+        bytesPerPacket: 4
+      )))
   #expect(noninterleavedInt32.sampleFormat == .int32)
 
   #expect(AudioFormatPlan(validating: linearPCMDescription(sampleRate: .nan)) == nil)
@@ -257,82 +264,96 @@ import WavesAudioCore
   #expect(AudioFormatPlan(validating: linearPCMDescription(bitsPerChannel: 24)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(bytesPerFrame: 4, bytesPerPacket: 4)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(channelsPerFrame: 0)) == nil)
-  #expect(AudioFormatPlan(validating: linearPCMDescription(
-    bytesPerFrame: 4 * (AudioFormatPlan.maximumChannelCount + 1),
-    channelsPerFrame: AudioFormatPlan.maximumChannelCount + 1,
-    bytesPerPacket: 4 * (AudioFormatPlan.maximumChannelCount + 1)
-  )) == nil)
+  #expect(
+    AudioFormatPlan(
+      validating: linearPCMDescription(
+        bytesPerFrame: 4 * (AudioFormatPlan.maximumChannelCount + 1),
+        channelsPerFrame: AudioFormatPlan.maximumChannelCount + 1,
+        bytesPerPacket: 4 * (AudioFormatPlan.maximumChannelCount + 1)
+      )) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(framesPerPacket: 0, bytesPerPacket: 0)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(bytesPerPacket: 16)) == nil)
 }
 
 @Test func audioFormatPlanRejectsExcessiveDirectChannelCounts() {
-  #expect(AudioFormatPlan(
-    sampleFormat: .float32,
-    sampleRate: 48_000,
-    channelCount: AudioFormatPlan.maximumChannelCount + 1,
-    isInterleaved: false,
-    bytesPerSample: 4,
-    bytesPerFrame: 4
-  ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .float32,
+      sampleRate: 48_000,
+      channelCount: AudioFormatPlan.maximumChannelCount + 1,
+      isInterleaved: false,
+      bytesPerSample: 4,
+      bytesPerFrame: 4
+    ) == nil)
 }
 
 @Test func audioFormatPlanValidatesInterleavedAndNoninterleavedCallbackGeometry() throws {
-  let interleaved = try #require(AudioFormatPlan(
-    sampleFormat: .float32,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 4,
-    bytesPerFrame: 8
-  ))
+  let interleaved = try #require(
+    AudioFormatPlan(
+      sampleFormat: .float32,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 4,
+      bytesPerFrame: 8
+    ))
   let interleavedGeometry = [AudioBufferGeometry(channelCount: 2, byteCount: 1_024)]
-  #expect(interleaved.validatesCallbackGeometry(
-    input: interleavedGeometry,
-    output: interleavedGeometry
-  ))
-  #expect(!interleaved.validatesBufferGeometry([
-    AudioBufferGeometry(channelCount: 1, byteCount: 512),
-    AudioBufferGeometry(channelCount: 1, byteCount: 512),
-  ]))
-  #expect(!interleaved.validatesBufferGeometry([
-    AudioBufferGeometry(channelCount: 1, byteCount: 1_024),
-  ]))
-  #expect(!interleaved.validatesBufferGeometry([
-    AudioBufferGeometry(channelCount: 2, byteCount: 1_026),
-  ]))
-  #expect(!interleaved.validatesCallbackGeometry(
-    input: interleavedGeometry,
-    output: [AudioBufferGeometry(channelCount: 2, byteCount: 2_048)]
-  ))
+  #expect(
+    interleaved.validatesCallbackGeometry(
+      input: interleavedGeometry,
+      output: interleavedGeometry
+    ))
+  #expect(
+    !interleaved.validatesBufferGeometry([
+      AudioBufferGeometry(channelCount: 1, byteCount: 512),
+      AudioBufferGeometry(channelCount: 1, byteCount: 512),
+    ]))
+  #expect(
+    !interleaved.validatesBufferGeometry([
+      AudioBufferGeometry(channelCount: 1, byteCount: 1_024)
+    ]))
+  #expect(
+    !interleaved.validatesBufferGeometry([
+      AudioBufferGeometry(channelCount: 2, byteCount: 1_026)
+    ]))
+  #expect(
+    !interleaved.validatesCallbackGeometry(
+      input: interleavedGeometry,
+      output: [AudioBufferGeometry(channelCount: 2, byteCount: 2_048)]
+    ))
 
-  let noninterleaved = try #require(AudioFormatPlan(
-    sampleFormat: .int16,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: false,
-    bytesPerSample: 2,
-    bytesPerFrame: 2
-  ))
+  let noninterleaved = try #require(
+    AudioFormatPlan(
+      sampleFormat: .int16,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: false,
+      bytesPerSample: 2,
+      bytesPerFrame: 2
+    ))
   let noninterleavedGeometry = [
     AudioBufferGeometry(channelCount: 1, byteCount: 512),
     AudioBufferGeometry(channelCount: 1, byteCount: 512),
   ]
-  #expect(noninterleaved.validatesCallbackGeometry(
-    input: noninterleavedGeometry,
-    output: noninterleavedGeometry
-  ))
-  #expect(!noninterleaved.validatesBufferGeometry([
-    AudioBufferGeometry(channelCount: 2, byteCount: 1_024),
-  ]))
-  #expect(!noninterleaved.validatesBufferGeometry([
-    AudioBufferGeometry(channelCount: 1, byteCount: 512),
-    AudioBufferGeometry(channelCount: 1, byteCount: 510),
-  ]))
-  #expect(!noninterleaved.validatesBufferGeometry([
-    AudioBufferGeometry(channelCount: 1, byteCount: 511),
-    AudioBufferGeometry(channelCount: 1, byteCount: 511),
-  ]))
+  #expect(
+    noninterleaved.validatesCallbackGeometry(
+      input: noninterleavedGeometry,
+      output: noninterleavedGeometry
+    ))
+  #expect(
+    !noninterleaved.validatesBufferGeometry([
+      AudioBufferGeometry(channelCount: 2, byteCount: 1_024)
+    ]))
+  #expect(
+    !noninterleaved.validatesBufferGeometry([
+      AudioBufferGeometry(channelCount: 1, byteCount: 512),
+      AudioBufferGeometry(channelCount: 1, byteCount: 510),
+    ]))
+  #expect(
+    !noninterleaved.validatesBufferGeometry([
+      AudioBufferGeometry(channelCount: 1, byteCount: 511),
+      AudioBufferGeometry(channelCount: 1, byteCount: 511),
+    ]))
 }
 
 @Test func outputDeviceReadinessNeverInventsOrCarriesForwardCurrentDevice() throws {
@@ -380,16 +401,17 @@ import WavesAudioCore
     intentRouteApplyOverride: { _, _ in }
   )
 
-  let result = await backend.applyAppIntent(AppRouteIntent(
-    appID: app.logicalID,
-    desiredVolume: 0.75,
-    isMuted: false,
-    volumeBoost: 1,
-    equalizerSettings: EqualizerSettings(),
-    targetDeviceUID: nil,
-    generation: 1,
-    reason: .automation
-  ))
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.75,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .automation
+    ))
 
   #expect(result.outcome == .applied)
   #expect(result.backendStatus.hasRequiredPermissions)

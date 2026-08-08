@@ -23,7 +23,7 @@ enum RenderCadence: Comparable, Sendable {
   /// interval — the right answer when the user is actually looking at it.
   var minimumInterval: Double? {
     switch self {
-    case .paused: nil // never mounted; see `isAnimating`
+    case .paused: nil  // never mounted; see `isAnimating`
     case .background: 1.0 / 30.0
     case .foreground: nil
     }

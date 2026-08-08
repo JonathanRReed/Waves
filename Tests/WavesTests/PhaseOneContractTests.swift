@@ -32,46 +32,51 @@ import WavesAudioCore
 }
 
 @Test func audioFormatPlanRejectsUnknownAndInvalidGeometry() {
-  #expect(AudioFormatPlan(
-    sampleFormat: .float32,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 4,
-    bytesPerFrame: 8
-  ) != nil)
-  #expect(AudioFormatPlan(
-    sampleFormat: .unknown,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 4,
-    bytesPerFrame: 8
-  ) == nil)
-  #expect(AudioFormatPlan(
-    sampleFormat: .int16,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 2,
-    bytesPerFrame: 2
-  ) == nil)
-  #expect(AudioFormatPlan(
-    sampleFormat: .float32,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 2,
-    bytesPerFrame: 4
-  ) == nil)
-  #expect(AudioFormatPlan(
-    sampleFormat: .float32,
-    sampleRate: 48_000,
-    channelCount: .max,
-    isInterleaved: true,
-    bytesPerSample: 4,
-    bytesPerFrame: .max
-  ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .float32,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 4,
+      bytesPerFrame: 8
+    ) != nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .unknown,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 4,
+      bytesPerFrame: 8
+    ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .int16,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 2,
+      bytesPerFrame: 2
+    ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .float32,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 2,
+      bytesPerFrame: 4
+    ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .float32,
+      sampleRate: 48_000,
+      channelCount: .max,
+      isInterleaved: true,
+      bytesPerSample: 4,
+      bytesPerFrame: .max
+    ) == nil)
 }
 
 @Test func legacyIntentAdapterFailsSafeWithoutMutating() async {

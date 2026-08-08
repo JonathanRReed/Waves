@@ -396,10 +396,10 @@ struct MixedWaveformView: View {
       sumPoints.append(CGPoint(x: x, y: midY - limited))
 
       if restMix > 0.01 {
-        let rest = restAmp * envelope(u) * (
-          0.70 * sin(2 * .pi * 1.4 * u + engine.restPhases[0])
-            + 0.30 * sin(2 * .pi * 2.9 * u + engine.restPhases[1])
-        )
+        let rest =
+          restAmp * envelope(u)
+          * (0.70 * sin(2 * .pi * 1.4 * u + engine.restPhases[0])
+            + 0.30 * sin(2 * .pi * 2.9 * u + engine.restPhases[1]))
         restPoints.append(CGPoint(x: x, y: midY - rest))
       }
     }
