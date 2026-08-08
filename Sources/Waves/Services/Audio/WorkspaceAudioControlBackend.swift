@@ -41,16 +41,41 @@ func checkedCleanupDegradations(
 struct MutingTapTeardownPreparationResult: Equatable, Sendable {
   let tapMuteReleaseStatus: OSStatus
   let ioProcStopStatus: OSStatus
+  let tapMuteRestoreStatus: OSStatus?
+  let didAttemptIOProcStop: Bool
+
+  enum AudiblePath: Equatable, Sendable {
+    case originalHardware
+    case wavesRenderer
+    case uncertain
+  }
 
   /// Native resources are safe to destroy only after Core Audio confirms that
   /// the IO proc stopped. An unmuted tap is fail-open for sound, but a failed
   /// stop can still deliver a late callback and therefore cannot be destroyed.
-  var canDestroyNativeResources: Bool { ioProcStopStatus == noErr }
+  var canDestroyNativeResources: Bool {
+    tapMuteReleaseStatus == noErr && didAttemptIOProcStop && ioProcStopStatus == noErr
+  }
+
+  var keepsRendererAndCallbackResourcesAlive: Bool { !canDestroyNativeResources }
+
+  var audiblePath: AudiblePath {
+    if canDestroyNativeResources { return .originalHardware }
+    if ioProcStopStatus != noErr, tapMuteRestoreStatus == noErr { return .wavesRenderer }
+    return .uncertain
+  }
+
+  var criticalDiagnostic: String? {
+    guard ioProcStopStatus != noErr, let tapMuteRestoreStatus, tapMuteRestoreStatus != noErr else {
+      return nil
+    }
+    return "Renderer stop failed and tap mute rollback failed. Waves retained callback resources because the audible path is uncertain."
+  }
 
   /// Either an unmuted tap or a stopped reader restores the process's original
   /// hardware playback path.
   var originalAudioIsFailOpen: Bool {
-    tapMuteReleaseStatus == noErr || ioProcStopStatus == noErr
+    audiblePath == .originalHardware
   }
 }
 
@@ -64,18 +89,164 @@ enum MutingTapTeardownPreparation {
   static func perform(
     makeOriginalAudioAudible: () -> OSStatus,
     stopIOProc: () -> OSStatus,
+    restoreTapMuting: () -> OSStatus,
     deactivateRenderer: () -> Void
   ) -> MutingTapTeardownPreparationResult {
     let muteReleaseStatus = makeOriginalAudioAudible()
-    let stopStatus = stopIOProc()
-    let result = MutingTapTeardownPreparationResult(
-      tapMuteReleaseStatus: muteReleaseStatus,
-      ioProcStopStatus: stopStatus
-    )
-    if result.canDestroyNativeResources {
-      deactivateRenderer()
+    guard muteReleaseStatus == noErr else {
+      return MutingTapTeardownPreparationResult(
+        tapMuteReleaseStatus: muteReleaseStatus,
+        ioProcStopStatus: noErr,
+        tapMuteRestoreStatus: nil,
+        didAttemptIOProcStop: false
+      )
     }
-    return result
+    let stopStatus = stopIOProc()
+    if stopStatus == noErr {
+      deactivateRenderer()
+      return MutingTapTeardownPreparationResult(
+        tapMuteReleaseStatus: muteReleaseStatus,
+        ioProcStopStatus: stopStatus,
+        tapMuteRestoreStatus: nil,
+        didAttemptIOProcStop: true
+      )
+    }
+    return MutingTapTeardownPreparationResult(
+      tapMuteReleaseStatus: muteReleaseStatus,
+      ioProcStopStatus: stopStatus,
+      tapMuteRestoreStatus: restoreTapMuting(),
+      didAttemptIOProcStop: true
+    )
+  }
+}
+
+enum CompetingRouterRouteDisposition: Equatable, Sendable {
+  case none
+  case monitorOnly
+}
+
+struct CompetingRouterConflictDecision: Equatable, Sendable {
+  let routeDisposition: CompetingRouterRouteDisposition
+  let detail: String
+
+  static func make(routerName: String, isVerified: Bool) -> Self {
+    guard isVerified else {
+      return Self(routeDisposition: .none, detail: "")
+    }
+    return Self(
+      routeDisposition: .monitorOnly,
+      detail: "\(routerName) is routing this app's audio. Waves is monitoring only until that router releases the route."
+    )
+  }
+}
+
+enum GeometryRecoveryAction: Equatable, Sendable {
+  case none
+  case scheduleRecovery(at: Duration)
+  case attempt(number: Int)
+  case recovered
+  case exhausted
+}
+
+enum GeometryRecoveryHealth: Equatable, Sendable {
+  case healthy
+  case recovering
+  case exhausted(String)
+}
+
+struct GeometryRecoveryCoordinator: Sendable {
+  private let maximumAttempts: Int
+  private let baseBackoff: Duration
+  private var attempts = 0
+  private var scheduledRecoveryAt: Duration?
+  private var recoveryInProgress = false
+  private(set) var health: GeometryRecoveryHealth = .healthy
+
+  init(maximumAttempts: Int = 3, baseBackoff: Duration = .milliseconds(250)) {
+    self.maximumAttempts = max(1, maximumAttempts)
+    self.baseBackoff = baseBackoff
+  }
+
+  mutating func signalMismatch(at now: Duration) -> GeometryRecoveryAction {
+    guard scheduledRecoveryAt == nil, !recoveryInProgress, !isExhausted else { return .none }
+    scheduledRecoveryAt = now
+    health = .recovering
+    return .scheduleRecovery(at: now)
+  }
+
+  mutating func beginRecovery(at now: Duration) -> GeometryRecoveryAction {
+    guard let scheduledRecoveryAt, now >= scheduledRecoveryAt, !recoveryInProgress else { return .none }
+    self.scheduledRecoveryAt = nil
+    recoveryInProgress = true
+    attempts += 1
+    return .attempt(number: attempts)
+  }
+
+  mutating func finishRecovery(succeeded: Bool, at now: Duration) -> GeometryRecoveryAction {
+    guard recoveryInProgress else { return .none }
+    recoveryInProgress = false
+    if succeeded {
+      attempts = 0
+      health = .healthy
+      return .recovered
+    }
+    guard attempts < maximumAttempts else {
+      health = .exhausted(exhaustedDetail)
+      return .exhausted
+    }
+    let next = now + backoff(for: attempts)
+    scheduledRecoveryAt = next
+    health = .recovering
+    return .scheduleRecovery(at: next)
+  }
+
+  private var isExhausted: Bool {
+    if case .exhausted = health { return true }
+    return false
+  }
+
+  private var exhaustedDetail: String {
+    "Audio route recovery failed after \(maximumAttempts) attempts. Refresh the route or restart Waves."
+  }
+
+  private func backoff(for attempt: Int) -> Duration {
+    var delay = Duration.zero
+    for _ in 0..<attempt { delay += baseBackoff }
+    return delay
+  }
+}
+
+enum RouterConflictObservationAction: Equatable, Sendable {
+  case none
+  case conflictActivated
+  case conflictReleased
+}
+
+struct RouterConflictObservationDebouncer: Sendable {
+  private let debounce: Duration
+  private var appliedState: Bool?
+  private var pendingState: Bool?
+  private var pendingSince: Duration?
+
+  init(debounce: Duration = .milliseconds(250)) {
+    self.debounce = debounce
+  }
+
+  mutating func observe(conflictIsActive: Bool, at now: Duration) -> RouterConflictObservationAction {
+    if pendingState != conflictIsActive {
+      pendingState = conflictIsActive
+      pendingSince = now
+    }
+    return advance(to: now)
+  }
+
+  mutating func advance(to now: Duration) -> RouterConflictObservationAction {
+    guard let pendingState, let pendingSince, now - pendingSince >= debounce else { return .none }
+    self.pendingState = nil
+    self.pendingSince = nil
+    guard appliedState != pendingState else { return .none }
+    appliedState = pendingState
+    return pendingState ? .conflictActivated : .conflictReleased
   }
 }
 
@@ -199,6 +370,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
   private var levelUpdateTask: Task<Void, Never>?
   private var routeMaintenanceTick = 0
+  private var geometryRecoveryByRuntimeID: [String: GeometryRecoveryCoordinator] = [:]
+  private var routerConflictObservationByRuntimeID: [String: RouterConflictObservationDebouncer] = [:]
+  private var routerObservationGeneration: UInt64 = 1
+  private var consumedRouterObservationGeneration: UInt64 = 0
   private var staleRouteTicks: [String: Int] = [:]
   /// Last IO-render-callback count seen per app, so a route that has genuinely
   /// stopped rendering can be told apart from one that is merely silent.
@@ -215,14 +390,19 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let staleRouteThresholdTicks = 24
   private var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
+  private var routerObservationListenerSelectors: [AudioObjectPropertySelector] = []
+  private var routerObservationListenerBlock: AudioObjectPropertyListenerBlock?
+  private let routerObservationQueue = DispatchQueue(label: "com.waves.backend.router-observation")
   private var lastKnownDefaultOutputDeviceUID: String?
   private var outputDeviceReadinessError: String?
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "AudioBackend")
 
   typealias IntentRouteApplyOverride = @Sendable (AudioApp, EqualizerSettings) async throws -> Void
   typealias ShutdownCleanupOverride = @Sendable () -> [CleanupDegradation]
+  typealias VerifiedRouterConflictProvider = @Sendable (AudioApp) -> String?
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
+  private let verifiedRouterConflictProvider: VerifiedRouterConflictProvider?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   private nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
@@ -233,13 +413,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.deviceChangeContinuation = continuation
     self.intentRouteApplyOverride = nil
     self.shutdownCleanupOverride = nil
+    self.verifiedRouterConflictProvider = nil
   }
 
   init(
     testingSnapshot: AudioSessionSnapshot,
     captureAuthorization: CaptureAuthorizationResult = .undetermined,
     intentRouteApplyOverride: @escaping IntentRouteApplyOverride,
-    shutdownCleanupOverride: ShutdownCleanupOverride? = nil
+    shutdownCleanupOverride: ShutdownCleanupOverride? = nil,
+    verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
@@ -248,6 +430,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.captureAuthorization = captureAuthorization
     self.intentRouteApplyOverride = intentRouteApplyOverride
     self.shutdownCleanupOverride = shutdownCleanupOverride
+    self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
     self.isStarted = true
   }
 
@@ -260,6 +443,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     isStarted = true
     startLevelUpdateTask()
     addDeviceChangeListener()
+    addRouterObservationListeners()
   }
 
   func stop() async {
@@ -316,6 +500,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     record(removeDeviceChangeListener())
+    record(removeRouterObservationListeners())
     lastKnownDefaultOutputDeviceUID = nil
 
     let installedControllers = controllers.sorted { $0.key < $1.key }
@@ -2879,12 +3064,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func updateAudioLevels() async {
     guard !isShuttingDown else { return }
+    let now = monotonicRouteTime()
     // Most of the app's lifetime has no managed renderers. Avoid rescanning the
     // entire app snapshot four times per second when there is nothing a router
     // conflict could suspend.
-    if !controllers.isEmpty {
-      suspendManagedRoutesForCompetingAudioRouter()
-    }
+    let routerReleasedRouteIDs = observeCompetingRouterConflicts(at: now)
     // With no controllers left there are no levels to read — but there may still
     // be a parked teardown to retry, and that is exactly the case where one
     // exists: disposing the last controller removes it from `controllers` before
@@ -2893,9 +3077,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // targets stays silent until Waves restarts.
     guard !controllers.isEmpty else {
       routeMaintenanceTick += 1
-      if routeMaintenanceTick >= routeMaintenanceTickInterval {
+      if routeMaintenanceTick >= routeMaintenanceTickInterval || !routerReleasedRouteIDs.isEmpty {
         routeMaintenanceTick = 0
         retryOrphanedControllerDisposals()
+        await maintainManagedRoutes(forceRebuildIDs: routerReleasedRouteIDs)
       }
       return
     }
@@ -2905,10 +3090,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     var routeIDsNeedingRebuild = Set<String>()
+    var geometryRecoveryRouteIDs = Set<String>()
 
     for (appID, controller) in controllers {
-      if let detail = controller.takeGeometryMismatchDiagnostic() {
-        logger.error("\(detail)")
+      if controller.consumeGeometryMismatch() {
+        var recovery = geometryRecoveryByRuntimeID[appID] ?? GeometryRecoveryCoordinator()
+        _ = recovery.signalMismatch(at: now)
+        geometryRecoveryByRuntimeID[appID] = recovery
+      }
+      if var recovery = geometryRecoveryByRuntimeID[appID],
+        case .attempt = recovery.beginRecovery(at: now)
+      {
+        geometryRecoveryByRuntimeID[appID] = recovery
+        routeIDsNeedingRebuild.insert(appID)
+        geometryRecoveryRouteIDs.insert(appID)
       }
 
       guard controller.isActive else {
@@ -2975,31 +3170,25 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     routeMaintenanceTick += 1
+    routeIDsNeedingRebuild.formUnion(routerReleasedRouteIDs)
     if routeMaintenanceTick >= routeMaintenanceTickInterval || !routeIDsNeedingRebuild.isEmpty {
       routeMaintenanceTick = 0
       // A tap left behind by a failed teardown keeps its app muted, so keep
       // trying to release it rather than leaving the app silent for the session.
       retryOrphanedControllerDisposals()
-      await maintainManagedRoutes(forceRebuildIDs: routeIDsNeedingRebuild)
+      await maintainManagedRoutes(
+        forceRebuildIDs: routeIDsNeedingRebuild,
+        geometryRecoveryIDs: geometryRecoveryRouteIDs
+      )
     }
   }
 
   private func competingAudioRouterConflictDetail(for app: AudioApp) -> String? {
-    if let routerName = AppDiscoveryPolicy.competingAudioRouterName(
-      for: app.bundleID,
-      among: []
-    ) {
+    guard let routerName = verifiedRouterConflictProvider?(app) else { return nil }
+    if AppDiscoveryPolicy.competingAudioRouterName(for: app.bundleID, among: []) != nil {
       return "\(routerName)'s mixed output can carry every monitored app. "
         + "Waves leaves this router untouched so one nested route cannot duplicate or silence the whole mix. "
         + "Control the upstream apps inside \(routerName)."
-    }
-    guard
-      let routerName = AppDiscoveryPolicy.competingAudioRouterName(
-        for: app.bundleID,
-        among: snapshot.apps
-      )
-    else {
-      return nil
     }
     return "\(routerName) is already routing this app's audio. "
       + "Waves left it untouched to prevent two copies. "
@@ -3021,25 +3210,107 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].notes = detail
   }
 
-  private func suspendManagedRoutesForCompetingAudioRouter() {
+  private func observeCompetingRouterConflicts(at now: Duration) -> Set<String> {
+    var recoveredRouteIDs = Set<String>()
     var changed = false
     for index in snapshot.apps.indices {
       let app = snapshot.apps[index]
-      guard
-        app.routingState == .managed || controllers[app.id] != nil,
-        let detail = competingAudioRouterConflictDetail(for: app)
-      else {
-        continue
+      let detail = competingAudioRouterConflictDetail(for: app)
+      var observation = routerConflictObservationByRuntimeID[app.id] ?? RouterConflictObservationDebouncer()
+      let action: RouterConflictObservationAction
+      if routerObservationGeneration != consumedRouterObservationGeneration {
+        action = observation.observe(conflictIsActive: detail != nil, at: now)
+      } else {
+        action = observation.advance(to: now)
       }
-      suspendManagedRouteForConflict(at: index, detail: detail)
-      changed = true
+      routerConflictObservationByRuntimeID[app.id] = observation
+
+      switch action {
+      case .conflictActivated:
+        guard app.routingState == .managed || controllers[app.id] != nil,
+          let detail
+        else { continue }
+        let routerName = verifiedRouterConflictProvider?(app) ?? "A competing audio router"
+        let decision = CompetingRouterConflictDecision.make(routerName: routerName, isVerified: true)
+        guard decision.routeDisposition == .monitorOnly else { continue }
+        suspendManagedRouteForConflict(at: index, detail: decision.detail.isEmpty ? detail : decision.detail)
+        changed = true
+      case .conflictReleased:
+        guard snapshot.apps[index].routingState == .monitorOnly,
+          snapshot.apps[index].notes?.contains("Waves is monitoring only") == true
+        else { continue }
+        snapshot.apps[index].routingState = .managed
+        snapshot.apps[index].notes = nil
+        recoveredRouteIDs.insert(snapshot.apps[index].logicalID)
+        changed = true
+      case .none:
+        break
+      }
     }
-    if changed {
-      snapshot.updatedAt = .now
-    }
+    consumedRouterObservationGeneration = routerObservationGeneration
+    if changed { snapshot.updatedAt = .now }
+    return recoveredRouteIDs
   }
 
-  private func maintainManagedRoutes(forceRebuildIDs: Set<String> = []) async {
+  private func addRouterObservationListeners() {
+    guard !isShuttingDown, routerObservationListenerBlock == nil else { return }
+    let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] count, addresses in
+      let observed = (0..<Int(count)).contains { index in
+        let selector = addresses[index].mSelector
+        return selector == kAudioHardwarePropertyProcessObjectList || selector == kAudioHardwarePropertyTapList
+      }
+      guard observed else { return }
+      Task { [weak self] in await self?.markRouterObservationDirty() }
+    }
+    for selector in [kAudioHardwarePropertyProcessObjectList, kAudioHardwarePropertyTapList] {
+      var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+      )
+      if AudioObjectAddPropertyListenerBlock(
+        AudioObjectID(kAudioObjectSystemObject),
+        &address,
+        routerObservationQueue,
+        listenerBlock
+      ) == noErr {
+        routerObservationListenerSelectors.append(selector)
+      }
+    }
+    if !routerObservationListenerSelectors.isEmpty { routerObservationListenerBlock = listenerBlock }
+  }
+
+  private func removeRouterObservationListeners() -> [CleanupDegradation] {
+    guard let listenerBlock = routerObservationListenerBlock else { return [] }
+    var observations: [CleanupStatusObservation] = []
+    for selector in routerObservationListenerSelectors {
+      var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+      )
+      observations.append(
+        CleanupStatusObservation(
+          stage: .listenerRemoval,
+          nativeStatus: AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, routerObservationQueue, listenerBlock
+          ),
+          detail: "Remove router observation listener selector \(selector)"
+        ))
+    }
+    routerObservationListenerSelectors.removeAll()
+    routerObservationListenerBlock = nil
+    return checkedCleanupDegradations(from: observations)
+  }
+
+  private func markRouterObservationDirty() {
+    routerObservationGeneration &+= 1
+  }
+
+  private func maintainManagedRoutes(
+    forceRebuildIDs: Set<String> = [],
+    geometryRecoveryIDs: Set<String> = []
+  ) async {
     guard !isShuttingDown else { return }
     let managedIDs = snapshot.apps
       .filter { $0.routingState == .managed || forceRebuildIDs.contains($0.logicalID) || forceRebuildIDs.contains($0.id) }
@@ -3083,8 +3354,31 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         }
         staleRouteTicks.removeValue(forKey: app.logicalID)
         lastRenderTickByAppID.removeValue(forKey: app.logicalID)
+        if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
+          var recovery = geometryRecoveryByRuntimeID[app.id]
+        {
+          _ = recovery.finishRecovery(succeeded: true, at: monotonicRouteTime())
+          geometryRecoveryByRuntimeID[app.id] = recovery
+        }
         changed = true
       } catch {
+        if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
+          var recovery = geometryRecoveryByRuntimeID[app.id]
+        {
+          let action = recovery.finishRecovery(succeeded: false, at: monotonicRouteTime())
+          geometryRecoveryByRuntimeID[app.id] = recovery
+          if case .exhausted = action {
+            let exhaustion = BackendError.managedRouteUnavailable(
+              "Audio route recovery failed after 3 attempts. Refresh the route or restart Waves."
+            )
+            if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+              markRouteError(at: currentIndex, error: exhaustion)
+            }
+            lastError = exhaustion.localizedDescription
+            changed = true
+            continue
+          }
+        }
         if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
           markRouteError(at: currentIndex, error: error)
           snapshot.apps[currentIndex].appliedVolume =
@@ -3101,6 +3395,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       refreshGlobalRouteHealth(latestError: lastError)
       snapshot.updatedAt = .now
     }
+  }
+
+  private func monotonicRouteTime() -> Duration {
+    .nanoseconds(Int64(clamping: DispatchTime.now().uptimeNanoseconds))
   }
 
   private func addDeviceChangeListener() {
@@ -3321,7 +3619,6 @@ private struct TapRenderState {
   var rmsLevel: Float
   var analysisRMS: Float
   var voiceBandEnergy: Float
-  var geometryMismatchObserved: UInt32
   /// Bumped on every IO render callback, including the ones that return early
   /// (geometry mismatch, inactive, muted, volume zero).
   ///
@@ -3335,6 +3632,9 @@ private struct TapRenderState {
 private final class TapRenderStateBox {
   let state: UnsafeMutablePointer<TapRenderState>
   private let stateLock = NSLock()
+  /// A callback-owned, single-bit handoff to route maintenance. It is allocated
+  /// during controller setup and only uses OSAtomic CAS in the realtime path.
+  private let geometryMismatchFlag = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
   private var stateBox = TapRenderState(
     volume: 1.0,
     volumeBoost: 1.0,
@@ -3344,19 +3644,21 @@ private final class TapRenderStateBox {
     rmsLevel: 0,
     analysisRMS: 0,
     voiceBandEnergy: 0,
-    geometryMismatchObserved: 0,
     renderTick: 0
   )
 
   init(initialState: TapRenderState) {
     state = UnsafeMutablePointer<TapRenderState>.allocate(capacity: 1)
     state.pointee = initialState
+    geometryMismatchFlag.initialize(to: 0)
     stateBox = initialState
   }
 
   deinit {
     state.deinitialize(count: 1)
     state.deallocate()
+    geometryMismatchFlag.deinitialize(count: 1)
+    geometryMismatchFlag.deallocate()
   }
 
   func read() -> TapRenderState {
@@ -3474,22 +3776,14 @@ private final class TapRenderStateBox {
   }
 
   func flagGeometryMismatch() {
-    // The realtime callback must never wait for diagnostics state. Missing a flag
-    // during contention is acceptable because a persistent mismatch is observed
-    // again on the next callback.
-    guard stateLock.try() else { return }
-    state.pointee.geometryMismatchObserved = 1
-    stateBox.geometryMismatchObserved = 1
-    stateLock.unlock()
+    // This callback-safe, single-writer signal has no lock, allocation, actor
+    // hop, logging, policy work, or recovery work. Once set, the flag remains
+    // set until route maintenance claims it, coalescing repeated mismatches.
+    _ = OSAtomicCompareAndSwap32Barrier(0, 1, geometryMismatchFlag)
   }
 
   func consumeGeometryMismatch() -> Bool {
-    stateLock.lock()
-    let wasObserved = state.pointee.geometryMismatchObserved != 0
-    state.pointee.geometryMismatchObserved = 0
-    stateBox.geometryMismatchObserved = 0
-    stateLock.unlock()
-    return wasObserved
+    OSAtomicCompareAndSwap32Barrier(1, 0, geometryMismatchFlag)
   }
 
   func setInactive() {
@@ -3524,7 +3818,6 @@ private final class PerAppTapController: @unchecked Sendable {
   private var didStartIOProc = false
   private let disposeOnce = IdempotentCleanupResult()
   private var retainedCleanupDegradations: [CleanupDegradation] = []
-  private var didReportGeometryMismatch = false
   private var equalizerSettings: EqualizerSettings
   private var managedAudioEqualizerSettings: GlobalEqualizerSettings
   private var equalizerHeadroomGain: Float
@@ -3587,7 +3880,6 @@ private final class PerAppTapController: @unchecked Sendable {
       rmsLevel: 0,
       analysisRMS: 0,
       voiceBandEnergy: 0,
-      geometryMismatchObserved: 0,
       renderTick: 0
     )
     self.stateBox = TapRenderStateBox(initialState: initialState)
@@ -3693,11 +3985,10 @@ private final class PerAppTapController: @unchecked Sendable {
     stateBox.readAdaptiveAnalysis()
   }
 
-  func takeGeometryMismatchDiagnostic() -> String? {
-    guard stateBox.consumeGeometryMismatch(), !didReportGeometryMismatch else { return nil }
-    didReportGeometryMismatch = true
-    let layout = audioFormatPlan.isInterleaved ? "interleaved" : "noninterleaved"
-    return "Silenced \(appName) because Core Audio callback geometry did not match the validated \(layout) \(audioFormatPlan.channelCount)-channel \(audioFormatPlan.sampleFormat) plan."
+  /// Claims the callback's coalesced geometry-mismatch signal from outside the
+  /// realtime thread. Recovery work is deliberately owned by the backend actor.
+  func consumeGeometryMismatch() -> Bool {
+    stateBox.consumeGeometryMismatch()
   }
 
   func start() throws {
@@ -3958,6 +4249,29 @@ private final class PerAppTapController: @unchecked Sendable {
     }
   }
 
+  @available(macOS 14.2, *)
+  private func restoreTapMuting() -> OSStatus {
+    guard tapID != .unknown else { return noErr }
+
+    tapDescription.muteBehavior = .mutedWhenTapped
+    var descriptionReference: CFTypeRef = tapDescription
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioTapPropertyDescription,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    return withUnsafePointer(to: &descriptionReference) { pointer in
+      AudioObjectSetPropertyData(
+        tapID,
+        &address,
+        0,
+        nil,
+        UInt32(MemoryLayout<CFTypeRef>.size),
+        pointer
+      )
+    }
+  }
+
   func dispose() -> [CleanupDegradation] {
     disposeOnce.run { [self] in
       var observations: [CleanupStatusObservation] = []
@@ -3984,6 +4298,10 @@ private final class PerAppTapController: @unchecked Sendable {
           guard shouldStop, let procID = ioProcID else { return noErr }
           return AudioDeviceStop(aggregateDeviceID, procID)
         },
+        restoreTapMuting: {
+          guard #available(macOS 14.2, *) else { return noErr }
+          return restoreTapMuting()
+        },
         deactivateRenderer: {
           stateBox.setInactive()
         }
@@ -3999,7 +4317,7 @@ private final class PerAppTapController: @unchecked Sendable {
           )
         )
       }
-      if shouldStop {
+      if shouldStop, preparation.didAttemptIOProcStop {
         observations.append(
           CleanupStatusObservation(
             appID: appID,

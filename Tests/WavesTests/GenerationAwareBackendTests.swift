@@ -161,6 +161,9 @@ import WavesAudioCore
     testingSnapshot: testSnapshot(apps: [zoom, waveLink]),
     intentRouteApplyOverride: { stagedApp, equalizer in
       await recorder.record(app: stagedApp, equalizer: equalizer)
+    },
+    verifiedRouterConflictProvider: { app in
+      app.logicalID == zoom.logicalID ? "Elgato Wave Link" : nil
     }
   )
 
@@ -205,6 +208,9 @@ import WavesAudioCore
     testingSnapshot: testSnapshot(apps: [waveLink]),
     intentRouteApplyOverride: { stagedApp, equalizer in
       await recorder.record(app: stagedApp, equalizer: equalizer)
+    },
+    verifiedRouterConflictProvider: { app in
+      app.logicalID == waveLink.logicalID ? "Elgato Wave Link" : nil
     }
   )
 

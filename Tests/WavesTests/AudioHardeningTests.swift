@@ -17,6 +17,10 @@ import WavesAudioCore
       events.append("stop-io")
       return noErr
     },
+    restoreTapMuting: {
+      events.append("restore-tap-mute")
+      return noErr
+    },
     deactivateRenderer: {
       events.append("deactivate-renderer")
     }
@@ -38,12 +42,16 @@ import WavesAudioCore
       bothFailedEvents.append("stop-io")
       return -2
     },
+    restoreTapMuting: {
+      bothFailedEvents.append("restore-tap-mute")
+      return noErr
+    },
     deactivateRenderer: {
       bothFailedEvents.append("deactivate-renderer")
     }
   )
 
-  #expect(bothFailedEvents == ["unmute-tap", "stop-io"])
+  #expect(bothFailedEvents == ["unmute-tap"])
   #expect(!bothFailed.canDestroyNativeResources)
   #expect(!bothFailed.originalAudioIsFailOpen)
 
@@ -57,14 +65,18 @@ import WavesAudioCore
       unmutedEvents.append("stop-io")
       return -2
     },
+    restoreTapMuting: {
+      unmutedEvents.append("restore-tap-mute")
+      return noErr
+    },
     deactivateRenderer: {
       unmutedEvents.append("deactivate-renderer")
     }
   )
 
-  #expect(unmutedEvents == ["unmute-tap", "stop-io"])
+  #expect(unmutedEvents == ["unmute-tap", "stop-io", "restore-tap-mute"])
   #expect(!unmutedBeforeStopFailure.canDestroyNativeResources)
-  #expect(unmutedBeforeStopFailure.originalAudioIsFailOpen)
+  #expect(unmutedBeforeStopFailure.audiblePath == .wavesRenderer)
 }
 
 @Test func processTapAggregateStartsImmediatelyWithoutWaitingForSourceAudio() {
