@@ -6,7 +6,7 @@ import WavesAudioCore
 @testable import Waves
 
 @Test func p11UnverifiedWaveLinkIdentityDoesNotBlockReattachment() {
-  withKnownIssue("P1.1: Task 2 must preserve monitor-only reattachment until router identity is verified.") {
+  p1Characterization("P1.1: Task 2 must preserve monitor-only reattachment until router identity is verified.") {
     let unverifiedWaveLink = AudioApp(
       id: "runtime.unverified-wave-link",
       logicalID: "unverified.wave-link",
@@ -29,7 +29,7 @@ import WavesAudioCore
 }
 
 @Test func p12RendererStopFailureRestoresTapMutingBeforeItReturns() {
-  withKnownIssue("P1.2: Task 2 must roll tap muting back after renderer stop fails.") {
+  p1Characterization("P1.2: Task 2 must roll tap muting back after renderer stop fails.") {
     var events: [String] = []
 
     let result = MutingTapTeardownPreparation.perform(
@@ -52,7 +52,7 @@ import WavesAudioCore
 }
 
 @Test func p13GeometryMismatchSchedulesARecoveryInsteadOfOnlyLogging() throws {
-  withKnownIssue("P1.3: Task 2 must schedule bounded geometry recovery from the callback mismatch signal.") {
+  try p1Characterization("P1.3: Task 2 must schedule bounded geometry recovery from the callback mismatch signal.") {
     let source = try String(
       contentsOf: workspaceAudioBackendURL(),
       encoding: .utf8
@@ -72,7 +72,7 @@ import WavesAudioCore
 }
 
 @Test func p14RouterReleaseIsNotBoundToTheFiveSecondMaintenancePoll() throws {
-  withKnownIssue("P1.4: Task 2 must replace the five-second router maintenance poll with debounced observation.") {
+  try p1Characterization("P1.4: Task 2 must replace the five-second router maintenance poll with debounced observation.") {
     let source = try String(
       contentsOf: workspaceAudioBackendURL(),
       encoding: .utf8
@@ -82,6 +82,20 @@ import WavesAudioCore
     )
 
     #expect(!isBoundToFiveSecondMaintenancePoll)
+  }
+}
+
+/// Set `WAVES_P1_CHARACTERIZATION_MODE=red` to replay a P1 assertion without
+/// its planned-failure wrapper and preserve a pre-fix receipt. This is test-only
+/// evidence plumbing, not a production behavior switch.
+private func p1Characterization(
+  _ knownIssue: Comment,
+  body: () throws -> Void
+) rethrows {
+  if ProcessInfo.processInfo.environment["WAVES_P1_CHARACTERIZATION_MODE"] == "red" {
+    try body()
+  } else {
+    withKnownIssue(knownIssue, body)
   }
 }
 
