@@ -3343,12 +3343,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func competingAudioRouterConflictDetail(for app: AudioApp) -> String? {
-    if AppDiscoveryPolicy.competingAudioRouterName(for: app.bundleID, among: []) != nil {
-      return "Elgato Wave Link's mixed output can carry every monitored app. "
-        + "Waves leaves this router untouched so one nested route cannot duplicate or silence the whole mix. "
-        + "Control the upstream apps inside Elgato Wave Link."
-    }
-    return verifiedRouterConflictProvider?(app)?.detail
+    CompetingRouterPolicy.conflictDetail(
+      for: app,
+      conflict: verifiedRouterConflictProvider?(app)
+    )
   }
 
   private func suspendManagedRouteForConflict(at index: Int, detail: String) {

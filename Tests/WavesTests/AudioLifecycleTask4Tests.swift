@@ -1,5 +1,6 @@
 import AudioToolbox
 import Testing
+import WavesAudioCore
 
 @testable import Waves
 
@@ -62,4 +63,26 @@ import Testing
   #expect(state.read().isActive == 0)
   #expect(state.consumeGeometryMismatch())
   #expect(!state.consumeGeometryMismatch())
+}
+
+@Test func competingRouterPolicyKeepsMixedOutputExclusionSeparateFromVerifiedOwnership() {
+  let waveLink = AudioApp(
+    id: "wave-link",
+    logicalID: "com.elgato.WaveLink3",
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "Wave Link",
+    category: .media,
+    compatibility: .supported
+  )
+  let ordinary = AudioApp(
+    id: "ordinary",
+    logicalID: "com.example.ordinary",
+    bundleID: "com.example.ordinary",
+    displayName: "Ordinary",
+    category: .media,
+    compatibility: .supported
+  )
+
+  #expect(CompetingRouterPolicy.mixedOutputExclusion(for: waveLink) != nil)
+  #expect(CompetingRouterPolicy.upstreamOwnershipDetail(for: ordinary, conflict: nil) == nil)
 }
