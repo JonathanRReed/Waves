@@ -1452,11 +1452,11 @@ final class AppStore {
   }
 
   func handleURLScheme(_ url: URL) {
-    guard requireAudioRunning() else { return }
     guard preferences.enableURLScheme else {
       logger.warning("URL scheme invocation rejected because URL schemes are disabled")
       return
     }
+    guard requireAudioRunning() else { return }
 
     guard url.absoluteString.utf8.count <= WavesURLPolicy.maxPayloadBytes else {
       logger.warning("URL scheme invocation rejected because the payload exceeded the size limit")

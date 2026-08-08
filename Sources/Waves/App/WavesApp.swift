@@ -496,14 +496,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   @objc private func handleGetURLEvent(
     _ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor
   ) {
-    guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
-      let url = WavesURLPolicy.parse(urlString)
-    else {
+    guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue else {
       logger.warning("URL scheme invocation rejected: Missing URL payload")
       return
     }
 
-    handleURLScheme(url)
+    handleURLScheme(urlString)
   }
 
   private func setupGlobalHotkeys() {
@@ -533,14 +531,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   // AppKit's default GetURL dispatch. A separate `application(_:open:)` entry
   // point would be unreachable for `waves://` invocations, so it is omitted.
 
-  private func handleURLScheme(_ url: URL) {
-    guard url.scheme == "waves", let store else { return }
-    guard store.isAudioRunning else {
-      store.promptToFinishSetup()
-      presentSetupWindowIfAvailable()
-      return
-    }
-    store.handleURLScheme(url)
+  private func handleURLScheme(_ rawURLString: String) {
+    guard let store else { return }
+    URLAutomationRouter(
+      isEnabled: { store.preferences.enableURLScheme },
+      isAudioRunning: { store.isAudioRunning },
+      parse: WavesURLPolicy.parse,
+      promptForSetup: { store.promptToFinishSetup() },
+      presentSetup: { self.presentSetupWindowIfAvailable() },
+      perform: { store.handleURLScheme($0) }
+    ).handle(rawURLString: rawURLString)
   }
 
   private func presentSetupWindowIfAvailable() {

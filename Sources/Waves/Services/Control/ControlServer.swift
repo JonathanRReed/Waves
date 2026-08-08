@@ -46,6 +46,7 @@ final class ControlServer {
   private nonisolated let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Control")
   private let url: URL
   private let handler: ControlCommandHandler
+  private let timeouts: ControlConnectionTimeouts
 
   /// Accept and read run on the main queue.
   ///
@@ -59,9 +60,14 @@ final class ControlServer {
   private var acceptSource: DispatchSourceRead?
   private var connections: [ObjectIdentifier: ControlConnection] = [:]
 
-  init(url: URL = ControlSocketLocation.defaultURL(), handler: ControlCommandHandler) {
+  init(
+    url: URL = ControlSocketLocation.defaultURL(),
+    handler: ControlCommandHandler,
+    timeouts: ControlConnectionTimeouts = .production
+  ) {
     self.url = url
     self.handler = handler
+    self.timeouts = timeouts
   }
 
   var isRunning: Bool { listenerFD >= 0 }
@@ -207,7 +213,7 @@ final class ControlServer {
         _ = Darwin.close(clientFD)
         continue
       }
-      let connection = ControlConnection(fd: clientFD, handler: handler)
+      let connection = ControlConnection(fd: clientFD, handler: handler, timeouts: timeouts)
       connection.onClose = { [weak self] closed in
         _ = self?.connections.removeValue(forKey: ObjectIdentifier(closed))
       }
@@ -221,7 +227,11 @@ final class ControlServer {
     var uid = uid_t()
     var gid = gid_t()
     guard getpeereid(fd, &uid, &gid) == 0 else { return false }
-    return uid == getuid()
+    return peerIsTrusted(peerUID: uid, currentUID: getuid())
+  }
+
+  nonisolated static func peerIsTrusted(peerUID: uid_t, currentUID: uid_t) -> Bool {
+    peerUID == currentUID
   }
 
   // MARK: Pushes
