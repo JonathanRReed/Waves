@@ -417,6 +417,92 @@ import WavesAudioCore
   _ = await backend.shutdownWithResult()
 }
 
+@Test func backendReattachmentDoesNotRescanWhenVerifiedActivityHasNoConflictForAnApp() async {
+  let conflicting = routerTestApp(id: "conflicting", pid: 101)
+  let nonconflicting = routerTestApp(id: "nonconflicting", pid: 303)
+  let fallback = RouterConflictFallbackSpy()
+  let backend = routerActivityBackend(
+    apps: [conflicting, nonconflicting],
+    activity: verifiedRouterActivitySnapshot(conflictingPID: 101),
+    fallback: fallback
+  )
+
+  await backend.reattachRoutesForTesting([conflicting.logicalID, nonconflicting.logicalID])
+
+  #expect(fallback.calledAppIDs.isEmpty)
+  _ = await backend.shutdownWithResult()
+}
+
+@Test func backendProfileApplyDoesNotRescanWhenVerifiedActivityHasNoConflictForAnApp() async {
+  let conflicting = routerTestApp(id: "conflicting", pid: 101)
+  let nonconflicting = routerTestApp(id: "nonconflicting", pid: 303)
+  let fallback = RouterConflictFallbackSpy()
+  let backend = routerActivityBackend(
+    apps: [conflicting, nonconflicting],
+    activity: verifiedRouterActivitySnapshot(conflictingPID: 101),
+    fallback: fallback
+  )
+
+  _ = await backend.applyProfileWithResults(
+    Profile(
+      name: "Snapshot reuse",
+      entries: [
+        .init(appID: conflicting.logicalID, desiredVolume: 0.5, isMuted: false, volumeBoost: 1),
+        .init(appID: nonconflicting.logicalID, desiredVolume: 0.5, isMuted: false, volumeBoost: 1),
+      ]
+    ),
+    generation: 1
+  )
+
+  #expect(fallback.calledAppIDs.isEmpty)
+  _ = await backend.shutdownWithResult()
+}
+
+@Test func backendMaintenanceDoesNotRescanWhenVerifiedActivityHasConflictingAndNonconflictingApps() async {
+  let conflicting = routerTestApp(id: "conflicting", pid: 101)
+  let nonconflicting = routerTestApp(id: "nonconflicting", pid: 303)
+  let fallback = RouterConflictFallbackSpy()
+  let backend = routerActivityBackend(
+    apps: [conflicting, nonconflicting],
+    activity: verifiedRouterActivitySnapshot(conflictingPID: 101),
+    fallback: fallback
+  )
+
+  await backend.updateAudioLevels(at: .zero)
+
+  #expect(fallback.calledAppIDs.isEmpty)
+  _ = await backend.shutdownWithResult()
+}
+
+@Test func backendSingleRouteFallsBackOnlyWhenNoVerifiedActivitySnapshotWasSupplied() async {
+  let app = routerTestApp(id: "single", pid: 101)
+  let fallback = RouterConflictFallbackSpy()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: routerActivitySnapshot(apps: [app]),
+    intentRouteApplyOverride: { _, _ in },
+    verifiedRouterConflictProvider: { app in
+      fallback.record(app)
+      return nil
+    }
+  )
+
+  _ = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.5,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .userEdit
+    )
+  )
+
+  #expect(fallback.calledAppIDs == [app.id])
+  _ = await backend.shutdownWithResult()
+}
+
 @MainActor
 @Test func liveCompositionPassesTheVerifiedProviderToItsBackendFactory() async {
   var capturedProvider: WorkspaceAudioControlBackend.VerifiedRouterConflictProvider?
@@ -475,6 +561,67 @@ private func routerTestApp(id: String, pid: Int32) -> AudioApp {
   )
 }
 
+private func routerActivitySnapshot(apps: [AudioApp]) -> AudioSessionSnapshot {
+  AudioSessionSnapshot(
+    apps: apps,
+    currentDevice: nil,
+    recentDeviceIDs: [],
+    supportMatrix: SupportMatrix(entries: []),
+    backendStatus: BackendStatus(
+      isAudioComponentInstalled: true,
+      hasRequiredPermissions: true,
+      isRouteRecoveryHealthy: true
+    )
+  )
+}
+
+private func verifiedRouterActivitySnapshot(conflictingPID: pid_t) -> VerifiedRouterActivitySnapshot {
+  VerifiedRouterConflictService(
+    descriptors: [.waveLink3_2_2],
+    snapshotProvider: {
+      .init(
+        processObjects: [
+          .init(id: 1, pid: conflictingPID, isRunningOutput: true),
+          .init(id: 2, pid: 202, isRunningOutput: true),
+        ],
+        taps: []
+      )
+    },
+    identityVerifier: { pid, _ in
+      guard pid == 202 else { return nil }
+      return .init(pid: pid, teamIdentifier: "Y93VXCB8Q5", matchesDesignatedRequirement: true)
+    }
+  ).activitySnapshot()
+}
+
+private func routerActivityBackend(
+  apps: [AudioApp],
+  activity: VerifiedRouterActivitySnapshot,
+  fallback: RouterConflictFallbackSpy
+) -> WorkspaceAudioControlBackend {
+  WorkspaceAudioControlBackend(
+    testingSnapshot: routerActivitySnapshot(apps: apps),
+    verifiedRouterConflictProvider: { app in
+      fallback.record(app)
+      return nil
+    },
+    verifiedRouterActivityProvider: { activity },
+    controllerFactory: { app, processObjectIDs, _, _, _ in
+      try PerAppTapController.testingController(
+        appID: app.id,
+        logicalID: app.logicalID,
+        targetProcessObjectIDs: processObjectIDs,
+        teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+          makeOriginalAudioAudible: { noErr },
+          stopIOProc: { noErr },
+          restoreTapMuting: { noErr }
+        )
+      )
+    },
+    processObjectIDResolver: { _ in [1] }
+  )
+}
+
 private final class RouterActivityScanCounter: @unchecked Sendable {
   private var count = 0
 
@@ -482,5 +629,13 @@ private final class RouterActivityScanCounter: @unchecked Sendable {
 
   func increment() {
     count += 1
+  }
+}
+
+private final class RouterConflictFallbackSpy: @unchecked Sendable {
+  private(set) var calledAppIDs: [String] = []
+
+  func record(_ app: AudioApp) {
+    calledAppIDs.append(app.id)
   }
 }

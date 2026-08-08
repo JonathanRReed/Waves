@@ -3015,9 +3015,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     for app: AudioApp,
     routerActivity: VerifiedRouterActivitySnapshot? = nil
   ) -> String? {
-    CompetingRouterPolicy.conflictDetail(
+    let conflict: VerifiedRouterConflict?
+    if let routerActivity {
+      conflict = routerActivity.conflict(for: app)
+    } else {
+      conflict = verifiedRouterConflictProvider?(app)
+    }
+    return CompetingRouterPolicy.conflictDetail(
       for: app,
-      conflict: routerActivity?.conflict(for: app) ?? verifiedRouterConflictProvider?(app)
+      conflict: conflict
     )
   }
 
