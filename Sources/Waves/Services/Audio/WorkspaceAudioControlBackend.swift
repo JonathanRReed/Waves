@@ -72,6 +72,16 @@ struct MutingTapTeardownPreparationResult: Equatable, Sendable {
     return "Renderer stop failed and tap mute rollback failed. Waves retained callback resources because the audible path is uncertain."
   }
 
+  func cleanupDegradation(appID: String) -> CleanupDegradation? {
+    guard let criticalDiagnostic else { return nil }
+    return CleanupDegradation(
+      appID: appID,
+      stage: .controllerDisposal,
+      nativeStatus: tapMuteRestoreStatus,
+      detail: criticalDiagnostic
+    )
+  }
+
   /// Either an unmuted tap or a stopped reader restores the process's original
   /// hardware playback path.
   var originalAudioIsFailOpen: Bool {
@@ -250,6 +260,124 @@ struct RouterConflictObservationDebouncer: Sendable {
   }
 }
 
+final class RouterObservationListenerBlockReference: @unchecked Sendable {
+  let block: AudioObjectPropertyListenerBlock
+
+  init(_ block: @escaping AudioObjectPropertyListenerBlock) {
+    self.block = block
+  }
+}
+
+struct RouterObservationListenerNativeCalls {
+  let add: @Sendable (AudioObjectPropertySelector, RouterObservationListenerBlockReference) -> OSStatus
+  let remove: @Sendable (AudioObjectPropertySelector, RouterObservationListenerBlockReference) -> OSStatus
+
+  static func live(on queue: DispatchQueue) -> Self {
+    Self(
+      add: { selector, listener in
+        var address = AudioObjectPropertyAddress(
+          mSelector: selector,
+          mScope: kAudioObjectPropertyScopeGlobal,
+          mElement: kAudioObjectPropertyElementMain
+        )
+        return AudioObjectAddPropertyListenerBlock(
+          AudioObjectID(kAudioObjectSystemObject), &address, queue, listener.block
+        )
+      },
+      remove: { selector, listener in
+        var address = AudioObjectPropertyAddress(
+          mSelector: selector,
+          mScope: kAudioObjectPropertyScopeGlobal,
+          mElement: kAudioObjectPropertyElementMain
+        )
+        return AudioObjectRemovePropertyListenerBlock(
+          AudioObjectID(kAudioObjectSystemObject), &address, queue, listener.block
+        )
+      }
+    )
+  }
+}
+
+final class RouterObservationListenerLifecycle: @unchecked Sendable {
+  private static let selectors = [
+    kAudioHardwarePropertyProcessObjectList,
+    kAudioHardwarePropertyTapList,
+  ]
+
+  private let nativeCalls: RouterObservationListenerNativeCalls
+  private let fallbackInterval: Int
+  private var listener: RouterObservationListenerBlockReference?
+  private(set) var installedSelectors: [AudioObjectPropertySelector] = []
+  private var fallbackTicks = 0
+
+  init(nativeCalls: RouterObservationListenerNativeCalls, fallbackInterval: Int = 4) {
+    self.nativeCalls = nativeCalls
+    self.fallbackInterval = max(1, fallbackInterval)
+  }
+
+  var requiresFallbackReobservation: Bool {
+    installedSelectors.count != Self.selectors.count
+  }
+
+  func install(onObservedChange: @escaping @Sendable () -> Void) -> [CleanupDegradation] {
+    if listener == nil {
+      listener = RouterObservationListenerBlockReference { count, addresses in
+        let observed = (0..<Int(count)).contains { index in
+          let selector = addresses[index].mSelector
+          return Self.selectors.contains(selector)
+        }
+        guard observed else { return }
+        onObservedChange()
+      }
+    }
+    guard let listener else { return [] }
+
+    var degradations: [CleanupDegradation] = []
+    for selector in Self.selectors where !installedSelectors.contains(selector) {
+      let status = nativeCalls.add(selector, listener)
+      if status == noErr {
+        installedSelectors.append(selector)
+      } else {
+        degradations.append(
+          CleanupDegradation(
+            stage: .listenerInstallation,
+            nativeStatus: status,
+            detail: "Add router observation listener selector \(selector)"
+          ))
+      }
+    }
+    return degradations
+  }
+
+  func consumeFallbackReobservationTick() -> Bool {
+    guard requiresFallbackReobservation else {
+      fallbackTicks = 0
+      return false
+    }
+    fallbackTicks += 1
+    guard fallbackTicks >= fallbackInterval else { return false }
+    fallbackTicks = 0
+    return true
+  }
+
+  func remove() -> [CleanupDegradation] {
+    guard let listener else { return [] }
+    let degradations = installedSelectors.compactMap { selector -> CleanupDegradation? in
+      let status = nativeCalls.remove(selector, listener)
+      guard status != noErr else { return nil }
+      return CleanupDegradation(
+        stage: .listenerRemoval,
+        nativeStatus: status,
+        detail: "Remove router observation listener selector \(selector)"
+      )
+    }
+    installedSelectors.removeAll()
+    self.listener = nil
+    fallbackTicks = 0
+    return degradations
+  }
+}
+
 enum ProcessTapAggregatePolicy {
   /// `true` makes AudioDeviceStart wait until the target emits its first audio.
   /// Waves starts an explicit IO proc, so waiting only blocks route creation.
@@ -372,6 +500,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var routeMaintenanceTick = 0
   private var geometryRecoveryByRuntimeID: [String: GeometryRecoveryCoordinator] = [:]
   private var routerConflictObservationByRuntimeID: [String: RouterConflictObservationDebouncer] = [:]
+  private var routerObservationListenerFailureDetail: String?
   private var routerObservationGeneration: UInt64 = 1
   private var consumedRouterObservationGeneration: UInt64 = 0
   private var staleRouteTicks: [String: Int] = [:]
@@ -390,18 +519,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let staleRouteThresholdTicks = 24
   private var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
   private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
-  private var routerObservationListenerSelectors: [AudioObjectPropertySelector] = []
-  private var routerObservationListenerBlock: AudioObjectPropertyListenerBlock?
-  private let routerObservationQueue = DispatchQueue(label: "com.waves.backend.router-observation")
+  private let routerObservationListeners: RouterObservationListenerLifecycle
   private var lastKnownDefaultOutputDeviceUID: String?
   private var outputDeviceReadinessError: String?
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "AudioBackend")
 
   typealias IntentRouteApplyOverride = @Sendable (AudioApp, EqualizerSettings) async throws -> Void
   typealias ShutdownCleanupOverride = @Sendable () -> [CleanupDegradation]
+  typealias RouteMaintenanceOverride = @Sendable (Set<String>, Set<String>) async -> Void
   typealias VerifiedRouterConflictProvider = @Sendable (AudioApp) -> String?
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
+  private let routeMaintenanceOverride: RouteMaintenanceOverride?
   private let verifiedRouterConflictProvider: VerifiedRouterConflictProvider?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
@@ -413,7 +542,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.deviceChangeContinuation = continuation
     self.intentRouteApplyOverride = nil
     self.shutdownCleanupOverride = nil
+    self.routeMaintenanceOverride = nil
     self.verifiedRouterConflictProvider = nil
+    self.routerObservationListeners = RouterObservationListenerLifecycle(
+      nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
+    )
   }
 
   init(
@@ -421,7 +554,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     captureAuthorization: CaptureAuthorizationResult = .undetermined,
     intentRouteApplyOverride: @escaping IntentRouteApplyOverride,
     shutdownCleanupOverride: ShutdownCleanupOverride? = nil,
-    verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil
+    verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
+    routerObservationNativeCalls: RouterObservationListenerNativeCalls? = nil,
+    testingControllers: [PerAppTapController] = [],
+    routeMaintenanceOverride: RouteMaintenanceOverride? = nil
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
@@ -430,7 +566,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.captureAuthorization = captureAuthorization
     self.intentRouteApplyOverride = intentRouteApplyOverride
     self.shutdownCleanupOverride = shutdownCleanupOverride
+    self.routeMaintenanceOverride = routeMaintenanceOverride
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
+    self.routerObservationListeners = RouterObservationListenerLifecycle(
+      nativeCalls: routerObservationNativeCalls
+        ?? .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
+    )
+    self.controllers = Dictionary(uniqueKeysWithValues: testingControllers.map { ($0.appID, $0) })
     self.isStarted = true
   }
 
@@ -443,7 +585,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     isStarted = true
     startLevelUpdateTask()
     addDeviceChangeListener()
-    addRouterObservationListeners()
+    retainCleanupDegradations(addRouterObservationListeners())
   }
 
   func stop() async {
@@ -561,6 +703,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     staleRouteTicks.removeAll()
     lastRenderTickByAppID.removeAll()
     routeMaintenanceTick = 0
+    routerObservationListenerFailureDetail = nil
     audibleCache = nil
     outputDeviceReadinessError = nil
     snapshot = .empty
@@ -2952,6 +3095,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       && captureAuthorization == .authorized
       && deviceIsReady
       && !hasRouteErrors
+      && routerObservationListenerFailureDetail == nil
 
     let routeError =
       hasRouteErrors
@@ -2969,6 +3113,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     if let outputDeviceReadinessError {
       details.append(outputDeviceReadinessError)
+    }
+    if let routerObservationListenerFailureDetail {
+      details.append(routerObservationListenerFailureDetail)
     }
     if let routeError, !details.contains(routeError) {
       details.append(routeError)
@@ -3063,8 +3210,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func updateAudioLevels() async {
+    await updateAudioLevels(at: monotonicRouteTime())
+  }
+
+  func updateAudioLevels(at now: Duration) async {
     guard !isShuttingDown else { return }
-    let now = monotonicRouteTime()
+    if routerObservationListeners.consumeFallbackReobservationTick() {
+      retainCleanupDegradations(addRouterObservationListeners())
+      markRouterObservationDirty()
+    }
     // Most of the app's lifetime has no managed renderers. Avoid rescanning the
     // entire app snapshot four times per second when there is nothing a router
     // conflict could suspend.
@@ -3080,7 +3234,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       if routeMaintenanceTick >= routeMaintenanceTickInterval || !routerReleasedRouteIDs.isEmpty {
         routeMaintenanceTick = 0
         retryOrphanedControllerDisposals()
-        await maintainManagedRoutes(forceRebuildIDs: routerReleasedRouteIDs)
+        await performRouteMaintenance(forceRebuildIDs: routerReleasedRouteIDs)
       }
       return
     }
@@ -3176,7 +3330,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // A tap left behind by a failed teardown keeps its app muted, so keep
       // trying to release it rather than leaving the app silent for the session.
       retryOrphanedControllerDisposals()
-      await maintainManagedRoutes(
+      await performRouteMaintenance(
         forceRebuildIDs: routeIDsNeedingRebuild,
         geometryRecoveryIDs: geometryRecoveryRouteIDs
       )
@@ -3252,55 +3406,37 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return recoveredRouteIDs
   }
 
-  private func addRouterObservationListeners() {
-    guard !isShuttingDown, routerObservationListenerBlock == nil else { return }
-    let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] count, addresses in
-      let observed = (0..<Int(count)).contains { index in
-        let selector = addresses[index].mSelector
-        return selector == kAudioHardwarePropertyProcessObjectList || selector == kAudioHardwarePropertyTapList
-      }
-      guard observed else { return }
+  private func addRouterObservationListeners() -> [CleanupDegradation] {
+    guard !isShuttingDown else { return [] }
+    let degradations = routerObservationListeners.install { [weak self] in
       Task { [weak self] in await self?.markRouterObservationDirty() }
     }
-    for selector in [kAudioHardwarePropertyProcessObjectList, kAudioHardwarePropertyTapList] {
-      var address = AudioObjectPropertyAddress(
-        mSelector: selector,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-      )
-      if AudioObjectAddPropertyListenerBlock(
-        AudioObjectID(kAudioObjectSystemObject),
-        &address,
-        routerObservationQueue,
-        listenerBlock
-      ) == noErr {
-        routerObservationListenerSelectors.append(selector)
-      }
+    if degradations.isEmpty, !routerObservationListeners.requiresFallbackReobservation {
+      routerObservationListenerFailureDetail = nil
+    } else if let degradation = degradations.first {
+      routerObservationListenerFailureDetail =
+        "Waves could not attach a router observation listener (OSStatus: \(degradation.nativeStatus ?? -1)). Re-observing every second until listeners attach."
     }
-    if !routerObservationListenerSelectors.isEmpty { routerObservationListenerBlock = listenerBlock }
+    refreshGlobalRouteHealth()
+    return degradations
   }
 
   private func removeRouterObservationListeners() -> [CleanupDegradation] {
-    guard let listenerBlock = routerObservationListenerBlock else { return [] }
-    var observations: [CleanupStatusObservation] = []
-    for selector in routerObservationListenerSelectors {
-      var address = AudioObjectPropertyAddress(
-        mSelector: selector,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-      )
-      observations.append(
-        CleanupStatusObservation(
-          stage: .listenerRemoval,
-          nativeStatus: AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, routerObservationQueue, listenerBlock
-          ),
-          detail: "Remove router observation listener selector \(selector)"
-        ))
+    routerObservationListeners.remove()
+  }
+
+  private func performRouteMaintenance(
+    forceRebuildIDs: Set<String> = [],
+    geometryRecoveryIDs: Set<String> = []
+  ) async {
+    if let routeMaintenanceOverride {
+      await routeMaintenanceOverride(forceRebuildIDs, geometryRecoveryIDs)
+      return
     }
-    routerObservationListenerSelectors.removeAll()
-    routerObservationListenerBlock = nil
-    return checkedCleanupDegradations(from: observations)
+    await maintainManagedRoutes(
+      forceRebuildIDs: forceRebuildIDs,
+      geometryRecoveryIDs: geometryRecoveryIDs
+    )
   }
 
   private func markRouterObservationDirty() {
@@ -3794,7 +3930,7 @@ private final class TapRenderStateBox {
   }
 }
 
-private final class PerAppTapController: @unchecked Sendable {
+final class PerAppTapController: @unchecked Sendable {
   let appID: String
   let appName: String
   let targetProcessObjectIDs: [AudioObjectID]
@@ -3884,6 +4020,45 @@ private final class PerAppTapController: @unchecked Sendable {
     )
     self.stateBox = TapRenderStateBox(initialState: initialState)
     self.callbackQueue.setSpecific(key: callbackQueueKey, value: callbackQueueToken)
+  }
+
+  static func testingController(appID: String) throws -> PerAppTapController {
+    let description = CATapDescription(stereoMixdownOfProcesses: [])
+    description.name = "Waves-Testing"
+    description.uuid = UUID()
+    description.muteBehavior = .mutedWhenTapped
+    description.isPrivate = true
+    guard
+      let format = AudioFormatPlan(
+        sampleFormat: .float32,
+        sampleRate: 48_000,
+        channelCount: 2,
+        isInterleaved: true,
+        bytesPerSample: 4,
+        bytesPerFrame: 8
+      )
+    else {
+      throw BackendError.managedRouteUnavailable("Could not make a test audio format.")
+    }
+    return try PerAppTapController(
+      appID: appID,
+      appName: "Testing",
+      targetProcessObjectIDs: [],
+      tapDescription: description,
+      tapID: .unknown,
+      aggregateDeviceID: .unknown,
+      volume: 1,
+      volumeBoost: 1,
+      muted: false,
+      equalizerSettings: EqualizerSettings(),
+      managedAudioEqualizerSettings: GlobalEqualizerSettings(),
+      adaptiveGainDB: 0,
+      audioFormatPlan: format
+    )
+  }
+
+  func flagGeometryMismatchForTesting() {
+    stateBox.flagGeometryMismatch()
   }
 
   var isActive: Bool {
@@ -4324,6 +4499,16 @@ private final class PerAppTapController: @unchecked Sendable {
             stage: .ioProcStop,
             nativeStatus: preparation.ioProcStopStatus,
             detail: "Stop controller IO proc"
+          )
+        )
+      }
+      if let degradation = preparation.cleanupDegradation(appID: appID) {
+        observations.append(
+          CleanupStatusObservation(
+            appID: degradation.appID,
+            stage: degradation.stage,
+            nativeStatus: degradation.nativeStatus ?? preparation.tapMuteRestoreStatus ?? -1,
+            detail: degradation.detail
           )
         )
       }

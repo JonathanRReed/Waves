@@ -234,6 +234,7 @@ private func degradedOutcome(
   // newer one, and bug reports quote them.
   let names = [
     CleanupStage.authorizationProbe,
+    .listenerInstallation,
     .listenerRemoval,
     .ioProcStop,
     .ioProcDestroy,

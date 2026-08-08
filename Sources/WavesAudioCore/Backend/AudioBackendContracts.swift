@@ -149,6 +149,7 @@ public struct OutputDeviceReadiness: Hashable, Sendable {
 
 public enum CleanupStage: Hashable, Sendable {
   case authorizationProbe
+  case listenerInstallation
   case listenerRemoval
   case ioProcStop
   case ioProcDestroy
@@ -163,6 +164,7 @@ public enum CleanupStage: Hashable, Sendable {
   public var name: String {
     switch self {
     case .authorizationProbe: "authorizationProbe"
+    case .listenerInstallation: "listenerInstallation"
     case .listenerRemoval: "listenerRemoval"
     case .ioProcStop: "ioProcStop"
     case .ioProcDestroy: "ioProcDestroy"
