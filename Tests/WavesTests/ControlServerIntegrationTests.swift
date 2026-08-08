@@ -93,6 +93,29 @@ import Testing
   #expect(fixture.server.connectionCount == 1)
 }
 
+@MainActor
+@Test func unsubscribingRearmsTheRealSocketIdleTimeout() async throws {
+  let fixture = await ControlSocketFixture.make(
+    timeouts: ControlConnectionTimeouts(handshake: .milliseconds(100), idle: .milliseconds(80)))
+  defer { fixture.stop() }
+  try fixture.server.start()
+
+  let client = try ControlSocketClient(path: fixture.url.path)
+  defer { client.close() }
+  try client.write(
+    "{\"id\":1,\"cmd\":\"hello\",\"protocol\":1}\n{\"id\":2,\"cmd\":\"subscribe\"}\n")
+  #expect((try await client.readLine()).contains(#""id":1"#))
+  #expect((try await client.readLine()).contains(#""id":2"#))
+
+  try? await Task.sleep(for: .milliseconds(160))
+  #expect(fixture.server.connectionCount == 1)
+
+  try client.write("{\"id\":3,\"cmd\":\"unsubscribe\"}\n")
+  #expect((try await client.readLine()).contains(#""id":3"#))
+  #expect(await client.reachesEOF(timeout: .milliseconds(500)))
+  #expect(fixture.server.connectionCount == 0)
+}
+
 @Test func validUnsubscribedActivityRefreshesThenExpiresTheIdleDeadline() {
   var deadline = ControlConnectionDeadline(
     timeouts: ControlConnectionTimeouts(handshake: .seconds(5), idle: .seconds(30)))
@@ -318,8 +341,8 @@ private final class ControlSocketClient {
     throw POSIXError(.ETIMEDOUT)
   }
 
-  func reachesEOF() async -> Bool {
-    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+  func reachesEOF(timeout: Duration = .seconds(5)) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: timeout)
     while ContinuousClock.now < deadline {
       var bytes = [UInt8](repeating: 0, count: 64)
       let count = read(fd, &bytes, bytes.count)

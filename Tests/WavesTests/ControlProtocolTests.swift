@@ -53,6 +53,33 @@ import WavesAudioCore
   }
 }
 
+@Test func codecEnforcesTheLimitPerFrameInsteadOfPerRead() throws {
+  var codec = ControlCodec()
+  let validPrefix = Data(repeating: 0x41, count: ControlProtocol.maximumLineBytes - 1)
+  #expect(try codec.append(validPrefix).isEmpty)
+
+  // A kernel read may complete the current near-limit frame and include the
+  // next frame. The aggregate read buffer is larger than one frame, but neither
+  // individual frame is oversized.
+  let lines = try codec.append(Data("\n{}\n".utf8))
+  #expect(lines == [validPrefix, Data("{}".utf8)])
+}
+
+@Test func codecRejectsOversizedCompletedFramesAndUnterminatedTails() {
+  var completed = ControlCodec()
+  let oversizedFrame =
+    Data(repeating: 0x41, count: ControlProtocol.maximumLineBytes + 1) + Data("\n{}\n".utf8)
+  #expect(throws: ControlCodecError.lineTooLong) {
+    _ = try completed.append(oversizedFrame)
+  }
+
+  var unterminated = ControlCodec()
+  let oversizedTail = Data(repeating: 0x41, count: ControlProtocol.maximumLineBytes + 1)
+  #expect(throws: ControlCodecError.lineTooLong) {
+    _ = try unterminated.append(oversizedTail)
+  }
+}
+
 @Test func decodingRejectsUnknownCommands() {
   // The command set is closed, so an unknown verb dies at the decoder and never
   // reaches a handler.

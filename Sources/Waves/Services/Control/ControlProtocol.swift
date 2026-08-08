@@ -181,21 +181,27 @@ struct ControlCodec {
   /// correctly will not recover, and buffering more would be the memory
   /// exhaustion the cap exists to prevent.
   mutating func append(_ data: Data) throws -> [Data] {
-    guard buffer.count + data.count <= ControlProtocol.maximumLineBytes else {
-      throw ControlCodecError.lineTooLong
-    }
     buffer.append(data)
 
     var lines: [Data] = []
-    while let newline = buffer.firstIndex(of: 0x0A) {
-      let line = buffer[buffer.startIndex..<newline]
-      buffer = buffer[buffer.index(after: newline)...]
+    var lineStart = buffer.startIndex
+    while let newline = buffer[lineStart...].firstIndex(of: 0x0A) {
+      let line = buffer[lineStart..<newline]
+      guard line.count <= ControlProtocol.maximumLineBytes else {
+        throw ControlCodecError.lineTooLong
+      }
       // Tolerate CRLF and skip blank keepalive lines rather than erroring.
       var trimmed = Data(line)
       if trimmed.last == 0x0D { trimmed.removeLast() }
       if !trimmed.isEmpty { lines.append(trimmed) }
+      lineStart = buffer.index(after: newline)
     }
-    buffer = Data(buffer)
+
+    let tail = buffer[lineStart...]
+    guard tail.count <= ControlProtocol.maximumLineBytes else {
+      throw ControlCodecError.lineTooLong
+    }
+    buffer = Data(tail)
     return lines
   }
 
