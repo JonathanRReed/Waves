@@ -1607,6 +1607,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       try ensureGenerationCurrent(generationContext)
     }
     let processObjectIDs = try resolveProcessObjectIDs(for: app)
+    let targetProcessFamily = TargetProcessFamily(
+      logicalID: app.logicalID,
+      processObjectIDs: processObjectIDs
+    )
     let stagedEqualizer =
       equalizerSettings
       ?? equalizerSettingsByAppID[app.logicalID]
@@ -1618,7 +1622,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if !forceRebuild,
       let controller = controllers[app.id],
       controller.isActive,
-      controller.covers(processObjectIDs)
+      controller.covers(targetProcessFamily)
     {
       if let generationContext {
         try ensureGenerationCurrent(generationContext)
@@ -1834,6 +1838,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       let controller = try PerAppTapController(
         appID: app.id,
         appName: app.displayName,
+        logicalID: app.logicalID,
         targetProcessObjectIDs: processObjectIDs,
         tapDescription: tapDescription,
         tapID: tapID,
@@ -3464,7 +3469,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         if !shouldForceRebuild,
           let controller = controllers[app.id],
           controller.isActive,
-          controller.covers(processObjectIDs)
+          controller.covers(
+            TargetProcessFamily(logicalID: app.logicalID, processObjectIDs: processObjectIDs)
+          )
         {
           continue
         }
@@ -3933,7 +3940,10 @@ struct PerAppTapControllerTeardownNativeCalls: Sendable {
 final class PerAppTapController: @unchecked Sendable {
   let appID: String
   let appName: String
-  let targetProcessObjectIDs: [AudioObjectID]
+  let targetProcessFamily: TargetProcessFamily
+  var targetProcessObjectIDs: [AudioObjectID] {
+    targetProcessFamily.processObjectIDs.sorted()
+  }
   /// Cleared once its destroy succeeds. Core Audio reuses object IDs, so an ID
   /// that has already been released must never be destroyed a second time — it
   /// may by then belong to something else entirely. Only matters because a
@@ -3968,6 +3978,7 @@ final class PerAppTapController: @unchecked Sendable {
   init(
     appID: String,
     appName: String,
+    logicalID: String,
     targetProcessObjectIDs: [AudioObjectID],
     tapDescription: CATapDescription,
     tapID: AudioObjectID,
@@ -3983,7 +3994,10 @@ final class PerAppTapController: @unchecked Sendable {
   ) throws {
     self.appID = appID
     self.appName = appName
-    self.targetProcessObjectIDs = targetProcessObjectIDs
+    self.targetProcessFamily = TargetProcessFamily(
+      logicalID: logicalID,
+      processObjectIDs: targetProcessObjectIDs
+    )
     self.tapDescription = tapDescription
     self.tapID = tapID
     self.aggregateDeviceID = aggregateDeviceID
@@ -4051,6 +4065,7 @@ final class PerAppTapController: @unchecked Sendable {
     return try PerAppTapController(
       appID: appID,
       appName: "Testing",
+      logicalID: appID,
       targetProcessObjectIDs: [],
       tapDescription: description,
       tapID: .unknown,
@@ -4074,17 +4089,17 @@ final class PerAppTapController: @unchecked Sendable {
     stateBox.read().isActive != 0 && ioProcID != nil && aggregateDeviceID != .unknown
   }
 
-  func matches(_ processObjectIDs: [AudioObjectID]) -> Bool {
-    targetProcessObjectIDs == processObjectIDs
+  func matches(_ target: TargetProcessFamily) -> Bool {
+    targetProcessFamily.matches(target)
   }
 
   /// Whether this controller's existing tap already captures every process in
-  /// `processObjectIDs`. Used so a parameter-only change (volume/mute/boost) on a
+  /// `target`. Used so a parameter-only change (volume/mute/boost) on a
   /// browser/Electron app — whose audible helper PIDs churn between calls — reuses
   /// the live tap instead of tearing it down, while still rebuilding when a *new*
   /// audio-producing process appears that the current tap doesn't cover.
-  func covers(_ processObjectIDs: [AudioObjectID]) -> Bool {
-    Set(processObjectIDs).isSubset(of: Set(targetProcessObjectIDs))
+  func covers(_ target: TargetProcessFamily) -> Bool {
+    targetProcessFamily.covers(target)
   }
 
   func apply(volume: Float, volumeBoost: Float, muted: Bool) {
