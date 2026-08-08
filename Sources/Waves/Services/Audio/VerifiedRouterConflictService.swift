@@ -78,6 +78,61 @@ struct VerifiedRouterConflict: Hashable, Sendable {
   let detail: String
 }
 
+struct VerifiedRouterActivitySnapshot: Sendable {
+  private let routers: [VerifiedRouter]
+  private let processObjects: [VerifiedRouterProcessObject]
+  private let routerBundleIdentifiers: Set<String>
+
+  init(
+    routers: [VerifiedRouter],
+    processObjects: [VerifiedRouterProcessObject],
+    routerBundleIdentifiers: Set<String>
+  ) {
+    self.routers = routers
+    self.processObjects = processObjects
+    self.routerBundleIdentifiers = routerBundleIdentifiers
+  }
+
+  func conflict(for app: AudioApp) -> VerifiedRouterConflict? {
+    guard let targetPID = app.pid else { return nil }
+    guard processObjects.contains(where: { $0.pid == targetPID && $0.isRunningOutput }) else {
+      return nil
+    }
+
+    if let router = routers.first(where: { $0.pid == targetPID }) {
+      return VerifiedRouterConflict(
+        routerName: router.descriptor.displayName,
+        kind: .routerMixedOutput,
+        detail:
+          "\(router.descriptor.displayName)'s mixed output can carry every monitored app. "
+          + "Waves leaves this router untouched so one nested route cannot duplicate or silence the whole mix. "
+          + "Control the upstream apps inside \(router.descriptor.displayName)."
+      )
+    }
+
+    if let bundleID = app.bundleID, routerBundleIdentifiers.contains(bundleID) {
+      return nil
+    }
+
+    if let router = routers.sorted(by: { $0.pid < $1.pid }).first {
+      let ambiguityDetail =
+        routers.count > 1
+        ? " Waves found more than one verified routing process, so it cannot narrow the affected app safely."
+        : ""
+      return VerifiedRouterConflict(
+        routerName: router.descriptor.displayName,
+        kind: .unattributableTapFallback,
+        detail:
+          "Core Audio cannot publicly attribute the system tap list to verified \(router.descriptor.displayName). "
+          + "Because its verified routing process owns active Core Audio output, Waves is monitoring only to avoid "
+          + "duplicate or silent playback until that router releases the path.\(ambiguityDetail)"
+      )
+    }
+
+    return nil
+  }
+}
+
 /// Produces route conflicts only from a current Core Audio snapshot and a
 /// Security.framework validation of the same running router PID. It is called
 /// by backend maintenance and route setup, never by the audio render callback.
@@ -100,11 +155,21 @@ final class VerifiedRouterConflictService: @unchecked Sendable {
   }
 
   func conflict(for app: AudioApp) -> VerifiedRouterConflict? {
-    guard let targetPID = app.pid else { return nil }
+    activitySnapshot().conflict(for: app)
+  }
 
+  /// Produces one immutable verified-router activity view for a route setup or
+  /// maintenance pass. Consumers must reuse it for every target in that pass.
+  func activitySnapshot() -> VerifiedRouterActivitySnapshot {
     let initialSnapshot = snapshotProvider()
     let initialRouters = verifiedRouters(in: initialSnapshot)
-    guard !initialRouters.isEmpty else { return nil }
+    guard !initialRouters.isEmpty else {
+      return VerifiedRouterActivitySnapshot(
+        routers: [],
+        processObjects: initialSnapshot.processObjects,
+        routerBundleIdentifiers: Set(descriptors.map(\.bundleIdentifier))
+      )
+    }
 
     // Refresh Core Audio after Security checked the guest code. A pid can be
     // recycled, and a process object can disappear between reads. Requiring the
@@ -115,56 +180,11 @@ final class VerifiedRouterConflictService: @unchecked Sendable {
       in: currentSnapshot,
       constrainedTo: initialRouters
     )
-    guard !currentRouters.isEmpty else { return nil }
-    guard
-      currentSnapshot.processObjects.contains(where: {
-        $0.pid == targetPID && $0.isRunningOutput
-      })
-    else {
-      return nil
-    }
-
-    if let router = currentRouters.first(where: { $0.pid == targetPID }) {
-      return VerifiedRouterConflict(
-        routerName: router.descriptor.displayName,
-        kind: .routerMixedOutput,
-        detail:
-          "\(router.descriptor.displayName)'s mixed output can carry every monitored app. "
-          + "Waves leaves this router untouched so one nested route cannot duplicate or silence the whole mix. "
-          + "Control the upstream apps inside \(router.descriptor.displayName)."
-      )
-    }
-
-    // Bundle metadata is never a positive identity signal. It is only used
-    // here to preserve the spoofing boundary: an unverified process that
-    // claims Wave Link's bundle identifier must not turn the fallback into a
-    // way to disable an unrelated route.
-    if descriptors.contains(where: { $0.bundleIdentifier == app.bundleID }) {
-      return nil
-    }
-
-    // kAudioHardwarePropertyTapList is system-wide. The public description has
-    // no creator PID or other stable router association, so even a readable
-    // membership cannot honestly identify the tap as Wave Link's. Do not turn
-    // a verified Wave Link PID plus an arbitrary system tap into a claim about
-    // this target. Instead, use only the verified router's active Core Audio
-    // output as the conservative coexistence signal.
-    if let router = currentRouters.sorted(by: { $0.pid < $1.pid }).first {
-      let ambiguityDetail =
-        currentRouters.count > 1
-        ? " Waves found more than one verified routing process, so it cannot narrow the affected app safely."
-        : ""
-      return VerifiedRouterConflict(
-        routerName: router.descriptor.displayName,
-        kind: .unattributableTapFallback,
-        detail:
-          "Core Audio cannot publicly attribute the system tap list to verified \(router.descriptor.displayName). "
-          + "Because its verified routing process owns active Core Audio output, Waves is monitoring only to avoid "
-          + "duplicate or silent playback until that router releases the path.\(ambiguityDetail)"
-      )
-    }
-
-    return nil
+    return VerifiedRouterActivitySnapshot(
+      routers: currentRouters,
+      processObjects: currentSnapshot.processObjects,
+      routerBundleIdentifiers: Set(descriptors.map(\.bundleIdentifier))
+    )
   }
 
   private func verifiedRouters(
@@ -192,7 +212,7 @@ final class VerifiedRouterConflictService: @unchecked Sendable {
 
 }
 
-private struct VerifiedRouter: Hashable, Sendable {
+struct VerifiedRouter: Hashable, Sendable {
   let descriptor: VerifiedRouterDescriptor
   let pid: pid_t
   let processObjectID: AudioObjectID

@@ -376,15 +376,20 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   typealias ShutdownCleanupOverride = @Sendable () -> [CleanupDegradation]
   typealias RouteMaintenanceOverride = @Sendable (Set<String>, Set<String>) async -> Void
   typealias VerifiedRouterConflictProvider = @Sendable (AudioApp) -> VerifiedRouterConflict?
+  typealias VerifiedRouterActivityProvider = @Sendable () -> VerifiedRouterActivitySnapshot
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
   private let routeMaintenanceOverride: RouteMaintenanceOverride?
   private let verifiedRouterConflictProvider: VerifiedRouterConflictProvider?
+  private let verifiedRouterActivityProvider: VerifiedRouterActivityProvider?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   private nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
 
-  init(verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil) {
+  init(
+    verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
+    verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil
+  ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
     self.deviceChangeContinuation = continuation
@@ -392,6 +397,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.shutdownCleanupOverride = nil
     self.routeMaintenanceOverride = nil
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
+    self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
     )
@@ -403,6 +409,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     intentRouteApplyOverride: @escaping IntentRouteApplyOverride,
     shutdownCleanupOverride: ShutdownCleanupOverride? = nil,
     verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
+    verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil,
     routerObservationNativeCalls: RouterObservationListenerNativeCalls? = nil,
     testingControllers: [PerAppTapController] = [],
     routeMaintenanceOverride: RouteMaintenanceOverride? = nil
@@ -416,6 +423,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.shutdownCleanupOverride = shutdownCleanupOverride
     self.routeMaintenanceOverride = routeMaintenanceOverride
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
+    self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: routerObservationNativeCalls
         ?? .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
@@ -1441,13 +1449,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     muted: Bool,
     forceRebuild: Bool = false,
     equalizerSettings: EqualizerSettings? = nil,
-    generationContext: IntentGenerationContext? = nil
+    generationContext: IntentGenerationContext? = nil,
+    routerActivity: VerifiedRouterActivitySnapshot? = nil
   ) async throws {
     try ensureAcceptingOperations()
     guard supportsPerAppRouting else {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
     }
-    if let detail = competingAudioRouterConflictDetail(for: app) {
+    if let detail = competingAudioRouterConflictDetail(for: app, routerActivity: routerActivity) {
       throw BackendError.unsupportedOperation(detail)
     }
 
@@ -3075,7 +3084,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // Most of the app's lifetime has no managed renderers. Avoid rescanning the
     // entire app snapshot four times per second when there is nothing a router
     // conflict could suspend.
-    let routerReleasedRouteIDs = observeCompetingRouterConflicts(at: now)
+    let routerActivity = verifiedRouterActivityProvider?()
+    let routerReleasedRouteIDs = observeCompetingRouterConflicts(
+      at: now,
+      routerActivity: routerActivity
+    )
     // With no controllers left there are no levels to read — but there may still
     // be a parked teardown to retry, and that is exactly the case where one
     // exists: disposing the last controller removes it from `controllers` before
@@ -3087,7 +3100,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       if routeMaintenanceTick >= routeMaintenanceTickInterval || !routerReleasedRouteIDs.isEmpty {
         routeMaintenanceTick = 0
         retryOrphanedControllerDisposals()
-        await performRouteMaintenance(forceRebuildIDs: routerReleasedRouteIDs)
+        await performRouteMaintenance(
+          forceRebuildIDs: routerReleasedRouteIDs,
+          routerActivity: routerActivity
+        )
       }
       return
     }
@@ -3185,15 +3201,19 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       retryOrphanedControllerDisposals()
       await performRouteMaintenance(
         forceRebuildIDs: routeIDsNeedingRebuild,
-        geometryRecoveryIDs: geometryRecoveryRouteIDs
+        geometryRecoveryIDs: geometryRecoveryRouteIDs,
+        routerActivity: routerActivity
       )
     }
   }
 
-  private func competingAudioRouterConflictDetail(for app: AudioApp) -> String? {
+  private func competingAudioRouterConflictDetail(
+    for app: AudioApp,
+    routerActivity: VerifiedRouterActivitySnapshot? = nil
+  ) -> String? {
     CompetingRouterPolicy.conflictDetail(
       for: app,
-      conflict: verifiedRouterConflictProvider?(app)
+      conflict: routerActivity?.conflict(for: app) ?? verifiedRouterConflictProvider?(app)
     )
   }
 
@@ -3212,12 +3232,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].notes = detail
   }
 
-  private func observeCompetingRouterConflicts(at now: Duration) -> Set<String> {
+  private func observeCompetingRouterConflicts(
+    at now: Duration,
+    routerActivity: VerifiedRouterActivitySnapshot?
+  ) -> Set<String> {
     var recoveredRouteIDs = Set<String>()
     var changed = false
     for index in snapshot.apps.indices {
       let app = snapshot.apps[index]
-      let detail = competingAudioRouterConflictDetail(for: app)
+      let detail = competingAudioRouterConflictDetail(for: app, routerActivity: routerActivity)
       var observation = routerConflictObservationByRuntimeID[app.id] ?? RouterConflictObservationDebouncer()
       let action: RouterConflictObservationAction
       if routerObservationGeneration != consumedRouterObservationGeneration {
@@ -3272,7 +3295,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func performRouteMaintenance(
     forceRebuildIDs: Set<String> = [],
-    geometryRecoveryIDs: Set<String> = []
+    geometryRecoveryIDs: Set<String> = [],
+    routerActivity: VerifiedRouterActivitySnapshot? = nil
   ) async {
     if let routeMaintenanceOverride {
       await routeMaintenanceOverride(forceRebuildIDs, geometryRecoveryIDs)
@@ -3280,7 +3304,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     await maintainManagedRoutes(
       forceRebuildIDs: forceRebuildIDs,
-      geometryRecoveryIDs: geometryRecoveryIDs
+      geometryRecoveryIDs: geometryRecoveryIDs,
+      routerActivity: routerActivity
     )
   }
 
@@ -3290,7 +3315,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func maintainManagedRoutes(
     forceRebuildIDs: Set<String> = [],
-    geometryRecoveryIDs: Set<String> = []
+    geometryRecoveryIDs: Set<String> = [],
+    routerActivity: VerifiedRouterActivitySnapshot? = nil
   ) async {
     guard !isShuttingDown else { return }
     let managedIDs = snapshot.apps
@@ -3326,7 +3352,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           for: app,
           toVolume: app.desiredVolume,
           muted: app.isMuted,
-          forceRebuild: shouldForceRebuild
+          forceRebuild: shouldForceRebuild,
+          routerActivity: routerActivity
         )
 
         if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {

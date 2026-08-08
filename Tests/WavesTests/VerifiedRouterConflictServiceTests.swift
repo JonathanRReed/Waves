@@ -246,9 +246,85 @@ import WavesAudioCore
   #expect(allRequirementsAreConstructible)
 }
 
+@Test func verifiedRouterActivitySnapshotScansOnceForMultipleApps() {
+  let scans = RouterActivityScanCounter()
+  let snapshot = VerifiedRouterObservationSnapshot(
+    processObjects: [
+      .init(id: 1, pid: 101, isRunningOutput: true),
+      .init(id: 2, pid: 202, isRunningOutput: true),
+    ],
+    taps: []
+  )
+  let service = VerifiedRouterConflictService(
+    descriptors: [.waveLink3_2_2],
+    snapshotProvider: {
+      scans.increment()
+      return snapshot
+    },
+    identityVerifier: { pid, _ in
+      guard pid == 202 else { return nil }
+      return .init(pid: pid, teamIdentifier: "Y93VXCB8Q5", matchesDesignatedRequirement: true)
+    }
+  )
+
+  let activity = service.activitySnapshot()
+  let first = routerTestApp(id: "first", pid: 101)
+  let second = routerTestApp(id: "second", pid: 303)
+
+  #expect(scans.value == 2)
+  #expect(activity.conflict(for: first)?.kind == .unattributableTapFallback)
+  #expect(activity.conflict(for: second) == nil)
+  #expect(scans.value == 2)
+}
+
+@Test func backendPrecomputesVerifiedRouterActivityOnceForMultipleApps() async {
+  let scans = RouterActivityScanCounter()
+  let observed = VerifiedRouterObservationSnapshot(
+    processObjects: [
+      .init(id: 1, pid: 101, isRunningOutput: true),
+      .init(id: 2, pid: 202, isRunningOutput: true),
+      .init(id: 3, pid: 303, isRunningOutput: true),
+    ],
+    taps: []
+  )
+  let service = VerifiedRouterConflictService(
+    descriptors: [.waveLink3_2_2],
+    snapshotProvider: {
+      scans.increment()
+      return observed
+    },
+    identityVerifier: { pid, _ in
+      guard pid == 202 else { return nil }
+      return .init(pid: pid, teamIdentifier: "Y93VXCB8Q5", matchesDesignatedRequirement: true)
+    }
+  )
+  let first = routerTestApp(id: "first", pid: 101)
+  let second = routerTestApp(id: "second", pid: 303)
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: AudioSessionSnapshot(
+      apps: [first, second],
+      currentDevice: nil,
+      recentDeviceIDs: [],
+      supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(
+        isAudioComponentInstalled: true,
+        hasRequiredPermissions: true,
+        isRouteRecoveryHealthy: true
+      )
+    ),
+    intentRouteApplyOverride: { _, _ in },
+    verifiedRouterActivityProvider: { service.activitySnapshot() }
+  )
+
+  await backend.updateAudioLevels(at: .zero)
+
+  #expect(scans.value == 2)
+}
+
 @MainActor
 @Test func liveCompositionPassesTheVerifiedProviderToItsBackendFactory() async {
   var capturedProvider: WorkspaceAudioControlBackend.VerifiedRouterConflictProvider?
+  var capturedActivityProvider: WorkspaceAudioControlBackend.VerifiedRouterActivityProvider?
   let target = routerTestApp(id: "target", pid: 101)
   _ = WavesComposition.makeLiveBackend(
     serviceFactory: {
@@ -262,17 +338,20 @@ import WavesAudioCore
         )
       )
     },
-    backendFactory: { provider in
+    backendFactory: { provider, activityProvider in
       capturedProvider = provider
+      capturedActivityProvider = activityProvider
       return WorkspaceAudioControlBackend(
         testingSnapshot: .empty,
         intentRouteApplyOverride: { _, _ in },
-        verifiedRouterConflictProvider: provider
+        verifiedRouterConflictProvider: provider,
+        verifiedRouterActivityProvider: activityProvider
       )
     }
   )
 
   #expect(capturedProvider?(target)?.kind == .unattributableTapFallback)
+  #expect(capturedActivityProvider?().conflict(for: target)?.kind == .unattributableTapFallback)
 }
 
 private func verifiedRouterService(
@@ -298,4 +377,14 @@ private func routerTestApp(id: String, pid: Int32) -> AudioApp {
     routingState: .managed,
     compatibility: .supported
   )
+}
+
+private final class RouterActivityScanCounter: @unchecked Sendable {
+  private var count = 0
+
+  var value: Int { count }
+
+  func increment() {
+    count += 1
+  }
 }

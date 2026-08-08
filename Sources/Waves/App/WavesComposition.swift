@@ -5,21 +5,26 @@ struct WavesComposition {
   let makeStore: @MainActor () -> AppStore
 
   typealias LiveBackendFactory = (
-    @escaping WorkspaceAudioControlBackend.VerifiedRouterConflictProvider
+    @escaping WorkspaceAudioControlBackend.VerifiedRouterConflictProvider,
+    @escaping WorkspaceAudioControlBackend.VerifiedRouterActivityProvider
   ) -> WorkspaceAudioControlBackend
 
   static let live = makeLive()
 
   static func makeLiveBackend(
     serviceFactory: () -> VerifiedRouterConflictService = { VerifiedRouterConflictService() },
-    backendFactory: LiveBackendFactory = { provider in
-      WorkspaceAudioControlBackend(verifiedRouterConflictProvider: provider)
+    backendFactory: LiveBackendFactory = { conflictProvider, activityProvider in
+      WorkspaceAudioControlBackend(
+        verifiedRouterConflictProvider: conflictProvider,
+        verifiedRouterActivityProvider: activityProvider
+      )
     }
   ) -> WorkspaceAudioControlBackend {
     let service = serviceFactory()
-    return backendFactory { app in
-      service.conflict(for: app)
-    }
+    return backendFactory(
+      { app in service.conflict(for: app) },
+      { service.activitySnapshot() }
+    )
   }
 
   static func makeLive() -> WavesComposition {
