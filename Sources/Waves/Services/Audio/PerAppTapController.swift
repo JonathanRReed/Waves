@@ -10,6 +10,25 @@ struct PerAppTapControllerTeardownNativeCalls: Sendable {
   let makeOriginalAudioAudible: @Sendable () -> OSStatus
   let stopIOProc: @Sendable () -> OSStatus
   let restoreTapMuting: @Sendable () -> OSStatus
+  let destroyIOProc: @Sendable (AudioObjectID, AudioDeviceIOProcID) -> OSStatus
+  let destroyAggregateDevice: @Sendable (AudioObjectID) -> OSStatus
+  let destroyProcessTap: @Sendable (AudioObjectID) -> OSStatus
+
+  init(
+    makeOriginalAudioAudible: @escaping @Sendable () -> OSStatus,
+    stopIOProc: @escaping @Sendable () -> OSStatus,
+    restoreTapMuting: @escaping @Sendable () -> OSStatus,
+    destroyIOProc: @escaping @Sendable (AudioObjectID, AudioDeviceIOProcID) -> OSStatus = { _, _ in noErr },
+    destroyAggregateDevice: @escaping @Sendable (AudioObjectID) -> OSStatus = { _ in noErr },
+    destroyProcessTap: @escaping @Sendable (AudioObjectID) -> OSStatus = { _ in noErr }
+  ) {
+    self.makeOriginalAudioAudible = makeOriginalAudioAudible
+    self.stopIOProc = stopIOProc
+    self.restoreTapMuting = restoreTapMuting
+    self.destroyIOProc = destroyIOProc
+    self.destroyAggregateDevice = destroyAggregateDevice
+    self.destroyProcessTap = destroyProcessTap
+  }
 }
 
 final class PerAppTapController: @unchecked Sendable {
@@ -37,6 +56,7 @@ final class PerAppTapController: @unchecked Sendable {
   private let callbackQueueToken = UUID()
   private var ioProcID: AudioDeviceIOProcID?
   private var didStartIOProc = false
+  private let testingIsActive: Bool
   private let disposeOnce = IdempotentCleanupResult()
   private var retainedCleanupDegradations: [CleanupDegradation] = []
   private var equalizerSettings: EqualizerSettings
@@ -65,7 +85,8 @@ final class PerAppTapController: @unchecked Sendable {
     managedAudioEqualizerSettings: GlobalEqualizerSettings,
     adaptiveGainDB: Float,
     audioFormatPlan: AudioFormatPlan,
-    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls? = nil
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls? = nil,
+    testingIsActive: Bool = false
   ) throws {
     self.appID = appID
     self.appName = appName
@@ -78,6 +99,7 @@ final class PerAppTapController: @unchecked Sendable {
     self.aggregateDeviceID = aggregateDeviceID
     self.audioFormatPlan = audioFormatPlan
     self.teardownNativeCalls = teardownNativeCalls
+    self.testingIsActive = testingIsActive
     self.equalizerDSP = EqualizerDSP(
       sampleRate: audioFormatPlan.sampleRate,
       channelCount: audioFormatPlan.channelCount,
@@ -118,6 +140,8 @@ final class PerAppTapController: @unchecked Sendable {
 
   static func testingController(
     appID: String,
+    logicalID: String? = nil,
+    targetProcessObjectIDs: [AudioObjectID] = [],
     teardownNativeCalls: PerAppTapControllerTeardownNativeCalls? = nil
   ) throws -> PerAppTapController {
     let description = CATapDescription(stereoMixdownOfProcesses: [])
@@ -140,11 +164,11 @@ final class PerAppTapController: @unchecked Sendable {
     return try PerAppTapController(
       appID: appID,
       appName: "Testing",
-      logicalID: appID,
-      targetProcessObjectIDs: [],
+      logicalID: logicalID ?? appID,
+      targetProcessObjectIDs: targetProcessObjectIDs,
       tapDescription: description,
-      tapID: .unknown,
-      aggregateDeviceID: .unknown,
+      tapID: 10_001,
+      aggregateDeviceID: 10_002,
       volume: 1,
       volumeBoost: 1,
       muted: false,
@@ -152,7 +176,8 @@ final class PerAppTapController: @unchecked Sendable {
       managedAudioEqualizerSettings: GlobalEqualizerSettings(),
       adaptiveGainDB: 0,
       audioFormatPlan: format,
-      teardownNativeCalls: teardownNativeCalls
+      teardownNativeCalls: teardownNativeCalls,
+      testingIsActive: true
     )
   }
 
@@ -161,7 +186,8 @@ final class PerAppTapController: @unchecked Sendable {
   }
 
   var isActive: Bool {
-    stateBox.read().isActive != 0 && ioProcID != nil && aggregateDeviceID != .unknown
+    stateBox.read().isActive != 0
+      && (testingIsActive || (ioProcID != nil && aggregateDeviceID != .unknown))
   }
 
   func matches(_ target: TargetProcessFamily) -> Bool {
@@ -268,6 +294,7 @@ final class PerAppTapController: @unchecked Sendable {
   func start() throws {
     var procID: AudioDeviceIOProcID?
 
+    // REALTIME_CALLBACK_AUDIT_BEGIN callback
     let status = AudioDeviceCreateIOProcIDWithBlock(
       &procID,
       aggregateDeviceID,
@@ -312,6 +339,7 @@ final class PerAppTapController: @unchecked Sendable {
         volumeBoost: volumeBoost
       )
     }
+    // REALTIME_CALLBACK_AUDIT_END callback
 
     if status != noErr {
       if let procID {
@@ -598,7 +626,9 @@ final class PerAppTapController: @unchecked Sendable {
       // Core Audio reuses object IDs, so the second destroy could hit an
       // unrelated device.
       if let procID = ioProcID, aggregateDeviceID != .unknown {
-        let destroyStatus = AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
+        let destroyStatus =
+          teardownNativeCalls?.destroyIOProc(aggregateDeviceID, procID)
+          ?? AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
         observations.append(
           CleanupStatusObservation(
             appID: appID,
@@ -614,7 +644,9 @@ final class PerAppTapController: @unchecked Sendable {
       }
 
       if aggregateDeviceID != .unknown {
-        let destroyStatus = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+        let destroyStatus =
+          teardownNativeCalls?.destroyAggregateDevice(aggregateDeviceID)
+          ?? AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
         observations.append(
           CleanupStatusObservation(
             appID: appID,
@@ -628,7 +660,9 @@ final class PerAppTapController: @unchecked Sendable {
       }
 
       if #available(macOS 14.2, *), tapID != .unknown {
-        let destroyStatus = AudioHardwareDestroyProcessTap(tapID)
+        let destroyStatus =
+          teardownNativeCalls?.destroyProcessTap(tapID)
+          ?? AudioHardwareDestroyProcessTap(tapID)
         observations.append(
           CleanupStatusObservation(
             appID: appID,
@@ -648,6 +682,7 @@ final class PerAppTapController: @unchecked Sendable {
     _ = dispose()
   }
 
+  // REALTIME_CALLBACK_AUDIT_BEGIN validatesCallbackGeometry
   private func validatesCallbackGeometry(
     _ inputData: UnsafePointer<AudioBufferList>?,
     outputData: UnsafeMutablePointer<AudioBufferList>
@@ -689,7 +724,9 @@ final class PerAppTapController: @unchecked Sendable {
     }
     return true
   }
+  // REALTIME_CALLBACK_AUDIT_END validatesCallbackGeometry
 
+  // REALTIME_CALLBACK_AUDIT_BEGIN renderTappedAudio
   private func renderTappedAudio(
     _ inputData: UnsafePointer<AudioBufferList>?,
     to outputData: UnsafeMutablePointer<AudioBufferList>,
@@ -813,7 +850,9 @@ final class PerAppTapController: @unchecked Sendable {
       voiceBandEnergy: voiceBandEnergy.isFinite ? voiceBandEnergy : 0
     )
   }
+  // REALTIME_CALLBACK_AUDIT_END renderTappedAudio
 
+  // REALTIME_CALLBACK_AUDIT_BEGIN zeroOutput
   private func zeroOutput(_ outOutputData: UnsafeMutablePointer<AudioBufferList>) {
     let buffers = UnsafeMutableAudioBufferListPointer(outOutputData)
     for buffer in buffers {
@@ -821,6 +860,7 @@ final class PerAppTapController: @unchecked Sendable {
       memset(data, 0, Int(buffer.mDataByteSize))
     }
   }
+  // REALTIME_CALLBACK_AUDIT_END zeroOutput
 
   private func drainCallbackQueue() {
     if DispatchQueue.getSpecific(key: callbackQueueKey) == callbackQueueToken {

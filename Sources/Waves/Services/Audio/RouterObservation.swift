@@ -95,6 +95,8 @@ final class RouterObservationListenerLifecycle: @unchecked Sendable {
     installedSelectors.count != Self.selectors.count
   }
 
+  var installedSelectorCount: Int { installedSelectors.count }
+
   func install(onObservedChange: @escaping @Sendable () -> Void) -> [CleanupDegradation] {
     if listener == nil {
       listener = RouterObservationListenerBlockReference { count, addresses in

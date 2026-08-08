@@ -24,6 +24,16 @@ struct CleanupStatusObservation: Hashable, Sendable {
   }
 }
 
+/// Read-only ownership view for lifecycle tests. Every value is derived from
+/// the backend's production collections, never maintained as a second model.
+struct AudioBackendLifecycleDebugSnapshot: Equatable, Sendable {
+  let liveControllers: Int
+  let orphanedControllers: Int
+  let retainedCallbackOwners: Int
+  let routerListenerRegistrations: Int
+  let pendingGeometryRecoveries: Int
+}
+
 func checkedCleanupDegradations(
   from observations: [CleanupStatusObservation]
 ) -> [CleanupDegradation] {
@@ -171,6 +181,10 @@ struct GeometryRecoveryCoordinator: Sendable {
   private var scheduledRecoveryAt: Duration?
   private var recoveryInProgress = false
   private(set) var health: GeometryRecoveryHealth = .healthy
+
+  var hasPendingRecoveryWork: Bool {
+    scheduledRecoveryAt != nil || recoveryInProgress
+  }
 
   init(maximumAttempts: Int = 3, baseBackoff: Duration = .milliseconds(250)) {
     self.maximumAttempts = max(1, maximumAttempts)
@@ -377,11 +391,24 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   typealias RouteMaintenanceOverride = @Sendable (Set<String>, Set<String>) async -> Void
   typealias VerifiedRouterConflictProvider = @Sendable (AudioApp) -> VerifiedRouterConflict?
   typealias VerifiedRouterActivityProvider = @Sendable () -> VerifiedRouterActivitySnapshot
+  typealias ControllerFactory =
+    @Sendable (
+      AudioApp,
+      [AudioObjectID],
+      EqualizerSettings,
+      GlobalEqualizerSettings,
+      Float
+    ) throws -> PerAppTapController
+  typealias ProcessObjectIDResolver = @Sendable (AudioApp) throws -> [AudioObjectID]
+  typealias ProcessObjectLivenessProvider = @Sendable (AudioObjectID) -> Bool
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
   private let routeMaintenanceOverride: RouteMaintenanceOverride?
   private let verifiedRouterConflictProvider: VerifiedRouterConflictProvider?
   private let verifiedRouterActivityProvider: VerifiedRouterActivityProvider?
+  private let controllerFactory: ControllerFactory?
+  private let processObjectIDResolver: ProcessObjectIDResolver?
+  private let processObjectLivenessProvider: ProcessObjectLivenessProvider?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   private nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
@@ -398,6 +425,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.routeMaintenanceOverride = nil
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
     self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
+    self.controllerFactory = nil
+    self.processObjectIDResolver = nil
+    self.processObjectLivenessProvider = nil
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
     )
@@ -406,13 +436,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   init(
     testingSnapshot: AudioSessionSnapshot,
     captureAuthorization: CaptureAuthorizationResult = .undetermined,
-    intentRouteApplyOverride: @escaping IntentRouteApplyOverride,
+    intentRouteApplyOverride: IntentRouteApplyOverride? = nil,
     shutdownCleanupOverride: ShutdownCleanupOverride? = nil,
     verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
     verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil,
     routerObservationNativeCalls: RouterObservationListenerNativeCalls? = nil,
     testingControllers: [PerAppTapController] = [],
-    routeMaintenanceOverride: RouteMaintenanceOverride? = nil
+    routeMaintenanceOverride: RouteMaintenanceOverride? = nil,
+    controllerFactory: ControllerFactory? = nil,
+    processObjectIDResolver: ProcessObjectIDResolver? = nil,
+    processObjectLivenessProvider: ProcessObjectLivenessProvider? = nil
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
@@ -424,6 +457,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.routeMaintenanceOverride = routeMaintenanceOverride
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
     self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
+    self.controllerFactory = controllerFactory
+    self.processObjectIDResolver = processObjectIDResolver
+    self.processObjectLivenessProvider = processObjectLivenessProvider
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: routerObservationNativeCalls
         ?? .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
@@ -442,6 +478,28 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     startLevelUpdateTask()
     addDeviceChangeListener()
     retainCleanupDegradations(addRouterObservationListeners())
+  }
+
+  func lifecycleDebugSnapshot() -> AudioBackendLifecycleDebugSnapshot {
+    AudioBackendLifecycleDebugSnapshot(
+      liveControllers: controllers.count,
+      orphanedControllers: orphanedControllers.count,
+      retainedCallbackOwners: controllers.count + orphanedControllers.count,
+      routerListenerRegistrations: routerObservationListeners.installedSelectorCount,
+      pendingGeometryRecoveries: geometryRecoveryByRuntimeID.values.count(where: \.hasPendingRecoveryWork)
+    )
+  }
+
+  func beginTestingLifecycle() {
+    retainCleanupDegradations(addRouterObservationListeners())
+  }
+
+  func reattachRoutesForTesting(_ logicalIDs: Set<String>) async {
+    await reattachRoutes(forLogicalIDs: logicalIDs)
+  }
+
+  func flagGeometryMismatchForTesting(runtimeID: String) {
+    controllers[runtimeID]?.flagGeometryMismatchForTesting()
   }
 
   func stop() async {
@@ -597,6 +655,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult {
+    await applyAppIntent(intent, routerActivity: nil)
+  }
+
+  private func applyAppIntent(
+    _ intent: AppRouteIntent,
+    routerActivity: VerifiedRouterActivitySnapshot?
+  ) async -> AppIntentApplyResult {
     guard !isShuttingDown else {
       return AppIntentApplyResult(
         appID: intent.appID,
@@ -666,7 +731,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }
 
-    if let detail = competingAudioRouterConflictDetail(for: snapshot.apps[acceptedIndex]) {
+    if let detail = competingAudioRouterConflictDetail(
+      for: snapshot.apps[acceptedIndex],
+      routerActivity: routerActivity
+    ) {
       suspendManagedRouteForConflict(at: acceptedIndex, detail: detail)
       clearStagedIntentIfCurrent(intent, logicalID: logicalID)
       snapshot.updatedAt = .now
@@ -750,7 +818,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           muted: intent.isMuted,
           forceRebuild: forceRebuild,
           equalizerSettings: intent.equalizerSettings,
-          generationContext: generationContext
+          generationContext: generationContext,
+          routerActivity: routerActivity
         )
       }
       try ensureGenerationCurrent(generationContext)
@@ -984,6 +1053,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     var rows: [ProfileRowApplyResult] = []
     rows.reserveCapacity(profile.entries.count)
+    let routerActivity = verifiedRouterActivityProvider?()
 
     for (entryIndex, entry) in profile.entries.enumerated() {
       guard entry.hasLevels else {
@@ -1023,7 +1093,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           targetDeviceUID: values.targetDeviceUID,
           generation: generation,
           reason: .profileApply
-        ))
+        ),
+        routerActivity: routerActivity
+      )
       rows.append(
         ProfileRowApplyResult(
           entryIndex: entryIndex,
@@ -1608,6 +1680,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   ) throws -> PerAppTapController {
     try ensureAcceptingOperations()
 
+    if let controllerFactory {
+      return try controllerFactory(
+        app,
+        processObjectIDs,
+        equalizerSettings,
+        managedAudioEqualizerSettings,
+        adaptiveGainDBByAppID[app.logicalID] ?? 0
+      )
+    }
+
     if #available(macOS 14.2, *) {
       // Route to the app's pinned device if it has one; otherwise follow the
       // system default. If a pinned device is gone, fail honestly (the caller
@@ -1730,6 +1812,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func resolveProcessObjectIDs(for app: AudioApp) throws -> [AudioObjectID] {
+    if let processObjectIDResolver {
+      return try processObjectIDResolver(app)
+    }
     var candidatePIDs = Set<pid_t>()
 
     if let bundleID = app.bundleID, !bundleID.isEmpty {
@@ -2319,12 +2404,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let knownIcons = (previousSnapshot?.apps ?? []).reduce(into: [String: Data]()) { result, app in
       if let data = app.iconTIFFData { result[app.logicalID] = data }
     }
-    let runningApps = await Task.detached { [currentBundleID, audible, knownIcons] in
+    let discoveryCapture = await MainActor.run { [currentBundleID, knownIcons] in
+      AppRuntimeDiscovery.captureRunningApplications(
+        currentBundleID: currentBundleID,
+        knownIconData: knownIcons
+      )
+    }
+    let runningApps = await Task.detached { [currentBundleID, audible, discoveryCapture] in
       AppRuntimeDiscovery.discoverRunningApps(
+        from: discoveryCapture,
         currentBundleID: currentBundleID,
         audiblePIDs: audible.pids,
-        audibleParentBundlePaths: audible.parentBundlePaths,
-        knownIconData: knownIcons
+        audibleParentBundlePaths: audible.parentBundlePaths
       )
     }.value
     guard !isShuttingDown else { return snapshot }
@@ -2363,7 +2454,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var mergedLogicalIDs = Set(mergedApps.map(\.logicalID))
     for previous in previousSnapshot?.apps ?? [] {
       guard !mergedLogicalIDs.contains(previous.logicalID) else { continue }
-      guard AppRuntimeDiscovery.isStillRunning(previous, currentBundleID: currentBundleID) else { continue }
+      guard AppRuntimeDiscovery.isStillRunning(previous, in: discoveryCapture, currentBundleID: currentBundleID) else { continue }
 
       var retained = previous
       retained.isActive = false
@@ -2722,6 +2813,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) async {
     guard !isShuttingDown else { return }
+    // A reattach is one coherent setup pass. Capture router activity before
+    // any await so every route sees the same verified Security/Core Audio view.
+    let routerActivity = verifiedRouterActivityProvider?()
     var lastError: String?
 
     // applyRoute suspends (tap-retry backoff) and the actor is reentrant, so a
@@ -2738,7 +2832,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         try await applyRoute(
           for: app,
           toVolume: app.desiredVolume,
-          muted: app.isMuted
+          muted: app.isMuted,
+          routerActivity: routerActivity
         )
         if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
           snapshot.apps[index].routingState = .managed
@@ -2864,7 +2959,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         // instead of logging a warning per dead object per poll.
         var stale = StaleAudioObjectTally()
         let sourceIsRunningOutput = controller.targetProcessObjectIDs.contains {
-          isProcessRunningOutput($0, stale: &stale)
+          processObjectLivenessProvider?($0) ?? isProcessRunningOutput($0, stale: &stale)
         }
         // Liveness comes from the IO proc actually running, never from signal
         // level. Judging a route dead because it went quiet meant that any app

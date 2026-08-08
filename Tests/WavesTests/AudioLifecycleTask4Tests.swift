@@ -87,182 +87,161 @@ import WavesAudioCore
   #expect(CompetingRouterPolicy.upstreamOwnershipDetail(for: ordinary, conflict: nil) == nil)
 }
 
-@Test func injectedRouteLifecycleCompletesOneHundredCreateReuseRecoveryAndShutdownCycles() throws {
-  let harness = RouteLifecycleCycleHarness.testing()
+@Test func backendOwnedLifecycleDrainsInjectedControllersAfterOneHundredCycles() async throws {
+  let fixture = try BackendOwnedLifecycleFixture.make()
+  let backend = fixture.backend
 
-  try harness.run(cycles: 100)
-
-  #expect(harness.counters.createdControllers == 200)
-  #expect(harness.counters.reusedControllers == 100)
-  #expect(harness.counters.helperExpansionRebuilds == 100)
-  #expect(harness.counters.geometryRecoveries == 100)
-  #expect(harness.counters.failedDisposals == 100)
-  #expect(harness.counters.successfulDisposals == 200)
-  #expect(harness.counters.liveControllers == 0)
-  #expect(harness.counters.retainedCallbackOwners == 0)
-  #expect(harness.counters.listenerRegistrations == 0)
-  #expect(harness.counters.pendingRecoveryWork == 0)
-}
-
-private struct RouteLifecycleCycleCounters: Equatable {
-  var createdControllers = 0
-  var reusedControllers = 0
-  var helperExpansionRebuilds = 0
-  var geometryRecoveries = 0
-  var failedDisposals = 0
-  var successfulDisposals = 0
-  var liveControllers = 0
-  var retainedCallbackOwners = 0
-  var listenerRegistrations = 0
-  var pendingRecoveryWork = 0
-}
-
-/// An injected backend lifecycle fixture. It drives the real controller
-/// teardown sequence and real listener lifecycle while replacing only native
-/// calls that require a physical route.
-private final class RouteLifecycleCycleHarness {
-  private let listenerRecorder: LifecycleListenerRecorder
-  private let listeners: RouterObservationListenerLifecycle
-  private(set) var counters = RouteLifecycleCycleCounters()
-
-  private init(
-    listeners: RouterObservationListenerLifecycle,
-    listenerRecorder: LifecycleListenerRecorder
-  ) {
-    self.listeners = listeners
-    self.listenerRecorder = listenerRecorder
+  await backend.beginTestingLifecycle()
+  for cycle in 0..<100 {
+    try await fixture.runCycle(number: cycle)
   }
 
-  static func testing() -> RouteLifecycleCycleHarness {
-    let recorder = LifecycleListenerRecorder()
-    let listeners = RouterObservationListenerLifecycle(
-      nativeCalls: RouterObservationListenerNativeCalls(
-        add: { selector, _ in
-          recorder.recordInstalled(selector)
-          return noErr
-        },
-        remove: { selector, _ in
-          recorder.recordRemoved(selector)
-          return noErr
-        }
-      )
-    )
-    return RouteLifecycleCycleHarness(listeners: listeners, listenerRecorder: recorder)
-  }
+  let beforeShutdown = await backend.lifecycleDebugSnapshot()
+  #expect(beforeShutdown.liveControllers == 1)
+  #expect(beforeShutdown.orphanedControllers == 0)
+  #expect(beforeShutdown.retainedCallbackOwners == 1)
+  #expect(beforeShutdown.routerListenerRegistrations == 2)
+  #expect(beforeShutdown.pendingGeometryRecoveries == 0)
 
-  func run(cycles: Int) throws {
-    _ = listeners.install {}
-    counters.listenerRegistrations = listenerRecorder.activeRegistrations
-
-    for cycle in 0..<cycles {
-      let native = LifecycleTeardownNativeCalls()
-      let appID = "cycle.\(cycle)"
-      let primary = try makeController(appID: appID, native: native)
-      counters.createdControllers += 1
-      counters.liveControllers += 1
-      counters.retainedCallbackOwners += 1
-
-      let originalTarget = TargetProcessFamily(logicalID: appID, processObjectIDs: [1])
-      let unchangedTarget = TargetProcessFamily(logicalID: appID, processObjectIDs: [1])
-      guard originalTarget.covers(unchangedTarget) else {
-        throw LifecycleHarnessError.reuseWasNotCovered
-      }
-      primary.apply(volume: 0.5, volumeBoost: 1, muted: false)
-      counters.reusedControllers += 1
-
-      let expandedTarget = TargetProcessFamily(logicalID: appID, processObjectIDs: [1, 2])
-      guard !originalTarget.covers(expandedTarget) else {
-        throw LifecycleHarnessError.helperExpansionDidNotRebuild
-      }
-      let expanded = try makeController(appID: "\(appID).helper", native: LifecycleTeardownNativeCalls())
-      counters.createdControllers += 1
-      counters.liveControllers += 1
-      counters.retainedCallbackOwners += 1
-      counters.helperExpansionRebuilds += 1
-
-      expanded.flagGeometryMismatchForTesting()
-      guard expanded.consumeGeometryMismatch() else {
-        throw LifecycleHarnessError.geometryRecoveryWasNotScheduled
-      }
-      var recovery = GeometryRecoveryCoordinator(maximumAttempts: 1)
-      guard recovery.signalMismatch(at: .zero) == .scheduleRecovery(at: .zero),
-        recovery.beginRecovery(at: .zero) == .attempt(number: 1),
-        recovery.finishRecovery(succeeded: true, at: .zero) == .recovered
-      else {
-        throw LifecycleHarnessError.geometryRecoveryDidNotComplete
-      }
-      counters.geometryRecoveries += 1
-
-      native.shouldFailStop = true
-      guard !primary.dispose().isEmpty else {
-        throw LifecycleHarnessError.disposeFailureWasNotRetained
-      }
-      counters.failedDisposals += 1
-      native.shouldFailStop = false
-      guard primary.retryDispose().isEmpty else {
-        throw LifecycleHarnessError.retryDisposeDidNotDrain
-      }
-      counters.successfulDisposals += 1
-      counters.liveControllers -= 1
-      counters.retainedCallbackOwners -= 1
-
-      guard expanded.dispose().isEmpty else {
-        throw LifecycleHarnessError.disposeDidNotDrain
-      }
-      counters.successfulDisposals += 1
-      counters.liveControllers -= 1
-      counters.retainedCallbackOwners -= 1
-    }
-
-    guard listeners.remove().isEmpty else {
-      throw LifecycleHarnessError.listenerDrainFailed
-    }
-    counters.listenerRegistrations = listenerRecorder.activeRegistrations
-    counters.pendingRecoveryWork = 0
-  }
-
-  private func makeController(
-    appID: String,
-    native: LifecycleTeardownNativeCalls
-  ) throws -> PerAppTapController {
-    try PerAppTapController.testingController(
-      appID: appID,
-      teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
-        makeOriginalAudioAudible: { noErr },
-        stopIOProc: { native.shouldFailStop ? -1 : noErr },
-        restoreTapMuting: { noErr }
-      )
-    )
-  }
+  _ = await backend.shutdownWithResult()
+  let afterShutdown = await backend.lifecycleDebugSnapshot()
+  #expect(afterShutdown.liveControllers == 0)
+  #expect(afterShutdown.orphanedControllers == 0)
+  #expect(afterShutdown.retainedCallbackOwners == 0)
+  #expect(afterShutdown.routerListenerRegistrations == 0)
+  #expect(afterShutdown.pendingGeometryRecoveries == 0)
 }
 
 private enum LifecycleHarnessError: Error {
   case reuseWasNotCovered
   case helperExpansionDidNotRebuild
-  case geometryRecoveryWasNotScheduled
   case geometryRecoveryDidNotComplete
   case disposeFailureWasNotRetained
-  case retryDisposeDidNotDrain
-  case disposeDidNotDrain
-  case listenerDrainFailed
 }
 
-private final class LifecycleTeardownNativeCalls: @unchecked Sendable {
+private final class BackendOwnedLifecycleFixture: @unchecked Sendable {
+  let backend: WorkspaceAudioControlBackend
+  private let processIDs: TestingProcessObjectIDs
+  private let teardown: TestingTeardownSwitch
+
+  private init(
+    backend: WorkspaceAudioControlBackend,
+    processIDs: TestingProcessObjectIDs,
+    teardown: TestingTeardownSwitch
+  ) {
+    self.backend = backend
+    self.processIDs = processIDs
+    self.teardown = teardown
+  }
+
+  static func make() throws -> BackendOwnedLifecycleFixture {
+    let processIDs = TestingProcessObjectIDs()
+    let teardown = TestingTeardownSwitch()
+    let app = AudioApp(
+      id: "lifecycle.app",
+      logicalID: "lifecycle.app",
+      pid: 700,
+      bundleID: "com.example.lifecycle",
+      displayName: "Lifecycle",
+      category: .media,
+      isActive: true,
+      desiredVolume: 0.5,
+      appliedVolume: 0.5,
+      routingState: .managed,
+      compatibility: .supported
+    )
+    let backend = WorkspaceAudioControlBackend(
+      testingSnapshot: AudioSessionSnapshot(
+        apps: [app],
+        currentDevice: nil,
+        recentDeviceIDs: [],
+        supportMatrix: SupportMatrix(entries: []),
+        backendStatus: BackendStatus(
+          isAudioComponentInstalled: true,
+          hasRequiredPermissions: true,
+          isRouteRecoveryHealthy: true
+        )
+      ),
+      routerObservationNativeCalls: RouterObservationListenerNativeCalls(
+        add: { _, _ in noErr },
+        remove: { _, _ in noErr }
+      ),
+      controllerFactory: { app, processObjectIDs, _, _, _ in
+        try PerAppTapController.testingController(
+          appID: app.id,
+          logicalID: app.logicalID,
+          targetProcessObjectIDs: processObjectIDs,
+          teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+            makeOriginalAudioAudible: { noErr },
+            stopIOProc: { teardown.shouldFailStop ? -1 : noErr },
+            restoreTapMuting: { noErr }
+          )
+        )
+      },
+      processObjectIDResolver: { _ in processIDs.value },
+      processObjectLivenessProvider: { _ in true }
+    )
+    return BackendOwnedLifecycleFixture(
+      backend: backend,
+      processIDs: processIDs,
+      teardown: teardown
+    )
+  }
+
+  func runCycle(number: Int) async throws {
+    let baseID = AudioObjectID(number + 1)
+    processIDs.value = [baseID]
+    let reuse = await backend.applyAppIntent(testingIntent(volume: 0.2, generation: UInt64(number * 2 + 1)))
+    guard reuse.outcome == .applied || reuse.outcome == .noChange else {
+      throw LifecycleHarnessError.reuseWasNotCovered
+    }
+
+    teardown.shouldFailStop = true
+    processIDs.value = [baseID, AudioObjectID(number + 10_000)]
+    let expanded = await backend.applyAppIntent(testingIntent(volume: 0.8, generation: UInt64(number * 2 + 2)))
+    teardown.shouldFailStop = false
+    guard expanded.outcome == .applied else {
+      throw LifecycleHarnessError.helperExpansionDidNotRebuild
+    }
+
+    let retained = await backend.lifecycleDebugSnapshot()
+    guard retained.liveControllers == 1,
+      retained.orphanedControllers == 1,
+      retained.retainedCallbackOwners == 2
+    else {
+      throw LifecycleHarnessError.disposeFailureWasNotRetained
+    }
+
+    await backend.flagGeometryMismatchForTesting(runtimeID: "lifecycle.app")
+    await backend.updateAudioLevels(at: .milliseconds(number))
+    let recovered = await backend.lifecycleDebugSnapshot()
+    guard recovered.liveControllers == 1,
+      recovered.orphanedControllers == 0,
+      recovered.retainedCallbackOwners == 1,
+      recovered.pendingGeometryRecoveries == 0
+    else {
+      throw LifecycleHarnessError.geometryRecoveryDidNotComplete
+    }
+  }
+
+  private func testingIntent(volume: Float, generation: UInt64) -> AppRouteIntent {
+    AppRouteIntent(
+      appID: "lifecycle.app",
+      desiredVolume: volume,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: generation,
+      reason: .automation
+    )
+  }
+}
+
+private final class TestingProcessObjectIDs: @unchecked Sendable {
+  var value: [AudioObjectID] = [1]
+}
+
+private final class TestingTeardownSwitch: @unchecked Sendable {
   var shouldFailStop = false
-}
-
-private final class LifecycleListenerRecorder: @unchecked Sendable {
-  private var activeSelectors = Set<AudioObjectPropertySelector>()
-
-  var activeRegistrations: Int {
-    activeSelectors.count
-  }
-
-  func recordInstalled(_ selector: AudioObjectPropertySelector) {
-    activeSelectors.insert(selector)
-  }
-
-  func recordRemoved(_ selector: AudioObjectPropertySelector) {
-    activeSelectors.remove(selector)
-  }
 }

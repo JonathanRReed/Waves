@@ -3,41 +3,88 @@ import Foundation
 import WavesAudioCore
 
 enum AppRuntimeDiscovery {
+  enum ActivationPolicy: Sendable {
+    case regular
+    case accessory
+    case prohibited
+  }
+
+  struct CapturedApplication: Sendable {
+    let pid: pid_t
+    let bundleID: String?
+    let localizedName: String
+    let bundlePath: String?
+    let activationPolicy: ActivationPolicy
+    let isActive: Bool
+    let iconTIFFData: Data?
+  }
+
+  struct Capture: Sendable {
+    let applications: [CapturedApplication]
+  }
+
+  /// The AppKit boundary. `NSWorkspace`, `NSRunningApplication`, icon lookup,
+  /// and image rasterization never escape this main-actor capture.
+  @MainActor
+  static func captureRunningApplications(
+    currentBundleID: String?,
+    knownIconData: [String: Data] = [:]
+  ) -> Capture {
+    let applications = NSWorkspace.shared.runningApplications.compactMap { app -> CapturedApplication? in
+      guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
+      guard app.activationPolicy != .prohibited else { return nil }
+      guard let localizedName = app.localizedName, !localizedName.isEmpty else { return nil }
+      guard app.bundleIdentifier != currentBundleID else { return nil }
+
+      let logicalID = AppDiscoveryPolicy.logicalAppID(
+        bundleID: app.bundleIdentifier,
+        displayName: localizedName
+      )
+      return CapturedApplication(
+        pid: app.processIdentifier,
+        bundleID: app.bundleIdentifier,
+        localizedName: localizedName,
+        bundlePath: app.bundleURL?.path,
+        activationPolicy: activationPolicy(for: app.activationPolicy),
+        isActive: app.isActive,
+        iconTIFFData: knownIconData[logicalID] ?? iconTIFFData(for: app)
+      )
+    }
+    return Capture(applications: applications)
+  }
+
+  /// Pure transformation for detached discovery work. The input is Sendable and
+  /// contains every value that would otherwise require AppKit access.
   static func discoverRunningApps(
+    from capture: Capture,
     currentBundleID: String?,
     audiblePIDs: Set<pid_t>,
-    audibleParentBundlePaths: Set<String>,
-    knownIconData: [String: Data] = [:]
+    audibleParentBundlePaths: Set<String>
   ) -> [AudioApp] {
-    let runningApps = NSWorkspace.shared.runningApplications
-      .filter { app in
-        guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
-        guard app.activationPolicy != .prohibited else { return false }
-        guard let localizedName = app.localizedName, !localizedName.isEmpty else { return false }
-        guard app.bundleIdentifier != currentBundleID else { return false }
-        return true
-      }
+    let runningApps = capture.applications.filter { app in
+      app.bundleID != currentBundleID && app.activationPolicy != .prohibited
+    }
 
     let candidateApps =
       runningApps
       .filter { app in
-        let localizedName = app.localizedName ?? ""
+        let localizedName = app.localizedName
         guard
           AppDiscoveryPolicy.isManageableApp(
             named: localizedName,
-            bundleID: app.bundleIdentifier,
-            bundlePath: app.bundleURL?.path
+            bundleID: app.bundleID,
+            bundlePath: app.bundlePath
           )
         else { return false }
         return true
       }
       .sorted {
-        ($0.localizedName ?? "").localizedCaseInsensitiveCompare($1.localizedName ?? "") == .orderedAscending
+        $0.localizedName.localizedCaseInsensitiveCompare($1.localizedName) == .orderedAscending
       }
 
-    var representativesByLogicalID: [String: NSRunningApplication] = [:]
+    var representativesByLogicalID: [String: CapturedApplication] = [:]
     for app in candidateApps {
-      let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: app.bundleIdentifier, displayName: app.localizedName ?? "")
+      let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: app.bundleID, displayName: app.localizedName)
       if let existing = representativesByLogicalID[logicalID] {
         representativesByLogicalID[logicalID] = AppRuntimeDiscovery.preferredRepresentative(current: existing, candidate: app)
       } else {
@@ -47,16 +94,16 @@ enum AppRuntimeDiscovery {
 
     return representativesByLogicalID.values
       .sorted {
-        ($0.localizedName ?? "").localizedCaseInsensitiveCompare($1.localizedName ?? "") == .orderedAscending
+        $0.localizedName.localizedCaseInsensitiveCompare($1.localizedName) == .orderedAscending
       }
       .map { app in
-        let bundleID = app.bundleIdentifier
-        let name = app.localizedName ?? "Unknown App"
+        let bundleID = app.bundleID
+        let name = app.localizedName
         let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: bundleID, displayName: name)
         let category = AppDiscoveryPolicy.inferCategory(bundleID: bundleID, displayName: name)
-        let pid = app.processIdentifier
+        let pid = app.pid
         let familyApps = AppRuntimeDiscovery.processFamily(for: app, in: runningApps)
-        let familyPIDs = Set(familyApps.map(\.processIdentifier))
+        let familyPIDs = Set(familyApps.map(\.pid))
         // An app is audible if a process in its NSWorkspace family is producing
         // output, OR — crucially for Chromium/Electron apps — if a helper whose
         // enclosing top-level app is this app is producing output. The latter is
@@ -64,10 +111,10 @@ enum AppRuntimeDiscovery {
         // sandboxed "Audio Service" helper that never appears in the family set.
         let isAudibleByPID = !audiblePIDs.isEmpty && !familyPIDs.isDisjoint(with: audiblePIDs)
         let isAudibleByBundle =
-          app.bundleURL.map { bundleURL in
+          app.bundlePath.map { bundlePath in
             audibleParentBundlePaths.contains { candidate in
               URL(fileURLWithPath: candidate).standardizedFileURL.resolvingSymlinksInPath().path
-                == bundleURL.standardizedFileURL.resolvingSymlinksInPath().path
+                == URL(fileURLWithPath: bundlePath).standardizedFileURL.resolvingSymlinksInPath().path
             }
           } ?? false
         let isAudible = isAudibleByPID || isAudibleByBundle
@@ -81,7 +128,7 @@ enum AppRuntimeDiscovery {
           bundleID: bundleID,
           displayName: name,
           iconName: AppDiscoveryPolicy.iconName(for: category),
-          iconTIFFData: knownIconData[logicalID] ?? AppRuntimeDiscovery.iconTIFFData(for: app),
+          iconTIFFData: app.iconTIFFData,
           category: category,
           isActive: isAudible || isFrontmost,
           peakLevel: 0,
@@ -98,7 +145,8 @@ enum AppRuntimeDiscovery {
       }
   }
 
-  static func iconTIFFData(for app: NSRunningApplication) -> Data? {
+  @MainActor
+  private static func iconTIFFData(for app: NSRunningApplication) -> Data? {
     if let icon = app.icon {
       return iconPNGData(from: icon)
     }
@@ -116,7 +164,8 @@ enum AppRuntimeDiscovery {
     return nil
   }
 
-  static func iconPNGData(from icon: NSImage) -> Data? {
+  @MainActor
+  private static func iconPNGData(from icon: NSImage) -> Data? {
     let size = NSSize(width: 64, height: 64)
     let resized = NSImage(size: size)
     resized.lockFocus()
@@ -133,61 +182,60 @@ enum AppRuntimeDiscovery {
   }
 
   static func preferredRepresentative(
-    current: NSRunningApplication,
-    candidate: NSRunningApplication
-  ) -> NSRunningApplication {
+    current: CapturedApplication,
+    candidate: CapturedApplication
+  ) -> CapturedApplication {
     score(candidate) >= score(current) ? candidate : current
   }
 
   static func processFamily(
-    for app: NSRunningApplication,
-    in runningApps: [NSRunningApplication]
-  ) -> [NSRunningApplication] {
-    let appName = app.localizedName ?? ""
-    let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: app.bundleIdentifier, displayName: appName)
+    for app: CapturedApplication,
+    in runningApps: [CapturedApplication]
+  ) -> [CapturedApplication] {
+    let appName = app.localizedName
+    let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: app.bundleID, displayName: appName)
 
     return runningApps.filter { candidate in
-      if candidate.processIdentifier == app.processIdentifier {
-        return true
-      }
-
-      if let bundleID = app.bundleIdentifier,
-        AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: candidate.bundleIdentifier)
-      {
-        return true
-      }
-
-      return AppDiscoveryPolicy.logicalAppID(
-        bundleID: candidate.bundleIdentifier,
-        displayName: candidate.localizedName ?? ""
-      ) == logicalID
-    }
-  }
-
-  static func isStillRunning(_ app: AudioApp, currentBundleID: String?) -> Bool {
-    NSWorkspace.shared.runningApplications.contains { candidate in
-      guard candidate.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
-      guard candidate.bundleIdentifier != currentBundleID else { return false }
-
-      if let pid = app.pid, candidate.processIdentifier == pid {
+      if candidate.pid == app.pid {
         return true
       }
 
       if let bundleID = app.bundleID,
-        AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: candidate.bundleIdentifier)
+        AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: candidate.bundleID)
       {
         return true
       }
 
       return AppDiscoveryPolicy.logicalAppID(
-        bundleID: candidate.bundleIdentifier,
-        displayName: candidate.localizedName ?? ""
+        bundleID: candidate.bundleID,
+        displayName: candidate.localizedName
+      ) == logicalID
+    }
+  }
+
+  static func isStillRunning(_ app: AudioApp, in capture: Capture, currentBundleID: String?) -> Bool {
+    capture.applications.contains { candidate in
+      guard candidate.bundleID != currentBundleID else { return false }
+
+      if let pid = app.pid, candidate.pid == pid {
+        return true
+      }
+
+      if let bundleID = app.bundleID,
+        AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: candidate.bundleID)
+      {
+        return true
+      }
+
+      return AppDiscoveryPolicy.logicalAppID(
+        bundleID: candidate.bundleID,
+        displayName: candidate.localizedName
       ) == app.logicalID
     }
   }
 
-  static func score(_ app: NSRunningApplication) -> Int {
-    let token = [app.bundleIdentifier ?? "", app.localizedName ?? ""].joined(separator: " ").lowercased()
+  static func score(_ app: CapturedApplication) -> Int {
+    let token = [app.bundleID ?? "", app.localizedName].joined(separator: " ").lowercased()
     var value = 0
 
     if app.activationPolicy == .regular {
@@ -200,17 +248,15 @@ enum AppRuntimeDiscovery {
       value += 4
     }
 
-    if app.bundleURL?.pathExtension == "app" {
+    if URL(fileURLWithPath: app.bundlePath ?? "").pathExtension == "app" {
       value += 2
     }
 
-    if app.icon != nil {
+    if app.iconTIFFData != nil {
       value += 1
     }
 
-    if let localizedName = app.localizedName,
-      !AppDiscoveryPolicy.isCompanionAudioProcess(named: localizedName, bundleID: app.bundleIdentifier)
-    {
+    if !AppDiscoveryPolicy.isCompanionAudioProcess(named: app.localizedName, bundleID: app.bundleID) {
       value += 6
     } else {
       value -= 4
@@ -223,5 +269,15 @@ enum AppRuntimeDiscovery {
     }
 
     return value
+  }
+
+  @MainActor
+  private static func activationPolicy(for policy: NSApplication.ActivationPolicy) -> ActivationPolicy {
+    switch policy {
+    case .regular: .regular
+    case .accessory: .accessory
+    case .prohibited: .prohibited
+    @unknown default: .prohibited
+    }
   }
 }

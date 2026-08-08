@@ -1,3 +1,4 @@
+import AudioToolbox
 import Testing
 import WavesAudioCore
 
@@ -319,6 +320,101 @@ import WavesAudioCore
   await backend.updateAudioLevels(at: .zero)
 
   #expect(scans.value == 2)
+}
+
+@Test func backendReattachmentUsesOneVerifiedActivitySnapshotForMultipleApps() async {
+  let scans = RouterActivityScanCounter()
+  let service = VerifiedRouterConflictService(
+    descriptors: [.waveLink3_2_2],
+    snapshotProvider: {
+      scans.increment()
+      return .init(processObjects: [], taps: [])
+    },
+    identityVerifier: { _, _ in nil }
+  )
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: AudioSessionSnapshot(
+      apps: [routerTestApp(id: "first", pid: 101), routerTestApp(id: "second", pid: 303)],
+      currentDevice: nil,
+      recentDeviceIDs: [],
+      supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(
+        isAudioComponentInstalled: true,
+        hasRequiredPermissions: true,
+        isRouteRecoveryHealthy: true
+      )
+    ),
+    verifiedRouterActivityProvider: { service.activitySnapshot() },
+    controllerFactory: { app, processObjectIDs, _, _, _ in
+      try PerAppTapController.testingController(
+        appID: app.id,
+        logicalID: app.logicalID,
+        targetProcessObjectIDs: processObjectIDs,
+        teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+          makeOriginalAudioAudible: { noErr },
+          stopIOProc: { noErr },
+          restoreTapMuting: { noErr }
+        )
+      )
+    },
+    processObjectIDResolver: { _ in [1] }
+  )
+
+  await backend.reattachRoutesForTesting(["first", "second"])
+
+  #expect(scans.value == 1)
+  _ = await backend.shutdownWithResult()
+}
+
+@Test func backendProfileApplyUsesOneVerifiedActivitySnapshotForMultipleApps() async {
+  let scans = RouterActivityScanCounter()
+  let service = VerifiedRouterConflictService(
+    descriptors: [.waveLink3_2_2],
+    snapshotProvider: {
+      scans.increment()
+      return .init(processObjects: [], taps: [])
+    },
+    identityVerifier: { _, _ in nil }
+  )
+  let apps = [routerTestApp(id: "first", pid: 101), routerTestApp(id: "second", pid: 303)]
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: AudioSessionSnapshot(
+      apps: apps,
+      currentDevice: nil,
+      recentDeviceIDs: [],
+      supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(
+        isAudioComponentInstalled: true,
+        hasRequiredPermissions: true,
+        isRouteRecoveryHealthy: true
+      )
+    ),
+    verifiedRouterActivityProvider: { service.activitySnapshot() },
+    controllerFactory: { app, processObjectIDs, _, _, _ in
+      try PerAppTapController.testingController(
+        appID: app.id,
+        logicalID: app.logicalID,
+        targetProcessObjectIDs: processObjectIDs,
+        teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+          makeOriginalAudioAudible: { noErr },
+          stopIOProc: { noErr },
+          restoreTapMuting: { noErr }
+        )
+      )
+    },
+    processObjectIDResolver: { _ in [1] }
+  )
+
+  _ = await backend.applyProfileWithResults(
+    Profile(
+      name: "Two apps",
+      entries: apps.map { .init(appID: $0.logicalID, desiredVolume: 0.5, isMuted: false, volumeBoost: 1) }
+    ),
+    generation: 1
+  )
+
+  #expect(scans.value == 1)
+  _ = await backend.shutdownWithResult()
 }
 
 @MainActor
