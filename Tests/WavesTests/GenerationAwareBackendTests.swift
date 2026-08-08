@@ -163,7 +163,16 @@ import WavesAudioCore
       await recorder.record(app: stagedApp, equalizer: equalizer)
     },
     verifiedRouterConflictProvider: { app in
-      app.logicalID == zoom.logicalID ? "Elgato Wave Link" : nil
+      app.logicalID == zoom.logicalID
+        ? VerifiedRouterConflict(
+          routerName: "Elgato Wave Link",
+          kind: .publicTapMembership,
+          detail:
+            "Elgato Wave Link is already routing this app's audio. "
+            + "Waves left it untouched to prevent two copies. "
+            + "Quit Elgato Wave Link before controlling this app in Waves."
+        )
+        : nil
     }
   )
 
@@ -208,9 +217,6 @@ import WavesAudioCore
     testingSnapshot: testSnapshot(apps: [waveLink]),
     intentRouteApplyOverride: { stagedApp, equalizer in
       await recorder.record(app: stagedApp, equalizer: equalizer)
-    },
-    verifiedRouterConflictProvider: { app in
-      app.logicalID == waveLink.logicalID ? "Elgato Wave Link" : nil
     }
   )
 

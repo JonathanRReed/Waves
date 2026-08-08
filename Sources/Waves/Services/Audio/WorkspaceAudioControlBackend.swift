@@ -527,7 +527,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   typealias IntentRouteApplyOverride = @Sendable (AudioApp, EqualizerSettings) async throws -> Void
   typealias ShutdownCleanupOverride = @Sendable () -> [CleanupDegradation]
   typealias RouteMaintenanceOverride = @Sendable (Set<String>, Set<String>) async -> Void
-  typealias VerifiedRouterConflictProvider = @Sendable (AudioApp) -> String?
+  typealias VerifiedRouterConflictProvider = @Sendable (AudioApp) -> VerifiedRouterConflict?
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
   private let routeMaintenanceOverride: RouteMaintenanceOverride?
@@ -536,14 +536,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   private nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
 
-  init() {
+  init(verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
     self.deviceChangeContinuation = continuation
     self.intentRouteApplyOverride = nil
     self.shutdownCleanupOverride = nil
     self.routeMaintenanceOverride = nil
-    self.verifiedRouterConflictProvider = nil
+    self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
     )
@@ -3338,15 +3338,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   private func competingAudioRouterConflictDetail(for app: AudioApp) -> String? {
-    guard let routerName = verifiedRouterConflictProvider?(app) else { return nil }
     if AppDiscoveryPolicy.competingAudioRouterName(for: app.bundleID, among: []) != nil {
-      return "\(routerName)'s mixed output can carry every monitored app. "
+      return "Elgato Wave Link's mixed output can carry every monitored app. "
         + "Waves leaves this router untouched so one nested route cannot duplicate or silence the whole mix. "
-        + "Control the upstream apps inside \(routerName)."
+        + "Control the upstream apps inside Elgato Wave Link."
     }
-    return "\(routerName) is already routing this app's audio. "
-      + "Waves left it untouched to prevent two copies. "
-      + "Quit \(routerName) before controlling this app in Waves."
+    return verifiedRouterConflictProvider?(app)?.detail
   }
 
   private func suspendManagedRouteForConflict(at index: Int, detail: String) {
@@ -3384,7 +3381,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         guard app.routingState == .managed || controllers[app.id] != nil,
           let detail
         else { continue }
-        let routerName = verifiedRouterConflictProvider?(app) ?? "A competing audio router"
+        let routerName = verifiedRouterConflictProvider?(app)?.routerName ?? "A competing audio router"
         let decision = CompetingRouterConflictDecision.make(routerName: routerName, isVerified: true)
         guard decision.routeDisposition == .monitorOnly else { continue }
         suspendManagedRouteForConflict(at: index, detail: decision.detail.isEmpty ? detail : decision.detail)
