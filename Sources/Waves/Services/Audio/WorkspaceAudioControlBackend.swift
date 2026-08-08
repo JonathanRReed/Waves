@@ -4195,39 +4195,6 @@ final class PerAppTapController: @unchecked Sendable {
   }
 
   @discardableResult
-  func invalidate() -> [CleanupDegradation] {
-    guard let procID = ioProcID, aggregateDeviceID != .unknown else {
-      ioProcID = nil
-      didStartIOProc = false
-      stateBox.setInactive()
-      return []
-    }
-
-    stateBox.setInactive()
-    var observations: [CleanupStatusObservation] = []
-    if didStartIOProc {
-      observations.append(
-        CleanupStatusObservation(
-          appID: appID,
-          stage: .ioProcStop,
-          nativeStatus: AudioDeviceStop(aggregateDeviceID, procID),
-          detail: "Stop controller IO proc during invalidation"
-        ))
-    }
-    didStartIOProc = false
-    drainCallbackQueue()
-    observations.append(
-      CleanupStatusObservation(
-        appID: appID,
-        stage: .ioProcDestroy,
-        nativeStatus: AudioDeviceDestroyIOProcID(aggregateDeviceID, procID),
-        detail: "Destroy controller IO proc during invalidation"
-      ))
-    ioProcID = nil
-    return checkedCleanupDegradations(from: observations)
-  }
-
-  @discardableResult
   /// Retries a teardown that previously failed. Distinct from `dispose()`,
   /// which stays idempotent so a second shutdown request never repeats
   /// destructive native cleanup.
