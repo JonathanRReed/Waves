@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-source_file="${1:-Sources/Waves/Services/Audio/WorkspaceAudioControlBackend.swift}"
+source_file="${1:-Sources/Waves/Services/Audio/PerAppTapController.swift}"
 callback_start='AudioDeviceCreateIOProcIDWithBlock'
 
 if [ ! -f "$source_file" ]; then
