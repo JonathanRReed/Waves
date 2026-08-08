@@ -276,20 +276,32 @@ private struct RenderActivityFixture {
 
 /// Shared with the control-surface tests: a running store with one managed app.
 @MainActor
-func makeControlStoreFixture() async -> AppStore {
-  await makeRenderActivityFixture().store
+func makeControlStoreFixture(
+  routingState: RoutingState = .managed,
+  startupState: AppStartupState = .running,
+  includeApp: Bool = true,
+  iconTIFFData: Data? = nil
+) async -> AppStore {
+  await makeRenderActivityFixture(
+    routingState: routingState,
+    startupState: startupState,
+    includeApp: includeApp,
+    iconTIFFData: iconTIFFData
+  ).store
 }
 
 @MainActor
 private func makeRenderActivityFixture(
   routingState: RoutingState = .managed,
   startupState: AppStartupState = .running,
-  includeApp: Bool = true
+  includeApp: Bool = true,
+  iconTIFFData: Data? = nil
 ) async -> RenderActivityFixture {
   let app = AudioApp(
     id: "runtime.render.app",
     logicalID: "com.example.render",
     displayName: "Render App",
+    iconTIFFData: iconTIFFData,
     category: .media,
     desiredVolume: 0.8,
     appliedVolume: 0.8,

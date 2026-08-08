@@ -13,6 +13,7 @@ import WavesAudioCore
 @MainActor
 struct ControlCommandHandler {
   let store: AppStore
+  var testingPreflightFailure: ((ControlRequest) -> ControlError?)? = nil
 
   struct HandlingResult {
     let response: ControlResponse
@@ -28,6 +29,9 @@ struct ControlCommandHandler {
 
   func handle(_ request: ControlRequest, session: Session) async -> HandlingResult {
     var session = session
+    if let error = testingPreflightFailure?(request) {
+      return HandlingResult(response: .failure(id: request.id, error), session: session)
+    }
     guard store.preferences.enableExternalControl else {
       return HandlingResult(response: .failure(id: request.id, .notPermitted), session: session)
     }

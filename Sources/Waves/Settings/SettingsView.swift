@@ -67,11 +67,12 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 struct SettingsView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.wavesTheme) private var theme
-  @State private var selection: SettingsPane = .general
+  @State private var workspace = SettingsWorkspace()
 
   var body: some View {
+    @Bindable var workspace = workspace
     HStack(spacing: 0) {
-      SettingsSidebar(selection: $selection)
+      SettingsSidebar(selection: $workspace.selection)
         .frame(width: 200)
 
       Divider()
@@ -90,26 +91,34 @@ struct SettingsView: View {
     .onChange(of: store.settingsPaneToken) { _, _ in
       applyRequestedPaneIfAny()
     }
+    .onChange(of: workspace.selection) { oldPane, newPane in
+      if oldPane == .control, newPane != .control {
+        workspace.controlDraft.beginPaneReplacement()
+      }
+    }
     .onDisappear {
+      if workspace.controlDraft.cancelRecording() {
+        store.setHotkeysSuspended(false)
+      }
       store.persistPreferences()
     }
   }
 
   private func applyRequestedPaneIfAny() {
     if let pane = store.consumeSettingsPaneRequest() {
-      selection = pane
+      workspace.selection = pane
     }
   }
 
   @ViewBuilder
   private var paneContent: some View {
-    switch selection {
+    switch workspace.selection {
     case .general: GeneralSettingsView()
     case .mixer: MixerSettingsView()
     case .profiles: ProfileSettingsView()
-    case .control: ControlSettingsView()
+    case .control: ControlSettingsView(draft: workspace.controlDraft)
     case .setup: SetupRepairView()
-    case .advanced: DiagnosticsSettingsView(onOpenSetup: { selection = .setup })
+    case .advanced: DiagnosticsSettingsView(onOpenSetup: { workspace.selection = .setup })
     case .help: HelpView()
     }
   }
@@ -606,13 +615,7 @@ private struct ProfileRow: View {
 
 private struct ControlSettingsView: View {
   @Environment(AppStore.self) private var store
-  /// Apps chosen from "Add App Shortcut" that have no chord yet.
-  ///
-  /// Held here rather than as an empty binding in the model: a binding with no
-  /// modifiers is not a shortcut, and writing one would hand `HotkeyCenter` an
-  /// unregisterable chord that comes straight back as a "shortcut unavailable"
-  /// warning the user did nothing to deserve.
-  @State private var pendingAppIDs: [String] = []
+  let draft: ControlSettingsDraft
 
   var body: some View {
     SettingsForm {
@@ -703,6 +706,7 @@ private struct ControlSettingsView: View {
         )
       }
     }
+    .onAppear { draft.finishPaneReplacement() }
   }
 
   private static let frontmostActions: [(title: String, action: HotkeyAction)] = [
@@ -723,7 +727,7 @@ private struct ControlSettingsView: View {
   private var appShortcutRows: [String] {
     let bound = store.preferences.hotkeys.boundAppIDs
       .sorted { appName($0).localizedCaseInsensitiveCompare(appName($1)) == .orderedAscending }
-    return bound + pendingAppIDs.filter { !bound.contains($0) }
+    return bound + draft.pendingAppIDs.filter { !bound.contains($0) }
   }
 
   /// Only apps with no shortcut and no pending row, so the menu can't offer a
@@ -735,7 +739,7 @@ private struct ControlSettingsView: View {
 
   private var takenAppIDs: Set<String> {
     var taken = Set(store.preferences.hotkeys.boundAppIDs)
-    taken.formUnion(pendingAppIDs)
+    taken.formUnion(draft.pendingAppIDs)
     return taken
   }
 
@@ -744,7 +748,7 @@ private struct ControlSettingsView: View {
     Menu {
       ForEach(assignableApps) { app in
         Button(app.displayName) {
-          pendingAppIDs.append(app.logicalID)
+          draft.addPendingApp(app.logicalID)
         }
       }
       if assignableApps.isEmpty {
@@ -785,7 +789,7 @@ private struct ControlSettingsView: View {
       let bundleID = Bundle(url: url)?.bundleIdentifier
     else { return }
     guard !takenAppIDs.contains(bundleID) else { return }
-    pendingAppIDs.append(bundleID)
+    draft.addPendingApp(bundleID)
   }
 
   private func appName(_ appID: String) -> String {
@@ -814,7 +818,7 @@ private struct ControlSettingsView: View {
   }
 
   private func removeAppShortcuts(_ appID: String) {
-    pendingAppIDs.removeAll { $0 == appID }
+    draft.removePendingApp(appID)
     for binding in store.preferences.hotkeys.bindings where binding.action.appID == appID {
       store.removeHotkey(id: binding.id)
     }
@@ -829,6 +833,8 @@ private struct ControlSettingsView: View {
     let binding = store.preferences.hotkeys.bindings.first { $0.action == action }
     return LabeledContent(title) {
       ShortcutRecorder(
+        action: action,
+        draft: draft,
         binding: binding,
         canRemoveWhenUnset: canRemoveWhenUnset,
         isUnavailable: binding.map(store.isHotkeyRejected) ?? false,
