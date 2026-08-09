@@ -3,15 +3,12 @@ import Foundation
 
 enum SystemSettingsDestination: String, CaseIterable, Sendable {
   case audioCapture
-  case loginItems
   case soundOutput
 
   var url: URL? {
     switch self {
     case .audioCapture:
       URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")
-    case .loginItems:
-      URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
     case .soundOutput:
       URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension?output")
     }

@@ -722,11 +722,6 @@ final class AppStore {
     )
   }
 
-  private func invalidateVisibleAppsCache() {
-    // No-op cache removed; keep explicit invalidation points intact for future
-    // callers without forcing a runtime write during view updates.
-  }
-
   var currentDeviceName: String {
     session.currentDevice?.name ?? "No output device"
   }
@@ -1304,7 +1299,6 @@ final class AppStore {
       let built = await backend.currentSnapshot()
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       session = mergedSession(with: built, cached: warmSnapshot)
-      invalidateVisibleAppsCache()
       cleanupStaleEntries()
       await reapplyRestoredAudioState()
       if preferences.adaptiveMixMode.usesSpeechFocus,
@@ -1434,7 +1428,6 @@ final class AppStore {
       let refreshed = try await backend.refresh()
       guard !Task.isCancelled, startupState == .running else { return }
       session = mergedSession(with: refreshed, cached: session)
-      invalidateVisibleAppsCache()
       cleanupStaleEntries()
       await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
       guard !Task.isCancelled, startupState == .running else { return }
@@ -1487,7 +1480,6 @@ final class AppStore {
       let knownAppIDs = Set(session.apps.map(\.logicalID))
       let rebuilt = try await backend.refresh()
       session = mergedSession(with: rebuilt, cached: session)
-      invalidateVisibleAppsCache()
       cleanupStaleEntries()
       await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
       persistSessionSnapshot()
@@ -1803,7 +1795,6 @@ final class AppStore {
       session.apps.removeAll { $0.logicalID == removedAppID || $0.id == removedAppID }
     }
     applyPendingVolumeProjection(forAppID: intent.appID)
-    invalidateVisibleAppsCache()
     syncOnboarding(using: session)
     persistSessionSnapshot()
   }
@@ -1828,7 +1819,6 @@ final class AppStore {
           : projection.intent.desiredVolume
       }
     }
-    invalidateVisibleAppsCache()
   }
 
   private func applyPendingVolumeProjection(forAppID appID: String) {
@@ -1878,8 +1868,6 @@ final class AppStore {
     appIntentCoordinator.claimDurableMutation(for: appID, generation: intent.generation)
     preferences.appAudioIntents[appID] = durableIntent
     preferences.appEqualizerSettings[appID] = durableIntent.equalizerSettings
-    invalidateVisibleAppsCache()
-
     do {
       try await savePreferencesDurably()
     } catch {
@@ -2071,7 +2059,6 @@ final class AppStore {
     let clamped = max(0, min(1, value))
     appIntentCoordinator.setPendingVolume(clamped, for: appID)
     applyPendingVolumeProjection(forAppID: appID)
-    invalidateVisibleAppsCache()
     scheduleVolumeTransaction(clamped, forAppID: appID)
   }
 
@@ -2539,7 +2526,6 @@ final class AppStore {
     // any code reading session.apps directly agrees); visibleApps reconciles too.
     if let index = session.apps.firstIndex(matchingAppKey: appKey) {
       session.apps[index].isPinned = willPin
-      invalidateVisibleAppsCache()
     }
 
     // Keep the backend snapshot in step on a best-effort basis; preferences
@@ -2768,7 +2754,6 @@ final class AppStore {
         optimistic: false
       )
     }
-    invalidateVisibleAppsCache()
   }
 
   /// Excludes every app in `apps` that does not expose a manageable audio stream
@@ -2924,8 +2909,6 @@ final class AppStore {
     let backendSnapshot = await backend.currentSnapshot()
     guard !Task.isCancelled, startupState == .running else { return }
     session = mergedSession(with: backendSnapshot, cached: session)
-    invalidateVisibleAppsCache()
-
     // Per-device preset restore additionally requires "Auto-restore device" —
     // it IS the auto-restore behavior for saved per-app volumes, so honoring
     // the per-device-presets toggle alone while ignoring the opt-out would
@@ -3193,7 +3176,6 @@ final class AppStore {
       await backend.setAdaptiveGains([:])
       let confirmed = await backend.currentSnapshot()
       session = mergedSession(with: confirmed, cached: session)
-      invalidateVisibleAppsCache()
       syncOnboarding(using: session)
     }
 
@@ -3279,7 +3261,6 @@ final class AppStore {
     }
 
     // Reflect the termination in the UI immediately.
-    var changed = false
     // Every session row matching the quit process — collected BEFORE the
     // routing-state guard below — so linger cleanup covers an app that had
     // already gone quiet (its row sits in Live only via the linger set, with a
@@ -3296,7 +3277,6 @@ final class AppStore {
         session.apps[index].appliedVolume = nil
         session.apps[index].peakLevel = 0
         session.apps[index].rmsLevel = 0
-        changed = true
       }
     }
     appIntentCoordinator.retainAutomaticMuteOwners(
@@ -3318,8 +3298,6 @@ final class AppStore {
       let next = recentlyLiveIDs.subtracting(matchedIDs)
       if next != recentlyLiveIDs { recentlyLiveIDs = next }
     }
-    if changed { invalidateVisibleAppsCache() }
-
     // Resume hook for the quit (not switched-away-from) case: resume is normally
     // driven by didActivateApplication, but if a conferencing app quits/crashes
     // and macOS doesn't promptly activate another app, no resume pass fires and
@@ -3531,7 +3509,6 @@ final class AppStore {
     }
 
     guard !pausedNames.isEmpty || !resumedNames.isEmpty else { return }
-    invalidateVisibleAppsCache()
     persistSessionSnapshot()
     syncOnboarding(using: session)
 
@@ -3934,7 +3911,6 @@ final class AppStore {
       }
     }
 
-    invalidateVisibleAppsCache()
     syncOnboarding(using: session)
     persistSessionSnapshot()
   }
@@ -3990,8 +3966,6 @@ final class AppStore {
         }
       }
     }
-    invalidateVisibleAppsCache()
-
     var persistenceResult = ProfilePersistenceResult()
     if !preferenceAppIDs.isEmpty {
       do {
@@ -4517,7 +4491,7 @@ final class AppStore {
 
   func exportProfile(_ profile: Profile) {
     guard startupState != .shuttingDown else { return }
-    startOwnedOperation { [self] _ in
+    startOwnedOperation { store in
       do {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
@@ -4536,15 +4510,15 @@ final class AppStore {
         // is frontmost), not the mixer window. Settings can be opened from the
         // menu bar with the mixer window closed, leaving NSApp.mainWindow nil.
         guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
-          showToast(title: "Export failed", detail: "No window available.", kind: .error)
+          store.showToast(title: "Export failed", detail: "No window available.", kind: .error)
           return
         }
 
         let response = await savePanel.beginSheetModal(for: window)
-        guard !Task.isCancelled, startupState != .shuttingDown else { return }
+        guard !Task.isCancelled, store.startupState != .shuttingDown else { return }
         if response == .OK, let url = savePanel.url {
           try data.write(to: url, options: .atomic)
-          showToast(
+          store.showToast(
             title: "Profile exported",
             detail: "Saved to \(url.lastPathComponent)",
             kind: .success,
@@ -4552,14 +4526,14 @@ final class AppStore {
           )
         }
       } catch {
-        showToast(title: "Export failed", detail: error.localizedDescription, kind: .error)
+        store.showToast(title: "Export failed", detail: error.localizedDescription, kind: .error)
       }
     }
   }
 
   func importProfiles() {
     guard startupState != .shuttingDown else { return }
-    startOwnedOperation { [self] _ in
+    startOwnedOperation { store in
       let openPanel = NSOpenPanel()
       openPanel.allowedContentTypes = [.json]
       openPanel.canChooseFiles = true
@@ -4570,12 +4544,12 @@ final class AppStore {
       // frontmost). Settings can be opened from the menu bar with the mixer
       // window closed, leaving NSApp.mainWindow nil.
       guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
-        showToast(title: "Import failed", detail: "No window available.", kind: .error)
+        store.showToast(title: "Import failed", detail: "No window available.", kind: .error)
         return
       }
 
       let response = await openPanel.beginSheetModal(for: window)
-      guard !Task.isCancelled, startupState != .shuttingDown else { return }
+      guard !Task.isCancelled, store.startupState != .shuttingDown else { return }
       if response == .OK, let url = openPanel.url {
         do {
           let sizeCap = 10 * 1024 * 1024
@@ -4585,7 +4559,7 @@ final class AppStore {
           if let reportedSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
             reportedSize > sizeCap
           {
-            showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
+            store.showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
             return
           }
 
@@ -4594,7 +4568,7 @@ final class AppStore {
           // size grew (or a symlink swapped) between the stat and the read.
           let data = try Data(contentsOf: url)
           if data.count > sizeCap {
-            showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
+            store.showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
             return
           }
 
@@ -4602,7 +4576,7 @@ final class AppStore {
           // envelope or a bare [Profile]) as well as a single exported Profile, so
           // restoring a backup doesn't fail with a cryptic generic decode error.
           guard let decoded = Self.decodeImportedProfiles(from: data) else {
-            showToast(
+            store.showToast(
               title: "Import failed",
               detail: "Unsupported file. Expected a Waves profile or profiles backup.",
               kind: .error
@@ -4615,7 +4589,7 @@ final class AppStore {
           // without having mutated `profiles`, so a multi-profile backup with a
           // single bad entry leaves the live library (and the UI) unchanged —
           // restoring the original atomic behavior for the multi-profile case.
-          var working = profiles
+          var working = store.profiles
           var importedNames: [String] = []
           for profile in decoded {
             // Validate profile structure. Trim first so a whitespace-only name is
@@ -4623,17 +4597,17 @@ final class AppStore {
             // the editor's 100-character cap.
             let trimmedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedName.isEmpty {
-              showToast(title: "Import failed", detail: "Profile name cannot be empty.", kind: .error)
+              store.showToast(title: "Import failed", detail: "Profile name cannot be empty.", kind: .error)
               return
             }
 
             if trimmedName.count > Profile.maxNameLength {
-              showToast(title: "Import failed", detail: "Profile name exceeds \(Profile.maxNameLength) characters.", kind: .error)
+              store.showToast(title: "Import failed", detail: "Profile name exceeds \(Profile.maxNameLength) characters.", kind: .error)
               return
             }
 
             if profile.entries.count > Profile.maxEntries {
-              showToast(title: "Import failed", detail: "Profile has too many entries (max \(Profile.maxEntries)).", kind: .error)
+              store.showToast(title: "Import failed", detail: "Profile has too many entries (max \(Profile.maxEntries)).", kind: .error)
               return
             }
 
@@ -4661,16 +4635,16 @@ final class AppStore {
           }
 
           // Every profile passed — commit the batch atomically and persist once.
-          profiles = working
-          persistProfiles()
-          showToast(
+          store.profiles = working
+          store.persistProfiles()
+          store.showToast(
             title: importedNames.count == 1 ? "Profile imported" : "Profiles imported",
             detail: importedNames.count == 1 ? importedNames.first : "\(importedNames.count) profiles restored",
             kind: .success,
             duration: .seconds(2.0)
           )
         } catch {
-          showToast(title: "Import failed", detail: error.localizedDescription, kind: .error)
+          store.showToast(title: "Import failed", detail: error.localizedDescription, kind: .error)
         }
       }
     }
@@ -4697,35 +4671,34 @@ final class AppStore {
     guard !isRecovering else { return }
 
     isRecovering = true
-    startOwnedOperation { [self] _ in
-      defer { isRecovering = false }
+    startOwnedOperation { store in
+      defer { store.isRecovering = false }
       do {
-        let recovered = try await backend.recoverRoutes()
-        guard !Task.isCancelled, startupState == .running else { return }
-        session = mergedSession(with: recovered, cached: session)
-        let includePreset = preferences.enablePerDeviceVolumePresets
-        for appID in session.apps.map(\.logicalID) {
-          _ = await restoreConfiguredApp(
+        let recovered = try await store.backend.recoverRoutes()
+        guard !Task.isCancelled, store.startupState == .running else { return }
+        store.session = store.mergedSession(with: recovered, cached: store.session)
+        let includePreset = store.preferences.enablePerDeviceVolumePresets
+        for appID in store.session.apps.map(\.logicalID) {
+          _ = await store.restoreConfiguredApp(
             appID: appID,
             defaultReason: .routeRecovery,
-            deviceID: currentDeviceID,
+            deviceID: store.currentDeviceID,
             includeDevicePreset: includePreset
           )
         }
-        invalidateVisibleAppsCache()
-        diagnostics = await backend.diagnosticsReport()
-        onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-        persistSessionSnapshot()
-        syncOnboarding(using: session)
+        store.diagnostics = await store.backend.diagnosticsReport()
+        store.onboarding.captureAuthorization = await store.backend.captureAuthorizationResult()
+        store.persistSessionSnapshot()
+        store.syncOnboarding(using: store.session)
         // backend.recoverRoutes() does not throw when a prerequisite is still
         // unmet (e.g. capture permission denied or no output device): it rebuilds
         // the snapshot, which recomputes isRouteRecoveryHealthy. Branch on the
         // resulting health instead of reporting success on every no-throw return,
         // so the toast can't claim "Routes recovered" while the Setup step stays
         // in its "needs action" state.
-        let status = session.backendStatus
+        let status = store.session.backendStatus
         if status.isRouteRecoveryHealthy {
-          showToast(
+          store.showToast(
             title: "Routes recovered",
             detail: "Managed routing paths were reattached.",
             kind: .success
@@ -4734,26 +4707,25 @@ final class AppStore {
           let reason: String
           if !status.hasRequiredPermissions {
             reason = "Audio capture isn't granted. Allow audio recording in System Settings, then try again."
-          } else if session.currentDevice == nil {
+          } else if store.session.currentDevice == nil {
             reason = "No output device is available. Connect an output device, then try again."
           } else {
             reason = status.lastError ?? "Routes are still not healthy. Check the Advanced tab for details."
           }
-          showToast(
+          store.showToast(
             title: "Routes still need attention",
             detail: reason,
             kind: .warning
           )
         }
       } catch {
-        guard startupState == .running else { return }
-        session = mergedSession(with: await backend.currentSnapshot(), cached: session)
-        invalidateVisibleAppsCache()
-        diagnostics = await backend.diagnosticsReport()
-        onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-        persistSessionSnapshot()
-        syncOnboarding(using: session)
-        showToast(title: "Recovery failed", detail: error.localizedDescription, kind: .error)
+        guard store.startupState == .running else { return }
+        store.session = store.mergedSession(with: await store.backend.currentSnapshot(), cached: store.session)
+        store.diagnostics = await store.backend.diagnosticsReport()
+        store.onboarding.captureAuthorization = await store.backend.captureAuthorizationResult()
+        store.persistSessionSnapshot()
+        store.syncOnboarding(using: store.session)
+        store.showToast(title: "Recovery failed", detail: error.localizedDescription, kind: .error)
       }
     }
   }
@@ -4764,7 +4736,7 @@ final class AppStore {
 
   func refreshDiagnostics() {
     guard requireAudioRunning() else { return }
-    startOwnedOperation { [self] _ in
+    startOwnedOperation { store in
       // Rebuild the backend snapshot FIRST so diagnostics are computed from the
       // same freshly-probed state the checklist/session read. diagnosticsReport()
       // re-probes capture authorization, but currentSnapshot() only returns the
@@ -4776,20 +4748,19 @@ final class AppStore {
       // freshly-probed source. Fall back to the cached snapshot if the rebuild
       // throws, so a transient failure still re-syncs from something current.
       let snapshot: AudioSessionSnapshot
-      if let rebuilt = try? await backend.refresh() {
+      if let rebuilt = try? await store.backend.refresh() {
         snapshot = rebuilt
       } else {
-        snapshot = await backend.currentSnapshot()
+        snapshot = await store.backend.currentSnapshot()
       }
-      guard !Task.isCancelled, startupState == .running else { return }
-      diagnostics = await backend.diagnosticsReport()
-      onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-      guard !Task.isCancelled, startupState == .running else { return }
+      guard !Task.isCancelled, store.startupState == .running else { return }
+      store.diagnostics = await store.backend.diagnosticsReport()
+      store.onboarding.captureAuthorization = await store.backend.captureAuthorizationResult()
+      guard !Task.isCancelled, store.startupState == .running else { return }
       // The live snapshot owns backend truth; mergedSession reapplies only the
       // store's current transaction/slider projection and preferences-owned tags.
-      session = mergedSession(with: snapshot, cached: session)
-      invalidateVisibleAppsCache()
-      syncOnboarding(using: session)
+      store.session = store.mergedSession(with: snapshot, cached: store.session)
+      store.syncOnboarding(using: store.session)
     }
   }
 
@@ -4888,7 +4859,6 @@ final class AppStore {
 
   func persistPreferences() {
     enqueuePreferencesPersistence(preferences)
-    invalidateVisibleAppsCache()
   }
 
   private func persistProfiles() {
@@ -5183,7 +5153,6 @@ final class AppStore {
     }
     preferences.customAppOrder = merged
     persistPreferences()
-    invalidateVisibleAppsCache()
   }
 
   private func syncOnboarding(using snapshot: AudioSessionSnapshot) {
@@ -5356,36 +5325,6 @@ final class AppStore {
       backendStatus: liveSession.backendStatus,
       updatedAt: liveSession.updatedAt
     )
-  }
-
-  private func mergeAppState(from backendSession: AudioSessionSnapshot, appID: String) {
-    guard let updatedApp = backendSession.apps.first(matchingAppKey: appID) else {
-      session = backendSession
-      invalidateVisibleAppsCache()
-      return
-    }
-
-    if let index = session.apps.firstIndex(matchingAppKey: appID) {
-      session.apps[index] = updatedApp
-      session.currentDevice = backendSession.currentDevice
-      session.recentDeviceIDs = backendSession.recentDeviceIDs
-      session.supportMatrix = backendSession.supportMatrix
-      session.backendStatus = backendSession.backendStatus
-      session.updatedAt = backendSession.updatedAt
-      invalidateVisibleAppsCache()
-    } else {
-      session = backendSession
-      invalidateVisibleAppsCache()
-    }
-  }
-
-  /// Merge a single backend app into the session and immediately re-derive the
-  /// onboarding signals from the now-fresh session.backendStatus, so the route
-  /// health (and other onboarding checklist steps) never lag a session-changing
-  /// action that already updated backendStatus via mergeAppState.
-  private func mergeAppStateAndSyncOnboarding(from backendSession: AudioSessionSnapshot, appID: String) {
-    mergeAppState(from: backendSession, appID: appID)
-    syncOnboarding(using: session)
   }
 
   private func persistSessionSnapshot() {
