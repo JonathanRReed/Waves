@@ -33,6 +33,15 @@ enum ControlSocketLocation {
 struct ControlServerFilesystemHooks {
   var afterParentOpened: @MainActor () throws -> Void = {}
   var beforeBind: @MainActor () throws -> Void = {}
+  var afterStagingBind: @MainActor (String) throws -> Void = { _ in }
+  var afterPublicPublish: @MainActor () throws -> Void = {}
+  var selfProofOverride: @MainActor (ControlListenerSelfProofPhase) -> Bool? = { _ in nil }
+  var afterShutdownQuarantine: @MainActor (String) -> Void = { _ in }
+}
+
+enum ControlListenerSelfProofPhase: Equatable {
+  case staging
+  case publicLeaf
 }
 
 /// Accepts control connections over a Unix domain socket.
@@ -145,16 +154,17 @@ final class ControlServer {
       )
     else { throw ControlServerError.unsafeParent }
 
-    let bindingPath: String
+    let stagingLeaf = ControlSocketFilesystem.uniqueLeafName(kind: "stage")
+    let stagingPath: String
     do {
-      bindingPath = try ControlSocketFilesystem.bindingPath(
+      stagingPath = try ControlSocketFilesystem.bindingPath(
         parentDescriptor: parent.descriptor,
-        leafName: leafName
+        leafName: stagingLeaf
       )
     } catch {
       throw ControlServerError.unsafeParent
     }
-    guard bindingPath.utf8.count < ControlSocketLocation.maximumPathBytes else {
+    guard stagingPath.utf8.count < ControlSocketLocation.maximumPathBytes else {
       throw ControlServerError.pathTooLong
     }
 
@@ -162,13 +172,21 @@ final class ControlServer {
     guard fd >= 0 else { throw ControlServerError.socketFailed(errno) }
     var retainListener = false
     var createdIdentity: ControlSocketIdentity?
+    var didPublishPublicLeaf = false
     defer {
       if !retainListener {
         _ = Darwin.close(fd)
         if let createdIdentity {
-          ControlSocketFilesystem.removeSocketLeafIfMatches(
+          if didPublishPublicLeaf {
+            ControlSocketFilesystem.quarantineAndRemoveSocketIfMatches(
+              parentDescriptor: parent.descriptor,
+              leafName: leafName,
+              identity: createdIdentity
+            )
+          }
+          ControlSocketFilesystem.quarantineAndRemoveSocketIfMatches(
             parentDescriptor: parent.descriptor,
-            leafName: leafName,
+            leafName: stagingLeaf,
             identity: createdIdentity
           )
         }
@@ -182,7 +200,7 @@ final class ControlServer {
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
     _ = withUnsafeMutablePointer(to: &address.sun_path) { pointer in
-      bindingPath.withCString { source in
+      stagingPath.withCString { source in
         strncpy(
           UnsafeMutableRawPointer(pointer).assumingMemoryBound(to: CChar.self),
           source,
@@ -208,13 +226,28 @@ final class ControlServer {
     guard bindResult == 0 else {
       throw ControlServerError.bindFailed(errno)
     }
+    guard listen(fd, Int32(Self.maximumConnections)) == 0 else {
+      throw ControlServerError.listenFailed(errno)
+    }
     guard
       let socketIdentity = ControlSocketFilesystem.ownedSocketIdentity(
         parentDescriptor: parent.descriptor,
-        leafName: leafName
+        leafName: stagingLeaf
       )
     else { throw ControlServerError.unsafeExistingLeaf }
     createdIdentity = socketIdentity
+    try filesystemHooks.afterStagingBind(stagingLeaf)
+
+    guard
+      verifyListener(
+        phase: .staging,
+        listener: fd,
+        path: stagingPath,
+        parentDescriptor: parent.descriptor,
+        leafName: stagingLeaf,
+        identity: socketIdentity
+      )
+    else { throw ControlServerError.listenerVerificationFailed }
 
     // The containing directory is already 0700, so the new node cannot be
     // reached by another user while its final mode is applied. Avoid changing
@@ -222,20 +255,54 @@ final class ControlServer {
     // must never inherit the socket's restrictive creation mask.
     if let permissionsError = ControlSocketFilesystem.setPrivateMode(
       parentDescriptor: parent.descriptor,
-      leafName: leafName,
+      leafName: stagingLeaf,
       identity: socketIdentity
     ) {
       throw ControlServerError.permissionsFailed(permissionsError)
     }
+
+    if let publicationError = ControlSocketFilesystem.publishSocketLeaf(
+      parentDescriptor: parent.descriptor,
+      stagingLeaf: stagingLeaf,
+      publicLeaf: leafName
+    ) {
+      throw ControlServerError.publicationFailed(publicationError)
+    }
+    didPublishPublicLeaf = true
+    guard
+      ControlSocketFilesystem.socketIdentityMatches(
+        parentDescriptor: parent.descriptor,
+        leafName: leafName,
+        identity: socketIdentity
+      )
+    else { throw ControlServerError.listenerVerificationFailed }
+    try filesystemHooks.afterPublicPublish()
+
+    guard
+      verifyListener(
+        phase: .publicLeaf,
+        listener: fd,
+        path: publicPath,
+        parentDescriptor: parent.descriptor,
+        leafName: leafName,
+        identity: socketIdentity
+      )
+    else { throw ControlServerError.listenerVerificationFailed }
     guard
       ControlSocketFilesystem.publicParentMatches(
         at: url.deletingLastPathComponent(),
         identity: parent.identity
       )
     else { throw ControlServerError.unsafeParent }
-    guard listen(fd, Int32(Self.maximumConnections)) == 0 else {
-      throw ControlServerError.listenFailed(errno)
-    }
+
+    // The public hard link now proved it reaches this listener. Remove the
+    // unpredictable staging name through quarantine without ever unlinking a
+    // checked public pathname.
+    ControlSocketFilesystem.quarantineAndRemoveSocketIfMatches(
+      parentDescriptor: parent.descriptor,
+      leafName: stagingLeaf,
+      identity: socketIdentity
+    )
 
     listenerFD = fd
     parentDirectoryFD = parent.descriptor
@@ -281,10 +348,11 @@ final class ControlServer {
     // socket it has to clean up. Remove only the exact socket created by this
     // server, through the verified directory descriptor retained since start.
     if parentDirectoryFD >= 0, let boundLeafIdentity {
-      ControlSocketFilesystem.removeSocketLeafIfMatches(
+      ControlSocketFilesystem.quarantineAndRemoveSocketIfMatches(
         parentDescriptor: parentDirectoryFD,
         leafName: url.lastPathComponent,
-        identity: boundLeafIdentity
+        identity: boundLeafIdentity,
+        afterQuarantine: filesystemHooks.afterShutdownQuarantine
       )
     }
     boundLeafIdentity = nil
@@ -304,6 +372,75 @@ final class ControlServer {
     let flags = fcntl(fd, F_GETFL, 0)
     guard flags >= 0 else { return false }
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0
+  }
+
+  private func verifyListener(
+    phase: ControlListenerSelfProofPhase,
+    listener: Int32,
+    path: String,
+    parentDescriptor: Int32,
+    leafName: String,
+    identity: ControlSocketIdentity
+  ) -> Bool {
+    if let override = filesystemHooks.selfProofOverride(phase) { return override }
+    return Self.listenerSelfProof(
+      listener: listener,
+      path: path,
+      parentDescriptor: parentDescriptor,
+      leafName: leafName,
+      identity: identity
+    )
+  }
+
+  /// Connects through the name being proved, then accepts on the actual
+  /// listener descriptor. The accepted peer must be this process and the name
+  /// must still identify the captured socket after the round trip.
+  private nonisolated static func listenerSelfProof(
+    listener: Int32,
+    path: String,
+    parentDescriptor: Int32,
+    leafName: String,
+    identity: ControlSocketIdentity
+  ) -> Bool {
+    let client = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard client >= 0 else { return false }
+    defer { _ = Darwin.close(client) }
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    _ = path.withCString { source in
+      strncpy(&address.sun_path.0, source, MemoryLayout.size(ofValue: address.sun_path) - 1)
+    }
+    let connected = withUnsafeBytes(of: &address) { raw in
+      connect(
+        client,
+        raw.baseAddress!.assumingMemoryBound(to: sockaddr.self),
+        socklen_t(raw.count)
+      )
+    }
+    guard connected == 0 else { return false }
+
+    let accepted: Int32
+    while true {
+      let candidate = accept(listener, nil, nil)
+      if candidate >= 0 {
+        accepted = candidate
+        break
+      }
+      if errno != EINTR { return false }
+    }
+    defer { _ = Darwin.close(accepted) }
+
+    guard
+      let peer = peerIdentity(accepted),
+      peer.uid == getuid(),
+      peer.processID == getpid()
+    else { return false }
+    return ControlSocketFilesystem.socketIdentityMatches(
+      parentDescriptor: parentDescriptor,
+      leafName: leafName,
+      identity: identity
+    )
   }
 
   /// Runs on `ioQueue`. Drains the accept backlog, rejecting anything that
@@ -436,6 +573,8 @@ enum ControlServerError: Error, Equatable {
   case unsafeExistingLeaf
   case socketFailed(Int32)
   case bindFailed(Int32)
+  case publicationFailed(Int32)
+  case listenerVerificationFailed
   case permissionsFailed(Int32)
   case listenFailed(Int32)
 }
@@ -468,6 +607,8 @@ struct ControlSocketIdentity: Equatable {
 }
 
 enum ControlSocketFilesystem {
+  private static let maximumUniqueNameAttempts = 4
+
   static func parentStatusIsSafe(_ status: stat, currentUID: uid_t) -> Bool {
     status.st_mode & S_IFMT == S_IFDIR
       && status.st_uid == currentUID
@@ -557,21 +698,46 @@ enum ControlSocketFilesystem {
       .path
   }
 
+  static func uniqueLeafName(kind: String) -> String {
+    let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    let prefix = kind == "stage" ? "s" : "q"
+    return ".\(prefix)-\(token.prefix(24))"
+  }
+
   static func removeStaleLeaf(
     parentDescriptor: Int32,
     leafName: String,
     currentUID: uid_t = getuid()
   ) throws {
+    guard
+      let quarantineLeaf = try moveToUniqueQuarantine(
+        parentDescriptor: parentDescriptor,
+        leafName: leafName
+      )
+    else { return }
+    var needsRestore = true
+    defer {
+      if needsRestore {
+        _ = restoreQuarantinedLeaf(
+          parentDescriptor: parentDescriptor,
+          quarantineLeaf: quarantineLeaf,
+          destinationLeaf: leafName
+        )
+      }
+    }
+
     var status = stat()
-    guard fstatat(parentDescriptor, leafName, &status, AT_SYMLINK_NOFOLLOW) == 0 else {
-      guard errno == ENOENT else { throw POSIXError(.EIO) }
-      return
+    guard fstatat(parentDescriptor, quarantineLeaf, &status, AT_SYMLINK_NOFOLLOW) == 0 else {
+      throw POSIXError(.EIO)
     }
     let type = status.st_mode & S_IFMT
     guard status.st_uid == currentUID, type == S_IFSOCK || type == S_IFREG else {
       throw POSIXError(.EACCES)
     }
-    guard unlinkat(parentDescriptor, leafName, 0) == 0 else { throw POSIXError(.EACCES) }
+    guard unlinkat(parentDescriptor, quarantineLeaf, 0) == 0 else {
+      throw POSIXError(.EACCES)
+    }
+    needsRestore = false
   }
 
   static func ownedSocketIdentity(
@@ -598,7 +764,7 @@ enum ControlSocketFilesystem {
     currentUID: uid_t = getuid()
   ) -> Int32? {
     guard
-      socketStatusMatches(
+      socketIdentityMatches(
         parentDescriptor: parentDescriptor,
         leafName: leafName,
         identity: identity,
@@ -610,41 +776,86 @@ enum ControlSocketFilesystem {
     }
     var status = stat()
     guard fstatat(parentDescriptor, leafName, &status, AT_SYMLINK_NOFOLLOW) == 0,
-      socketStatusMatches(status, identity: identity, currentUID: currentUID),
+      socketIdentityMatches(status, identity: identity, currentUID: currentUID),
       status.st_mode & 0o777 == 0o600
     else { return EACCES }
     return nil
   }
 
-  static func removeSocketLeafIfMatches(
+  /// Hard-link publication is atomic and no-overwrite. The unpredictable
+  /// staging name remains available until a filesystem that accepts the link
+  /// proves public-name reachability through the actual listener.
+  static func publishSocketLeaf(
+    parentDescriptor: Int32,
+    stagingLeaf: String,
+    publicLeaf: String
+  ) -> Int32? {
+    guard
+      linkat(
+        parentDescriptor,
+        stagingLeaf,
+        parentDescriptor,
+        publicLeaf,
+        AT_SYMLINK_NOFOLLOW_ANY
+      ) == 0
+    else { return errno }
+    return nil
+  }
+
+  /// Atomically removes the named entry from its public or staging name before
+  /// inspecting it. A mismatch is restored with no-overwrite rename; if a new
+  /// public entry appeared concurrently, both inodes remain preserved.
+  static func quarantineAndRemoveSocketIfMatches(
+    parentDescriptor: Int32,
+    leafName: String,
+    identity: ControlSocketIdentity,
+    currentUID: uid_t = getuid(),
+    afterQuarantine: (String) -> Void = { _ in }
+  ) {
+    guard
+      let quarantineLeaf = try? moveToUniqueQuarantine(
+        parentDescriptor: parentDescriptor,
+        leafName: leafName
+      )
+    else { return }
+    afterQuarantine(quarantineLeaf)
+    guard
+      socketIdentityMatches(
+        parentDescriptor: parentDescriptor,
+        leafName: quarantineLeaf,
+        identity: identity,
+        currentUID: currentUID
+      )
+    else {
+      _ = restoreQuarantinedLeaf(
+        parentDescriptor: parentDescriptor,
+        quarantineLeaf: quarantineLeaf,
+        destinationLeaf: leafName
+      )
+      return
+    }
+    guard unlinkat(parentDescriptor, quarantineLeaf, 0) == 0 else {
+      _ = restoreQuarantinedLeaf(
+        parentDescriptor: parentDescriptor,
+        quarantineLeaf: quarantineLeaf,
+        destinationLeaf: leafName
+      )
+      return
+    }
+  }
+
+  static func socketIdentityMatches(
     parentDescriptor: Int32,
     leafName: String,
     identity: ControlSocketIdentity,
     currentUID: uid_t = getuid()
-  ) {
-    guard
-      socketStatusMatches(
-        parentDescriptor: parentDescriptor,
-        leafName: leafName,
-        identity: identity,
-        currentUID: currentUID
-      )
-    else { return }
-    _ = unlinkat(parentDescriptor, leafName, 0)
-  }
-
-  private static func socketStatusMatches(
-    parentDescriptor: Int32,
-    leafName: String,
-    identity: ControlSocketIdentity,
-    currentUID: uid_t
   ) -> Bool {
     var status = stat()
     return fstatat(parentDescriptor, leafName, &status, AT_SYMLINK_NOFOLLOW) == 0
-      && socketStatusMatches(status, identity: identity, currentUID: currentUID)
+      && socketIdentityMatches(status, identity: identity, currentUID: currentUID)
   }
 
-  private static func socketStatusMatches(
+  private static func socketIdentityMatches(
     _ status: stat,
     identity: ControlSocketIdentity,
     currentUID: uid_t
@@ -654,5 +865,43 @@ enum ControlSocketFilesystem {
       && status.st_uid == identity.owner
       && status.st_dev == identity.device
       && status.st_ino == identity.inode
+  }
+
+  private static func moveToUniqueQuarantine(
+    parentDescriptor: Int32,
+    leafName: String
+  ) throws -> String? {
+    for _ in 0..<maximumUniqueNameAttempts {
+      let quarantineLeaf = uniqueLeafName(kind: "quarantine")
+      if renameatx_np(
+        parentDescriptor,
+        leafName,
+        parentDescriptor,
+        quarantineLeaf,
+        UInt32(RENAME_EXCL)
+      ) == 0 {
+        return quarantineLeaf
+      }
+      if errno == ENOENT { return nil }
+      if errno != EEXIST {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+      }
+    }
+    throw POSIXError(.EEXIST)
+  }
+
+  @discardableResult
+  private static func restoreQuarantinedLeaf(
+    parentDescriptor: Int32,
+    quarantineLeaf: String,
+    destinationLeaf: String
+  ) -> Bool {
+    renameatx_np(
+      parentDescriptor,
+      quarantineLeaf,
+      parentDescriptor,
+      destinationLeaf,
+      UInt32(RENAME_EXCL)
+    ) == 0
   }
 }

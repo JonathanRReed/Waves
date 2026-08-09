@@ -614,7 +614,7 @@ func oneProcessCannotHoldEverySubscriberSlotIndefinitely() async throws {
     )
   )
 
-  #expect(throws: ControlServerError.bindFailed(EADDRINUSE)) {
+  #expect(throws: ControlServerError.publicationFailed(EEXIST)) {
     try server.start()
   }
   var status = stat()
@@ -622,6 +622,106 @@ func oneProcessCannotHoldEverySubscriberSlotIndefinitely() async throws {
   #expect(status.st_mode & S_IFMT == S_IFSOCK)
   let client = try ControlSocketClient(path: url.path)
   client.close()
+}
+
+@MainActor
+@Test func controlServerFailsClosedWhenStagingLeafIsReplacedAfterBind() async throws {
+  let directory = try makePrivateSocketTestDirectory(prefix: "wvstage")
+  let url = directory.appendingPathComponent("control.sock")
+  var replacement: UnixSocketLeaf?
+  var replacementURL: URL?
+  var replacementSnapshot: SocketLeafSnapshot?
+  defer {
+    replacement?.close()
+    try? FileManager.default.removeItem(at: directory)
+  }
+
+  let store = await makeControlStoreFixture()
+  let server = ControlServer(
+    url: url,
+    handler: ControlCommandHandler(store: store),
+    filesystemHooks: ControlServerFilesystemHooks(
+      afterStagingBind: { stagingLeaf in
+        let stagingURL = directory.appendingPathComponent(stagingLeaf)
+        guard unlink(stagingURL.path) == 0 else { throw POSIXError(.EIO) }
+        replacement = try UnixSocketLeaf(path: stagingURL.path)
+        replacementURL = stagingURL
+        replacementSnapshot = try socketLeafSnapshot(at: stagingURL)
+      }
+    )
+  )
+
+  #expect(throws: ControlServerError.listenerVerificationFailed) {
+    try server.start()
+  }
+  let stagingURL = try #require(replacementURL)
+  #expect(try socketLeafSnapshot(at: stagingURL) == replacementSnapshot)
+  #expect(replacement?.drainPendingConnection() == true)
+  let client = try ControlSocketClient(path: stagingURL.path)
+  client.close()
+}
+
+@MainActor
+@Test func controlServerFailsClosedWhenPublicLeafIsReplacedAfterPublish() async throws {
+  let directory = try makePrivateSocketTestDirectory(prefix: "wvpublish")
+  let url = directory.appendingPathComponent("control.sock")
+  var replacement: UnixSocketLeaf?
+  var replacementSnapshot: SocketLeafSnapshot?
+  defer {
+    replacement?.close()
+    try? FileManager.default.removeItem(at: directory)
+  }
+
+  let store = await makeControlStoreFixture()
+  let server = ControlServer(
+    url: url,
+    handler: ControlCommandHandler(store: store),
+    filesystemHooks: ControlServerFilesystemHooks(
+      afterPublicPublish: {
+        guard unlink(url.path) == 0 else { throw POSIXError(.EIO) }
+        replacement = try UnixSocketLeaf(path: url.path)
+        replacementSnapshot = try socketLeafSnapshot(at: url)
+      }
+    )
+  )
+
+  #expect(throws: ControlServerError.listenerVerificationFailed) {
+    try server.start()
+  }
+  #expect(try socketLeafSnapshot(at: url) == replacementSnapshot)
+  #expect(replacement?.drainPendingConnection() == true)
+  let client = try ControlSocketClient(path: url.path)
+  client.close()
+}
+
+@MainActor
+@Test func controlServerRequiresStagingListenerSelfProof() async throws {
+  let fixture = await ControlSocketFixture.make(
+    filesystemHooks: ControlServerFilesystemHooks(
+      selfProofOverride: { phase in phase == .staging ? false : nil }
+    )
+  )
+  defer { fixture.stop() }
+
+  #expect(throws: ControlServerError.listenerVerificationFailed) {
+    try fixture.server.start()
+  }
+  #expect(!FileManager.default.fileExists(atPath: fixture.url.path))
+}
+
+@MainActor
+@Test func controlServerRequiresPublicListenerSelfProof() async throws {
+  let fixture = await ControlSocketFixture.make(
+    filesystemHooks: ControlServerFilesystemHooks(
+      selfProofOverride: { phase in phase == .publicLeaf ? false : nil }
+    )
+  )
+  defer { fixture.stop() }
+
+  #expect(throws: ControlServerError.listenerVerificationFailed) {
+    try fixture.server.start()
+  }
+  #expect(!FileManager.default.fileExists(atPath: fixture.url.path))
 }
 
 @MainActor
@@ -649,6 +749,7 @@ func oneProcessCannotHoldEverySubscriberSlotIndefinitely() async throws {
 
   #expect(unlink(fixture.url.path) == 0)
   let replacement = try UnixSocketLeaf(path: fixture.url.path)
+  let replacementSnapshot = try socketLeafSnapshot(at: fixture.url)
   defer { replacement.close() }
 
   fixture.server.stop()
@@ -656,7 +757,42 @@ func oneProcessCannotHoldEverySubscriberSlotIndefinitely() async throws {
   var status = stat()
   #expect(lstat(fixture.url.path, &status) == 0)
   #expect(status.st_mode & S_IFMT == S_IFSOCK)
+  #expect(try socketLeafSnapshot(at: fixture.url) == replacementSnapshot)
   let client = try ControlSocketClient(path: fixture.url.path)
+  client.close()
+}
+
+@MainActor
+@Test func controlServerStopRestoresSocketThatReplacesQuarantinedLeaf() async throws {
+  let directory = try makePrivateSocketTestDirectory(prefix: "wvq")
+  let url = directory.appendingPathComponent("control.sock")
+  var replacement: UnixSocketLeaf?
+  var replacementSnapshot: SocketLeafSnapshot?
+  let store = await makeControlStoreFixture()
+  let server = ControlServer(
+    url: url,
+    handler: ControlCommandHandler(store: store),
+    filesystemHooks: ControlServerFilesystemHooks(
+      afterShutdownQuarantine: { quarantineLeaf in
+        let quarantineURL = directory.appendingPathComponent(quarantineLeaf)
+        guard unlink(quarantineURL.path) == 0 else { return }
+        replacement = try? UnixSocketLeaf(path: quarantineURL.path)
+        replacementSnapshot = try? socketLeafSnapshot(at: quarantineURL)
+      }
+    )
+  )
+  defer {
+    replacement?.close()
+    server.stop()
+    try? FileManager.default.removeItem(at: directory)
+  }
+  try server.start()
+
+  server.stop()
+
+  let expected = try #require(replacementSnapshot)
+  #expect(try socketLeafSnapshot(at: url) == expected)
+  let client = try ControlSocketClient(path: url.path)
   client.close()
 }
 
@@ -709,6 +845,37 @@ func oneProcessCannotHoldEverySubscriberSlotIndefinitely() async throws {
   broad.st_mode = mode_t(S_IFDIR | 0o755)
   broad.st_uid = getuid()
   #expect(!ControlSocketFilesystem.parentStatusIsSafe(broad, currentUID: getuid()))
+}
+
+private struct SocketLeafSnapshot: Equatable {
+  let device: dev_t
+  let inode: ino_t
+  let owner: uid_t
+  let mode: mode_t
+}
+
+private func socketLeafSnapshot(at url: URL) throws -> SocketLeafSnapshot {
+  var status = stat()
+  guard lstat(url.path, &status) == 0, status.st_mode & S_IFMT == S_IFSOCK else {
+    throw POSIXError(.ENOTSOCK)
+  }
+  return SocketLeafSnapshot(
+    device: status.st_dev,
+    inode: status.st_ino,
+    owner: status.st_uid,
+    mode: status.st_mode & 0o777
+  )
+}
+
+private func makePrivateSocketTestDirectory(prefix: String) throws -> URL {
+  let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("\(prefix)-\(UUID().uuidString.prefix(8))", isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  try FileManager.default.setAttributes(
+    [.posixPermissions: 0o700],
+    ofItemAtPath: directory.path
+  )
+  return directory
 }
 
 private struct ControlSocketFixture {
@@ -808,6 +975,20 @@ private final class UnixSocketLeaf {
       fd = -1
       throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
     }
+    let flags = fcntl(fd, F_GETFL, 0)
+    guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
+      let failure = errno
+      Darwin.close(fd)
+      fd = -1
+      throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
+    }
+  }
+
+  func drainPendingConnection() -> Bool {
+    let accepted = accept(fd, nil, nil)
+    guard accepted >= 0 else { return false }
+    Darwin.close(accepted)
+    return true
   }
 
   func close() {
