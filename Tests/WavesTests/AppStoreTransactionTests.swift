@@ -5,7 +5,7 @@ import WavesAudioCore
 @testable import Waves
 
 @MainActor
-@Test func silentMaintenancePublishesOnlySemanticSessionChanges() async {
+@Test func silentMaintenancePublishesOnlySemanticSessionAndDiagnosticsChanges() async throws {
   let app = transactionTestApp()
   let device = transactionTestDevice()
   let fixture = makeTransactionFixture(
@@ -20,6 +20,7 @@ import WavesAudioCore
   #expect(await fixture.backend.diagnosticsCallCount() == 1)
   let unchangedSession = fixture.store.session
   let unchangedDiagnostics = fixture.store.diagnostics
+  let unchangedDiagnosticID = try #require(unchangedDiagnostics?.checks.first?.id)
   let unchangedAuthorization = fixture.store.onboarding.captureAuthorization
   let unchangedDevices = fixture.store.availableDevices
   let unchangedSaveCount = fixture.sessionStore.saveCount
@@ -31,6 +32,7 @@ import WavesAudioCore
   #expect(await fixture.backend.diagnosticsCallCount() == 2)
   #expect(fixture.store.session == unchangedSession)
   #expect(fixture.store.diagnostics == unchangedDiagnostics)
+  #expect(fixture.store.diagnostics?.checks.first?.id == unchangedDiagnosticID)
   #expect(fixture.store.onboarding.captureAuthorization == unchangedAuthorization)
   #expect(fixture.store.availableDevices == unchangedDevices)
   #expect(fixture.sessionStore.saveCount == unchangedSaveCount)
@@ -53,6 +55,43 @@ import WavesAudioCore
   #expect(fixture.store.session.currentDevice == changedDevice)
   #expect(fixture.store.session.backendStatus == changedSnapshot.backendStatus)
   #expect(fixture.sessionStore.saveCount == unchangedSaveCount + 1)
+}
+
+@MainActor
+@Test(arguments: ["title", "status", "detail"])
+func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async throws {
+  let app = transactionTestApp()
+  let device = transactionTestDevice()
+  let fixture = makeTransactionFixture(apps: [app], device: device, refreshApps: [app])
+
+  await fixture.store.performSilentSessionRefresh()
+  let initialDiagnostics = try #require(fixture.store.diagnostics)
+  let initialCheck = try #require(initialDiagnostics.checks.first)
+
+  var title = initialCheck.title
+  var status = initialCheck.status
+  var detail = initialCheck.detail
+  switch field {
+  case "title": title = "Changed audio component"
+  case "status": status = .warning
+  case "detail": detail = "Injected diagnostic content change."
+  default: Issue.record("Unexpected diagnostic field: \(field)")
+  }
+  await fixture.backend.setDiagnosticsTemplate(
+    DiagnosticsReport(
+      summary: initialDiagnostics.summary,
+      checks: [DiagnosticsCheck(title: title, status: status, detail: detail)]
+    )
+  )
+
+  await fixture.store.performSilentSessionRefresh()
+
+  let changedDiagnostics = try #require(fixture.store.diagnostics)
+  let changedCheck = try #require(changedDiagnostics.checks.first)
+  #expect(changedDiagnostics != initialDiagnostics)
+  #expect(changedCheck.title == title)
+  #expect(changedCheck.status == status)
+  #expect(changedCheck.detail == detail)
 }
 
 @MainActor
@@ -1578,6 +1617,16 @@ private actor TransactionBackend: AudioControlBackend {
   private var refreshCalls = 0
   private var diagnosticsCalls = 0
   private var diagnosticsReprobeValues: [Bool] = []
+  private var diagnosticsTemplate = DiagnosticsReport(
+    summary: "Transaction test",
+    checks: [
+      DiagnosticsCheck(
+        title: "Audio component",
+        status: .passed,
+        detail: "Process tap routing is supported on this system."
+      )
+    ]
+  )
   private var firstIntentIsSuspended = false
   private var firstIntentResume: CheckedContinuation<Void, Never>?
   private var suspensionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1609,6 +1658,9 @@ private actor TransactionBackend: AudioControlBackend {
   func refreshCallCount() -> Int { refreshCalls }
   func diagnosticsCallCount() -> Int { diagnosticsCalls }
   func diagnosticsReprobeRequests() -> [Bool] { diagnosticsReprobeValues }
+  func setDiagnosticsTemplate(_ replacement: DiagnosticsReport) {
+    diagnosticsTemplate = replacement
+  }
   func currentDeviceID() -> String? { snapshot.currentDevice?.id }
   func setRefreshSnapshot(_ replacement: AudioSessionSnapshot) {
     refreshSnapshot = replacement
@@ -1874,7 +1926,12 @@ private actor TransactionBackend: AudioControlBackend {
   func autoRestoreDevice() async throws -> AudioSessionSnapshot { snapshot }
   func diagnosticsReport() async -> DiagnosticsReport {
     diagnosticsCalls += 1
-    return DiagnosticsReport(summary: "Transaction test", checks: [])
+    return DiagnosticsReport(
+      summary: diagnosticsTemplate.summary,
+      checks: diagnosticsTemplate.checks.map { check in
+        DiagnosticsCheck(title: check.title, status: check.status, detail: check.detail)
+      }
+    )
   }
   func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport {
     diagnosticsReprobeValues.append(reprobeCaptureAuthorization)

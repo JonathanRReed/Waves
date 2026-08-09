@@ -1535,7 +1535,18 @@ final class AppStore {
     var normalizedLHS = lhs
     normalizedLHS.generatedAt = .distantPast
     normalizedRHS.generatedAt = .distantPast
-    return normalizedLHS == normalizedRHS
+    guard
+      normalizedLHS.generatedAt == normalizedRHS.generatedAt,
+      normalizedLHS.summary == normalizedRHS.summary,
+      normalizedLHS.checks.count == normalizedRHS.checks.count
+    else {
+      return false
+    }
+    return zip(normalizedLHS.checks, normalizedRHS.checks).allSatisfy { lhsCheck, rhsCheck in
+      lhsCheck.title == rhsCheck.title
+        && lhsCheck.status == rhsCheck.status
+        && lhsCheck.detail == rhsCheck.detail
+    }
   }
 
   func handleURLScheme(_ url: URL) {
