@@ -102,6 +102,8 @@ APP_SOURCE_ARCHIVE_SHA256="${WAVES_SOURCE_ARCHIVE_SHA256:-}"
 APP_BUILD_RECIPE_SHA256="${WAVES_BUILD_RECIPE_SHA256:-}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+SIGNING_USER_HOME=""
+SIGNING_KEYCHAIN=""
 SWIFT_SDK="${SWIFT_SDK:-}"
 SMOKE_SECONDS="${SMOKE_SECONDS:-5}"
 
@@ -202,6 +204,139 @@ require_command() {
     exit 1
   fi
 }
+
+resolve_signing_account_paths() {
+  local account_name
+  local account_record
+  local account_home
+  local resolved_home
+  local keychain_path
+  local home_owner
+  local home_mode
+  local home_type
+  local keychain_owner
+  local keychain_mode
+  local keychain_type
+
+  account_name="$(/usr/bin/id -un "$EUID")" || {
+    echo "Error: Could not resolve the release-signing account name." >&2
+    exit 1
+  }
+  if [[ ! "$account_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Error: Release-signing account name is invalid." >&2
+    exit 1
+  fi
+  account_record="$(/usr/bin/dscl . -read "/Users/$account_name" NFSHomeDirectory)" || {
+    echo "Error: Could not resolve the release-signing account home." >&2
+    exit 1
+  }
+  case "$account_record" in
+    "NFSHomeDirectory: "*) account_home="${account_record#NFSHomeDirectory: }" ;;
+    *)
+      echo "Error: Release-signing account home record is invalid." >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$account_home" != /Users/* ]] \
+    || [[ "$account_home" == *$'\n'* ]] \
+    || [[ "$account_home" == *$'\r'* ]] \
+    || [ ! -d "$account_home" ] \
+    || [ -L "$account_home" ]; then
+    echo "Error: Release-signing account home is not a trusted local account directory." >&2
+    exit 1
+  fi
+  resolved_home="$(builtin cd -P -- "$account_home" && builtin pwd -P)" || {
+    echo "Error: Could not canonicalize the release-signing account home." >&2
+    exit 1
+  }
+  if [ "$resolved_home" != "$account_home" ]; then
+    echo "Error: Release-signing account home is not canonical." >&2
+    exit 1
+  fi
+  IFS=: read -r home_owner home_mode home_type \
+    <<< "$(/usr/bin/stat -f '%u:%Lp:%HT' "$account_home")"
+  if [ "$home_owner" != "$EUID" ] \
+    || [ "$home_type" != "Directory" ] \
+    || (( 8#$home_mode & 0022 )); then
+    echo "Error: Release-signing account home ownership or permissions are unsafe." >&2
+    exit 1
+  fi
+
+  keychain_path="$account_home/Library/Keychains/login.keychain-db"
+  if [ ! -f "$keychain_path" ] || [ -L "$keychain_path" ]; then
+    echo "Error: Release-signing login keychain is missing or unsafe." >&2
+    exit 1
+  fi
+  IFS=: read -r keychain_owner keychain_mode keychain_type \
+    <<< "$(/usr/bin/stat -f '%u:%Lp:%HT' "$keychain_path")"
+  if [ "$keychain_owner" != "$EUID" ] \
+    || [ "$keychain_type" != "Regular File" ] \
+    || (( 8#$keychain_mode & 0022 )); then
+    echo "Error: Release-signing login keychain ownership or permissions are unsafe." >&2
+    exit 1
+  fi
+
+  SIGNING_USER_HOME="$account_home"
+  SIGNING_KEYCHAIN="$keychain_path"
+}
+
+run_notarytool() {
+  /usr/bin/env -i \
+    HOME="$SIGNING_USER_HOME" \
+    TMPDIR="$TMPDIR" \
+    CFFIXED_USER_HOME="$CFFIXED_USER_HOME" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    LC_ALL="C.UTF-8" \
+    LANG="C.UTF-8" \
+    /usr/bin/xcrun notarytool "$@"
+}
+
+run_signing_security() {
+  /usr/bin/env -i \
+    HOME="$SIGNING_USER_HOME" \
+    TMPDIR="$TMPDIR" \
+    CFFIXED_USER_HOME="$CFFIXED_USER_HOME" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    LC_ALL="C.UTF-8" \
+    LANG="C.UTF-8" \
+    /usr/bin/security "$@"
+}
+
+if is_notarize_mode; then
+  if [ -z "$SIGN_IDENTITY" ]; then
+    echo "Error: SIGN_IDENTITY must be set to a Developer ID Application identity for notarization." >&2
+    exit 2
+  fi
+  if [ -z "$NOTARY_PROFILE" ]; then
+    echo "Error: NOTARY_PROFILE must be set to a notarytool keychain profile." >&2
+    echo "Create one with: xcrun notarytool store-credentials <profile> --apple-id <apple-id> --team-id <team-id>" >&2
+    exit 2
+  fi
+fi
+
+if [ -n "$SIGN_IDENTITY" ]; then
+  signing_identities=""
+  resolve_signing_account_paths
+  signing_identities="$(run_signing_security find-identity -v -p codesigning "$SIGNING_KEYCHAIN")" || {
+    echo "Error: Could not read the release-signing login keychain." >&2
+    exit 1
+  }
+  case "$signing_identities" in
+    *"\"$SIGN_IDENTITY\""*) ;;
+    *)
+      echo "Error: The canonical Developer ID identity is unavailable in the validated login keychain." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if is_notarize_mode; then
+  require_command xcrun "for notarytool and stapler"
+  if ! run_notarytool history --keychain-profile "$NOTARY_PROFILE" --output-format json >/dev/null; then
+    echo "Error: The named notarytool profile is unavailable for the validated release account." >&2
+    exit 1
+  fi
+fi
 
 cleanup_isolated_distribution_build() {
   if [ -n "$ACTIVE_ISOLATION_ROOT" ]; then
@@ -340,23 +475,12 @@ sign_runtime_item() {
     args+=(--entitlements "$entitlements")
   fi
 
-  /usr/bin/codesign "${args[@]}" --sign "$identity" "$target"
+  if [ -n "$SIGN_IDENTITY" ]; then
+    /usr/bin/codesign --keychain "$SIGNING_KEYCHAIN" "${args[@]}" --sign "$identity" "$target"
+  else
+    /usr/bin/codesign "${args[@]}" --sign "$identity" "$target"
+  fi
 }
-
-if is_notarize_mode; then
-  if [ -z "$SIGN_IDENTITY" ]; then
-    echo "Error: SIGN_IDENTITY must be set to a Developer ID Application identity for notarization." >&2
-    exit 2
-  fi
-
-  if [ -z "$NOTARY_PROFILE" ]; then
-    echo "Error: NOTARY_PROFILE must be set to a notarytool keychain profile." >&2
-    echo "Create one with: xcrun notarytool store-credentials <profile> --apple-id <apple-id> --team-id <team-id>" >&2
-    exit 2
-  fi
-
-  require_command xcrun "for notarytool and stapler"
-fi
 
 if ! is_existing_package_mode; then
   require_command swift "to build Waves"
@@ -1335,7 +1459,7 @@ create_dmg() {
   # primary-signature assessment of the DMG (and the publication check below)
   # rejects an unsigned image even when the app inside is notarized.
   if [ -n "$SIGN_IDENTITY" ] && [ -x /usr/bin/codesign ]; then
-    /usr/bin/codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+    /usr/bin/codesign --keychain "$SIGNING_KEYCHAIN" --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
   fi
 
   rm -rf "$ACTIVE_STAGING_DIR"
@@ -1365,7 +1489,7 @@ notarize_release() {
 
   require_command xcrun "for notarytool and stapler"
   release_check
-  /usr/bin/xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  run_notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
   /usr/bin/xcrun stapler staple "$DMG_PATH"
   /usr/bin/xcrun stapler validate "$DMG_PATH"
 

@@ -2258,6 +2258,27 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_release_signing_binds_each_credential_to_the_validated_login_account
+    source = File.read(File.expand_path("../build_and_run.sh", __dir__))
+
+    assert_includes source, "resolve_signing_account_paths"
+    assert_includes source, 'SIGNING_USER_HOME=""'
+    assert_includes source, 'SIGNING_KEYCHAIN=""'
+    assert_includes source, '/usr/bin/dscl . -read "/Users/$account_name" NFSHomeDirectory'
+    assert_includes source, "run_signing_security()"
+    assert_includes source, 'run_signing_security find-identity -v -p codesigning "$SIGNING_KEYCHAIN"'
+
+    assert_includes source,
+      '/usr/bin/codesign --keychain "$SIGNING_KEYCHAIN" "${args[@]}" --sign "$identity" "$target"'
+    assert_includes source,
+      '/usr/bin/codesign --keychain "$SIGNING_KEYCHAIN" --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"'
+
+    assert_includes source, "run_notarytool()"
+    assert_includes source, 'HOME="$SIGNING_USER_HOME"'
+    assert_includes source, 'run_notarytool history --keychain-profile "$NOTARY_PROFILE"'
+    assert_includes source, 'run_notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait'
+  end
+
   private
 
   def evidence_authoring_entrypoints(directory = nil)

@@ -129,6 +129,13 @@ Then, for each release:
 SIGN_IDENTITY="Developer ID Application: Jonathan Reed (AJ9VWBRNZN)" NOTARY_PROFILE=waves-notary ./script/build_and_run.sh --notarize
 ```
 
+The release environment keeps its build `HOME` private. It resolves the active
+macOS account through Directory Services, validates that account's home and
+login keychain ownership, passes that keychain explicitly to `codesign`, and
+gives only the validated account home to a minimal `notarytool` child process.
+The signing identity and named notary profile are checked before either
+universal architecture begins compiling.
+
 `.github/workflows/release.yml` is manual-only and accepts an exact lowercase
 40-character revision. Pushing a tag does not start a build. The workflow has
 one read-only verification job, contains no credentialed signer, and uploads
