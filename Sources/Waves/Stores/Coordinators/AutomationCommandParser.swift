@@ -50,6 +50,7 @@ final class AutomationCommandParser {
   func parse(_ url: URL) -> AutomationCommandParseResult {
     invocationCount += 1
 
+    let validated: AutomationCommand
     guard url.absoluteString.utf8.count <= WavesURLPolicy.maxPayloadBytes else {
       return .rejected(
         AutomationCommandRejection(
@@ -68,16 +69,6 @@ final class AutomationCommandParser {
           shouldPresent: false
         ))
     }
-    guard acceptRequest() else {
-      let currentTime = now()
-      let shouldNotify =
-        lastThrottleNotification.map {
-          currentTime.timeIntervalSince($0) >= throttleNotificationInterval
-        } ?? true
-      if shouldNotify { lastThrottleNotification = currentTime }
-      return .throttled(shouldNotify: shouldNotify)
-    }
-
     switch host {
     case "set-volume":
       guard let appID = queryValue(named: "app", in: components),
@@ -91,7 +82,7 @@ final class AutomationCommandParser {
       else {
         return presentedRejection("Set-volume command was invalid.")
       }
-      return .accepted(.setVolume(appID: appID, volume: volume))
+      validated = .setVolume(appID: appID, volume: volume)
 
     case "mute":
       guard let appID = queryValue(named: "app", in: components),
@@ -102,22 +93,34 @@ final class AutomationCommandParser {
       else {
         return presentedRejection("Mute command was invalid.")
       }
-      return .accepted(.setMuted(appID: appID, isMuted: shouldMute))
+      validated = .setMuted(appID: appID, isMuted: shouldMute)
 
     case "apply-profile", "apply-preset":
       guard let profileName = queryValue(named: "name", in: components),
+        !profileName.isEmpty,
         profileName.count <= 256
       else {
         return presentedRejection("Profile command was invalid.")
       }
-      return .accepted(.applyProfile(name: profileName))
+      validated = .applyProfile(name: profileName)
 
     case "refresh":
-      return .accepted(.refresh)
+      validated = .refresh
 
     default:
       return presentedRejection("Unknown command: \(String(host.prefix(64)))")
     }
+
+    guard acceptRequest() else {
+      let currentTime = now()
+      let shouldNotify =
+        lastThrottleNotification.map {
+          currentTime.timeIntervalSince($0) >= throttleNotificationInterval
+        } ?? true
+      if shouldNotify { lastThrottleNotification = currentTime }
+      return .throttled(shouldNotify: shouldNotify)
+    }
+    return .accepted(validated)
   }
 
   func reset() {

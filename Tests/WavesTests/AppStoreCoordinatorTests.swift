@@ -41,6 +41,34 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func automationParserCountsOnlyAcceptedCommandsTowardQuota() {
+  let parser = AutomationCommandParser()
+  let invalidCommands = [
+    "waves://unknown",
+    "waves://set-volume?app=music",
+    "waves://set-volume?app=music&volume=nan",
+    "waves://set-volume?app=music&volume=inf",
+    "waves://set-volume?app=music&volume=-0.1",
+    "waves://set-volume?app=music&volume=1.1",
+    "waves://mute?app=music",
+    "waves://mute?app=music&muted=maybe",
+    "waves://apply-profile",
+    "waves://apply-preset?name=",
+  ]
+
+  for command in invalidCommands {
+    guard case .rejected = parser.parse(URL(string: command)!) else {
+      Issue.record("expected rejection for \(command)")
+      continue
+    }
+  }
+  for _ in 0..<10 {
+    #expect(parser.parse(URL(string: "waves://refresh")!) == .accepted(.refresh))
+  }
+  #expect(parser.parse(URL(string: "waves://refresh")!) == .throttled(shouldNotify: true))
+}
+
+@MainActor
 @Test func deviceSuppressionExpiresConsumesAndShutsDownDeterministically() async {
   let clock = CoordinatorTestClock()
   let suppression = DeviceChangeSuppressionCoordinator(
