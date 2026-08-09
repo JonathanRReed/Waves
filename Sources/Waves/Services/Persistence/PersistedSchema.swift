@@ -61,11 +61,6 @@ enum PersistenceSecurity {
     try setPrivateDirectoryPermissions(directory, fileManager: fileManager)
   }
 
-  static func secureExistingFile(at url: URL, fileManager: FileManager = .default) {
-    guard fileManager.fileExists(atPath: url.path) else { return }
-    try? setPrivateFilePermissions(url, fileManager: fileManager)
-  }
-
   static func setPrivateFilePermissions(_ url: URL, fileManager: FileManager = .default) throws {
     try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
   }

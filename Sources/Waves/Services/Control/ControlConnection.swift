@@ -105,6 +105,8 @@ final class ControlConnection {
   private nonisolated let fd: Int32
   private let handler: ControlCommandHandler
   private let timeouts: ControlConnectionTimeouts
+  let peerProcessID: pid_t
+  private let canSubscribe: () -> Bool
 
   private var readSource: DispatchSourceRead?
   private var writeSource: DispatchSourceWrite?
@@ -112,19 +114,27 @@ final class ControlConnection {
   private var isWriteSourceActive = false
   private var codec = ControlCodec()
   private var session = ControlCommandHandler.Session()
-  private var limiter = ControlRateLimiter(now: Date().timeIntervalSinceReferenceDate)
+  private var admission = ControlInboundAdmission(now: Date().timeIntervalSinceReferenceDate)
   private var writePump = ControlWritePump()
-  private var pendingRequests: [ControlRequest] = []
+  private var pendingRequests = ControlPendingRequestQueue()
   private var isHandlingRequest = false
   private var isClosed = false
 
   var onClose: ((ControlConnection) -> Void)?
   var isSubscribed: Bool { session.isSubscribed }
 
-  init(fd: Int32, handler: ControlCommandHandler, timeouts: ControlConnectionTimeouts = .production) {
+  init(
+    fd: Int32,
+    peerProcessID: pid_t,
+    handler: ControlCommandHandler,
+    timeouts: ControlConnectionTimeouts = .production,
+    canSubscribe: @escaping () -> Bool
+  ) {
     self.fd = fd
+    self.peerProcessID = peerProcessID
     self.handler = handler
     self.timeouts = timeouts
+    self.canSubscribe = canSubscribe
 
     var flags = fcntl(fd, F_GETFL, 0)
     flags |= O_NONBLOCK
@@ -168,6 +178,7 @@ final class ControlConnection {
     guard !isClosed else { return }
     isClosed = true
     writePump.removeAll()
+    pendingRequests.removeAll()
     readSource?.cancel()
     readSource = nil
     if let writeSource {
@@ -205,19 +216,26 @@ final class ControlConnection {
     }
 
     for line in lines {
-      guard let request = ControlCodec.decode(line) else {
-        send(.failure(id: nil, .malformedRequest))
-        continue
-      }
+      switch admission.classify(line, now: Date().timeIntervalSinceReferenceDate) {
+      case let .failure(id, error, shouldClose):
+        if shouldClose {
+          logger.error("Closing an abusive control connection")
+          finish()
+          return
+        }
+        send(.failure(id: id, error))
 
-      // A valid decoded request keeps an established, unsubscribed session
-      // alive. It cannot extend the initial handshake window.
-      if session.didHandshake { scheduleActivityDeadline() }
-      guard limiter.allow(now: Date().timeIntervalSinceReferenceDate) else {
-        send(.failure(id: request.id, .rateLimited))
-        continue
+      case let .request(request, retainedByteCount):
+        // An admitted, decoded request keeps an established, unsubscribed
+        // session alive. It cannot extend the initial handshake window.
+        if session.didHandshake { scheduleActivityDeadline() }
+        guard pendingRequests.enqueue(request, retainedByteCount: retainedByteCount) else {
+          logger.error("Closing a control connection whose pending request queue exceeded its limit")
+          finish()
+          return
+        }
+        processNextRequestIfNeeded()
       }
-      enqueue(request)
     }
   }
 
@@ -226,23 +244,24 @@ final class ControlConnection {
     onClose?(self)
   }
 
-  private func enqueue(_ request: ControlRequest) {
-    pendingRequests.append(request)
-    processNextRequestIfNeeded()
-  }
-
   private func processNextRequestIfNeeded() {
-    guard !isClosed, !isHandlingRequest, !pendingRequests.isEmpty else { return }
+    guard !isClosed, !isHandlingRequest, let request = pendingRequests.first else { return }
     isHandlingRequest = true
-    let request = pendingRequests.removeFirst()
     let priorSession = session
     Task { @MainActor [weak self] in
       guard let self else { return }
       let result = await self.handler.handle(request, session: priorSession)
       guard !self.isClosed else { return }
-      self.session = result.session
-      self.send(result.response)
+      let startedSubscription = !priorSession.isSubscribed && result.session.isSubscribed
+      if startedSubscription, !self.canSubscribe() {
+        self.session = priorSession
+        self.send(.failure(id: request.id, .rateLimited))
+      } else {
+        self.session = result.session
+        self.send(result.response)
+      }
       if self.session.didHandshake { self.scheduleActivityDeadline() }
+      _ = self.pendingRequests.removeFirst()
       self.isHandlingRequest = false
       self.processNextRequestIfNeeded()
     }

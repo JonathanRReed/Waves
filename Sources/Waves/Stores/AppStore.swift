@@ -339,6 +339,7 @@ final class AppStore {
   private let appIntentCoordinator = AppIntentCoordinator()
   private let adaptiveMixCoordinator = AdaptiveMixCoordinator()
   private let automationParser = AutomationCommandParser()
+  private let urlInvocationLimiter = URLInvocationLimiter()
   private let persistenceCoordinator: AppStorePersistenceCoordinator
   private let deviceChangeSuppression: DeviceChangeSuppressionCoordinator
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "AppStore")
@@ -1548,9 +1549,17 @@ final class AppStore {
     }
   }
 
-  func handleURLScheme(_ url: URL) {
+  func admitURLAutomationInvocation() -> Bool {
+    urlInvocationLimiter.allow()
+  }
+
+  func handleURLScheme(_ url: URL, invocationAlreadyAdmitted: Bool = false) {
     guard preferences.enableURLScheme else {
       logger.warning("URL scheme invocation rejected because URL schemes are disabled")
+      return
+    }
+    guard invocationAlreadyAdmitted || admitURLAutomationInvocation() else {
+      logger.warning("URL scheme invocation rejected because the invocation limit was exceeded")
       return
     }
     guard requireAudioRunning() else { return }
@@ -3166,6 +3175,7 @@ final class AppStore {
     let adaptiveTask = adaptiveMixCoordinator.shutdown()
     let suppressionTasks = deviceChangeSuppression.beginShutdown()
     automationParser.shutdown()
+    urlInvocationLimiter.reset()
     let appTransactions = intentTasks.appTransactions
     var mutationTasks = [
       privacySetupTask,
@@ -4608,21 +4618,10 @@ final class AppStore {
       if response == .OK, let url = openPanel.url {
         do {
           let sizeCap = 10 * 1024 * 1024
-          // Reject over-cap files BEFORE reading so a huge selection can't exhaust
-          // memory in the Data(contentsOf:) allocation. resourceValues is a cheap
-          // stat that doesn't load the file.
-          if let reportedSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-            reportedSize > sizeCap
-          {
-            store.showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
-            return
-          }
-
-          // Re-enforce the cap on the data actually loaded. The pre-read stat above
-          // bounds the allocation; this post-read check still rejects a file whose
-          // size grew (or a symlink swapped) between the stat and the read.
-          let data = try Data(contentsOf: url)
-          if data.count > sizeCap {
+          let data: Data
+          do {
+            data = try BoundedRegularFileReader.read(from: url, maximumBytes: sizeCap)
+          } catch BoundedRegularFileReaderError.fileTooLarge {
             store.showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
             return
           }

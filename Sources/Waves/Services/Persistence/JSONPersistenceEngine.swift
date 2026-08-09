@@ -67,23 +67,22 @@ final class JSONPersistenceEngine<Value: Sendable>: @unchecked Sendable {
 
   func load(from fileURL: URL) -> JSONPersistenceLoadResult<Value> {
     queue.sync {
-      guard fileManager.fileExists(atPath: fileURL.path) else { return .missing }
-      PersistenceSecurity.secureExistingFile(at: fileURL, fileManager: fileManager)
       do {
-        let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
-        let fileSize = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-        guard fileSize <= maximumFileSize else {
-          throw JSONPersistenceEngineError.fileTooLarge(
-            actual: fileSize,
-            maximum: maximumFileSize
-          )
-        }
-        return .loaded(try codec.decode(Data(contentsOf: fileURL)))
+        let data = try BoundedRegularFileReader.read(
+          from: fileURL,
+          maximumBytes: Int(clamping: maximumFileSize),
+          requiredPermissions: 0o600
+        )
+        return .loaded(try codec.decode(data))
+      } catch BoundedRegularFileReaderError.missing {
+        return .missing
       } catch {
         logger.warning(
           "Failed to load \(self.displayName): \(error.localizedDescription). Preserving file and using defaults."
         )
-        preserveCorruptFile(at: fileURL)
+        let shouldPreserve =
+          (error as? BoundedRegularFileReaderError)?.shouldPreserveAtPath ?? true
+        if shouldPreserve { preserveCorruptFile(at: fileURL) }
         recoveredFromCorruption = true
         return .recoveredFromCorruption
       }
@@ -136,17 +135,6 @@ final class JSONPersistenceEngine<Value: Sendable>: @unchecked Sendable {
       logger.warning("Moved unreadable \(self.displayName) file to \(backupURL.lastPathComponent)")
     } catch {
       logger.error("Failed to preserve unreadable \(self.displayName) file: \(error.localizedDescription)")
-    }
-  }
-}
-
-private enum JSONPersistenceEngineError: LocalizedError {
-  case fileTooLarge(actual: Int64, maximum: Int64)
-
-  var errorDescription: String? {
-    switch self {
-    case .fileTooLarge(let actual, let maximum):
-      "Persistence file is \(actual) bytes, exceeding the \(maximum)-byte limit."
     }
   }
 }

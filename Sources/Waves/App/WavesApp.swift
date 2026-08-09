@@ -537,11 +537,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     guard let store else { return }
     URLAutomationRouter(
       isEnabled: { store.preferences.enableURLScheme },
+      admitInvocation: { store.admitURLAutomationInvocation() },
       isAudioRunning: { store.isAudioRunning },
       parse: WavesURLPolicy.parse,
       promptForSetup: { store.promptToFinishSetup() },
       presentSetup: { self.presentSetupWindowIfAvailable() },
-      perform: { store.handleURLScheme($0) }
+      perform: { store.handleURLScheme($0, invocationAlreadyAdmitted: true) }
     ).handle(rawURLString: rawURLString)
   }
 

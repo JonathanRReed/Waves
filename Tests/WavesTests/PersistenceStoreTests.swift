@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 import WavesAudioCore
@@ -365,6 +366,52 @@ import WavesAudioCore
       deviceID: "legacy.device"
     ) == AppVolumeSettings(desiredVolume: 0.3, isMuted: true, volumeBoost: 2)
   )
+}
+
+@Test func boundedRegularFileReaderRejectsOversizeSymlinkAndFIFOWithoutFollowing() throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  let regular = directory.appendingPathComponent("regular.json")
+  try Data("12345".utf8).write(to: regular)
+  #expect(try BoundedRegularFileReader.read(from: regular, maximumBytes: 5) == Data("12345".utf8))
+  #expect(throws: BoundedRegularFileReaderError.fileTooLarge(actual: 5, maximum: 4)) {
+    _ = try BoundedRegularFileReader.read(from: regular, maximumBytes: 4)
+  }
+
+  let symlink = directory.appendingPathComponent("linked.json")
+  try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: regular)
+  #expect(throws: BoundedRegularFileReaderError.symbolicLink) {
+    _ = try BoundedRegularFileReader.read(from: symlink, maximumBytes: 100)
+  }
+
+  let fifo = directory.appendingPathComponent("pipe.json")
+  #expect(mkfifo(fifo.path, 0o600) == 0)
+  #expect(throws: BoundedRegularFileReaderError.notRegularFile) {
+    _ = try BoundedRegularFileReader.read(from: fifo, maximumBytes: 100)
+  }
+}
+
+@Test func persistenceLoadDoesNotFollowOrChmodASymlinkedStateFile() throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let target = directory.appendingPathComponent("outside.json")
+  var enabled = UserPreferences()
+  enabled.enableExternalControl = true
+  let original = try JSONEncoder().encode(enabled)
+  try original.write(to: target)
+  try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.path)
+
+  let linkedState = directory.appendingPathComponent("preferences.json")
+  try FileManager.default.createSymbolicLink(at: linkedState, withDestinationURL: target)
+  let loaded = PreferencesStore(directory: directory).load()
+
+  #expect(!loaded.enableExternalControl)
+  #expect(try Data(contentsOf: target) == original)
+  #expect(try persistencePermissions(at: target) == 0o644)
+  var status = stat()
+  #expect(lstat(linkedState.path, &status) == 0)
+  #expect(status.st_mode & S_IFMT == S_IFLNK)
 }
 
 private enum TaskSevenPersistenceStore: String, CaseIterable {

@@ -230,7 +230,7 @@ func controlServerHandlesMalformedOversizedEOFAndReconnect() async throws {
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
-func controlServerCapsConnectionsAndRemovesSocketOnShutdown() async throws {
+func controlServerCapsOneProcessAndRemovesSocketOnShutdown() async throws {
   let fixture = await ControlSocketFixture.make(
     timeouts: ControlConnectionTimeouts(handshake: .seconds(30), idle: .seconds(30))
   )
@@ -241,7 +241,7 @@ func controlServerCapsConnectionsAndRemovesSocketOnShutdown() async throws {
     fixture.stop()
   }
 
-  for expectedCount in 1...ControlServer.maximumConnections {
+  for expectedCount in 1...ControlServer.maximumConnectionsPerProcess {
     let client = try ControlSocketClient(path: fixture.url.path)
     clients.append(client)
     try client.write("{\"id\":\(expectedCount),\"cmd\":\"hello\",\"protocol\":1}\n")
@@ -251,20 +251,255 @@ func controlServerCapsConnectionsAndRemovesSocketOnShutdown() async throws {
     #expect(fixture.server.connectionCount == expectedCount)
   }
 
-  let ninthRejected: Bool
+  let excessRejected: Bool
   do {
-    let ninth = try ControlSocketClient(path: fixture.url.path)
-    clients.append(ninth)
-    ninthRejected = await ninth.reachesEOF(timeout: .seconds(30))
+    let excess = try ControlSocketClient(path: fixture.url.path)
+    clients.append(excess)
+    excessRejected = await excess.reachesEOF(timeout: .seconds(1))
   } catch {
-    ninthRejected = true
+    excessRejected = true
   }
-  #expect(ninthRejected)
-  #expect(fixture.server.connectionCount == ControlServer.maximumConnections)
+  #expect(excessRejected)
+  #expect(fixture.server.connectionCount == ControlServer.maximumConnectionsPerProcess)
+  #expect(ControlServer.maximumConnectionsPerProcess < ControlServer.maximumConnections)
 
   fixture.server.stop()
   #expect(!FileManager.default.fileExists(atPath: fixture.url.path))
   #expect(await clients[0].reachesEOF(timeout: .seconds(30)))
+}
+
+@Test func acceptBatchAppliesCapacityAndWorkBudgetBeforeReturningDescriptors() {
+  var offered = Array(10..<30).map(Int32.init)
+  var acceptedCallCount = 0
+  var closed: [Int32] = []
+
+  let accepted = ControlServer.collectAcceptedDescriptors(
+    remainingCapacity: 2,
+    maximumAttempts: 4,
+    acceptOne: {
+      acceptedCallCount += 1
+      return offered.isEmpty ? nil : offered.removeFirst()
+    },
+    identity: { descriptor in
+      ControlPeerIdentity(uid: getuid(), processID: pid_t(descriptor))
+    },
+    close: { closed.append($0) }
+  )
+
+  #expect(acceptedCallCount == 4)
+  #expect(accepted.map(\.fileDescriptor) == [10, 11])
+  #expect(closed == [12, 13])
+}
+
+@Test func malformedAndOverLimitFramesShareABoundedPredecodeAdmissionBudget() {
+  var admission = ControlInboundAdmission(
+    frameBurst: 1,
+    frameRefillPerSecond: 0,
+    byteBurst: 1_024,
+    byteRefillPerSecond: 0,
+    maximumAbuseStrikes: 3,
+    now: 0
+  )
+  var decodeCount = 0
+  let malformed = Data("{\"id\":41,\"cmd\":".utf8)
+
+  let first = admission.classify(malformed, now: 0) { _ in
+    decodeCount += 1
+    return nil
+  }
+  let second = admission.classify(malformed, now: 0) { _ in
+    decodeCount += 1
+    return nil
+  }
+  let third = admission.classify(malformed, now: 0) { _ in
+    decodeCount += 1
+    return nil
+  }
+
+  #expect(first == .failure(id: 41, error: .malformedRequest, shouldClose: false))
+  #expect(second == .failure(id: 41, error: .rateLimited, shouldClose: false))
+  #expect(third == .failure(id: 41, error: .rateLimited, shouldClose: true))
+  #expect(decodeCount == 1)
+
+  var byteAdmission = ControlInboundAdmission(
+    frameBurst: 10,
+    frameRefillPerSecond: 0,
+    byteBurst: malformed.count - 1,
+    byteRefillPerSecond: 0,
+    maximumAbuseStrikes: 3,
+    now: 0
+  )
+  decodeCount = 0
+  #expect(
+    byteAdmission.classify(malformed, now: 0) { _ in
+      decodeCount += 1
+      return nil
+    } == .failure(id: 41, error: .rateLimited, shouldClose: false)
+  )
+  #expect(decodeCount == 0)
+}
+
+@Test func pendingRequestQueueBoundsCountAndRetainedFrameBytes() {
+  let request = ControlRequest(id: 1, cmd: .listApps)
+  var countBounded = ControlPendingRequestQueue(maximumCount: 2, maximumRetainedBytes: 100)
+
+  let countFirst = countBounded.enqueue(request, retainedByteCount: 10)
+  let countSecond = countBounded.enqueue(request, retainedByteCount: 10)
+  let countOverflow = countBounded.enqueue(request, retainedByteCount: 10)
+  #expect(countFirst)
+  #expect(countSecond)
+  #expect(!countOverflow)
+  #expect(countBounded.count == 2)
+  #expect(countBounded.retainedByteCount == 20)
+
+  _ = countBounded.removeFirst()
+  #expect(countBounded.count == 1)
+  #expect(countBounded.retainedByteCount == 10)
+
+  var byteBounded = ControlPendingRequestQueue(maximumCount: 10, maximumRetainedBytes: 15)
+  let byteFirst = byteBounded.enqueue(request, retainedByteCount: 10)
+  let byteOverflow = byteBounded.enqueue(request, retainedByteCount: 6)
+  #expect(byteFirst)
+  #expect(!byteOverflow)
+  #expect(byteBounded.count == 1)
+  #expect(byteBounded.retainedByteCount == 10)
+}
+
+@MainActor
+@Test func URLInvocationLimiterChargesRejectedAndNotRunningInvocationsBeforeParsing() {
+  var now = Date(timeIntervalSince1970: 1_000)
+  let limiter = URLInvocationLimiter(
+    maximumInvocations: 2,
+    window: 60,
+    now: { now }
+  )
+  var isRunning = false
+  var parseCount = 0
+  var setupCount = 0
+  var mutationCount = 0
+  let router = URLAutomationRouter(
+    isEnabled: { true },
+    admitInvocation: { limiter.allow() },
+    isAudioRunning: { isRunning },
+    parse: { raw in
+      parseCount += 1
+      return URL(string: raw)
+    },
+    promptForSetup: { setupCount += 1 },
+    presentSetup: {},
+    perform: { _ in mutationCount += 1 }
+  )
+
+  router.handle(rawURLString: "not-a-url")
+  router.handle(rawURLString: "waves://refresh")
+  isRunning = true
+  router.handle(rawURLString: "waves://refresh")
+
+  #expect(parseCount == 2)
+  #expect(setupCount == 1)
+  #expect(mutationCount == 0)
+
+  now.addTimeInterval(61)
+  router.handle(rawURLString: "waves://refresh")
+  #expect(parseCount == 3)
+  #expect(mutationCount == 1)
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func oneProcessCannotHoldEverySubscriberSlotIndefinitely() async throws {
+  let fixture = await ControlSocketFixture.make()
+  defer { fixture.stop() }
+  try fixture.server.start()
+
+  let first = try ControlSocketClient(path: fixture.url.path)
+  let second = try ControlSocketClient(path: fixture.url.path)
+  let third = try ControlSocketClient(path: fixture.url.path)
+  defer {
+    first.close()
+    second.close()
+    third.close()
+  }
+
+  for (index, client) in [first, second, third].enumerated() {
+    try client.write("{\"id\":\(index * 2 + 1),\"cmd\":\"hello\",\"protocol\":1}\n")
+    #expect((try await client.readLine()).contains(#""ok":true"#))
+    try client.write("{\"id\":\(index * 2 + 2),\"cmd\":\"subscribe\"}\n")
+  }
+
+  #expect((try await first.readLine()).contains(#""ok":true"#))
+  #expect((try await second.readLine()).contains(#""ok":true"#))
+  let refused = try await third.readLine()
+  #expect(refused.contains(#""error":"rate-limited""#))
+
+  try first.write("{\"id\":7,\"cmd\":\"unsubscribe\"}\n")
+  #expect((try await first.readLine()).contains(#""ok":true"#))
+  try third.write("{\"id\":8,\"cmd\":\"subscribe\"}\n")
+  #expect((try await third.readLine()).contains(#""ok":true"#))
+
+  try second.write("{\"id\":9,\"cmd\":\"list-apps\"}\n")
+  #expect((try await second.readLine()).contains(#""id":9"#))
+}
+
+@MainActor
+@Test func controlServerRejectsSymlinkedParentsAndExistingLeaves() async throws {
+  let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
+    .appendingPathComponent("wvsec-\(UUID().uuidString.prefix(8))", isDirectory: true)
+  let realParent = root.appendingPathComponent("real", isDirectory: true)
+  let linkedParent = root.appendingPathComponent("linked", isDirectory: true)
+  try FileManager.default.createDirectory(at: realParent, withIntermediateDirectories: true)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: realParent.path)
+  try FileManager.default.createSymbolicLink(at: linkedParent, withDestinationURL: realParent)
+  defer { try? FileManager.default.removeItem(at: root) }
+
+  let store = await makeControlStoreFixture()
+  let parentServer = ControlServer(
+    url: linkedParent.appendingPathComponent("control.sock"),
+    handler: ControlCommandHandler(store: store)
+  )
+  #expect(throws: ControlServerError.unsafeParent) {
+    try parentServer.start()
+  }
+
+  let target = root.appendingPathComponent("must-remain")
+  try Data("sentinel".utf8).write(to: target)
+  let leaf = realParent.appendingPathComponent("control.sock")
+  try FileManager.default.createSymbolicLink(at: leaf, withDestinationURL: target)
+  let leafServer = ControlServer(url: leaf, handler: ControlCommandHandler(store: store))
+  #expect(throws: ControlServerError.unsafeExistingLeaf) {
+    try leafServer.start()
+  }
+  #expect(try Data(contentsOf: target) == Data("sentinel".utf8))
+  #expect(try FileManager.default.destinationOfSymbolicLink(atPath: leaf.path) == target.path)
+}
+
+@MainActor
+@Test func controlServerStopDoesNotUnlinkAReplacementLeaf() async throws {
+  let fixture = await ControlSocketFixture.make()
+  defer { fixture.stop() }
+  try fixture.server.start()
+
+  let target = fixture.directory.appendingPathComponent("must-remain")
+  try Data("sentinel".utf8).write(to: target)
+  #expect(unlink(fixture.url.path) == 0)
+  try FileManager.default.createSymbolicLink(at: fixture.url, withDestinationURL: target)
+
+  fixture.server.stop()
+
+  #expect(try Data(contentsOf: target) == Data("sentinel".utf8))
+  #expect(try FileManager.default.destinationOfSymbolicLink(atPath: fixture.url.path) == target.path)
+}
+
+@Test func socketParentPolicyRejectsForeignOwnershipAndNonPrivateMode() {
+  var foreign = stat()
+  foreign.st_mode = mode_t(S_IFDIR | 0o700)
+  foreign.st_uid = getuid() &+ 1
+  #expect(!ControlSocketFilesystem.parentStatusIsSafe(foreign, currentUID: getuid()))
+
+  var broad = stat()
+  broad.st_mode = mode_t(S_IFDIR | 0o755)
+  broad.st_uid = getuid()
+  #expect(!ControlSocketFilesystem.parentStatusIsSafe(broad, currentUID: getuid()))
 }
 
 private struct ControlSocketFixture {

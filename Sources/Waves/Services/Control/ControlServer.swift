@@ -19,7 +19,6 @@ enum ControlSocketLocation {
       directory = fileManager.homeDirectoryForCurrentUser
         .appendingPathComponent(".Waves", isDirectory: true)
     }
-    try? PersistenceSecurity.preparePrivateDirectory(directory, fileManager: fileManager)
     return directory.appendingPathComponent("control.sock")
   }
 
@@ -39,7 +38,10 @@ final class ControlServer {
   /// Beyond this, further connects are refused. A control surface needs one
   /// client, maybe a few; a bound stops a misbehaving one from exhausting
   /// descriptors for the whole app.
-  static let maximumConnections = 8
+  nonisolated static let maximumConnections = 8
+  nonisolated static let maximumConnectionsPerProcess = 4
+  nonisolated static let maximumAcceptAttemptsPerEvent = 16
+  nonisolated static let maximumSubscribersPerProcess = 2
 
   // nonisolated: the accept/read paths log from the I/O queue, and Logger is
   // Sendable, so requiring main-actor isolation here would trap at runtime.
@@ -86,10 +88,16 @@ final class ControlServer {
       throw ControlServerError.pathTooLong
     }
 
-    // A socket file left behind by a crash would make bind() fail with EADDRINUSE
-    // forever. Nothing else owns this path, so replacing it is safe and is the
-    // difference between "recovers on next launch" and "never works again".
-    unlink(path)
+    do {
+      try ControlSocketFilesystem.prepareParent(at: url.deletingLastPathComponent())
+    } catch {
+      throw ControlServerError.unsafeParent
+    }
+    do {
+      try ControlSocketFilesystem.removeStaleLeaf(at: url)
+    } catch {
+      throw ControlServerError.unsafeExistingLeaf
+    }
 
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { throw ControlServerError.socketFailed(errno) }
@@ -155,7 +163,11 @@ final class ControlServer {
     source.setEventHandler { [weak self] in
       MainActor.assumeIsolated {
         guard let self else { return }
-        let accepted = Self.acceptPendingFileDescriptors(listener: fd, logger: self.logger)
+        let accepted = Self.acceptPendingFileDescriptors(
+          listener: fd,
+          remainingCapacity: Self.maximumConnections - self.connections.count,
+          logger: self.logger
+        )
         self.adopt(accepted)
       }
     }
@@ -179,7 +191,7 @@ final class ControlServer {
     }
     // Leaving the file behind would make the next launch look like a stale
     // socket it has to clean up; removing it keeps the filesystem honest.
-    unlink(url.path)
+    ControlSocketFilesystem.removeOwnedSocketLeafIfPresent(at: url)
     logger.info("Control socket stopped")
   }
 
@@ -198,31 +210,79 @@ final class ControlServer {
   /// fails the uid check before it becomes a connection at all.
   private nonisolated static func acceptPendingFileDescriptors(
     listener: Int32,
+    remainingCapacity: Int,
     logger: Logger
-  ) -> [Int32] {
-    var accepted: [Int32] = []
-    while true {
-      let clientFD = accept(listener, nil, nil)
-      guard clientFD >= 0 else { return accepted }
-      guard Self.isPeerTrusted(clientFD) else {
-        // Filesystem permissions already restrict this to our uid; this is
-        // defence in depth against a mode that somehow widened.
-        logger.error("Refused a control connection from another user")
-        _ = Darwin.close(clientFD)
-        continue
-      }
-      accepted.append(clientFD)
-    }
+  ) -> [AcceptedControlDescriptor] {
+    collectAcceptedDescriptors(
+      remainingCapacity: remainingCapacity,
+      maximumAttempts: maximumAcceptAttemptsPerEvent,
+      acceptOne: {
+        let clientFD = accept(listener, nil, nil)
+        guard clientFD >= 0 else { return nil }
+        return clientFD
+      },
+      identity: { descriptor in
+        guard let identity = Self.peerIdentity(descriptor) else {
+          // Filesystem permissions already restrict this to our uid; this is
+          // defence in depth against a mode that somehow widened.
+          logger.error("Refused an unverified control connection")
+          return nil
+        }
+        return identity
+      },
+      close: { _ = Darwin.close($0) }
+    )
   }
 
-  private func adopt(_ fileDescriptors: [Int32]) {
-    for clientFD in fileDescriptors {
-      guard connections.count < Self.maximumConnections else {
+  nonisolated static func collectAcceptedDescriptors(
+    remainingCapacity: Int,
+    maximumAttempts: Int,
+    acceptOne: () -> Int32?,
+    identity: (Int32) -> ControlPeerIdentity?,
+    close: (Int32) -> Void
+  ) -> [AcceptedControlDescriptor] {
+    let remainingCapacity = max(0, remainingCapacity)
+    var accepted: [AcceptedControlDescriptor] = []
+    var attempts = 0
+    while attempts < max(0, maximumAttempts), let descriptor = acceptOne() {
+      attempts += 1
+      guard let identity = identity(descriptor), accepted.count < remainingCapacity else {
+        close(descriptor)
+        continue
+      }
+      accepted.append(
+        AcceptedControlDescriptor(fileDescriptor: descriptor, identity: identity)
+      )
+    }
+    return accepted
+  }
+
+  private func adopt(_ descriptors: [AcceptedControlDescriptor]) {
+    for accepted in descriptors {
+      let clientFD = accepted.fileDescriptor
+      let peerProcessID = accepted.identity.processID
+      let peerConnectionCount = connections.values.count {
+        $0.peerProcessID == peerProcessID
+      }
+      guard connections.count < Self.maximumConnections,
+        peerConnectionCount < Self.maximumConnectionsPerProcess
+      else {
         logger.error("Refused a control connection: too many already open")
         _ = Darwin.close(clientFD)
         continue
       }
-      let connection = ControlConnection(fd: clientFD, handler: handler, timeouts: timeouts)
+      let connection = ControlConnection(
+        fd: clientFD,
+        peerProcessID: peerProcessID,
+        handler: handler,
+        timeouts: timeouts,
+        canSubscribe: { [weak self] in
+          guard let self else { return false }
+          return self.connections.values.count {
+            $0.peerProcessID == peerProcessID && $0.isSubscribed
+          } < Self.maximumSubscribersPerProcess
+        }
+      )
       connection.onClose = { [weak self] closed in
         guard let self,
           self.connections.removeValue(forKey: ObjectIdentifier(closed)) != nil
@@ -240,11 +300,19 @@ final class ControlServer {
   }
 
   /// True when the connecting process runs as the same user.
-  private nonisolated static func isPeerTrusted(_ fd: Int32) -> Bool {
+  private nonisolated static func peerIdentity(_ fd: Int32) -> ControlPeerIdentity? {
     var uid = uid_t()
     var gid = gid_t()
-    guard getpeereid(fd, &uid, &gid) == 0 else { return false }
-    return peerIsTrusted(peerUID: uid, currentUID: getuid())
+    guard getpeereid(fd, &uid, &gid) == 0,
+      peerIsTrusted(peerUID: uid, currentUID: getuid())
+    else { return nil }
+    var processID = pid_t()
+    var length = socklen_t(MemoryLayout<pid_t>.size)
+    guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &processID, &length) == 0,
+      length == MemoryLayout<pid_t>.size,
+      processID > 0
+    else { return nil }
+    return ControlPeerIdentity(uid: uid, processID: processID)
   }
 
   nonisolated static func peerIsTrusted(peerUID: uid_t, currentUID: uid_t) -> Bool {
@@ -264,8 +332,87 @@ final class ControlServer {
 
 enum ControlServerError: Error, Equatable {
   case pathTooLong
+  case unsafeParent
+  case unsafeExistingLeaf
   case socketFailed(Int32)
   case bindFailed(Int32)
   case permissionsFailed(Int32)
   case listenFailed(Int32)
+}
+
+struct ControlPeerIdentity: Equatable {
+  let uid: uid_t
+  let processID: pid_t
+}
+
+struct AcceptedControlDescriptor: Equatable {
+  let fileDescriptor: Int32
+  let identity: ControlPeerIdentity
+}
+
+enum ControlSocketFilesystem {
+  static func parentStatusIsSafe(_ status: stat, currentUID: uid_t) -> Bool {
+    status.st_mode & S_IFMT == S_IFDIR
+      && status.st_uid == currentUID
+      && status.st_mode & 0o777 == 0o700
+  }
+
+  static func prepareParent(
+    at url: URL,
+    fileManager: FileManager = .default,
+    currentUID: uid_t = getuid()
+  ) throws {
+    var status = stat()
+    if lstat(url.path, &status) != 0 {
+      guard errno == ENOENT else { throw POSIXError(.EIO) }
+      try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+      guard lstat(url.path, &status) == 0 else { throw POSIXError(.EIO) }
+    }
+
+    guard status.st_mode & S_IFMT == S_IFDIR, status.st_uid == currentUID else {
+      throw POSIXError(.EACCES)
+    }
+    if status.st_mode & 0o777 != 0o700 {
+      guard chmod(url.path, 0o700) == 0 else { throw POSIXError(.EACCES) }
+      guard lstat(url.path, &status) == 0 else { throw POSIXError(.EIO) }
+    }
+    guard parentStatusIsSafe(status, currentUID: currentUID) else {
+      throw POSIXError(.EACCES)
+    }
+
+    let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    guard descriptor >= 0 else { throw POSIXError(.EACCES) }
+    defer { _ = Darwin.close(descriptor) }
+    var opened = stat()
+    guard fstat(descriptor, &opened) == 0,
+      parentStatusIsSafe(opened, currentUID: currentUID),
+      opened.st_dev == status.st_dev,
+      opened.st_ino == status.st_ino
+    else { throw POSIXError(.EACCES) }
+  }
+
+  static func removeStaleLeaf(at url: URL, currentUID: uid_t = getuid()) throws {
+    var status = stat()
+    guard lstat(url.path, &status) == 0 else {
+      guard errno == ENOENT else { throw POSIXError(.EIO) }
+      return
+    }
+    let type = status.st_mode & S_IFMT
+    guard status.st_uid == currentUID, type == S_IFSOCK || type == S_IFREG else {
+      throw POSIXError(.EACCES)
+    }
+    guard unlink(url.path) == 0 else { throw POSIXError(.EACCES) }
+  }
+
+  static func removeOwnedSocketLeafIfPresent(
+    at url: URL,
+    currentUID: uid_t = getuid()
+  ) {
+    var status = stat()
+    guard lstat(url.path, &status) == 0,
+      status.st_uid == currentUID,
+      status.st_mode & S_IFMT == S_IFSOCK
+    else { return }
+    _ = unlink(url.path)
+  }
 }
