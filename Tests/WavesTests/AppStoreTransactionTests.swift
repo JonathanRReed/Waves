@@ -1468,8 +1468,7 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
   let app = transactionTestApp(runtimeIdentity: identity)
   let fixture = makeTransactionFixture(
     apps: [app],
-    device: transactionTestDevice(),
-    runtimeIdentityProvider: { _ in nil }
+    device: transactionTestDevice()
   )
 
   fixture.store.handleAppTermination(pid: 42)
@@ -1500,8 +1499,7 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
   )
   let fixture = makeTransactionFixture(
     apps: [terminated, unrelated],
-    device: transactionTestDevice(),
-    runtimeIdentityProvider: { _ in nil }
+    device: transactionTestDevice()
   )
 
   fixture.store.handleAppTermination(pid: 42)
@@ -1523,9 +1521,6 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
     device: transactionTestDevice(),
     runtimeProcessProbe: { pid in
       pid == 42 ? transactionRuntimeProbe(identity: replacementIdentity) : nil
-    },
-    runtimeIdentityProvider: { pid in
-      pid == 42 ? replacementIdentity : nil
     }
   )
 
@@ -1538,6 +1533,65 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
 }
 
 @MainActor
+@Test func delayedTerminationAfterRefreshCannotReleaseTheLiveReplacementController() async throws {
+  let replacementIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+  let replacement = transactionTestApp(
+    id: "replacement",
+    runtimeIdentity: replacementIdentity
+  )
+  let device = transactionTestDevice()
+  let snapshot = transactionSnapshot(apps: [replacement], device: device)
+  let controller = try PerAppTapController.testingController(
+    appID: replacement.id,
+    logicalID: replacement.logicalID,
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: { noErr },
+      stopIOProc: { noErr },
+      restoreTapMuting: { noErr },
+      destroyIOProc: { _, _ in noErr },
+      destroyAggregateDevice: { _ in noErr },
+      destroyProcessTap: { _ in noErr }
+    )
+  )
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: snapshot,
+    captureAuthorization: .authorized,
+    testingControllers: [controller]
+  )
+  let preferencesStore = TransactionPreferencesStore()
+  preferencesStore.value.appAudioIntentMigrationVersion = 1
+  preferencesStore.value.hasCompletedPrivacySetup = true
+  let sessionStore = TransactionSessionStore()
+  sessionStore.value = snapshot
+  let store = AppStore(
+    backend: backend,
+    preferencesStore: preferencesStore,
+    profileStore: TransactionProfilesStore(),
+    sessionStore: sessionStore,
+    loginItemService: TransactionLoginItemService(),
+    deviceVolumePresetsStore: TransactionDevicePresetsStore(),
+    initialStartupState: .running,
+    runtimeProcessProbe: { pid in
+      pid == 42 ? transactionRuntimeProbe(identity: replacementIdentity) : nil
+    }
+  )
+
+  store.handleAppTermination(pid: 42)
+  await waitUntil { store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  let backendLifecycle = await backend.lifecycleDebugSnapshot()
+  let backendReplacement = await backend.currentSnapshot().apps.first
+  #expect(backendLifecycle.liveControllers == 1)
+  #expect(controller.isActive)
+  #expect(backendReplacement?.routingState == .managed)
+  #expect(backendReplacement?.isActive == true)
+  #expect(store.session.apps.first?.routingState == .managed)
+  #expect(store.session.apps.first?.isActive == true)
+
+  _ = await store.shutdown()
+}
+
+@MainActor
 @Test func liveProcessWithoutAVerifiableIdentityDefersTerminationToMaintenance() async {
   let storedIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
   let replacementIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
@@ -1547,8 +1601,7 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
     device: transactionTestDevice(),
     runtimeProcessProbe: { pid in
       pid == 42 ? transactionRuntimeProbe(identity: replacementIdentity) : nil
-    },
-    runtimeIdentityProvider: { _ in nil }
+    }
   )
 
   fixture.store.handleAppTermination(pid: 42)
@@ -1564,8 +1617,7 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
   let legacy = transactionTestApp(runtimeIdentity: nil)
   let fixture = makeTransactionFixture(
     apps: [legacy],
-    device: transactionTestDevice(),
-    runtimeIdentityProvider: { _ in nil }
+    device: transactionTestDevice()
   )
 
   fixture.store.handleAppTermination(pid: 42)
@@ -1588,8 +1640,7 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
   )
   let fixture = makeTransactionFixture(
     apps: [first, second],
-    device: transactionTestDevice(),
-    runtimeIdentityProvider: { _ in nil }
+    device: transactionTestDevice()
   )
 
   fixture.store.handleAppTermination(pid: 42)
@@ -1680,7 +1731,6 @@ private func makeTransactionFixture(
   refreshApps: [AudioApp]? = nil,
   initialStartupState: AppStartupState = .running,
   runtimeProcessProbe: @escaping @Sendable (Int32) -> RuntimeProcessProbe? = { _ in nil },
-  runtimeIdentityProvider: @escaping @Sendable (Int32) -> AppRuntimeIdentity? = { _ in nil },
   deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
     duration in try await Task.sleep(for: duration)
   }
@@ -1732,7 +1782,6 @@ private func makeTransactionFixture(
     deviceVolumePresetsStore: presetsStore,
     initialStartupState: initialStartupState,
     runtimeProcessProbe: runtimeProcessProbe,
-    runtimeIdentityProvider: runtimeIdentityProvider,
     deviceChangeSuppressionSleep: deviceChangeSuppressionSleep
   )
   return TransactionFixture(

@@ -254,7 +254,6 @@ enum PrivacySetupPresentationState: Equatable {
 @MainActor
 final class AppStore {
   typealias RuntimeProcessProbeProvider = @Sendable (Int32) -> RuntimeProcessProbe?
-  typealias RuntimeIdentityProvider = @Sendable (Int32) -> AppRuntimeIdentity?
 
   var session: AudioSessionSnapshot {
     didSet {
@@ -340,7 +339,6 @@ final class AppStore {
   private let backend: any AudioControlBackend
   private let loginItemService: any LoginItemServicing
   private let runtimeProcessProbe: RuntimeProcessProbeProvider
-  private let runtimeIdentityProvider: RuntimeIdentityProvider
   private let appIntentCoordinator = AppIntentCoordinator()
   private let adaptiveMixCoordinator = AdaptiveMixCoordinator()
   private let automationParser = AutomationCommandParser()
@@ -467,7 +465,6 @@ final class AppStore {
     initialStartupState: AppStartupState = .idle,
     deviceChangeSuppressionInterval: Duration = .seconds(5),
     runtimeProcessProbe: @escaping RuntimeProcessProbeProvider = RuntimeProcessIdentity.probe,
-    runtimeIdentityProvider: @escaping RuntimeIdentityProvider = RuntimeProcessIdentity.captureLive,
     deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
       duration in try await Task.sleep(for: duration)
     },
@@ -476,7 +473,6 @@ final class AppStore {
     self.backend = backend
     self.loginItemService = loginItemService
     self.runtimeProcessProbe = runtimeProcessProbe
-    self.runtimeIdentityProvider = runtimeIdentityProvider
     self.startupState = initialStartupState
     self.hasStartedAudioBackend = initialStartupState == .running
     self.accessibilityAnnouncementPoster = accessibilityAnnouncementPoster
@@ -3323,6 +3319,14 @@ final class AppStore {
 
   func handleAppTermination(pid: Int32) {
     guard startupState == .running else { return }
+    guard runtimeProcessProbe(pid) == nil else {
+      // The workspace notification carries only a reusable PID, not the
+      // lifetime that generated the event. Any process currently holding that
+      // PID makes immediate teardown ambiguous, even if the refreshed session
+      // already describes that live replacement. Maintenance remains the
+      // non-destructive fallback.
+      return
+    }
     let matchingRows = session.apps.filter { $0.pid == pid }
     guard matchingRows.count == 1,
       let storedIdentity = matchingRows[0].runtimeIdentity,
@@ -3331,17 +3335,6 @@ final class AppStore {
       // A legacy or ambiguous row is not safe immediate-teardown authority.
       // The ordinary maintenance refresh remains the non-destructive fallback.
       return
-    }
-    if let liveProbe = runtimeProcessProbe(pid) {
-      guard liveProbe.lifetime == storedIdentity.lifetime,
-        liveProbe.executablePath == storedIdentity.executablePath,
-        liveProbe.outerBundlePath == storedIdentity.outerBundlePath,
-        runtimeIdentityProvider(pid) == storedIdentity
-      else {
-        // The notification arrived after PID reuse, or a still-live process
-        // could not be authenticated. Do not demote or tear down that route.
-        return
-      }
     }
 
     // Release the quit app's tap/aggregate device promptly instead of waiting
