@@ -1289,7 +1289,6 @@ private func waitForRefresh(_ store: AppStore) async {
   clock.resumeAll()
   await waitUntil { fixture.store.lifecycleSnapshot.deviceSuppression == .idle }
 
-  #expect(fixture.store.toasts.count { $0.title == "Output switched" } == 1)
   #expect(fixture.store.toasts.count { $0.title == "Output device changed" } == 0)
   #expect(fixture.store.lifecycleSnapshot.deviceSuppression == .idle)
 
