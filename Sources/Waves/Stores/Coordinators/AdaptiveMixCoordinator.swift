@@ -55,9 +55,7 @@ final class AdaptiveMixCoordinator {
   }
 
   func evaluate(_ input: AdaptiveMixPassInput) -> AdaptiveMixPassOutput {
-    let hasManagedRoute = input.apps.contains {
-      $0.app.routingState == .managed && $0.levels != nil
-    }
+    let hasManagedRoute = input.apps.contains { $0.app.routingState == .managed }
     guard hasManagedRoute else {
       let needsReset = !lastPublishedGains.isEmpty
       lastPublishedGains = [:]

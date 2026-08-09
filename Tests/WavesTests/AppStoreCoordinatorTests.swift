@@ -166,6 +166,34 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func managedAdaptiveRouteWithoutAnalysisKeepsTheActiveCadence() {
+  let coordinator = AdaptiveMixCoordinator()
+  let app = AudioApp(
+    id: "music.runtime",
+    logicalID: "music",
+    displayName: "Music",
+    category: .media,
+    routingState: .managed
+  )
+  let output = coordinator.evaluate(
+    AdaptiveMixPassInput(
+      mode: .both,
+      focusMode: .smartHybrid,
+      apps: [
+        AdaptiveMixAppInput(
+          app: app,
+          policy: AdaptiveAppPolicy(contentType: .music, priority: .normal),
+          levels: nil,
+          isFrontmost: false
+        )
+      ],
+      elapsed: 0.1
+    ))
+
+  #expect(output.didWork)
+}
+
+@MainActor
 @Test func persistenceCoordinatorCoalescesDrainsFinalizesAndStopsAcceptingWork() async throws {
   let directory = FileManager.default.temporaryDirectory
     .appendingPathComponent("waves-persistence-coordinator-\(UUID().uuidString)")
