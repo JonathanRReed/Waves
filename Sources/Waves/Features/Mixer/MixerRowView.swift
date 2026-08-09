@@ -16,6 +16,90 @@ enum MixerRowAccessibility {
   static func muteLabel(for app: AudioApp) -> String {
     app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)"
   }
+
+  static func recoveryLabel(for app: AudioApp) -> String {
+    "Recover \(app.displayName) route"
+  }
+}
+
+struct MixerRouteControlPolicy: Equatable, Sendable {
+  let allowsAudioControl: Bool
+  let offersRecovery: Bool
+  let sliderHelp: String
+  let muteHelp: String
+  let controlHint: String
+
+  init(app: AudioApp) {
+    switch app.routeHealthContext {
+    case .verifiedRouterOwnership:
+      self.init(
+        allowsAudioControl: false,
+        offersRecovery: false,
+        reason: "Wave Link controls this route. Adjust the app in Wave Link."
+      )
+    case .unattributableRouterFallback:
+      self.init(
+        allowsAudioControl: false,
+        offersRecovery: false,
+        reason: "Waves is yielding this route because Wave Link ownership cannot be publicly attributed. Adjust the app in Wave Link."
+      )
+    case .routerMixedOutput:
+      self.init(
+        allowsAudioControl: false,
+        offersRecovery: false,
+        reason: "Waves leaves Wave Link mixed output untouched. Adjust upstream apps in Wave Link."
+      )
+    case .geometryRecoveryInProgress:
+      self.init(
+        allowsAudioControl: false,
+        offersRecovery: false,
+        reason: "Waves is rebuilding this route. Controls return when recovery finishes."
+      )
+    case .geometryRecoveryExhausted:
+      self.init(
+        allowsAudioControl: false,
+        offersRecovery: true,
+        reason: "Route recovery stopped. Use Recover Routes before changing this app."
+      )
+    case nil:
+      let isManaged = app.routingState == .managed
+      self.init(
+        allowsAudioControl: true,
+        offersRecovery: false,
+        sliderHelp: isManaged
+          ? "Adjust \(app.displayName) volume"
+          : "Move the slider and Waves starts managing \(app.displayName).",
+        muteHelp: isManaged
+          ? (app.isMuted ? "Unmute" : "Mute")
+          : "Mute it and Waves starts managing \(app.displayName).",
+        controlHint: "Adjusts this app through Waves."
+      )
+    }
+  }
+
+  private init(allowsAudioControl: Bool, offersRecovery: Bool, reason: String) {
+    self.init(
+      allowsAudioControl: allowsAudioControl,
+      offersRecovery: offersRecovery,
+      sliderHelp: reason,
+      muteHelp: reason,
+      controlHint: reason
+    )
+  }
+
+  private init(
+    allowsAudioControl: Bool,
+    offersRecovery: Bool,
+    sliderHelp: String,
+    muteHelp: String,
+    controlHint: String
+  ) {
+    self.allowsAudioControl = allowsAudioControl
+    self.offersRecovery = offersRecovery
+    self.sliderHelp = sliderHelp
+    self.muteHelp = muteHelp
+    self.controlHint = controlHint
+  }
 }
 
 struct MixerRowView: View {
@@ -66,6 +150,9 @@ struct MixerRowView: View {
             // controlling them, so showing a route state would be misleading.
             if !isExcluded {
               RoutingStateIndicator(app: app)
+              if routePolicy.offersRecovery {
+                RouteRecoveryButton(app: app, compact: false)
+              }
             }
           }
         }
@@ -93,11 +180,11 @@ struct MixerRowView: View {
         .help(sliderHelp)
         .accessibilityLabel(MixerRowAccessibility.volumeLabel(for: app))
         .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
-        .accessibilityHint("Adjusts the per-app volume target.")
+        .accessibilityHint(routePolicy.controlHint)
         .accessibilityAdjustableAction { direction in
           adjustVolume(direction)
         }
-        .disabled(isExcluded)
+        .disabled(isExcluded || !routePolicy.allowsAudioControl)
 
         Text("\(Int((app.desiredVolume * 100).rounded()))%")
           .font(.caption.monospacedDigit().weight(.medium))
@@ -110,7 +197,8 @@ struct MixerRowView: View {
           .accessibilityHidden(true)
 
         BoostMenu(app: app, compact: false)
-          .disabled(isExcluded)
+          .disabled(isExcluded || !routePolicy.allowsAudioControl)
+          .help(routePolicy.allowsAudioControl ? "Set boost for \(app.displayName)" : routePolicy.controlHint)
 
         Button {
           store.focusEqualizer(for: app)
@@ -121,10 +209,11 @@ struct MixerRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
-        .help("Equalizer for \(app.displayName)")
+        .help(routePolicy.allowsAudioControl ? "Equalizer for \(app.displayName)" : routePolicy.controlHint)
         .accessibilityLabel(MixerRowAccessibility.equalizerLabel(for: app))
         .accessibilityValue(equalizerIsEnabled ? "On" : "Off")
-        .disabled(isExcluded)
+        .accessibilityHint(routePolicy.controlHint)
+        .disabled(isExcluded || !routePolicy.allowsAudioControl)
 
         Button {
           store.setMuted(!app.isMuted, for: app)
@@ -143,8 +232,9 @@ struct MixerRowView: View {
         .buttonStyle(.borderless)
         .help(muteHelp)
         .accessibilityLabel(MixerRowAccessibility.muteLabel(for: app))
+        .accessibilityHint(routePolicy.controlHint)
         .sensoryFeedback(.selection, trigger: app.isMuted)
-        .disabled(isExcluded)
+        .disabled(isExcluded || !routePolicy.allowsAudioControl)
       }
       // Dim excluded rows, but lift the floor under Increase Contrast so the
       // already-secondary text doesn't fall below a legible ratio.
@@ -191,6 +281,7 @@ struct MixerRowView: View {
 
   private var isExcluded: Bool { store.isExcluded(app) }
   private var equalizerIsEnabled: Bool { store.equalizerSettings(for: app).isEnabled }
+  private var routePolicy: MixerRouteControlPolicy { MixerRouteControlPolicy(app: app) }
 
   private var showsLevelMeter: Bool {
     !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
@@ -225,23 +316,16 @@ struct MixerRowView: View {
     return parts.joined(separator: ", ")
   }
 
-  private var canControlAudio: Bool {
-    app.routingState == .managed
-  }
-
   private var sliderHelp: Text {
-    canControlAudio
-      ? Text("Adjust \(app.displayName) volume")
-      : Text("Move the slider and Waves starts managing \(app.displayName).")
+    Text(routePolicy.sliderHelp)
   }
 
   private var muteHelp: Text {
-    canControlAudio
-      ? Text(app.isMuted ? "Unmute" : "Mute")
-      : Text("Mute it and Waves starts managing \(app.displayName).")
+    Text(routePolicy.muteHelp)
   }
 
   private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
+    guard routePolicy.allowsAudioControl else { return }
     let step: Float = 0.05
     let nextValue: Float
 
@@ -259,24 +343,6 @@ struct MixerRowView: View {
   }
 }
 
-private struct MixerRowHelpers {
-  static func canControlAudio(_ app: AudioApp) -> Bool {
-    app.routingState == .managed
-  }
-
-  static func sliderHelp(for app: AudioApp) -> Text {
-    canControlAudio(app)
-      ? Text("Adjust \(app.displayName) volume")
-      : Text("Move the slider and Waves starts managing \(app.displayName).")
-  }
-
-  static func muteHelp(for app: AudioApp) -> Text {
-    canControlAudio(app)
-      ? Text(app.isMuted ? "Unmute" : "Mute")
-      : Text("Mute it and Waves starts managing \(app.displayName).")
-  }
-}
-
 /// The Equalizer / Pin / Output Device / Exclude actions shared by both row densities, so
 /// the menu-bar's compact row never silently falls behind the main window's
 /// full row in capability — a menu-bar-first user can route an app to a
@@ -288,6 +354,7 @@ private struct MixerRowContextMenuItems: View {
   let opensMainWindow: Bool
 
   private var isExcluded: Bool { store.isExcluded(app) }
+  private var routePolicy: MixerRouteControlPolicy { MixerRouteControlPolicy(app: app) }
 
   /// Shows the current chord when there is one, so the menu doubles as the
   /// answer to "did I already give this app a shortcut?".
@@ -311,9 +378,9 @@ private struct MixerRowContextMenuItems: View {
         NSApp.activate(ignoringOtherApps: true)
       }
     }
-    .disabled(isExcluded)
+    .disabled(isExcluded || !routePolicy.allowsAudioControl)
 
-    if !isExcluded {
+    if !isExcluded, routePolicy.allowsAudioControl {
       Button(muteShortcutTitle) {
         // The compact menu-bar panel has nowhere to put a sheet, so the request
         // travels to the main window the same way the equalizer does.
@@ -330,7 +397,7 @@ private struct MixerRowContextMenuItems: View {
     Button(app.isPinned ? "Unpin" : "Pin") {
       store.togglePinned(app)
     }
-    if !isExcluded {
+    if !isExcluded, routePolicy.allowsAudioControl {
       Menu(MixerRowAccessibility.outputDeviceMenuLabel) {
         Button {
           store.setOutputDevice(nil, for: app)
@@ -422,6 +489,9 @@ struct CompactMixerRow: View {
           .accessibilityLabel("Excluded from Waves")
       } else {
         RoutingStateDot(app: app)
+        if routePolicy.offersRecovery {
+          RouteRecoveryButton(app: app, compact: true)
+        }
       }
 
       Spacer()
@@ -447,11 +517,11 @@ struct CompactMixerRow: View {
       .help(sliderHelp)
       .accessibilityLabel(MixerRowAccessibility.volumeLabel(for: app))
       .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
-      .accessibilityHint("Adjusts the per-app volume target.")
+      .accessibilityHint(routePolicy.controlHint)
       .accessibilityAdjustableAction { direction in
         adjustVolume(direction)
       }
-      .disabled(isExcluded)
+      .disabled(isExcluded || !routePolicy.allowsAudioControl)
 
       // Numeric parity with the full row, so a menu-bar-first user dragging the
       // short slider can read the target they're setting.
@@ -464,7 +534,8 @@ struct CompactMixerRow: View {
         .accessibilityHidden(true)
 
       BoostMenu(app: app, compact: true)
-        .disabled(isExcluded)
+        .disabled(isExcluded || !routePolicy.allowsAudioControl)
+        .help(routePolicy.allowsAudioControl ? "Set boost for \(app.displayName)" : routePolicy.controlHint)
 
       Button {
         store.focusEqualizer(for: app, source: .running)
@@ -478,10 +549,11 @@ struct CompactMixerRow: View {
           .contentShape(Rectangle())
       }
       .buttonStyle(.borderless)
-      .help("Open equalizer for \(app.displayName)")
+      .help(routePolicy.allowsAudioControl ? "Open equalizer for \(app.displayName)" : routePolicy.controlHint)
       .accessibilityLabel(MixerRowAccessibility.equalizerLabel(for: app))
       .accessibilityValue(equalizerIsEnabled ? "On" : "Off")
-      .disabled(isExcluded)
+      .accessibilityHint(routePolicy.controlHint)
+      .disabled(isExcluded || !routePolicy.allowsAudioControl)
 
       Button {
         store.setMuted(!app.isMuted, for: app)
@@ -497,8 +569,8 @@ struct CompactMixerRow: View {
       .buttonStyle(.borderless)
       .help(muteHelp)
       .accessibilityLabel(MixerRowAccessibility.muteLabel(for: app))
-      .accessibilityHint(app.isMuted ? "Restores audio for this app." : "Silences this app.")
-      .disabled(isExcluded)
+      .accessibilityHint(routePolicy.controlHint)
+      .disabled(isExcluded || !routePolicy.allowsAudioControl)
     }
     .opacity(isExcluded ? (contrast == .increased ? 0.85 : 0.55) : 1)
     // Mirror the main window's quiet cyan level meter so a menu-bar-first user
@@ -525,6 +597,7 @@ struct CompactMixerRow: View {
 
   private var isExcluded: Bool { store.isExcluded(app) }
   private var equalizerIsEnabled: Bool { store.equalizerSettings(for: app).isEnabled }
+  private var routePolicy: MixerRouteControlPolicy { MixerRouteControlPolicy(app: app) }
 
   private var showsLevelMeter: Bool {
     !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
@@ -533,19 +606,16 @@ struct CompactMixerRow: View {
   private var meterRMS: Float { store.liveLevels[app.logicalID]?.rms ?? 0 }
   private var meterPeak: Float { store.liveLevels[app.logicalID]?.peak ?? 0 }
 
-  private var canControlAudio: Bool {
-    MixerRowHelpers.canControlAudio(app)
-  }
-
   private var sliderHelp: Text {
-    MixerRowHelpers.sliderHelp(for: app)
+    Text(routePolicy.sliderHelp)
   }
 
   private var muteHelp: Text {
-    MixerRowHelpers.muteHelp(for: app)
+    Text(routePolicy.muteHelp)
   }
 
   private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
+    guard routePolicy.allowsAudioControl else { return }
     let step: Float = 0.05
     let nextValue: Float
 
@@ -560,6 +630,31 @@ struct CompactMixerRow: View {
 
     store.setDesiredVolume(nextValue, for: app)
     store.commitDesiredVolume(for: app)
+  }
+}
+
+private struct RouteRecoveryButton: View {
+  @Environment(AppStore.self) private var store
+  let app: AudioApp
+  let compact: Bool
+
+  var body: some View {
+    Button {
+      store.recoverRoutes()
+    } label: {
+      if compact {
+        Image(systemName: "arrow.clockwise")
+          .frame(width: 18, height: 18)
+      } else {
+        Label("Recover", systemImage: "arrow.clockwise")
+      }
+    }
+    .buttonStyle(.borderless)
+    .controlSize(.small)
+    .disabled(store.isRecovering)
+    .help("Recover this route")
+    .accessibilityLabel(MixerRowAccessibility.recoveryLabel(for: app))
+    .accessibilityHint("Reattaches active per-app audio routes through Waves.")
   }
 }
 

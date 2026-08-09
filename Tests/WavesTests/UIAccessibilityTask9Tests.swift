@@ -119,6 +119,42 @@ import WavesAudioCore
   }
 }
 
+@Test func routeContextCapabilityPolicyPreventsMisleadingControl() {
+  let ordinary = MixerRouteControlPolicy(app: task9App(state: .monitorOnly))
+  #expect(ordinary.allowsAudioControl)
+  #expect(ordinary.offersRecovery == false)
+  #expect(ordinary.sliderHelp.contains("starts managing"))
+
+  for context in [
+    RouteHealthContext.verifiedRouterOwnership,
+    .unattributableRouterFallback,
+    .routerMixedOutput,
+  ] {
+    let policy = MixerRouteControlPolicy(
+      app: task9App(state: .monitorOnly, context: context)
+    )
+    #expect(policy.allowsAudioControl == false)
+    #expect(policy.offersRecovery == false)
+    #expect(policy.controlHint.contains("Wave Link"))
+    #expect(policy.sliderHelp.contains("starts managing") == false)
+  }
+
+  let recovering = MixerRouteControlPolicy(
+    app: task9App(state: .managed, context: .geometryRecoveryInProgress)
+  )
+  #expect(recovering.allowsAudioControl == false)
+  #expect(recovering.offersRecovery == false)
+  #expect(recovering.controlHint.contains("rebuilding"))
+
+  let exhausted = MixerRouteControlPolicy(
+    app: task9App(state: .error, context: .geometryRecoveryExhausted)
+  )
+  #expect(exhausted.allowsAudioControl == false)
+  #expect(exhausted.offersRecovery)
+  #expect(exhausted.controlHint.contains("Recover Routes"))
+  #expect(MixerRowAccessibility.recoveryLabel(for: task9App(state: .error)) == "Recover Task 9 App route")
+}
+
 @Test func routeHealthContextDecodingIsAdditiveForLegacySessions() throws {
   let app = task9App(state: .monitorOnly)
   var object = try #require(

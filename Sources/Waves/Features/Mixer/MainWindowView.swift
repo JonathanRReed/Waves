@@ -843,6 +843,9 @@ private struct SourceListView: View {
     guard let id = selectedAppID, let app = apps.first(where: { $0.id == id }) else {
       return .ignored
     }
+    if command != .togglePin, !MixerRouteControlPolicy(app: app).allowsAudioControl {
+      return .ignored
+    }
     switch command {
     case .toggleMute:
       store.setMuted(command.updatedMute(for: app) ?? app.isMuted, for: app)
