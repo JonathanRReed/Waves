@@ -160,7 +160,7 @@ private SwiftPM scratch directories for both slices. It builds arm64 and x86_64,
 stamps the full source revision plus source-archive and build-recipe hashes into
 `Info.plist`, creates and validates `Waves.app`, and creates a matching universal
 `Waves.app.dSYM` when `dsymutil` is available. It then renders the checked-in
-1320 by 860 Waves background, creates a writable image, configures a 660 by 430
+660 by 430 Waves background, creates a writable image, configures a 660 by 430
 Finder window with 128-point app and Applications icons, and converts the
 verified result to `Waves.dmg`. The common package checks run inside one fresh
 mode-0700 root. Only

@@ -50,7 +50,7 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes finder_script, "set sidebar width of layoutWindow to 0"
   end
 
-  def test_dmg_background_renderer_produces_exact_1320_by_860_png
+  def test_dmg_background_renderer_matches_the_660_by_430_finder_window
     root = File.expand_path("../..", __dir__)
     renderer_path = File.join(root, "script/render-dmg-background.swift")
     Dir.mktmpdir("waves-dmg-background") do |directory|
@@ -69,8 +69,8 @@ class ReleaseInfraTest < Minitest::Test
         output
       )
       assert dimension_status.success?, dimension_error
-      assert_match(/pixelWidth: 1320/, dimensions)
-      assert_match(/pixelHeight: 860/, dimensions)
+      assert_match(/pixelWidth: 660/, dimensions)
+      assert_match(/pixelHeight: 430/, dimensions)
     end
   end
 

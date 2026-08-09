@@ -9,7 +9,7 @@ and Sparkle public keys are verification material only. Private credentials and
 Git signing configuration remain outside the repository.
 
 The Finder disk-image presentation is source-controlled beside the release
-scripts. `script/render-dmg-background.swift` draws the 1320 by 860 background,
+scripts. `script/render-dmg-background.swift` draws the 660 by 430 background,
 and `script/configure-dmg.applescript` applies the fixed 660 by 430 Finder window,
 128-point icons, and drag-to-Applications layout. Package verification mounts the
 finished image and rejects different background bytes or unexpected content.
