@@ -6,6 +6,9 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public let pid: Int32?
   public let bundleID: String?
   public let displayName: String
+  /// Case- and diacritic-folded once from the immutable display name so UI
+  /// sorts do not repeat ICU work during every render pass.
+  public let displayNameSortKey: String
   public let iconName: String?
   public let iconTIFFData: Data?
   public let category: AppCategory
@@ -70,6 +73,10 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.pid = pid
     self.bundleID = bundleID.map { String($0.prefix(256)) }
     self.displayName = String(displayName.prefix(256))
+    self.displayNameSortKey = self.displayName.folding(
+      options: [.caseInsensitive, .diacriticInsensitive],
+      locale: .current
+    )
 
     // Validate iconTIFFData size (max 10MB to prevent excessive memory usage)
     self.iconTIFFData = iconTIFFData.map { data in
@@ -191,7 +198,6 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     try container.encodeIfPresent(bundleID, forKey: .bundleID)
     try container.encode(displayName, forKey: .displayName)
     try container.encodeIfPresent(iconName, forKey: .iconName)
-    try container.encodeIfPresent(iconTIFFData, forKey: .iconTIFFData)
     try container.encode(category, forKey: .category)
     try container.encode(isActive, forKey: .isActive)
     try container.encode(peakLevel, forKey: .peakLevel)

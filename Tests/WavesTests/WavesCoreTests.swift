@@ -327,6 +327,43 @@ import Testing
   #expect(decoded.routingState == .managed)
 }
 
+@Test func audioAppOmitsRuntimeIconWhenEncodingButReadsLegacyIconData() throws {
+  let iconData = Data([1, 2, 3, 4])
+  let app = AudioApp(
+    id: "icon.app",
+    displayName: "Icon App",
+    iconTIFFData: iconData,
+    category: .media
+  )
+
+  let encoded = try JSONEncoder().encode(app)
+  let encodedObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+  #expect(encodedObject["iconTIFFData"] == nil)
+
+  var legacyObject = encodedObject
+  legacyObject["iconTIFFData"] = iconData.base64EncodedString()
+  let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+  let decoded = try JSONDecoder().decode(AudioApp.self, from: legacyData)
+  #expect(decoded.iconTIFFData == iconData)
+}
+
+@Test func audioAppDerivesNonpersistedFoldedDisplayNameSortKey() throws {
+  let apps = [
+    AudioApp(id: "zoom", displayName: "Zoom", category: .media),
+    AudioApp(id: "atna", displayName: "ÄTNA", category: .media),
+    AudioApp(id: "beta", displayName: "beta", category: .media),
+  ]
+
+  #expect(apps[1].displayNameSortKey == "atna")
+  #expect(apps.sorted { $0.displayNameSortKey < $1.displayNameSortKey }.map(\.id) == ["atna", "beta", "zoom"])
+
+  let encoded = try JSONEncoder().encode(apps[1])
+  let encodedObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+  #expect(encodedObject["displayNameSortKey"] == nil)
+  let decoded = try JSONDecoder().decode(AudioApp.self, from: encoded)
+  #expect(decoded.displayNameSortKey == "atna")
+}
+
 @Test func audioSessionSnapshotEncodesAndDecodesCorrectly() throws {
   let snapshot = AudioSessionSnapshot(
     apps: [

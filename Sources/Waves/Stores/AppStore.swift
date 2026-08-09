@@ -4968,48 +4968,21 @@ final class AppStore {
     NotificationCenter.default.post(name: .wavesKeyboardShortcutsPreferenceChanged, object: nil)
   }
 
-  /// The key names are sorted by: case- and diacritic-folded, so "Ätna" lands
-  /// next to "Atna" rather than after "Zoom" the way a raw `lowercased()`
-  /// comparison would put it.
-  ///
-  /// `lowercased()` alone is not a substitute for ICU collation — it leaves
-  /// accented characters at their Unicode scalar values, which sorts them after
-  /// every unaccented letter. Folding diacritics too keeps the order a person
-  /// would expect while still reducing each comparison to a plain string compare.
-  static func displayNameSortKey(_ name: String) -> String {
-    name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-  }
-
-  /// Decorate-sort-undecorate: build each app's key once instead of paying for a
-  /// full ICU collation on every one of the O(n log n) comparisons. This is the
-  /// default sort mode and runs on every `visibleApps` read, which the level
-  /// poll drives several times a second.
+  /// Uses the folded key derived once from each app's immutable display name.
   private func sortedByFoldedDisplayName(_ apps: [AudioApp]) -> [AudioApp] {
-    struct SortEntry {
-      let key: String
-      let app: AudioApp
+    apps.sorted { lhs, rhs in
+      if lhs.displayNameSortKey != rhs.displayNameSortKey {
+        return lhs.displayNameSortKey < rhs.displayNameSortKey
+      }
+      return lhs.logicalID < rhs.logicalID
     }
-    let decorated = apps.map { SortEntry(key: Self.displayNameSortKey($0.displayName), app: $0) }
-    let sorted = decorated.sorted { lhs, rhs in
-      if lhs.key != rhs.key { return lhs.key < rhs.key }
-      return lhs.app.logicalID < rhs.app.logicalID
-    }
-    return sorted.map(\.app)
   }
 
   private func sortedApps(_ apps: [AudioApp]) -> [AudioApp] {
-    // Every mode falls back to the folded display name, and folding is a full
-    // ICU pass. Only `.name` used to decorate first, so the other three paid for
-    // one folding per operand of every O(n log n) comparison — on a list the
-    // level poll re-reads several times a second.
-    let nameKeys = Dictionary(
-      apps.map { ($0.logicalID, Self.displayNameSortKey($0.displayName)) },
-      uniquingKeysWith: { first, _ in first }
-    )
     func byName(_ app1: AudioApp, _ app2: AudioApp) -> Bool {
-      let key1 = nameKeys[app1.logicalID] ?? app1.displayName
-      let key2 = nameKeys[app2.logicalID] ?? app2.displayName
-      if key1 != key2 { return key1 < key2 }
+      if app1.displayNameSortKey != app2.displayNameSortKey {
+        return app1.displayNameSortKey < app2.displayNameSortKey
+      }
       return app1.logicalID < app2.logicalID
     }
 
@@ -5077,30 +5050,6 @@ final class AppStore {
     }
 
     return 4
-  }
-
-  /// Shared by every sort mode's name ordering and tiebreak, so all four agree
-  /// on what "alphabetical" means. Falls back to `logicalID` for identical
-  /// names: Swift's sort is not stable, so two apps sharing a display name would
-  /// otherwise swap places between reads and make rows jump under the pointer.
-  private func displayNameComparator(_ app1: AudioApp, _ app2: AudioApp) -> Bool {
-    let key1 = Self.displayNameSortKey(app1.displayName)
-    let key2 = Self.displayNameSortKey(app2.displayName)
-    if key1 != key2 { return key1 < key2 }
-    return app1.logicalID < app2.logicalID
-  }
-
-  private var manualOrderComparator: (AudioApp, AudioApp) -> Bool {
-    let order = preferences.customAppOrder
-    let nameComparator = displayNameComparator
-    return { app1, app2 in
-      let index1 = order.firstIndex(of: app1.logicalID) ?? Int.max
-      let index2 = order.firstIndex(of: app2.logicalID) ?? Int.max
-      if index1 != index2 {
-        return index1 < index2
-      }
-      return nameComparator(app1, app2)
-    }
   }
 
   func reorderApps(from source: IndexSet, to destination: Int) {
