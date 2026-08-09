@@ -60,7 +60,7 @@ struct DiagnosticsSettingsView: View {
     .onAppear {
       // Settings panes are switched by destroying/recreating view identity
       // (see SettingsView.paneContent), not by a native TabView that keeps
-      // inactive tabs alive — so onAppear fires every time this pane is
+      // inactive tabs alive, so onAppear fires every time this pane is
       // revisited, not just once. Diagnostics already has its own explicit
       // "Refresh Diagnostics" action for re-probing on demand, so only
       // auto-refresh the first time there's nothing to show yet; don't redo

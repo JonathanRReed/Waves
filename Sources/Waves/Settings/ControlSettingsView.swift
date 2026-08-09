@@ -28,7 +28,7 @@ struct ControlSettingsView: View {
         Text("Global Shortcuts")
       } footer: {
         Text(
-          "The first three act on whichever app is in front; Show Waves brings the mixer forward, which is the only way in from a full-screen app. Click a shortcut to change it, or press Delete while recording to remove it. Waves registers only the combinations listed here — it never watches your other keystrokes."
+          "The first three act on whichever app is in front; Show Waves brings the mixer forward, which is the only way in from a full-screen app. Click a shortcut to change it, or press Delete while recording to remove it. Waves registers only the combinations listed here; it never watches your other keystrokes."
         )
       }
 
@@ -50,7 +50,7 @@ struct ControlSettingsView: View {
         Text("App Shortcuts")
       } footer: {
         Text(
-          "Mute or adjust one specific app from anywhere, whatever is in front — the app you most want a shortcut for is rarely the one you are looking at. Nothing is assigned by default, so nothing collides with your launcher or key remapper. You can also assign one from an app's row in the mixer."
+          "Mute or adjust one specific app from anywhere, whatever is in front. The app you most want a shortcut for is rarely the one you are looking at. Nothing is assigned by default, so nothing collides with your launcher or key remapper. You can also assign one from an app's row in the mixer."
         )
       }
 
@@ -91,7 +91,7 @@ struct ControlSettingsView: View {
         Text("Automation")
       } footer: {
         Text(
-          "Both are off by default. Turn them on only for automation you trust. External control listens on a private socket that only your user account can reach — never the network — and no other Mac can see it. In the main window, keyboard control also works without either: arrow keys select an app, Space mutes, = and - adjust volume."
+          "Both are off by default. Turn them on only for automation you trust. External control listens on a private socket that only your user account can reach, never the network, and no other Mac can see it. In the main window, keyboard control also works without either: arrow keys select an app, Space mutes, = and - adjust volume."
         )
       }
     }
@@ -143,13 +143,13 @@ struct ControlSettingsView: View {
       if assignableApps.isEmpty {
         // Name the actual reason. "Every running app already has a shortcut" was
         // shown even when the real cause was that every app is excluded, or that
-        // nothing is running yet — three different situations, one wrong answer.
+        // nothing is running yet. Three different situations, one wrong answer.
         Text(emptyAppMenuReason)
       }
       Divider()
       // Running apps only would be the wrong roster: a shortcut is stored
       // against a bundle ID and works the moment that app launches, so binding
-      // one for an app you have quit — the common case for "mute Spotify" —
+      // one for an app you have quit, the common case for "mute Spotify",
       // should not require launching it first.
       Button("Choose App…") { chooseAppForShortcut() }
     } label: {

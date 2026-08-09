@@ -4,7 +4,7 @@ import WavesAudioCore
 struct ProfileSettingsView: View {
   @Environment(AppStore.self) private var store
   // Presenting the same ProfileEditorSheet MainWindowView's sidebar "+"/"Edit
-  // Profile…" use — this pane used to only hint at using that sidebar instead
+  // Profile…" use. This pane used to only hint at using that sidebar instead
   // of offering the action itself.
   @State private var editorContext: ProfileEditorContext?
 
