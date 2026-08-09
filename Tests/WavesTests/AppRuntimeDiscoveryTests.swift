@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 import WavesAudioCore
@@ -65,7 +66,7 @@ import WavesAudioCore
   #expect(AppRuntimeDiscovery.processFamily(for: target, in: [target, spoof]).map(\.pid) == [42])
 }
 
-@Test func appRuntimeDiscoveryKeepsALegitimateNestedHelperFamily() {
+@Test func appRuntimeDiscoveryRejectsAnAdHocChildIdentifierWithoutAuthenticatedMembership() {
   let target = AppRuntimeDiscovery.CapturedApplication(
     pid: 42,
     bundleID: "com.example.player",
@@ -92,6 +93,39 @@ import WavesAudioCore
       pid: 84,
       outerBundlePath: "/Applications/Player.app",
       signingIdentifier: "com.example.player.audio-service"
+    )
+  )
+
+  #expect(AppRuntimeDiscovery.processFamily(for: target, in: [target, helper]).map(\.pid) == [42])
+}
+
+@Test func appRuntimeDiscoveryKeepsAnExactAdHocNestedHelperIdentity() {
+  let target = AppRuntimeDiscovery.CapturedApplication(
+    pid: 42,
+    bundleID: "com.example.player",
+    localizedName: "Player",
+    bundlePath: "/Applications/Player.app",
+    activationPolicy: .regular,
+    isActive: true,
+    iconTIFFData: nil,
+    runtimeIdentity: testRuntimeIdentity(
+      pid: 42,
+      outerBundlePath: "/Applications/Player.app",
+      signingIdentifier: "com.example.player"
+    )
+  )
+  let helper = AppRuntimeDiscovery.CapturedApplication(
+    pid: 84,
+    bundleID: "com.example.player",
+    localizedName: "Player Helper",
+    bundlePath: "/Applications/Player.app/Contents/Helpers/Player Helper.app",
+    activationPolicy: .accessory,
+    isActive: false,
+    iconTIFFData: nil,
+    runtimeIdentity: testRuntimeIdentity(
+      pid: 84,
+      outerBundlePath: "/Applications/Player.app",
+      signingIdentifier: "com.example.player"
     )
   )
 
@@ -212,6 +246,113 @@ import WavesAudioCore
   #expect(fixture.captureCallCount == 4)
 }
 
+@Test func runtimeSigningIdentityBindsStableEvidenceBackToTheDynamicCodeInOrder() throws {
+  let identity = testRuntimeIdentity(
+    pid: 42,
+    outerBundlePath: "/Applications/Player.app",
+    signingIdentifier: "com.example.player",
+    teamIdentifier: "TEAM123"
+  ).signingIdentity
+  let fixture = RuntimeSigningOperationsFixture(
+    snapshots: [
+      .init(identity: identity, designatedRequirement: "requirement-a"),
+      .init(identity: identity, designatedRequirement: "requirement-a"),
+    ],
+    validityResults: [true, true]
+  )
+
+  let captured = RuntimeProcessIdentity.validatedSigningIdentity(pid: 42, operations: fixture)
+
+  #expect(captured == identity)
+  #expect(
+    fixture.events == [
+      "copy-dynamic:42",
+      "check:nil",
+      "snapshot",
+      "check:requirement-a",
+      "snapshot",
+    ])
+}
+
+@Test func runtimeSigningIdentityRejectsAFinalDynamicRequirementFailure() {
+  let identity = testRuntimeIdentity(
+    pid: 42,
+    outerBundlePath: "/Applications/Player.app",
+    signingIdentifier: "com.example.player",
+    teamIdentifier: "TEAM123"
+  ).signingIdentity
+  let fixture = RuntimeSigningOperationsFixture(
+    snapshots: [
+      .init(identity: identity, designatedRequirement: "requirement-a"),
+      .init(identity: identity, designatedRequirement: "requirement-a"),
+    ],
+    validityResults: [true, false]
+  )
+
+  #expect(RuntimeProcessIdentity.validatedSigningIdentity(pid: 42, operations: fixture) == nil)
+  #expect(
+    fixture.events == [
+      "copy-dynamic:42",
+      "check:nil",
+      "snapshot",
+      "check:requirement-a",
+    ])
+}
+
+@Test func runtimeSigningIdentityRejectsSamePathEvidenceSubstitution() {
+  let original = testRuntimeIdentity(
+    pid: 42,
+    outerBundlePath: "/Applications/Player.app",
+    signingIdentifier: "com.example.player",
+    teamIdentifier: "TEAM123"
+  ).signingIdentity
+  let replacement = AppCodeSigningIdentity(
+    identifier: "com.example.replacement",
+    teamIdentifier: "OTHERTEAM",
+    designatedRequirement: "identifier \"com.example.replacement\"",
+    codeDirectoryHash: Data([9, 9, 9])
+  )
+  let fixture = RuntimeSigningOperationsFixture(
+    snapshots: [
+      .init(identity: original, designatedRequirement: "requirement-a"),
+      .init(identity: replacement, designatedRequirement: "requirement-b"),
+    ],
+    validityResults: [true, true]
+  )
+
+  #expect(RuntimeProcessIdentity.validatedSigningIdentity(pid: 42, operations: fixture) == nil)
+  #expect(fixture.events.suffix(2) == ["check:requirement-a", "snapshot"])
+}
+
+@Test func securityFrameworkBindsRealAdHocNestedHelperFixtures() throws {
+  let fixture = try RuntimeSigningProcessFixture()
+  defer { fixture.dispose() }
+
+  let targetProcess = try fixture.launch(fixture.targetExecutable)
+  let exactHelperProcess = try fixture.launch(fixture.exactHelperExecutable)
+  let childIdentifierProcess = try fixture.launch(fixture.childIdentifierExecutable)
+  let target = try #require(waitForRuntimeIdentity(pid: targetProcess.processIdentifier))
+  let exactHelper = try #require(
+    waitForRuntimeIdentity(pid: exactHelperProcess.processIdentifier)
+  )
+  let childIdentifier = try #require(
+    waitForRuntimeIdentity(pid: childIdentifierProcess.processIdentifier)
+  )
+
+  #expect(target.signingIdentity.teamIdentifier == nil)
+  #expect(exactHelper.signingIdentity == target.signingIdentity)
+  #expect(
+    AppDiscoveryPolicy.runtimeFamilyMatches(
+      target: target,
+      candidate: exactHelper
+    ))
+  #expect(
+    !AppDiscoveryPolicy.runtimeFamilyMatches(
+      target: target,
+      candidate: childIdentifier
+    ))
+}
+
 private func testRuntimeIdentity(
   pid: Int32,
   startTimeSeconds: UInt64 = 100,
@@ -281,4 +422,160 @@ private final class RuntimeIdentityCacheFixture: @unchecked Sendable {
       )
     )
   }
+}
+
+private final class RuntimeSigningOperationsFixture: RuntimeSigningIdentityOperating {
+  typealias DynamicCode = Int
+  typealias DesignatedRequirement = String
+
+  private var snapshots: [RuntimeSigningSnapshot<String>]
+  private var validityResults: [Bool]
+  private(set) var events: [String] = []
+
+  init(
+    snapshots: [RuntimeSigningSnapshot<String>],
+    validityResults: [Bool]
+  ) {
+    self.snapshots = snapshots
+    self.validityResults = validityResults
+  }
+
+  func copyDynamicCode(pid: pid_t) -> Int? {
+    events.append("copy-dynamic:\(pid)")
+    return 1
+  }
+
+  func checkValidity(_ code: Int, requirement: String?) -> Bool {
+    events.append("check:\(requirement ?? "nil")")
+    return validityResults.removeFirst()
+  }
+
+  func copySigningSnapshot(_ code: Int) -> RuntimeSigningSnapshot<String>? {
+    events.append("snapshot")
+    return snapshots.removeFirst()
+  }
+}
+
+private final class RuntimeSigningProcessFixture {
+  let targetExecutable: URL
+  let exactHelperExecutable: URL
+  let childIdentifierExecutable: URL
+
+  private let rootURL: URL
+  private var processes: [Process] = []
+
+  init() throws {
+    let fileManager = FileManager.default
+    rootURL = fileManager.temporaryDirectory
+      .appendingPathComponent("waves-runtime-signing-\(UUID().uuidString)", isDirectory: true)
+    let outerBundle = rootURL.appendingPathComponent("Fixture.app", isDirectory: true)
+    targetExecutable = outerBundle.appendingPathComponent("Contents/MacOS/Fixture")
+    exactHelperExecutable = outerBundle.appendingPathComponent(
+      "Contents/Helpers/Fixture Helper.app/Contents/MacOS/Fixture Helper"
+    )
+    childIdentifierExecutable = outerBundle.appendingPathComponent(
+      "Contents/Helpers/Chosen Child.app/Contents/MacOS/Chosen Child"
+    )
+
+    try fileManager.createDirectory(
+      at: rootURL,
+      withIntermediateDirectories: true
+    )
+    let exactSignedSource = rootURL.appendingPathComponent("exact-signed-source")
+    try fileManager.copyItem(
+      at: URL(fileURLWithPath: "/bin/sleep"),
+      to: exactSignedSource
+    )
+    try Self.run(
+      "/usr/bin/codesign",
+      arguments: [
+        "--force",
+        "--sign",
+        "-",
+        "--identifier",
+        "com.example.waves.runtime-fixture",
+        exactSignedSource.path,
+      ]
+    )
+    for executable in [targetExecutable, exactHelperExecutable] {
+      try fileManager.createDirectory(
+        at: executable.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+      )
+      try fileManager.copyItem(at: exactSignedSource, to: executable)
+    }
+
+    let childSignedSource = rootURL.appendingPathComponent("child-signed-source")
+    try fileManager.copyItem(
+      at: URL(fileURLWithPath: "/bin/sleep"),
+      to: childSignedSource
+    )
+    try Self.run(
+      "/usr/bin/codesign",
+      arguments: [
+        "--force",
+        "--sign",
+        "-",
+        "--identifier",
+        "com.example.waves.runtime-fixture.child",
+        childSignedSource.path,
+      ]
+    )
+    try fileManager.createDirectory(
+      at: childIdentifierExecutable.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try fileManager.copyItem(
+      at: childSignedSource,
+      to: childIdentifierExecutable
+    )
+  }
+
+  func launch(_ executable: URL) throws -> Process {
+    let process = Process()
+    process.executableURL = executable
+    process.arguments = ["30"]
+    try process.run()
+    processes.append(process)
+    return process
+  }
+
+  func dispose() {
+    for process in processes where process.isRunning {
+      process.terminate()
+    }
+    for process in processes {
+      process.waitUntilExit()
+    }
+    try? FileManager.default.removeItem(at: rootURL)
+  }
+
+  private static func run(_ executable: String, arguments: [String]) throws {
+    let process = Process()
+    let errorPipe = Pipe()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardError = errorPipe
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+      let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+      let detail = String(data: data, encoding: .utf8) ?? "Unknown fixture error"
+      throw RuntimeSigningFixtureError.commandFailed(detail)
+    }
+  }
+}
+
+private enum RuntimeSigningFixtureError: Error {
+  case commandFailed(String)
+}
+
+private func waitForRuntimeIdentity(pid: pid_t) -> AppRuntimeIdentity? {
+  for _ in 0..<100 {
+    if let identity = RuntimeProcessIdentity.captureLive(pid: pid) {
+      return identity
+    }
+    usleep(10_000)
+  }
+  return nil
 }

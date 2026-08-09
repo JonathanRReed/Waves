@@ -533,6 +533,58 @@ import WavesAudioCore
   #expect(!result.backendStatus.isRouteRecoveryHealthy)
 }
 
+@Test func backendTerminationReleaseMatchesTheExactRuntimeIdentity() async throws {
+  let terminatedIdentity = audioSecurityRuntimeIdentity(startTimeSeconds: 100)
+  let replacementIdentity = audioSecurityRuntimeIdentity(startTimeSeconds: 200)
+  let terminated = AudioApp(
+    id: "runtime.terminated",
+    logicalID: "com.example.player.terminated",
+    pid: 42,
+    bundleID: "com.example.shared",
+    displayName: "Terminated",
+    category: .media,
+    isActive: true,
+    routingState: .managed,
+    compatibility: .supported,
+    runtimeIdentity: terminatedIdentity
+  )
+  let replacement = AudioApp(
+    id: "runtime.replacement",
+    logicalID: "com.example.player.replacement",
+    pid: 42,
+    bundleID: "com.example.shared",
+    displayName: "Replacement",
+    category: .media,
+    isActive: true,
+    routingState: .managed,
+    compatibility: .supported,
+    runtimeIdentity: replacementIdentity
+  )
+  var snapshot = hardeningSnapshot()
+  snapshot.apps = [terminated, replacement]
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: snapshot,
+    captureAuthorization: .authorized
+  )
+
+  await backend.releaseControllers(
+    forRuntimeIdentity: terminatedIdentity,
+    clearMuteState: false
+  )
+
+  let released = await backend.currentSnapshot()
+  let terminatedAfterRelease = try #require(
+    released.apps.first { $0.id == terminated.id }
+  )
+  let replacementAfterRelease = try #require(
+    released.apps.first { $0.id == replacement.id }
+  )
+  #expect(terminatedAfterRelease.routingState == .monitorOnly)
+  #expect(!terminatedAfterRelease.isActive)
+  #expect(replacementAfterRelease.routingState == .managed)
+  #expect(replacementAfterRelease.isActive)
+}
+
 @Test func preEQHeadroomPreventsPrematureBoostingEQSaturation() {
   let sampleRate = 48_000.0
   var settings = EqualizerSettings(

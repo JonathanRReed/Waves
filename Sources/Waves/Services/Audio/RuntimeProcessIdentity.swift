@@ -9,6 +9,91 @@ struct RuntimeProcessProbe: Equatable, Sendable {
   let outerBundlePath: String
 }
 
+struct RuntimeSigningSnapshot<DesignatedRequirement> {
+  let identity: AppCodeSigningIdentity
+  let designatedRequirement: DesignatedRequirement
+}
+
+protocol RuntimeSigningIdentityOperating {
+  associatedtype DynamicCode
+  associatedtype DesignatedRequirement
+
+  func copyDynamicCode(pid: pid_t) -> DynamicCode?
+  func checkValidity(
+    _ code: DynamicCode,
+    requirement: DesignatedRequirement?
+  ) -> Bool
+  func copySigningSnapshot(
+    _ code: DynamicCode
+  ) -> RuntimeSigningSnapshot<DesignatedRequirement>?
+}
+
+private struct SecurityRuntimeSigningIdentityOperations: RuntimeSigningIdentityOperating {
+  func copyDynamicCode(pid: pid_t) -> SecCode? {
+    var code: SecCode?
+    let attributes = [kSecGuestAttributePid: pid] as CFDictionary
+    guard SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &code) == errSecSuccess else {
+      return nil
+    }
+    return code
+  }
+
+  func checkValidity(_ code: SecCode, requirement: SecRequirement?) -> Bool {
+    SecCodeCheckValidity(code, SecCSFlags(), requirement) == errSecSuccess
+  }
+
+  func copySigningSnapshot(_ code: SecCode) -> RuntimeSigningSnapshot<SecRequirement>? {
+    let informationFlags = SecCSFlags(
+      rawValue: UInt32(kSecCSSigningInformation | kSecCSRequirementInformation)
+    )
+    var information: CFDictionary?
+    // The Security.framework contract accepts a dynamic Code object here even
+    // though the C signature uses the common StaticCode reference type. Keeping
+    // the original guest object lets the extracted requirement be applied back
+    // to that exact running code below.
+    let inspectableCode = unsafeBitCast(code, to: SecStaticCode.self)
+    guard
+      SecCodeCopySigningInformation(
+        inspectableCode,
+        informationFlags,
+        &information
+      ) == errSecSuccess,
+      let information
+    else {
+      return nil
+    }
+
+    let values = information as NSDictionary
+    guard let identifier = values[kSecCodeInfoIdentifier] as? String,
+      !identifier.isEmpty,
+      let rawRequirement = values[kSecCodeInfoDesignatedRequirement],
+      let codeDirectoryHash = values[kSecCodeInfoUnique] as? Data,
+      !codeDirectoryHash.isEmpty,
+      CFGetTypeID(rawRequirement as CFTypeRef) == SecRequirementGetTypeID()
+    else {
+      return nil
+    }
+    let requirement = unsafeBitCast(rawRequirement as AnyObject, to: SecRequirement.self)
+
+    var requirementText: CFString?
+    guard SecRequirementCopyString(requirement, SecCSFlags(), &requirementText) == errSecSuccess,
+      let requirementText
+    else {
+      return nil
+    }
+
+    return RuntimeSigningSnapshot(
+      identity: AppCodeSigningIdentity(
+        identifier: identifier,
+        teamIdentifier: values[kSecCodeInfoTeamIdentifier] as? String,
+        designatedRequirement: requirementText as String,
+        codeDirectoryHash: codeDirectoryHash
+      ),
+      designatedRequirement: requirement
+    )
+  }
+}
+
 enum RuntimeProcessIdentity {
   static func probe(pid: pid_t) -> RuntimeProcessProbe? {
     guard pid > 0,
@@ -94,59 +179,29 @@ enum RuntimeProcessIdentity {
   }
 
   private static func validatedSigningIdentity(pid: pid_t) -> AppCodeSigningIdentity? {
-    var code: SecCode?
-    let attributes = [kSecGuestAttributePid: pid] as CFDictionary
-    guard SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &code) == errSecSuccess,
-      let code,
-      SecCodeCheckValidity(code, SecCSFlags(), nil) == errSecSuccess
-    else {
-      return nil
-    }
-
-    var staticCode: SecStaticCode?
-    guard SecCodeCopyStaticCode(code, SecCSFlags(), &staticCode) == errSecSuccess,
-      let staticCode
-    else {
-      return nil
-    }
-
-    let informationFlags = SecCSFlags(
-      rawValue: UInt32(kSecCSSigningInformation | kSecCSRequirementInformation)
+    validatedSigningIdentity(
+      pid: pid,
+      operations: SecurityRuntimeSigningIdentityOperations()
     )
-    var information: CFDictionary?
-    guard SecCodeCopySigningInformation(staticCode, informationFlags, &information) == errSecSuccess,
-      let information
+  }
+
+  static func validatedSigningIdentity<Operations: RuntimeSigningIdentityOperating>(
+    pid: pid_t,
+    operations: Operations
+  ) -> AppCodeSigningIdentity? {
+    guard let dynamicCode = operations.copyDynamicCode(pid: pid),
+      operations.checkValidity(dynamicCode, requirement: nil),
+      let firstSnapshot = operations.copySigningSnapshot(dynamicCode),
+      operations.checkValidity(
+        dynamicCode,
+        requirement: firstSnapshot.designatedRequirement
+      ),
+      let finalSnapshot = operations.copySigningSnapshot(dynamicCode),
+      finalSnapshot.identity == firstSnapshot.identity
     else {
       return nil
     }
-
-    let values = information as NSDictionary
-    guard let identifier = values[kSecCodeInfoIdentifier] as? String,
-      !identifier.isEmpty,
-      let rawRequirement = values[kSecCodeInfoDesignatedRequirement],
-      let codeDirectoryHash = values[kSecCodeInfoUnique] as? Data,
-      !codeDirectoryHash.isEmpty
-    else {
-      return nil
-    }
-    guard CFGetTypeID(rawRequirement as CFTypeRef) == SecRequirementGetTypeID() else {
-      return nil
-    }
-    let requirement = unsafeBitCast(rawRequirement as AnyObject, to: SecRequirement.self)
-
-    var requirementText: CFString?
-    guard SecRequirementCopyString(requirement, SecCSFlags(), &requirementText) == errSecSuccess,
-      let requirementText
-    else {
-      return nil
-    }
-
-    return AppCodeSigningIdentity(
-      identifier: identifier,
-      teamIdentifier: values[kSecCodeInfoTeamIdentifier] as? String,
-      designatedRequirement: requirementText as String,
-      codeDirectoryHash: codeDirectoryHash
-    )
+    return finalSnapshot.identity
   }
 }
 

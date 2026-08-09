@@ -253,6 +253,9 @@ enum PrivacySetupPresentationState: Equatable {
 @Observable
 @MainActor
 final class AppStore {
+  typealias RuntimeProcessProbeProvider = @Sendable (Int32) -> RuntimeProcessProbe?
+  typealias RuntimeIdentityProvider = @Sendable (Int32) -> AppRuntimeIdentity?
+
   var session: AudioSessionSnapshot {
     didSet {
       let previousRuntimeIDs = Set(oldValue.apps.map(\.id))
@@ -336,6 +339,8 @@ final class AppStore {
 
   private let backend: any AudioControlBackend
   private let loginItemService: any LoginItemServicing
+  private let runtimeProcessProbe: RuntimeProcessProbeProvider
+  private let runtimeIdentityProvider: RuntimeIdentityProvider
   private let appIntentCoordinator = AppIntentCoordinator()
   private let adaptiveMixCoordinator = AdaptiveMixCoordinator()
   private let automationParser = AutomationCommandParser()
@@ -461,6 +466,8 @@ final class AppStore {
     deviceVolumePresetsStore: any DeviceVolumePresetsPersisting,
     initialStartupState: AppStartupState = .idle,
     deviceChangeSuppressionInterval: Duration = .seconds(5),
+    runtimeProcessProbe: @escaping RuntimeProcessProbeProvider = RuntimeProcessIdentity.probe,
+    runtimeIdentityProvider: @escaping RuntimeIdentityProvider = RuntimeProcessIdentity.captureLive,
     deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
       duration in try await Task.sleep(for: duration)
     },
@@ -468,6 +475,8 @@ final class AppStore {
   ) {
     self.backend = backend
     self.loginItemService = loginItemService
+    self.runtimeProcessProbe = runtimeProcessProbe
+    self.runtimeIdentityProvider = runtimeIdentityProvider
     self.startupState = initialStartupState
     self.hasStartedAudioBackend = initialStartupState == .running
     self.accessibilityAnnouncementPoster = accessibilityAnnouncementPoster
@@ -3305,22 +3314,41 @@ final class AppStore {
       queue: .main
     ) { [weak self] note in
       guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-      let bundleID = app.bundleIdentifier
       let pid = app.processIdentifier
       MainActor.assumeIsolated {
-        self?.handleAppTermination(bundleID: bundleID, pid: pid)
+        self?.handleAppTermination(pid: pid)
       }
     }
   }
 
-  private func handleAppTermination(bundleID: String?, pid: Int32) {
+  func handleAppTermination(pid: Int32) {
     guard startupState == .running else { return }
+    let matchingRows = session.apps.filter { $0.pid == pid }
+    guard matchingRows.count == 1,
+      let storedIdentity = matchingRows[0].runtimeIdentity,
+      storedIdentity.lifetime.pid == pid
+    else {
+      // A legacy or ambiguous row is not safe immediate-teardown authority.
+      // The ordinary maintenance refresh remains the non-destructive fallback.
+      return
+    }
+    if let liveProbe = runtimeProcessProbe(pid) {
+      guard liveProbe.lifetime == storedIdentity.lifetime,
+        liveProbe.executablePath == storedIdentity.executablePath,
+        liveProbe.outerBundlePath == storedIdentity.outerBundlePath,
+        runtimeIdentityProvider(pid) == storedIdentity
+      else {
+        // The notification arrived after PID reuse, or a still-live process
+        // could not be authenticated. Do not demote or tear down that route.
+        return
+      }
+    }
+
     // Release the quit app's tap/aggregate device promptly instead of waiting
     // for the next refresh. Termination must NOT clear the user's saved mute.
     startOwnedOperation { store in
       await store.backend.releaseControllers(
-        forBundleID: bundleID,
-        pid: pid,
+        forRuntimeIdentity: storedIdentity,
         clearMuteState: false
       )
     }
@@ -3334,7 +3362,7 @@ final class AppStore {
     var matchedIDs: [String] = []
     for index in session.apps.indices {
       let app = session.apps[index]
-      guard (bundleID != nil && app.bundleID == bundleID) || app.pid == pid else { continue }
+      guard app.runtimeIdentity == storedIdentity else { continue }
       matchedIDs.append(app.logicalID)
       if app.isActive || app.routingState == .managed || app.routingState == .live {
         session.apps[index].isActive = false

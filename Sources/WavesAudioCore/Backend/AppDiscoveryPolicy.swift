@@ -353,12 +353,11 @@ public enum AppDiscoveryPolicy {
     case let (targetTeam?, candidateTeam?):
       return !targetTeam.isEmpty && targetTeam == candidateTeam
     case (nil, nil):
-      // Ad hoc code has no Team ID. Its signed identifier remains authenticated
-      // by the validated designated requirement. Combined with the canonical
-      // outer-bundle boundary, an exact or child identifier preserves legitimate
-      // local helper families without admitting an unrelated app.
-      return targetSigning.identifier == candidateSigning.identifier
-        || candidateSigning.identifier.hasPrefix(targetSigning.identifier + ".")
+      // Ad hoc code has no authenticated developer family. Without separately
+      // verified sealed-bundle membership, only the exact securely bound signed
+      // identity is authoritative. A chosen child identifier is not proof that
+      // independently signed code belongs to the target.
+      return targetSigning == candidateSigning
     default:
       return false
     }

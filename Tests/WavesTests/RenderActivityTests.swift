@@ -418,7 +418,10 @@ private actor RenderActivityBackend: AudioControlBackend {
   }
   func setDefaultOutputDevice(uid: String) async throws {}
   func setOutputDevice(uid: String?, forAppID appID: String) async throws {}
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {}
   func audioCapabilityMode() async -> AudioCapabilityMode { .full }
   func captureAuthorizationResult() async -> CaptureAuthorizationResult { .authorized }
   func shutdownWithResult() async -> BackendShutdownResult {

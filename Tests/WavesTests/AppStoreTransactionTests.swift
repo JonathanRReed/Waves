@@ -1462,18 +1462,159 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
   Issue.record("Timed out waiting for asynchronous test condition")
 }
 
+@MainActor
+@Test func appTerminationReleasesAndDemotesOnlyTheExactStoredRuntimeIdentity() async throws {
+  let identity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  let app = transactionTestApp(runtimeIdentity: identity)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    runtimeIdentityProvider: { _ in nil }
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  #expect(await fixture.backend.releasedRuntimeIdentities() == [identity])
+  let released = try #require(fixture.store.session.apps.first)
+  #expect(!released.isActive)
+  #expect(released.routingState == .monitorOnly)
+  #expect(released.appliedVolume == nil)
+}
+
+@MainActor
+@Test func appTerminationDoesNotUseASharedOrSpoofedBundleIdentifierAsAuthority() async throws {
+  let terminatedIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  let unrelatedIdentity = transactionRuntimeIdentity(pid: 84, startTimeSeconds: 100)
+  let terminated = transactionTestApp(
+    id: "terminated",
+    pid: 42,
+    bundleID: "com.example.shared",
+    runtimeIdentity: terminatedIdentity
+  )
+  let unrelated = transactionTestApp(
+    id: "unrelated",
+    pid: 84,
+    bundleID: "com.example.shared",
+    runtimeIdentity: unrelatedIdentity
+  )
+  let fixture = makeTransactionFixture(
+    apps: [terminated, unrelated],
+    device: transactionTestDevice(),
+    runtimeIdentityProvider: { _ in nil }
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  #expect(await fixture.backend.releasedRuntimeIdentities() == [terminatedIdentity])
+  #expect(fixture.store.session.apps.first { $0.id == terminated.id }?.routingState == .monitorOnly)
+  #expect(fixture.store.session.apps.first { $0.id == unrelated.id }?.routingState == .managed)
+  #expect(fixture.store.session.apps.first { $0.id == unrelated.id }?.isActive == true)
+}
+
+@MainActor
+@Test func delayedTerminationCannotReleaseAReplacementThatReusedThePID() async {
+  let terminatedIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  let replacementIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+  let app = transactionTestApp(runtimeIdentity: terminatedIdentity)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    runtimeProcessProbe: { pid in
+      pid == 42 ? transactionRuntimeProbe(identity: replacementIdentity) : nil
+    },
+    runtimeIdentityProvider: { pid in
+      pid == 42 ? replacementIdentity : nil
+    }
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await Task.yield()
+
+  #expect(await fixture.backend.releasedRuntimeIdentities().isEmpty)
+  #expect(fixture.store.session.apps.first?.routingState == .managed)
+  #expect(fixture.store.session.apps.first?.isActive == true)
+}
+
+@MainActor
+@Test func liveProcessWithoutAVerifiableIdentityDefersTerminationToMaintenance() async {
+  let storedIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  let replacementIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+  let app = transactionTestApp(runtimeIdentity: storedIdentity)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    runtimeProcessProbe: { pid in
+      pid == 42 ? transactionRuntimeProbe(identity: replacementIdentity) : nil
+    },
+    runtimeIdentityProvider: { _ in nil }
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await Task.yield()
+
+  #expect(await fixture.backend.releasedRuntimeIdentities().isEmpty)
+  #expect(fixture.store.session.apps.first?.routingState == .managed)
+  #expect(fixture.store.session.apps.first?.isActive == true)
+}
+
+@MainActor
+@Test func terminationWithoutAnImmutableStoredIdentityDefersToMaintenance() async {
+  let legacy = transactionTestApp(runtimeIdentity: nil)
+  let fixture = makeTransactionFixture(
+    apps: [legacy],
+    device: transactionTestDevice(),
+    runtimeIdentityProvider: { _ in nil }
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await Task.yield()
+
+  #expect(await fixture.backend.releasedRuntimeIdentities().isEmpty)
+  #expect(fixture.store.session.apps.first?.routingState == .managed)
+  #expect(fixture.store.session.apps.first?.isActive == true)
+}
+
+@MainActor
+@Test func ambiguousStoredTerminationIdentityDefersToMaintenance() async {
+  let first = transactionTestApp(
+    id: "first",
+    runtimeIdentity: transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  )
+  let second = transactionTestApp(
+    id: "second",
+    runtimeIdentity: transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+  )
+  let fixture = makeTransactionFixture(
+    apps: [first, second],
+    device: transactionTestDevice(),
+    runtimeIdentityProvider: { _ in nil }
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await Task.yield()
+
+  #expect(await fixture.backend.releasedRuntimeIdentities().isEmpty)
+  #expect(fixture.store.session.apps.allSatisfy { $0.routingState == .managed })
+  #expect(fixture.store.session.apps.allSatisfy { $0.isActive })
+}
+
 private func transactionTestApp(
   id: String = "test.app",
+  pid: Int32 = 42,
+  bundleID: String? = nil,
   desiredVolume: Float = 0.4,
   isMuted: Bool = false,
   volumeBoost: Float = 2,
-  targetDeviceUID: String? = "device.original"
+  targetDeviceUID: String? = "device.original",
+  runtimeIdentity: AppRuntimeIdentity? = nil
 ) -> AudioApp {
   AudioApp(
     id: "\(id).runtime",
     logicalID: id,
-    pid: 42,
-    bundleID: id,
+    pid: pid,
+    bundleID: bundleID ?? id,
     displayName: "Test App",
     category: .media,
     isActive: true,
@@ -1483,7 +1624,37 @@ private func transactionTestApp(
     routingState: .managed,
     compatibility: .supported,
     volumeBoost: volumeBoost,
-    targetDeviceUID: targetDeviceUID
+    targetDeviceUID: targetDeviceUID,
+    runtimeIdentity: runtimeIdentity
+  )
+}
+
+private func transactionRuntimeIdentity(
+  pid: Int32,
+  startTimeSeconds: UInt64
+) -> AppRuntimeIdentity {
+  AppRuntimeIdentity(
+    lifetime: AppProcessLifetimeIdentity(
+      pid: pid,
+      startTimeSeconds: startTimeSeconds,
+      startTimeMicroseconds: 0
+    ),
+    executablePath: "/Applications/Test App.app/Contents/MacOS/Test App",
+    outerBundlePath: "/Applications/Test App.app",
+    signingIdentity: AppCodeSigningIdentity(
+      identifier: "com.example.test-app",
+      teamIdentifier: "TEAM123",
+      designatedRequirement: "identifier \"com.example.test-app\"",
+      codeDirectoryHash: Data([1, 2, 3])
+    )
+  )
+}
+
+private func transactionRuntimeProbe(identity: AppRuntimeIdentity) -> RuntimeProcessProbe {
+  RuntimeProcessProbe(
+    lifetime: identity.lifetime,
+    executablePath: identity.executablePath,
+    outerBundlePath: identity.outerBundlePath
   )
 }
 
@@ -1508,6 +1679,8 @@ private func makeTransactionFixture(
   resultGenerationOffset: UInt64 = 0,
   refreshApps: [AudioApp]? = nil,
   initialStartupState: AppStartupState = .running,
+  runtimeProcessProbe: @escaping @Sendable (Int32) -> RuntimeProcessProbe? = { _ in nil },
+  runtimeIdentityProvider: @escaping @Sendable (Int32) -> AppRuntimeIdentity? = { _ in nil },
   deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
     duration in try await Task.sleep(for: duration)
   }
@@ -1558,6 +1731,8 @@ private func makeTransactionFixture(
     loginItemService: TransactionLoginItemService(),
     deviceVolumePresetsStore: presetsStore,
     initialStartupState: initialStartupState,
+    runtimeProcessProbe: runtimeProcessProbe,
+    runtimeIdentityProvider: runtimeIdentityProvider,
     deviceChangeSuppressionSleep: deviceChangeSuppressionSleep
   )
   return TransactionFixture(
@@ -1617,6 +1792,7 @@ private actor TransactionBackend: AudioControlBackend {
   private var refreshCalls = 0
   private var diagnosticsCalls = 0
   private var diagnosticsReprobeValues: [Bool] = []
+  private var releasedIdentities: [AppRuntimeIdentity] = []
   private var diagnosticsTemplate = DiagnosticsReport(
     summary: "Transaction test",
     checks: [
@@ -1658,6 +1834,7 @@ private actor TransactionBackend: AudioControlBackend {
   func refreshCallCount() -> Int { refreshCalls }
   func diagnosticsCallCount() -> Int { diagnosticsCalls }
   func diagnosticsReprobeRequests() -> [Bool] { diagnosticsReprobeValues }
+  func releasedRuntimeIdentities() -> [AppRuntimeIdentity] { releasedIdentities }
   func setDiagnosticsTemplate(_ replacement: DiagnosticsReport) {
     diagnosticsTemplate = replacement
   }
@@ -1944,7 +2121,12 @@ private actor TransactionBackend: AudioControlBackend {
     snapshot.currentDevice = AudioDevice(id: uid, name: "Selected", kind: .virtual)
   }
   func setOutputDevice(uid: String?, forAppID appID: String) async throws {}
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {
+    releasedIdentities.append(runtimeIdentity)
+  }
   func audioLevels() async -> [String: AudioLevels] { [:] }
 }
 

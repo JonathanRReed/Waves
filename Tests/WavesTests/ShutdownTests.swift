@@ -548,7 +548,10 @@ private actor ShutdownBackend: AudioControlBackend {
     recorder.append("backend.defaultDevice")
   }
   func setOutputDevice(uid: String?, forAppID appID: String) async throws {}
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {}
   func audioLevels() async -> [String: AudioLevels] { [:] }
 
   func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult {

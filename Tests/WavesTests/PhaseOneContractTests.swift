@@ -431,7 +431,10 @@ private actor LegacyRecordingBackend: AudioControlBackend {
     snapshot.apps[index].targetDeviceUID = uid
   }
 
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {}
   func audioLevels() async -> [String: AudioLevels] { [:] }
 
   private func appIndex(_ appID: String) -> Int? {
@@ -482,7 +485,15 @@ private actor OverrideDispatchBackend: AudioControlBackend {
   func availableOutputDevices() async -> [AudioDevice] { await legacy.availableOutputDevices() }
   func setDefaultOutputDevice(uid: String) async throws { try await legacy.setDefaultOutputDevice(uid: uid) }
   func setOutputDevice(uid: String?, forAppID appID: String) async throws { try await legacy.setOutputDevice(uid: uid, forAppID: appID) }
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async { await legacy.releaseControllers(forBundleID: bundleID, pid: pid, clearMuteState: clearMuteState) }
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {
+    await legacy.releaseControllers(
+      forRuntimeIdentity: runtimeIdentity,
+      clearMuteState: clearMuteState
+    )
+  }
   func audioLevels() async -> [String: AudioLevels] { await legacy.audioLevels() }
 }
 

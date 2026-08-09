@@ -2679,16 +2679,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return result
   }
 
-  // Satisfies the AudioControlBackend protocol requirement
-  // releaseControllers(forBundleID:pid:). The defaulted clearMuteState parameter
-  // means this also fulfils the shorter protocol signature, and plain callers
-  // (e.g. app TERMINATION via handleAppTermination) get the safe default of
-  // NOT clearing mute — so a user's saved manual mute survives the app quitting
-  // and is not later propagated as "unmuted" by a snapshot merge.
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool = false) async {
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool = false
+  ) async {
     guard !isShuttingDown else { return }
     let targetIDs = snapshot.apps.filter { app in
-      (bundleID != nil && app.bundleID == bundleID) || (app.pid != nil && app.pid == pid)
+      app.runtimeIdentity == runtimeIdentity
     }.map(\.id)
 
     guard !targetIDs.isEmpty else { return }

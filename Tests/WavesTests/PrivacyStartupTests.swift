@@ -535,7 +535,10 @@ private actor PrivacyRecordingBackend: AudioControlBackend {
     recorder.append("backend.appOutput")
   }
 
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {
     recorder.append("backend.release")
   }
 
