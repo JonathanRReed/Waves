@@ -36,9 +36,10 @@ func wavesCTLRejectsInvalidArgumentsBeforeTransport(_ arguments: [String]) {
   process.standardOutput = output
   process.standardError = output
   try process.run()
+  let data = output.fileHandleForReading.readDataToEndOfFile()
   process.waitUntilExit()
 
-  let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+  let text = String(decoding: data, as: UTF8.self)
   #expect(process.terminationReason == .exit)
   #expect(process.terminationStatus == 2)
   #expect(text.contains("usage: wavesctl volume <app-id> <0..1>"))
