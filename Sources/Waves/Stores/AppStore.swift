@@ -2592,8 +2592,7 @@ final class AppStore {
             levels: analysis[app.logicalID],
             isFrontmost: app.logicalID == frontmostAppID
           )
-        },
-        elapsed: 0.1
+        }
       ))
 
     guard !Task.isCancelled, startupState == .running,

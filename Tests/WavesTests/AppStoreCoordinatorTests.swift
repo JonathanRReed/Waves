@@ -133,7 +133,8 @@ import WavesAudioCore
 
 @MainActor
 @Test func adaptiveCoordinatorDeduplicatesAndPeriodicallyRepublishes() {
-  let coordinator = AdaptiveMixCoordinator(republishPasses: 2)
+  let clock = CoordinatorTestMonotonicClock(now: 100)
+  let coordinator = AdaptiveMixCoordinator(republishPasses: 2, now: clock.read)
   let app = AudioApp(
     id: "music.runtime",
     logicalID: "music",
@@ -151,24 +152,77 @@ import WavesAudioCore
         levels: AdaptiveAnalysisLevels(rms: 0, voiceBandEnergy: 0),
         isFrontmost: false
       )
-    ],
-    elapsed: 0.1
+    ]
   )
 
   let first = coordinator.evaluate(input)
   #expect(first.didWork)
+  #expect(first.elapsed == 0.1)
   #expect(first.backendGains != nil)
+  clock.advance(by: 0.1)
   let second = coordinator.evaluate(input)
+  #expect(abs(second.elapsed - 0.1) < 0.000_001)
   #expect(second.backendGains == nil)
+  clock.advance(by: 0.1)
   let third = coordinator.evaluate(input)
   #expect(third.backendGains != nil)
 
+  clock.advance(by: 1)
   let reset = coordinator.evaluate(
-    AdaptiveMixPassInput(mode: .speechFocus, focusMode: .smartHybrid, apps: [], elapsed: 0.1)
+    AdaptiveMixPassInput(mode: .speechFocus, focusMode: .smartHybrid, apps: [])
   )
   #expect(!reset.didWork)
+  #expect(reset.elapsed == 1)
   #expect(reset.visibleGains.isEmpty)
   #expect(reset.backendGains == [:])
+}
+
+@MainActor
+@Test func adaptiveCoordinatorMeasuresIdleAndDelayedWakeElapsedTime() {
+  let clock = CoordinatorTestMonotonicClock(now: 1_000)
+  let coordinator = AdaptiveMixCoordinator(now: clock.read)
+  let managedApp = AudioApp(
+    id: "music.runtime",
+    logicalID: "music",
+    displayName: "Music",
+    category: .media,
+    routingState: .managed
+  )
+  let managedInput = AdaptiveMixPassInput(
+    mode: .both,
+    focusMode: .smartHybrid,
+    apps: [
+      AdaptiveMixAppInput(
+        app: managedApp,
+        policy: AdaptiveAppPolicy(contentType: .music, priority: .normal),
+        levels: AdaptiveAnalysisLevels(rms: 0.2, voiceBandEnergy: 0.1),
+        isFrontmost: false
+      )
+    ]
+  )
+  let idleInput = AdaptiveMixPassInput(mode: .both, focusMode: .smartHybrid, apps: [])
+
+  #expect(coordinator.evaluate(managedInput).elapsed == 0.1)
+  clock.advance(by: 1)
+  #expect(coordinator.evaluate(idleInput).elapsed == 1)
+  clock.advance(by: 1)
+  #expect(coordinator.evaluate(managedInput).elapsed == 1)
+  clock.advance(by: 2.75)
+  #expect(coordinator.evaluate(managedInput).elapsed == 2.75)
+
+  _ = coordinator.cancel()
+  clock.advance(by: 30)
+  #expect(coordinator.evaluate(managedInput).elapsed == 0.1)
+
+  coordinator.restart(
+    isEnabled: false,
+    activeInterval: .milliseconds(100),
+    idleInterval: .seconds(1),
+    performPass: { false },
+    reset: {}
+  )
+  clock.advance(by: 30)
+  #expect(coordinator.evaluate(managedInput).elapsed == 0.1)
 }
 
 @MainActor
@@ -214,8 +268,7 @@ import WavesAudioCore
           levels: nil,
           isFrontmost: false
         )
-      ],
-      elapsed: 0.1
+      ]
     ))
 
   #expect(output.didWork)
@@ -300,5 +353,22 @@ final class CoordinatorTestClock: @unchecked Sendable {
       if hasSleeper { return }
       await Task.yield()
     }
+  }
+}
+
+@MainActor
+final class CoordinatorTestMonotonicClock {
+  private var now: TimeInterval
+
+  init(now: TimeInterval) {
+    self.now = now
+  }
+
+  func read() -> TimeInterval {
+    now
+  }
+
+  func advance(by interval: TimeInterval) {
+    now += interval
   }
 }

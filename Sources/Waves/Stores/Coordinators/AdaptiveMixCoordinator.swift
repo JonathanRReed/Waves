@@ -12,11 +12,11 @@ struct AdaptiveMixPassInput: Sendable {
   let mode: AdaptiveMixMode
   let focusMode: AdaptiveFocusMode
   let apps: [AdaptiveMixAppInput]
-  let elapsed: TimeInterval
 }
 
 struct AdaptiveMixPassOutput: Equatable, Sendable {
   let didWork: Bool
+  let elapsed: TimeInterval
   let visibleGains: [String: Float]
   let backendGains: [String: Float]?
 }
@@ -35,16 +35,27 @@ struct AdaptiveMixCoordinatorLifecycleSnapshot: Equatable, Sendable {
 /// loop task. AppStore builds each pass input and publishes the typed output.
 @MainActor
 final class AdaptiveMixCoordinator {
+  typealias MonotonicClock = @MainActor @Sendable () -> TimeInterval
+
   private var policyEngine = AdaptivePolicyEngine()
   private var lastPublishedGains: [String: Float] = [:]
   private var republishCountdown = 0
   private let republishPasses: Int
+  private let now: MonotonicClock
+  private var initialElapsed: TimeInterval
+  private var lastAnalysisTime: TimeInterval?
   private var loopTask: Task<Void, Never>?
   private var loopToken: UUID?
   private var isShutDown = false
 
-  init(republishPasses: Int = 20) {
+  init(
+    republishPasses: Int = 20,
+    initialElapsed: TimeInterval = 0.1,
+    now: @escaping MonotonicClock = { ProcessInfo.processInfo.systemUptime }
+  ) {
     self.republishPasses = max(1, republishPasses)
+    self.initialElapsed = max(0, initialElapsed)
+    self.now = now
   }
 
   var lifecycleSnapshot: AdaptiveMixCoordinatorLifecycleSnapshot {
@@ -55,6 +66,9 @@ final class AdaptiveMixCoordinator {
   }
 
   func evaluate(_ input: AdaptiveMixPassInput) -> AdaptiveMixPassOutput {
+    let currentTime = now()
+    let elapsed = lastAnalysisTime.map { max(0, currentTime - $0) } ?? initialElapsed
+    lastAnalysisTime = currentTime
     let hasManagedRoute = input.apps.contains { $0.app.routingState == .managed }
     guard hasManagedRoute else {
       let needsReset = !lastPublishedGains.isEmpty
@@ -63,6 +77,7 @@ final class AdaptiveMixCoordinator {
       policyEngine.reset()
       return AdaptiveMixPassOutput(
         didWork: false,
+        elapsed: elapsed,
         visibleGains: [:],
         backendGains: needsReset ? [:] : nil
       )
@@ -82,7 +97,7 @@ final class AdaptiveMixCoordinator {
           isFrontmost: item.isFrontmost
         )
       },
-      elapsed: input.elapsed
+      elapsed: elapsed
     )
     let visible = gains.filter { abs($0.value) >= 0.05 }
     republishCountdown -= 1
@@ -93,6 +108,7 @@ final class AdaptiveMixCoordinator {
     }
     return AdaptiveMixPassOutput(
       didWork: true,
+      elapsed: elapsed,
       visibleGains: visible,
       backendGains: shouldPublish ? gains : nil
     )
@@ -109,6 +125,8 @@ final class AdaptiveMixCoordinator {
     loopTask = nil
     let token = UUID()
     loopToken = token
+    initialElapsed = Self.seconds(in: activeInterval)
+    lastAnalysisTime = nil
     policyEngine.reset()
     lastPublishedGains = [:]
     republishCountdown = 0
@@ -145,6 +163,7 @@ final class AdaptiveMixCoordinator {
     task?.cancel()
     loopTask = nil
     loopToken = nil
+    lastAnalysisTime = nil
     return task
   }
 
@@ -158,5 +177,13 @@ final class AdaptiveMixCoordinator {
     lastPublishedGains = [:]
     republishCountdown = 0
     return cancel()
+  }
+
+  private static func seconds(in duration: Duration) -> TimeInterval {
+    let components = duration.components
+    return max(
+      0,
+      Double(components.seconds) + Double(components.attoseconds) / 1e18
+    )
   }
 }
