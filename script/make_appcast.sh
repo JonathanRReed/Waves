@@ -99,6 +99,15 @@ if [ ! -f "$DMG_PATH" ]; then
   exit 1
 fi
 
+SIGNER_ARCHIVE="$TMP_DIR/source.tar"
+SIGNER_SOURCE="$TMP_DIR/source"
+SIGNER_SCRATCH="$TMP_DIR/swiftpm"
+SIGNER_IDENTITY="$TMP_DIR/source-identity.json"
+mkdir -p "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
+chmod 700 "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
+ruby "$RELEASE_TOOL" source-identity "$REVISION" "$SIGNER_ARCHIVE" >"$SIGNER_IDENTITY"
+tar -xf "$SIGNER_ARCHIVE" -C "$SIGNER_SOURCE"
+
 RELEASE_NOTES_MD="$TMP_DIR/release-notes.md"
 RELEASE_NOTES_HTML="$TMP_DIR/release-notes.html"
 NEW_ITEM="$TMP_DIR/item.xml"
@@ -241,7 +250,8 @@ if [ "$BUILD_NUMBER" != "$CANONICAL_BUILD" ]; then
   exit 1
 fi
 ruby "$RELEASE_TOOL" verify-release-artifacts \
-  "$PUBLICATION_MANIFEST" "$MOUNT_POINT/Waves.app" "$DMG_PATH" "$DSYM_BINARY"
+  "$PUBLICATION_MANIFEST" "$MOUNT_POINT/Waves.app" "$DMG_PATH" "$DSYM_BINARY" \
+  "$SIGNER_IDENTITY"
 hdiutil detach "$MOUNT_POINT" -quiet
 MOUNTED=0
 
@@ -286,14 +296,6 @@ if [ -f "$OUTPUT_PATH" ]; then
   fi
 fi
 
-SIGNER_ARCHIVE="$TMP_DIR/source.tar"
-SIGNER_SOURCE="$TMP_DIR/source"
-SIGNER_SCRATCH="$TMP_DIR/swiftpm"
-SIGNER_IDENTITY="$TMP_DIR/source-identity.json"
-mkdir -p "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
-chmod 700 "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
-ruby "$RELEASE_TOOL" source-identity "$REVISION" "$SIGNER_ARCHIVE" >"$SIGNER_IDENTITY"
-tar -xf "$SIGNER_ARCHIVE" -C "$SIGNER_SOURCE"
 RESOLVED_BEFORE="$(shasum -a 256 "$SIGNER_SOURCE/Package.resolved" | cut -d ' ' -f 1)"
 swift package \
   --package-path "$SIGNER_SOURCE" \

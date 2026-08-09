@@ -442,6 +442,120 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_exact_tag_source_identity_must_match_sealed_evidence_and_artifact_stamps
+    verifier = WavesRelease::ArtifactEvidence
+    assert_respond_to verifier, :verify_exact_source_identity!
+    return unless verifier.respond_to?(:verify_exact_source_identity!)
+
+    manifest = WavesRelease::Evidence.seal(
+      input: evidence_input(remote: "passed"),
+      metadata: load_metadata,
+      profile: "publication"
+    )
+    exact_identity = manifest.fetch("source").dup
+    artifact_facts = {
+      "sourceRevision" => REVISION,
+      "sourceArchiveSHA256" => "4" * 64,
+      "buildRecipeSHA256" => "5" * 64,
+    }
+
+    verifier.verify_exact_source_identity!(
+      manifest: manifest,
+      exact_identity: exact_identity,
+      artifact_facts: artifact_facts
+    )
+
+    {
+      "revision" => ["sourceRevision", "source revision", "b" * 40],
+      "sourceArchiveSHA256" => ["sourceArchiveSHA256", "source archive", "6" * 64],
+      "buildRecipeSHA256" => ["buildRecipeSHA256", "build recipe", "7" * 64],
+    }.each do |source_field, (artifact_field, label, mutation)|
+      wrong_evidence = Marshal.load(Marshal.dump(manifest))
+      wrong_evidence.fetch("source")[source_field] = mutation
+      assert_release_error(/#{label}.*sealed evidence/) do
+        verifier.verify_exact_source_identity!(
+          manifest: wrong_evidence,
+          exact_identity: exact_identity,
+          artifact_facts: artifact_facts
+        )
+      end
+
+      wrong_artifact = artifact_facts.merge(artifact_field => mutation)
+      assert_release_error(/#{label}.*artifact/) do
+        verifier.verify_exact_source_identity!(
+          manifest: manifest,
+          exact_identity: exact_identity,
+          artifact_facts: wrong_artifact
+        )
+      end
+    end
+  end
+
+  def test_release_artifact_verifier_enforces_the_recomputed_exact_source_identity
+    Dir.mktmpdir("waves-artifact-source-binding") do |root|
+      app = File.join(root, "Waves.app")
+      executable = File.join(app, "Contents/MacOS/Waves")
+      info_plist = File.join(app, "Contents/Info.plist")
+      dmg = File.join(root, "Waves.dmg")
+      dsym = File.join(root, "Waves.dSYM")
+      FileUtils.mkdir_p(File.dirname(executable))
+      File.write(executable, "app bytes")
+      File.write(info_plist, "plist bytes")
+      File.write(dmg, "dmg bytes")
+      File.write(dsym, "dsym bytes")
+
+      manifest = WavesRelease::Evidence.seal(
+        input: evidence_input(remote: "passed"),
+        metadata: load_metadata,
+        profile: "publication"
+      )
+      manifest.fetch("package")["hashes"] = {
+        "appExecutable" => Digest::SHA256.file(executable).hexdigest,
+        "dmg" => Digest::SHA256.file(dmg).hexdigest,
+        "dSYM" => Digest::SHA256.file(dsym).hexdigest,
+      }
+      exact_identity = manifest.fetch("source").merge("sourceArchiveSHA256" => "9" * 64)
+      plist_values = {
+        "CFBundleIdentifier" => BUNDLE_IDENTIFIER,
+        "CFBundleShortVersionString" => VERSION,
+        "CFBundleVersion" => BUILD.to_s,
+        "LSMinimumSystemVersion" => FLOOR,
+        "WavesSourceRevision" => REVISION,
+        "WavesSourceArchiveSHA256" => "4" * 64,
+        "WavesBuildRecipeSHA256" => "5" * 64,
+      }
+      signing_details = lambda do |path, **_arguments|
+        details = {
+          "identity" => DEVELOPER_IDENTITY,
+          "teamIdentifier" => TEAM_IDENTIFIER,
+          "hardenedRuntime" => true,
+        }
+        details["designatedRequirement"] = DESIGNATED_REQUIREMENT if path == app
+        details
+      end
+      command_result = lambda do |*arguments, **_options|
+        arguments.first == "spctl" ? "source=Notarized Developer ID\n" : ""
+      end
+
+      WavesRelease::ArtifactEvidence.stub(:signing_details!, signing_details) do
+        WavesRelease::ArtifactEvidence.stub(:plist_value!, ->(_path, key) { plist_values.fetch(key) }) do
+          WavesRelease::Validation.stub(:run_combined, command_result) do
+            assert_release_error(/source archive.*sealed evidence/) do
+              WavesRelease::ArtifactEvidence.verify_release_artifacts!(
+                manifest: manifest,
+                metadata: load_metadata,
+                app: app,
+                dmg: dmg,
+                dsym: dsym,
+                exact_source_identity: exact_identity
+              )
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_sparkle_signer_accepts_only_the_exact_tool_in_a_private_fresh_root
     resolver = WavesRelease.const_defined?(:SparkleSigningTool) ? WavesRelease::SparkleSigningTool : nil
     refute_nil resolver, "isolated Sparkle signing-tool validation must be implemented"
@@ -551,10 +665,12 @@ class ReleaseInfraTest < Minitest::Test
     with_release_script_repo do |root, helper_root|
       fake_bin = File.join(helper_root, "bin")
       log = File.join(helper_root, "swift-arguments.log")
+      working_directory_log = File.join(helper_root, "swift-working-directory.log")
       FileUtils.mkdir_p(fake_bin)
       fake_swift = File.join(fake_bin, "swift")
       File.write(fake_swift, <<~SH)
         #!/bin/sh
+        pwd > "$WAVES_TEST_SWIFT_WORKING_DIRECTORY_LOG"
         printf '%s\n' "$@" > "$WAVES_TEST_SWIFT_LOG"
         exit 23
       SH
@@ -564,6 +680,7 @@ class ReleaseInfraTest < Minitest::Test
         {
           "PATH" => "#{fake_bin}:#{ENV.fetch('PATH')}",
           "WAVES_TEST_SWIFT_LOG" => log,
+          "WAVES_TEST_SWIFT_WORKING_DIRECTORY_LOG" => working_directory_log,
         },
         File.join(root, "script/build_and_run.sh"),
         "--release-check",
@@ -576,7 +693,55 @@ class ReleaseInfraTest < Minitest::Test
       refute_nil scratch, "release SwiftPM invocation must specify a scratch path"
       refute scratch.start_with?(root), "release scratch path must not reuse checkout build state"
       assert_match(%r{/waves-release-build\.[^/]+/swiftpm/arm64\z}, scratch)
+      working_directory = File.read(working_directory_log).strip
+      refute working_directory.start_with?(root), "release compiler must not run in the submitted checkout"
+      assert_match(%r{/waves-release-build\.[^/]+/source\z}, working_directory)
       refute Dir.exist?(scratch), "isolated release workspace must be removed after a failed build"
+    end
+  end
+
+  def test_distribution_builder_rejects_dirty_checkout_even_with_forged_inner_environment
+    with_release_script_repo do |root, helper_root|
+      fake_bin = File.join(helper_root, "bin")
+      compiler_marker = File.join(helper_root, "compiler-ran")
+      archive = File.join(helper_root, "caller-source.tar")
+      scratch = File.join(helper_root, "caller-scratch")
+      output = File.join(helper_root, "caller-output")
+      FileUtils.mkdir_p(fake_bin)
+      FileUtils.mkdir_p(scratch)
+      File.write(archive, "caller-selected archive")
+      fake_swift = File.join(fake_bin, "swift")
+      File.write(fake_swift, <<~SH)
+        #!/bin/sh
+        touch "$WAVES_TEST_COMPILER_MARKER"
+        exit 23
+      SH
+      FileUtils.chmod(0o700, fake_swift)
+
+      revision = git(root, "rev-parse", "HEAD").strip
+      recipe = WavesRelease::ReleaseSource.recipe_digest_from_files(root: root)
+      File.write(File.join(root, "Sources/Fixture.swift"), "let injected = true\n")
+
+      _stdout, stderr, status = Open3.capture3(
+        {
+          "PATH" => "#{fake_bin}:#{ENV.fetch('PATH')}",
+          "APP_SOURCE_REVISION" => revision,
+          "WAVES_BUILD_RECIPE_SHA256" => recipe,
+          "WAVES_ISOLATED_RELEASE_BUILD" => "1",
+          "WAVES_RELEASE_OUTPUT_DIR" => output,
+          "WAVES_RELEASE_SCRATCH_ROOT" => scratch,
+          "WAVES_RELEASE_SOURCE_ARCHIVE" => archive,
+          "WAVES_SOURCE_ARCHIVE_SHA256" => Digest::SHA256.file(archive).hexdigest,
+          "WAVES_TEST_COMPILER_MARKER" => compiler_marker,
+        },
+        File.join(root, "script/build_and_run.sh"),
+        "--release-check",
+        chdir: root
+      )
+
+      refute status.success?
+      assert_match(/clean tracked tree/, stderr)
+      refute File.exist?(compiler_marker), "dirty caller source must be rejected before compilation"
     end
   end
 
@@ -771,20 +936,23 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def test_release_workflow_is_verification_only_and_contains_no_credentialed_job
+  def test_release_workflow_rejects_a_structural_second_job_without_credential_strings
     Dir.mktmpdir("waves-workflows") do |root|
       write_workflow_fixtures(root)
       WavesRelease::WorkflowContract.validate!(root: root)
-      File.open(File.join(root, ".github/workflows/release.yml"), "a") do |file|
-        file.write(<<~YAML)
-            sign:
-              timeout-minutes: 30
-              permissions:
-                contents: read
-              steps:
-                - run: security import certificate.p12
-        YAML
-      end
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        "jobs:\n  verify:\n",
+        "jobs:\n" \
+          "  package:\n" \
+          "    timeout-minutes: 30\n" \
+          "    permissions:\n" \
+          "      contents: read\n" \
+          "    steps:\n" \
+          "      - run: echo package verification\n" \
+          "  verify:\n"
+      )
       assert_release_error(/verification-only/) do
         WavesRelease::WorkflowContract.validate!(root: root)
       end

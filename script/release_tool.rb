@@ -483,7 +483,34 @@ module WavesRelease
       true
     end
 
-    def verify_release_artifacts!(manifest:, metadata:, app:, dmg:, dsym:)
+    def verify_exact_source_identity!(manifest:, exact_identity:, artifact_facts:)
+      source = manifest.fetch("source")
+      Validation.exact_keys!(
+        exact_identity,
+        %w[revision trackedDirty untrackedBuildInputs sourceArchiveSHA256 buildRecipeSHA256],
+        "exact-tag source identity"
+      )
+      unless exact_identity["trackedDirty"] == false && exact_identity["untrackedBuildInputs"] == false
+        raise Error, "exact-tag source identity must describe a clean source with no untracked build inputs"
+      end
+
+      {
+        "revision" => ["sourceRevision", "source revision"],
+        "sourceArchiveSHA256" => ["sourceArchiveSHA256", "source archive"],
+        "buildRecipeSHA256" => ["buildRecipeSHA256", "build recipe"],
+      }.each do |source_field, (artifact_field, label)|
+        exact = exact_identity.fetch(source_field)
+        unless exact == source.fetch(source_field)
+          raise Error, "exact-tag #{label} does not match sealed evidence"
+        end
+        unless exact == artifact_facts.fetch(artifact_field)
+          raise Error, "exact-tag #{label} does not match authenticated artifact metadata"
+        end
+      end
+      true
+    end
+
+    def verify_release_artifacts!(manifest:, metadata:, app:, dmg:, dsym:, exact_source_identity:)
       executable = File.join(app, "Contents/MacOS/Waves")
       verify_hashes!(
         manifest: manifest,
@@ -528,6 +555,11 @@ module WavesRelease
         "gatekeeper" => true,
       }
       verify_identity_facts!(manifest: manifest, metadata: metadata, facts: facts)
+      verify_exact_source_identity!(
+        manifest: manifest,
+        exact_identity: exact_source_identity,
+        artifact_facts: facts
+      )
     end
 
     def signing_details!(path, require_designated_requirement: true)
@@ -1086,10 +1118,13 @@ module WavesRelease
         raise Error, "usage: release_tool.rb sparkle-signing-tool SCRATCH_ROOT CANDIDATE" unless candidate_path
         puts SparkleSigningTool.verify!(scratch_root: scratch_root, candidate_path: candidate_path)
       when "verify-release-artifacts"
-        manifest_path, app_path, dmg_path, dsym_path = arguments
-        raise Error, "usage: release_tool.rb verify-release-artifacts MANIFEST APP DMG DSYM" unless dsym_path
+        manifest_path, app_path, dmg_path, dsym_path, source_identity_path = arguments
+        unless source_identity_path
+          raise Error, "usage: release_tool.rb verify-release-artifacts MANIFEST APP DMG DSYM SOURCE_IDENTITY"
+        end
         metadata = Metadata.load(metadata_path)
         manifest = StrictJSON.load(manifest_path)
+        source_identity = StrictJSON.load(source_identity_path)
         profile = manifest["sealProfile"]
         Evidence.validate!(manifest, metadata: metadata, profile: profile)
         ArtifactEvidence.verify_release_artifacts!(
@@ -1097,7 +1132,8 @@ module WavesRelease
           metadata: metadata,
           app: app_path,
           dmg: dmg_path,
-          dsym: dsym_path
+          dsym: dsym_path,
+          exact_source_identity: source_identity
         )
         puts "Release artifact identity and trust facts match sealed evidence."
       when "verify-artifacts"
@@ -1107,13 +1143,18 @@ module WavesRelease
         manifest = StrictJSON.load(manifest_path)
         profile = manifest["sealProfile"]
         Evidence.validate!(manifest, metadata: metadata, profile: profile)
+        source_identity = ReleaseSource.identity!(
+          root: root,
+          expected_revision: manifest.fetch("source").fetch("revision")
+        )
         paths = ArtifactEvidence.default_paths(root)
         ArtifactEvidence.verify_release_artifacts!(
           manifest: manifest,
           metadata: metadata,
           app: File.join(root, "dist/Waves.app"),
           dmg: paths.fetch("dmg"),
-          dsym: paths.fetch("dSYM")
+          dsym: paths.fetch("dSYM"),
+          exact_source_identity: source_identity
         )
         puts "Signed candidate artifact identity, trust, and hashes match sealed evidence."
       else

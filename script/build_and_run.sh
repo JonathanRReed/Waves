@@ -6,6 +6,7 @@ APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 LOG_SUBSYSTEM="com.jonathanreed.Waves"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ACTIVE_ISOLATION_ROOT=""
 RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
 if [ ! -f "$RELEASE_TOOL" ]; then
   echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
@@ -144,66 +145,82 @@ require_command() {
   fi
 }
 
-run_isolated_distribution_build() {
+cleanup_isolated_distribution_build() {
+  if [ -n "$ACTIVE_ISOLATION_ROOT" ]; then
+    rm -rf "$ACTIVE_ISOLATION_ROOT"
+  fi
+  ACTIVE_ISOLATION_ROOT=""
+}
+trap cleanup_isolated_distribution_build EXIT
+
+prepare_isolated_distribution_build() {
+  local checkout_root="$ROOT_DIR"
   local revision
-  local isolation_root
   local archive_path
   local source_root
   local scratch_root
   local identity_path
   local source_archive_sha256
   local build_recipe_sha256
-  local status
+  local actual_archive_sha256
+  local actual_recipe_sha256
 
   for command_name in git tar mktemp chmod shasum; do
     require_command "$command_name" "for an isolated release build"
   done
 
-  revision="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-  isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/waves-release-build.XXXXXX")"
-  chmod 700 "$isolation_root"
-  archive_path="$isolation_root/source.tar"
-  source_root="$isolation_root/source"
-  scratch_root="$isolation_root/swiftpm"
-  identity_path="$isolation_root/source-identity.json"
+  if [ -L "$checkout_root/dist" ]; then
+    echo "Error: Release artifact destination dist must not be a symbolic link." >&2
+    exit 1
+  fi
+  if [ -e "$checkout_root/dist" ] && [ ! -d "$checkout_root/dist" ]; then
+    echo "Error: Release artifact destination dist exists but is not a directory." >&2
+    exit 1
+  fi
+
+  revision="$(git -C "$checkout_root" rev-parse HEAD)"
+  ACTIVE_ISOLATION_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/waves-release-build.XXXXXX")"
+  chmod 700 "$ACTIVE_ISOLATION_ROOT"
+  archive_path="$ACTIVE_ISOLATION_ROOT/source.tar"
+  source_root="$ACTIVE_ISOLATION_ROOT/source"
+  scratch_root="$ACTIVE_ISOLATION_ROOT/swiftpm"
+  identity_path="$ACTIVE_ISOLATION_ROOT/source-identity.json"
   mkdir -p "$source_root" "$scratch_root"
   chmod 700 "$source_root" "$scratch_root"
 
   if ! ruby "$RELEASE_TOOL" source-identity "$revision" "$archive_path" >"$identity_path"; then
-    rm -rf "$isolation_root"
     return 1
   fi
   tar -xf "$archive_path" -C "$source_root"
   source_archive_sha256="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("sourceArchiveSHA256")' "$identity_path")"
   build_recipe_sha256="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("buildRecipeSHA256")' "$identity_path")"
+  actual_archive_sha256="$(shasum -a 256 "$archive_path" | cut -d ' ' -f 1)"
+  if [ "$actual_archive_sha256" != "$source_archive_sha256" ]; then
+    echo "Error: Exact-revision source archive does not match its computed identity." >&2
+    exit 1
+  fi
+  actual_recipe_sha256="$(ruby "$RELEASE_TOOL" build-recipe-digest "$source_root")"
+  if [ "$actual_recipe_sha256" != "$build_recipe_sha256" ]; then
+    echo "Error: Extracted exact-revision build recipe does not match its computed identity." >&2
+    exit 1
+  fi
 
-  set +e
-  env \
-    APP_SOURCE_REVISION="$revision" \
-    WAVES_BUILD_RECIPE_SHA256="$build_recipe_sha256" \
-    WAVES_ISOLATED_RELEASE_BUILD=1 \
-    WAVES_RELEASE_OUTPUT_DIR="$ROOT_DIR/dist" \
-    WAVES_RELEASE_SCRATCH_ROOT="$scratch_root" \
-    WAVES_RELEASE_SOURCE_ARCHIVE="$archive_path" \
-    WAVES_SOURCE_ARCHIVE_SHA256="$source_archive_sha256" \
-    "$source_root/script/build_and_run.sh" "$MODE"
-  status=$?
-  set -e
-  rm -rf "$isolation_root"
-  return "$status"
+  # Continue in this shell so there is no caller-selectable "inner build"
+  # branch. All caller-provided provenance and workspace paths are overwritten
+  # with values derived from the clean exact-revision archive above.
+  APP_SOURCE_REVISION="$revision"
+  APP_SOURCE_ARCHIVE_SHA256="$source_archive_sha256"
+  APP_BUILD_RECIPE_SHA256="$build_recipe_sha256"
+  WAVES_RELEASE_OUTPUT_DIR="$checkout_root/dist"
+  WAVES_RELEASE_SCRATCH_ROOT="$scratch_root"
+  ROOT_DIR="$source_root"
+  RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
+  cd "$ROOT_DIR"
+  unset WAVES_ISOLATED_RELEASE_BUILD WAVES_RELEASE_SOURCE_ARCHIVE
 }
 
-if is_distribution_build_mode && [ "${WAVES_ISOLATED_RELEASE_BUILD:-0}" != "1" ]; then
-  if [ -L "$ROOT_DIR/dist" ]; then
-    echo "Error: Release artifact destination dist must not be a symbolic link." >&2
-    exit 1
-  fi
-  if [ -e "$ROOT_DIR/dist" ] && [ ! -d "$ROOT_DIR/dist" ]; then
-    echo "Error: Release artifact destination dist exists but is not a directory." >&2
-    exit 1
-  fi
-  run_isolated_distribution_build
-  exit $?
+if is_distribution_build_mode; then
+  prepare_isolated_distribution_build
 fi
 
 if is_distribution_build_mode; then
@@ -214,15 +231,6 @@ if is_distribution_build_mode; then
   if [[ ! "$APP_SOURCE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || [[ ! "$APP_BUILD_RECIPE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "Error: Isolated release build requires valid source archive and build recipe SHA-256 stamps." >&2
-    exit 1
-  fi
-  if [ -z "${WAVES_RELEASE_SOURCE_ARCHIVE:-}" ] || [ ! -f "$WAVES_RELEASE_SOURCE_ARCHIVE" ]; then
-    echo "Error: Isolated release source archive is missing." >&2
-    exit 1
-  fi
-  actual_archive_sha256="$(shasum -a 256 "$WAVES_RELEASE_SOURCE_ARCHIVE" | cut -d ' ' -f 1)"
-  if [ "$actual_archive_sha256" != "$APP_SOURCE_ARCHIVE_SHA256" ]; then
-    echo "Error: Isolated release source archive does not match its provenance stamp." >&2
     exit 1
   fi
   actual_recipe_sha256="$(ruby "$RELEASE_TOOL" build-recipe-digest "$ROOT_DIR")"
@@ -334,6 +342,8 @@ cleanup() {
     rm -rf "$ACTIVE_SMOKE_HOME"
   fi
   ACTIVE_SMOKE_HOME=""
+
+  cleanup_isolated_distribution_build
 }
 trap cleanup EXIT
 
