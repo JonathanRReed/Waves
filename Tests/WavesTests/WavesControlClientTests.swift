@@ -16,6 +16,36 @@ func wavesCTLRejectsInvalidArgumentsBeforeTransport(_ arguments: [String]) {
   }
 }
 
+@Test func wavesCTLExecutableRejectsInvalidVolumeBeforeConnecting() throws {
+  let packageRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+  let executable = packageRoot.appendingPathComponent(".build/debug/wavesctl")
+  #expect(FileManager.default.isExecutableFile(atPath: executable.path))
+
+  let process = Process()
+  process.executableURL = executable
+  process.arguments = ["volume", "com.example.invalid", "1.1"]
+  var environment = ProcessInfo.processInfo.environment
+  environment["WAVES_CONTROL_SOCKET"] =
+    "/tmp/wavesctl-invalid-\(UUID().uuidString.lowercased()).sock"
+  process.environment = environment
+
+  let output = Pipe()
+  process.standardOutput = output
+  process.standardError = output
+  try process.run()
+  process.waitUntilExit()
+
+  let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+  #expect(process.terminationReason == .exit)
+  #expect(process.terminationStatus == 2)
+  #expect(text.contains("usage: wavesctl volume <app-id> <0..1>"))
+  #expect(text.contains("Could not connect") == false)
+  #expect(text.contains("Control socket") == false)
+}
+
 @Test func wavesCTLParsesEverySupportedCommandWithoutTransport() throws {
   #expect(try WavesCTLCommand.parse(["apps"]) == .apps)
   #expect(try WavesCTLCommand.parse(["icon", "app.id"]) == .icon(app: "app.id"))
