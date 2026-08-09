@@ -131,7 +131,8 @@ import WavesAudioCore
   }
   // The first-run case has to tell the user where to go, or the plugin looks
   // broken rather than switched off.
-  #expect(ControlError.notPermitted.message.contains("Settings"))
+  #expect(ControlError.notPermitted.message.contains("Settings ▸ Shortcuts & Automation"))
+  #expect(!ControlError.notPermitted.message.contains("Shortcuts ▸ Automation"))
 }
 
 @Test func protocolV1GoldenNamesAndRepresentativeResponsesStayStable() throws {

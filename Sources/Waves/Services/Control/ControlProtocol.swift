@@ -96,7 +96,7 @@ enum ControlError: String, Codable, Equatable, Sendable {
     case .rateLimited:
       "Too many commands. Slow down."
     case .notPermitted:
-      "External control is turned off. Turn it on in Waves \u{25B8} Settings \u{25B8} Shortcuts \u{25B8} Automation."
+      "External control is turned off. Turn it on in Waves \u{25B8} Settings \u{25B8} Shortcuts & Automation."
     }
   }
 }
