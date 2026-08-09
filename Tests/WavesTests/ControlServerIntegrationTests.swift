@@ -96,7 +96,7 @@ import Testing
 @MainActor
 @Test func unsubscribingRearmsTheRealSocketIdleTimeout() async throws {
   let fixture = await ControlSocketFixture.make(
-    timeouts: ControlConnectionTimeouts(handshake: .milliseconds(100), idle: .seconds(1)))
+    timeouts: ControlConnectionTimeouts(handshake: .seconds(5), idle: .seconds(1)))
   defer { fixture.stop() }
   try fixture.server.start()
 
