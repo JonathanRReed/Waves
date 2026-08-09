@@ -164,8 +164,11 @@ import WavesAudioCore
   fixture.store.setMuted(true, for: app)
   await fixture.preferencesStore.waitUntilFirstSaveIsSuspended()
   fixture.store.setVolumeBoost(3, for: app)
-  await fixture.store.drainAppIntentTransactions()
+  let drain = Task { @MainActor in await fixture.store.drainAppIntentTransactions() }
+  await Task.yield()
+  #expect(fixture.store.trackedAppIntentTaskCount == 2)
   fixture.preferencesStore.resumeFirstSave()
+  await drain.value
   await waitUntil { fixture.store.persistenceFailureCount == 2 }
 
   #expect(fixture.store.preferences.appAudioIntents[app.logicalID] == baseline)
@@ -1133,8 +1136,11 @@ import WavesAudioCore
   }
   await fixture.backend.waitUntilFirstIntentIsSuspended()
   fixture.store.setMuted(true, for: app)
-  await fixture.store.drainAppIntentTransactions()
+  let drain = Task { @MainActor in await fixture.store.drainAppIntentTransactions() }
+  await Task.yield()
+  #expect(fixture.store.trackedAppIntentTaskCount == 2)
   await fixture.backend.resumeFirstIntent()
+  await drain.value
   await automatic.value
 
   await fixture.store.applyAutomaticConferencingTransition(
