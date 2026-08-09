@@ -79,7 +79,11 @@ class ReleaseInfraTest < Minitest::Test
         },
         "developerID" => {"status" => "passed", "identity" => "Developer ID Application: Test (TEAMID1234)"},
         "hardenedRuntime" => passed_gate.call("runtime flag"),
-        "notarization" => passed_gate.call("accepted submission"),
+        "notarization" => {
+          "status" => "passed",
+          "submissionID" => "11111111-2222-3333-4444-555555555555",
+          "detail" => "accepted submission",
+        },
         "stapling" => passed_gate.call("ticket validated"),
         "gatekeeper" => passed_gate.call("app and DMG accepted"),
       },
@@ -200,6 +204,51 @@ class ReleaseInfraTest < Minitest::Test
     assert_release_error(/remoteElgato/) do
       WavesRelease::Evidence.seal(input: evidence_input, metadata: load_metadata, profile: "publication")
     end
+  end
+
+  def test_evidence_requires_an_accepted_notarization_submission_identity
+    input = evidence_input
+    input.fetch("package").fetch("notarization").delete("submissionID")
+    assert_release_error(/submissionID/) do
+      WavesRelease::Evidence.seal(input: input, metadata: load_metadata, profile: "candidate")
+    end
+  end
+
+  def test_tsan_gate_uses_the_macro_free_harness_instead_of_instrumenting_macro_plugins
+    quality_gate = File.read(File.expand_path("../quality-gate.sh", __dir__))
+    runner = File.read(File.expand_path("../run-tsan-harness.sh", __dir__))
+    harness = File.expand_path("../tsan-harness/Package.swift", __dir__)
+    tests = File.expand_path("../tsan-harness/Sources/WavesTSanHarness/main.swift", __dir__)
+
+    assert_includes quality_gate, "run-tsan-harness.sh"
+    assert_includes quality_gate, "script/tsan-harness"
+    refute_match(/swift test --sanitize=thread --filter/, quality_gate)
+    assert File.file?(harness), "expected checked-in TSan harness manifest"
+    assert File.file?(tests), "expected checked-in TSan harness coverage"
+    refute_includes File.read(harness), "swift-testing"
+    assert_includes File.read(tests), "@testable import Waves"
+    assert_includes runner, 'ditto "$RESOLVED_FILE" "$HARNESS_ROOT/Package.resolved"'
+    assert_includes runner, "--disable-automatic-resolution"
+    source_files = Dir.glob(File.expand_path("../../Sources/**/*.swift", __dir__))
+    refute source_files.any? { |path| File.read(path).include?("WAVES_TSAN_HARNESS") }
+  end
+
+  def test_tsan_runner_fails_before_building_when_the_tracked_lockfile_is_missing
+    Dir.mktmpdir("waves-tsan-runner") do |root|
+      FileUtils.mkdir_p(File.join(root, "script"))
+      runner = File.expand_path("../run-tsan-harness.sh", __dir__)
+      copied_runner = File.join(root, "script", "run-tsan-harness.sh")
+      FileUtils.cp(runner, copied_runner)
+
+      _stdout, stderr, status = Open3.capture3(copied_runner)
+      refute status.success?
+      assert_match(/tracked Package\.resolved is required/, stderr)
+    end
+  end
+
+  def test_packager_uses_the_stable_macos_system_bash
+    packager = File.expand_path("../build_and_run.sh", __dir__)
+    assert_equal "#!/bin/bash", File.foreach(packager).first.chomp
   end
 
   def test_publication_seal_requires_all_results_and_derives_eligibility
@@ -425,6 +474,10 @@ class ReleaseInfraTest < Minitest::Test
       write_workflow_fixtures(root)
       mutate(root, ".github/workflows/release.yml", "./script/release-gate.sh preflight", "./script/build_and_run.sh --publication-check")
       assert_release_error(/release-gate/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(root, ".github/workflows/release.yml", "      contents: read\n", "      contents: write\n")
+      assert_release_error(/read-only/) { WavesRelease::WorkflowContract.validate!(root: root) }
     end
   end
 
@@ -474,6 +527,9 @@ class ReleaseInfraTest < Minitest::Test
       name: Release
       on:
         workflow_dispatch:
+          inputs:
+            revision:
+              required: true
       permissions:
         contents: read
       concurrency:
@@ -497,14 +553,6 @@ class ReleaseInfraTest < Minitest::Test
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
               with:
                 retention-days: 14
-        draft-publication:
-          timeout-minutes: 30
-          permissions:
-            contents: write
-          steps:
-            - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-            - run: ./script/release-gate.sh publication
-            - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
     YAML
   end
 

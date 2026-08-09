@@ -45,7 +45,8 @@ run_infra() {
 
 run_format() {
   run_phase "${WAVES_PHASE_TIMEOUT_FORMAT:-300}" "Strict recursive Swift format and lint" \
-    swift format lint --recursive --parallel --strict Sources Tests Package.swift
+    swift format lint --recursive --parallel --strict \
+    Sources Tests Package.swift script/tsan-harness
 }
 
 run_build() {
@@ -61,8 +62,7 @@ run_tests() {
 run_tsan() {
   run_phase "${WAVES_PHASE_TIMEOUT_TSAN:-1800}" "Focused Thread Sanitizer suite" \
     /usr/bin/env HOME="$QUALITY_HOME" CFFIXED_USER_HOME="$QUALITY_HOME" \
-    swift test --sanitize=thread --filter \
-    'AppStoreCoordinatorTests|AppStoreTransactionTests|PersistenceStoreTests|CoalescingPersistenceWriterTests|ControlServerIntegrationTests|WavesControlClientTests|AudioLifecycleTask4Tests|AudioCorrectnessTask2Tests'
+    "$ROOT_DIR/script/run-tsan-harness.sh"
 }
 
 run_package() {
