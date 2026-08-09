@@ -64,8 +64,14 @@ final class HotkeyCenter {
   /// them is how a shortcut becomes "it just doesn't work sometimes".
   @discardableResult
   func apply(_ bindings: [HotkeyBinding]) -> [HotkeyBinding] {
-    unregisterAll()
+    stopRepeating()
+    registrations.removeAll()
+    actionsByHotkeyID.removeAll()
     appliedBindings = bindings
+    // A recorder owns the pause until its single terminal callback. Binding
+    // edits made while it is open update what resume will restore, but must not
+    // put Carbon registrations back early and steal the chord from the field.
+    guard !isPaused else { return [] }
     guard !bindings.isEmpty else { return [] }
     installHandlerIfNeeded()
 

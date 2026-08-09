@@ -136,6 +136,37 @@ enum AppStartupState: Equatable {
   case shuttingDown
 }
 
+enum ProfileSaveResult: Equatable, Sendable {
+  case saved(UUID)
+  case unavailableDuringShutdown
+  case blankName
+  case nameTooLong(maximum: Int)
+  case duplicateName(String)
+  case noEligibleApps
+
+  var savedProfileID: UUID? {
+    guard case .saved(let id) = self else { return nil }
+    return id
+  }
+
+  var message: String? {
+    switch self {
+    case .saved:
+      nil
+    case .unavailableDuringShutdown:
+      "Waves is closing. Reopen it before saving this profile."
+    case .blankName:
+      "Enter a profile name."
+    case .nameTooLong(let maximum):
+      "Keep the profile name to \(maximum) characters or fewer."
+    case .duplicateName(let name):
+      "A profile named “\(name)” already exists."
+    case .noEligibleApps:
+      "Select at least one app that is not excluded from Waves."
+    }
+  }
+}
+
 enum AppShutdownCompletion: Hashable, Sendable {
   case clean
   case degraded
@@ -4378,24 +4409,27 @@ final class AppStore {
   /// otherwise the entries are membership-only (a pure grouping). Pass an `id`
   /// to edit an existing profile in place (so a rename keeps its identity);
   /// otherwise a same-named profile is replaced, or a new one is appended.
-  func saveProfile(id: UUID? = nil, named name: String, appIDs: [String], captureLevels: Bool) {
-    guard startupState != .shuttingDown else { return }
+  @discardableResult
+  func saveProfile(
+    id: UUID? = nil,
+    named name: String,
+    appIDs: [String],
+    captureLevels: Bool
+  ) -> ProfileSaveResult {
+    guard startupState != .shuttingDown else { return .unavailableDuringShutdown }
     let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmedName.isEmpty, trimmedName.count <= 100 else { return }
+    guard !trimmedName.isEmpty else { return .blankName }
+    guard trimmedName.count <= 100 else { return .nameTooLong(maximum: 100) }
 
-    // Resolve which existing profile (if any) this save targets: an explicit id
-    // wins (an edit, even across a rename), otherwise fall back to a name match.
-    let targetIndex =
-      id.flatMap { id in profiles.firstIndex(where: { $0.id == id }) }
-      ?? profiles.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame })
+    // An explicit id identifies an edit. A create request must never replace an
+    // existing same-named profile silently; callers receive a typed duplicate
+    // result and can keep their editor state intact.
+    let targetIndex = id.flatMap { id in profiles.firstIndex(where: { $0.id == id }) }
 
-    // Reject a rename that would collide with a *different* existing profile, so
-    // an edit can't silently produce two profiles with the same name.
-    if let collision = profiles.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame }),
-      collision != targetIndex
-    {
-      showToast(title: "Name already used", detail: "A profile named “\(trimmedName)” already exists.", kind: .warning)
-      return
+    if let collision = profiles.firstIndex(where: {
+      $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame
+    }), collision != targetIndex {
+      return .duplicateName(profiles[collision].name)
     }
 
     // Never bake an excluded app into a profile — applying it later would re-tap
@@ -4428,6 +4462,9 @@ final class AppStore {
         return existingEntries[appID] ?? ProfileEntry(appID: appID)
       }
 
+    guard !entries.isEmpty else { return .noEligibleApps }
+
+    let savedProfileID: UUID
     if let targetIndex {
       var replacement = profiles[targetIndex]
       replacement.name = trimmedName
@@ -4435,10 +4472,12 @@ final class AppStore {
       replacement.updatedAt = .now
       profiles[targetIndex] = replacement
       focusProfile(replacement.id)
+      savedProfileID = replacement.id
     } else {
       let profile = Profile(name: trimmedName, entries: entries)
       profiles.append(profile)
       focusProfile(profile.id)
+      savedProfileID = profile.id
     }
     persistProfiles()
     showToast(
@@ -4447,6 +4486,7 @@ final class AppStore {
       kind: .success,
       duration: .seconds(1.6)
     )
+    return .saved(savedProfileID)
   }
 
   func deleteProfiles(at offsets: IndexSet) {

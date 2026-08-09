@@ -27,6 +27,9 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public var hasNoAudioCapability: Bool
   public var compatibility: CompatibilityState
   public var notes: String?
+  /// Typed live routing context for truthful presentation. This is additive and
+  /// optional so schema-1 sessions written before Waves 1.5 continue to decode.
+  public var routeHealthContext: RouteHealthContext?
   public var volumeBoost: Float
   /// Whether the current mute was set by the user or applied automatically
   /// (e.g. auto-pause during a call). Lets auto-resume avoid overriding a mute
@@ -58,7 +61,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     notes: String? = nil,
     volumeBoost: Float = 1.0,
     muteSource: MuteSource = .user,
-    targetDeviceUID: String? = nil
+    targetDeviceUID: String? = nil,
+    routeHealthContext: RouteHealthContext? = nil
   ) {
     // Validate string lengths to prevent excessive memory usage
     self.id = String(id.prefix(256))
@@ -92,6 +96,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
 
     // Validate notes length
     self.notes = notes.map { String($0.prefix(1000)) }
+    self.routeHealthContext = routeHealthContext
 
     // Clamp volumeBoost to the supported range [1.0, 4.0], matching
     // ProfileEntry and AppVolumeSettings so a tampered/corrupted session
@@ -121,6 +126,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     case routingState
     case compatibility
     case notes
+    case routeHealthContext
     case volumeBoost
     case muteSource
     case targetDeviceUID
@@ -146,6 +152,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     let routingState = try container.decodeIfPresent(RoutingState.self, forKey: .routingState) ?? .recent
     let compatibility = try container.decodeIfPresent(CompatibilityState.self, forKey: .compatibility) ?? .planned
     let notes = try container.decodeIfPresent(String.self, forKey: .notes)
+    let routeHealthContext = try container.decodeIfPresent(RouteHealthContext.self, forKey: .routeHealthContext)
     let volumeBoost = try container.decodeIfPresent(Float.self, forKey: .volumeBoost) ?? 1.0
     let muteSource = try container.decodeIfPresent(MuteSource.self, forKey: .muteSource) ?? .user
     let targetDeviceUID = try container.decodeIfPresent(String.self, forKey: .targetDeviceUID)
@@ -171,7 +178,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
       notes: notes,
       volumeBoost: volumeBoost,
       muteSource: muteSource,
-      targetDeviceUID: targetDeviceUID
+      targetDeviceUID: targetDeviceUID,
+      routeHealthContext: routeHealthContext
     )
   }
 
@@ -195,10 +203,19 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     try container.encode(routingState, forKey: .routingState)
     try container.encode(compatibility, forKey: .compatibility)
     try container.encodeIfPresent(notes, forKey: .notes)
+    try container.encodeIfPresent(routeHealthContext, forKey: .routeHealthContext)
     try container.encode(volumeBoost, forKey: .volumeBoost)
     try container.encode(muteSource, forKey: .muteSource)
     try container.encodeIfPresent(targetDeviceUID, forKey: .targetDeviceUID)
   }
+}
+
+public enum RouteHealthContext: String, Codable, Hashable, Sendable {
+  case verifiedRouterOwnership = "verified_router_ownership"
+  case unattributableRouterFallback = "unattributable_router_fallback"
+  case routerMixedOutput = "router_mixed_output"
+  case geometryRecoveryInProgress = "geometry_recovery_in_progress"
+  case geometryRecoveryExhausted = "geometry_recovery_exhausted"
 }
 
 public enum MuteSource: String, Codable, Hashable, Sendable {
@@ -224,7 +241,7 @@ public enum RoutingState: String, Codable, CaseIterable, Hashable, Sendable {
     case .managed:
       "Managed"
     case .monitorOnly:
-      "Ready"
+      "Monitoring only"
     case .error:
       "Error"
     }

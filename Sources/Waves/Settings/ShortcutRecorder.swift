@@ -13,6 +13,7 @@ import SwiftUI
 struct ShortcutRecorder: View {
   @Environment(\.wavesTheme) private var theme
   @Environment(AppStore.self) private var store
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   /// A shared Settings owner keeps these two values alive while pane content is
   /// replaced. Other recorder surfaces keep their existing view-local lifetime.
@@ -113,10 +114,14 @@ struct ShortcutRecorder: View {
           .foregroundStyle(.secondary)
           .multilineTextAlignment(.trailing)
           .frame(maxWidth: 260, alignment: .trailing)
-          .transition(.opacity)
+          .transition(ShortcutRecorderMotion.allowsAnimation(reduceMotion: reduceMotion) ? .opacity : .identity)
       }
     }
-    .animation(.easeOut(duration: 0.15), value: message)
+    .animation(
+      ShortcutRecorderMotion.allowsAnimation(reduceMotion: reduceMotion)
+        ? .easeOut(duration: 0.15) : nil,
+      value: message
+    )
     .onChange(of: message) { _, new in
       // VoiceOver does not read a caption that simply appears, so a refusal
       // would be completely silent — the user hears nothing, the field stays
@@ -135,7 +140,7 @@ struct ShortcutRecorder: View {
   /// working one forever.
   private var unavailableNote: String? {
     guard isUnavailable, !isRecording else { return nil }
-    return "macOS or another app already uses this. Pick another combination."
+    return "Registration was refused. This combination may be reserved by macOS or another app."
   }
 
   private func record(_ chord: HotkeyChord) {
@@ -263,6 +268,12 @@ struct ShortcutRecorder: View {
     guard let binding else { return "Shortcut, not set" }
     if isUnavailable { return "Shortcut, \(binding.displayString), unavailable" }
     return "Shortcut, \(binding.displayString)"
+  }
+}
+
+enum ShortcutRecorderMotion {
+  static func allowsAnimation(reduceMotion: Bool) -> Bool {
+    !reduceMotion
   }
 }
 

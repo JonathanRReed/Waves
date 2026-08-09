@@ -49,7 +49,7 @@ struct MixerRowView: View {
             // Hide the managed/live route chip for excluded apps — Waves isn't
             // controlling them, so showing a route state would be misleading.
             if !isExcluded {
-              RoutingStateIndicator(state: app.routingState)
+              RoutingStateIndicator(app: app)
             }
           }
         }
@@ -405,7 +405,7 @@ struct CompactMixerRow: View {
           .fixedSize()
           .accessibilityLabel("Excluded from Waves")
       } else {
-        RoutingStateDot(state: app.routingState, notes: app.notes)
+        RoutingStateDot(app: app)
       }
 
       Spacer()
@@ -592,19 +592,14 @@ private struct BoostMenu: View {
   private var isBoosted: Bool { app.volumeBoost > 1 }
 }
 
-private extension RoutingState {
+private extension RouteHealthPresentation.Tone {
   func indicatorColor(accent: Color) -> Color {
     switch self {
-    case .managed:
-      .green
-    case .live:
-      accent
-    case .monitorOnly:
-      .secondary
-    case .recent:
-      .secondary
-    case .error:
-      .red
+    case .active: accent
+    case .success: WavesDesign.success
+    case .neutral: .secondary
+    case .warning: WavesDesign.warning
+    case .error: WavesDesign.error
     }
   }
 }
@@ -613,132 +608,69 @@ private struct RoutingStateIndicator: View {
   @Environment(\.colorSchemeContrast) private var contrast
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.wavesTheme) private var theme
-  let state: RoutingState
+  let app: AudioApp
 
   @ViewBuilder
   var body: some View {
-    if state != .monitorOnly {
-      HStack(spacing: 4) {
-        Image(systemName: symbolName)
-          .font(.system(size: 9, weight: .semibold))
-          .foregroundStyle(color)
-          .frame(width: 10)
-          // The Live badge's waveform gently cycles its bars while audio is
-          // playing — a quiet "this is alive" pulse — and holds still otherwise
-          // and under Reduce Motion.
-          .symbolEffect(.variableColor.iterative, isActive: state == .live && !reduceMotion)
+    HStack(spacing: 4) {
+      Image(systemName: presentation.symbolName)
+        .font(.system(size: 9, weight: .semibold))
+        .foregroundStyle(color)
+        .frame(width: 10)
+        .symbolEffect(
+          .variableColor.iterative,
+          isActive: app.routingState == .live && !reduceMotion
+        )
 
-        Text(state.displayName)
-          .font(.caption2.weight(.medium))
-          .foregroundStyle(color)
-          .lineLimit(1)
-      }
-      .padding(.horizontal, 6)
-      .padding(.vertical, 2)
-      .background(color.opacity(backgroundOpacity), in: Capsule())
-      // Under Increase Contrast, add a solid outline so the chip reads as a
-      // distinct element rather than a faint tint.
-      .overlay {
-        if contrast == .increased {
-          Capsule().strokeBorder(color, lineWidth: 1)
-        }
-      }
-      .help(Text(helpText))
-      .accessibilityLabel(Text(helpText))
+      Text(presentation.title)
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(color)
+        .lineLimit(1)
     }
+    .padding(.horizontal, 6)
+    .padding(.vertical, 2)
+    .background(color.opacity(backgroundOpacity), in: Capsule())
+    .overlay {
+      if contrast == .increased {
+        Capsule().strokeBorder(color, lineWidth: 1)
+      }
+    }
+    .help(Text(presentation.help))
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(Text(presentation.accessibilityLabel))
+    .accessibilityValue(Text(presentation.accessibilityValue))
+    .accessibilityHint(Text(presentation.help))
   }
 
-  private var color: Color { state.indicatorColor(accent: theme.accent) }
+  private var presentation: RouteHealthPresentation { RouteHealthPresentation(app: app) }
+  private var color: Color { presentation.tone.indicatorColor(accent: theme.accent) }
 
   private var backgroundOpacity: Double {
     if contrast == .increased { return 0.28 }
-    switch state {
-    case .monitorOnly, .recent:
-      return 0.08
-    default:
-      return 0.12
-    }
-  }
-
-  private var symbolName: String {
-    switch state {
-    case .managed:
-      "checkmark.circle.fill"
-    case .live:
-      "waveform"
-    case .monitorOnly:
-      "checkmark.circle"
-    case .recent:
-      "clock.fill"
-    case .error:
-      "exclamationmark.triangle.fill"
-    }
-  }
-
-  private var helpText: String {
-    switch state {
-    case .managed:
-      "Managed route is active."
-    case .live:
-      "Live audio source detected."
-    case .monitorOnly:
-      "Ready to manage. Move the slider or mute the app to start per-app control."
-    case .recent:
-      "Recent audio source."
-    case .error:
-      "Route setup failed."
-    }
+    return presentation.tone == .neutral ? 0.08 : 0.12
   }
 }
 
 private struct RoutingStateDot: View {
   @Environment(\.wavesTheme) private var theme
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  let state: RoutingState
-  // When the route errored, the failure reason is otherwise visible only in
-  // the full window's inline note; surface it here so a menu-bar user can see
-  // why volume/mute didn't take effect (hover tooltip + VoiceOver).
-  var notes: String? = nil
+  let app: AudioApp
 
   var body: some View {
-    Image(systemName: symbolName)
+    Image(systemName: presentation.symbolName)
       .font(.caption2.weight(.semibold))
       .foregroundStyle(color)
       .frame(width: 12, height: 12)
       // Match the main window: a live source's waveform shimmers while playing.
-      .symbolEffect(.variableColor.iterative, isActive: state == .live && !reduceMotion)
-      .help(Text(helpText))
-      .accessibilityLabel(Text("Route state: \(state.displayName)"))
-      .accessibilityValue(Text(errorNote ?? ""))
+      .symbolEffect(.variableColor.iterative, isActive: app.routingState == .live && !reduceMotion)
+      .help(Text(presentation.help))
+      .accessibilityLabel(Text(presentation.accessibilityLabel))
+      .accessibilityValue(Text(presentation.accessibilityValue))
+      .accessibilityHint(Text(presentation.help))
   }
 
-  /// The failure reason, only when the route actually errored.
-  private var errorNote: String? {
-    guard state == .error, let notes, !notes.isEmpty else { return nil }
-    return notes
-  }
-
-  private var helpText: String {
-    if let errorNote { return "\(state.displayName): \(errorNote)" }
-    return state.displayName
-  }
-
-  private var color: Color { state.indicatorColor(accent: theme.accent) }
-
-  private var symbolName: String {
-    switch state {
-    case .managed:
-      "checkmark.circle.fill"
-    case .live:
-      "waveform"
-    case .monitorOnly:
-      "checkmark.circle"
-    case .recent:
-      "clock.fill"
-    case .error:
-      "exclamationmark.triangle.fill"
-    }
-  }
+  private var presentation: RouteHealthPresentation { RouteHealthPresentation(app: app) }
+  private var color: Color { presentation.tone.indicatorColor(accent: theme.accent) }
 }
 
 /// Caches decoded app icons so the icon PNG/TIFF is not re-decoded on every

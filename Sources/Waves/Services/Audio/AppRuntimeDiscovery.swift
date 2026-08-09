@@ -1,6 +1,65 @@
 import AppKit
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 import WavesAudioCore
+
+struct AppIconRaster: Sendable {
+  let width: Int
+  let height: Int
+  let bytesPerRow: Int
+  let rgbaBytes: Data
+}
+
+struct AppIconEncoder: Sendable {
+  typealias Encode = @Sendable (AppIconRaster) -> Data?
+  private let operation: Encode
+
+  init(operation: @escaping Encode = Self.encodePNG) {
+    self.operation = operation
+  }
+
+  func encode(_ raster: AppIconRaster) async -> Data? {
+    let operation = operation
+    return await Task.detached(priority: .utility) {
+      operation(raster)
+    }.value
+  }
+
+  private static func encodePNG(_ raster: AppIconRaster) -> Data? {
+    guard raster.width > 0, raster.height > 0,
+      raster.bytesPerRow >= raster.width * 4,
+      raster.rgbaBytes.count >= raster.bytesPerRow * raster.height,
+      let provider = CGDataProvider(data: raster.rgbaBytes as CFData),
+      let image = CGImage(
+        width: raster.width,
+        height: raster.height,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: raster.bytesPerRow,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: true,
+        intent: .defaultIntent
+      )
+    else { return nil }
+
+    let output = NSMutableData()
+    guard
+      let destination = CGImageDestinationCreateWithData(
+        output,
+        UTType.png.identifier as CFString,
+        1,
+        nil
+      )
+    else { return nil }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { return nil }
+    return output as Data
+  }
+}
 
 enum AppRuntimeDiscovery {
   enum ActivationPolicy: Sendable {
@@ -28,27 +87,38 @@ enum AppRuntimeDiscovery {
   @MainActor
   static func captureRunningApplications(
     currentBundleID: String?,
-    knownIconData: [String: Data] = [:]
-  ) -> Capture {
-    let applications = NSWorkspace.shared.runningApplications.compactMap { app -> CapturedApplication? in
-      guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
-      guard app.activationPolicy != .prohibited else { return nil }
-      guard let localizedName = app.localizedName, !localizedName.isEmpty else { return nil }
-      guard app.bundleIdentifier != currentBundleID else { return nil }
+    knownIconData: [String: Data] = [:],
+    iconEncoder: AppIconEncoder = AppIconEncoder()
+  ) async -> Capture {
+    var applications: [CapturedApplication] = []
+    for app in NSWorkspace.shared.runningApplications {
+      guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { continue }
+      guard app.activationPolicy != .prohibited else { continue }
+      guard let localizedName = app.localizedName, !localizedName.isEmpty else { continue }
+      guard app.bundleIdentifier != currentBundleID else { continue }
 
       let logicalID = AppDiscoveryPolicy.logicalAppID(
         bundleID: app.bundleIdentifier,
         displayName: localizedName
       )
-      return CapturedApplication(
-        pid: app.processIdentifier,
-        bundleID: app.bundleIdentifier,
-        localizedName: localizedName,
-        bundlePath: app.bundleURL?.path,
-        activationPolicy: activationPolicy(for: app.activationPolicy),
-        isActive: app.isActive,
-        iconTIFFData: knownIconData[logicalID] ?? iconTIFFData(for: app)
-      )
+      let iconData: Data?
+      if let known = knownIconData[logicalID] {
+        iconData = known
+      } else if let raster = iconRaster(for: app) {
+        iconData = await iconEncoder.encode(raster)
+      } else {
+        iconData = nil
+      }
+      applications.append(
+        CapturedApplication(
+          pid: app.processIdentifier,
+          bundleID: app.bundleIdentifier,
+          localizedName: localizedName,
+          bundlePath: app.bundleURL?.path,
+          activationPolicy: activationPolicy(for: app.activationPolicy),
+          isActive: app.isActive,
+          iconTIFFData: iconData
+        ))
     }
     return Capture(applications: applications)
   }
@@ -146,39 +216,43 @@ enum AppRuntimeDiscovery {
   }
 
   @MainActor
-  private static func iconTIFFData(for app: NSRunningApplication) -> Data? {
-    if let icon = app.icon {
-      return iconPNGData(from: icon)
-    }
-
-    if let bundleURL = app.bundleURL {
-      return iconPNGData(from: NSWorkspace.shared.icon(forFile: bundleURL.path))
-    }
-
-    if let bundleID = app.bundleIdentifier,
+  private static func iconRaster(for app: NSRunningApplication) -> AppIconRaster? {
+    let icon: NSImage
+    if let runningIcon = app.icon {
+      icon = runningIcon
+    } else if let bundleURL = app.bundleURL {
+      icon = NSWorkspace.shared.icon(forFile: bundleURL.path)
+    } else if let bundleID = app.bundleIdentifier,
       let bundleURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
     {
-      return iconPNGData(from: NSWorkspace.shared.icon(forFile: bundleURL.path))
-    }
-
-    return nil
-  }
-
-  @MainActor
-  private static func iconPNGData(from icon: NSImage) -> Data? {
-    let size = NSSize(width: 64, height: 64)
-    let resized = NSImage(size: size)
-    resized.lockFocus()
-    icon.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .copy, fraction: 1)
-    resized.unlockFocus()
-
-    guard let tiffData = resized.tiffRepresentation,
-      let bitmap = NSBitmapImageRep(data: tiffData)
-    else {
+      icon = NSWorkspace.shared.icon(forFile: bundleURL.path)
+    } else {
       return nil
     }
 
-    return bitmap.representation(using: .png, properties: [:])
+    let width = 64
+    let height = 64
+    let bytesPerRow = width * 4
+    var bytes = Data(count: bytesPerRow * height)
+    let rendered = bytes.withUnsafeMutableBytes { buffer -> Bool in
+      guard let baseAddress = buffer.baseAddress,
+        let context = CGContext(
+          data: baseAddress,
+          width: width,
+          height: height,
+          bitsPerComponent: 8,
+          bytesPerRow: bytesPerRow,
+          space: CGColorSpaceCreateDeviceRGB(),
+          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ),
+        let image = icon.cgImage(forProposedRect: nil, context: nil, hints: nil)
+      else { return false }
+      context.interpolationQuality = .high
+      context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+      return true
+    }
+    guard rendered else { return nil }
+    return AppIconRaster(width: width, height: height, bytesPerRow: bytesPerRow, rgbaBytes: bytes)
   }
 
   static func preferredRepresentative(

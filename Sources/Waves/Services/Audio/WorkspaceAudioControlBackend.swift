@@ -735,11 +735,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }
 
-    if let detail = competingAudioRouterConflictDetail(
+    if let conflict = competingAudioRouterConflict(
       for: snapshot.apps[acceptedIndex],
       routerActivity: routerActivity
     ) {
-      suspendManagedRouteForConflict(at: acceptedIndex, detail: detail)
+      let detail = conflict.detail
+      suspendManagedRouteForConflict(at: acceptedIndex, conflict: conflict)
       clearStagedIntentIfCurrent(intent, logicalID: logicalID)
       snapshot.updatedAt = .now
       return AppIntentApplyResult(
@@ -852,6 +853,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       snapshot.apps[currentIndex].routingState = .managed
       snapshot.apps[currentIndex].hasNoAudioCapability = false
       snapshot.apps[currentIndex].notes = nil
+      snapshot.apps[currentIndex].routeHealthContext = nil
       if intent.isMuted {
         snapshot.apps[currentIndex].peakLevel = 0
         snapshot.apps[currentIndex].rmsLevel = 0
@@ -1430,6 +1432,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].rmsLevel = 0
     snapshot.apps[index].hasNoAudioCapability = false
     snapshot.apps[index].notes = nil
+    snapshot.apps[index].routeHealthContext = nil
   }
 
   private func disposeControllerInstalledByGeneration(
@@ -1532,8 +1535,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard supportsPerAppRouting else {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
     }
-    if let detail = competingAudioRouterConflictDetail(for: app, routerActivity: routerActivity) {
-      throw BackendError.unsupportedOperation(detail)
+    if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
+      throw BackendError.unsupportedOperation(conflict.detail)
     }
 
     if let generationContext {
@@ -2408,12 +2411,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let knownIcons = (previousSnapshot?.apps ?? []).reduce(into: [String: Data]()) { result, app in
       if let data = app.iconTIFFData { result[app.logicalID] = data }
     }
-    let discoveryCapture = await MainActor.run { [currentBundleID, knownIcons] in
-      AppRuntimeDiscovery.captureRunningApplications(
-        currentBundleID: currentBundleID,
-        knownIconData: knownIcons
-      )
-    }
+    let discoveryCapture = await AppRuntimeDiscovery.captureRunningApplications(
+      currentBundleID: currentBundleID,
+      knownIconData: knownIcons
+    )
     let runningApps = await Task.detached { [currentBundleID, audible, discoveryCapture] in
       AppRuntimeDiscovery.discoverRunningApps(
         from: discoveryCapture,
@@ -2440,6 +2441,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       app.volumeBoost = previous.volumeBoost
       app.muteSource = previous.muteSource
       app.targetDeviceUID = previous.targetDeviceUID
+      app.routeHealthContext = previous.routeHealthContext
+      if previous.routeHealthContext != nil {
+        app.routingState = previous.routingState
+        app.notes = previous.notes
+      }
       // Preserve a prior route error across a plain rebuild: a refresh with no
       // successful re-apply must not erase the Error chip / inline reason. The
       // error clears only on a later successful apply or reattach (those paths
@@ -2484,6 +2490,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         mergedApps[index].routingState = RoutingState.monitorOnly
         mergedApps[index].notes = "Per-app route requires macOS 14.2+"
         mergedApps[index].compatibility = CompatibilityState.planned
+        continue
+      }
+
+      if mergedApps[index].routeHealthContext != nil {
         continue
       }
 
@@ -2803,11 +2813,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       snapshot.apps[index].routingState = .monitorOnly
       snapshot.apps[index].notes = error.localizedDescription
       snapshot.apps[index].hasNoAudioCapability = false
+      snapshot.apps[index].routeHealthContext = nil
       return
     }
 
     snapshot.apps[index].routingState = .error
     snapshot.apps[index].notes = error.localizedDescription
+    snapshot.apps[index].routeHealthContext = nil
     if case BackendError.noAudioCapability = error {
       snapshot.apps[index].hasNoAudioCapability = true
     } else {
@@ -2844,6 +2856,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           snapshot.apps[index].appliedVolume =
             snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
           snapshot.apps[index].notes = nil
+          snapshot.apps[index].routeHealthContext = nil
         }
       } catch {
         if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
@@ -2924,6 +2937,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         var recovery = geometryRecoveryByRuntimeID[appID] ?? GeometryRecoveryCoordinator()
         _ = recovery.signalMismatch(at: now)
         geometryRecoveryByRuntimeID[appID] = recovery
+        if let index = appIndexMap[appID] ?? snapshot.apps.firstIndex(where: { $0.id == appID }) {
+          snapshot.apps[index].routeHealthContext = .geometryRecoveryInProgress
+          snapshot.apps[index].notes = "Audio geometry changed. Waves is rebuilding this route asynchronously."
+          snapshot.updatedAt = .now
+        }
       }
       if var recovery = geometryRecoveryByRuntimeID[appID],
         case .attempt = recovery.beginRecovery(at: now)
@@ -3011,23 +3029,23 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private func competingAudioRouterConflictDetail(
+  private func competingAudioRouterConflict(
     for app: AudioApp,
     routerActivity: VerifiedRouterActivitySnapshot? = nil
-  ) -> String? {
+  ) -> VerifiedRouterConflict? {
     let conflict: VerifiedRouterConflict?
     if let routerActivity {
       conflict = routerActivity.conflict(for: app)
     } else {
       conflict = verifiedRouterConflictProvider?(app)
     }
-    return CompetingRouterPolicy.conflictDetail(
+    return CompetingRouterPolicy.conflict(
       for: app,
-      conflict: conflict
+      verifiedConflict: conflict
     )
   }
 
-  private func suspendManagedRouteForConflict(at index: Int, detail: String) {
+  private func suspendManagedRouteForConflict(at index: Int, conflict: VerifiedRouterConflict) {
     let app = snapshot.apps[index]
     if let controller = controllers.removeValue(forKey: app.id) {
       retainCleanupDegradations(disposeController(controller))
@@ -3039,7 +3057,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].appliedVolume = nil
     snapshot.apps[index].peakLevel = 0
     snapshot.apps[index].rmsLevel = 0
-    snapshot.apps[index].notes = detail
+    snapshot.apps[index].notes = conflict.detail
+    snapshot.apps[index].routeHealthContext =
+      switch conflict.kind {
+      case .publicTapMembership: .verifiedRouterOwnership
+      case .unattributableTapFallback: .unattributableRouterFallback
+      case .routerMixedOutput: .routerMixedOutput
+      }
   }
 
   private func observeCompetingRouterConflicts(
@@ -3050,11 +3074,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var changed = false
     for index in snapshot.apps.indices {
       let app = snapshot.apps[index]
-      let detail = competingAudioRouterConflictDetail(for: app, routerActivity: routerActivity)
+      let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity)
       var observation = routerConflictObservationByRuntimeID[app.id] ?? RouterConflictObservationDebouncer()
       let action: RouterConflictObservationAction
       if routerObservationGeneration != consumedRouterObservationGeneration {
-        action = observation.observe(conflictIsActive: detail != nil, at: now)
+        action = observation.observe(conflictIsActive: conflict != nil, at: now)
       } else {
         action = observation.advance(to: now)
       }
@@ -3063,16 +3087,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       switch action {
       case .conflictActivated:
         guard app.routingState == .managed || controllers[app.id] != nil,
-          let detail
+          let conflict
         else { continue }
-        suspendManagedRouteForConflict(at: index, detail: detail)
+        suspendManagedRouteForConflict(at: index, conflict: conflict)
         changed = true
       case .conflictReleased:
-        guard snapshot.apps[index].routingState == .monitorOnly,
-          snapshot.apps[index].notes?.contains("Waves is monitoring only") == true
-        else { continue }
+        guard snapshot.apps[index].routingState == .monitorOnly else { continue }
+        switch snapshot.apps[index].routeHealthContext {
+        case .verifiedRouterOwnership, .unattributableRouterFallback, .routerMixedOutput:
+          break
+        default:
+          continue
+        }
         snapshot.apps[index].routingState = .managed
         snapshot.apps[index].notes = nil
+        snapshot.apps[index].routeHealthContext = nil
         recoveredRouteIDs.insert(snapshot.apps[index].logicalID)
         changed = true
       case .none:
@@ -3171,6 +3200,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           snapshot.apps[currentIndex].appliedVolume =
             snapshot.apps[currentIndex].isMuted ? 0 : snapshot.apps[currentIndex].desiredVolume
           snapshot.apps[currentIndex].notes = nil
+          snapshot.apps[currentIndex].routeHealthContext = nil
         }
         staleRouteTicks.removeValue(forKey: app.logicalID)
         lastRenderTickByAppID.removeValue(forKey: app.logicalID)
@@ -3193,6 +3223,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
             )
             if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
               markRouteError(at: currentIndex, error: exhaustion)
+              snapshot.apps[currentIndex].routeHealthContext = .geometryRecoveryExhausted
             }
             lastError = exhaustion.localizedDescription
             changed = true

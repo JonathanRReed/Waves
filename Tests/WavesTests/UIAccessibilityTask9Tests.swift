@@ -1,0 +1,198 @@
+import AppKit
+import Carbon.HIToolbox
+import Foundation
+import Testing
+import WavesAudioCore
+
+@testable import Waves
+
+@MainActor
+@Test func profileSaveReturnsEveryValidationResultWithoutMutatingOnFailure() async throws {
+  let store = await makeControlStoreFixture()
+  let appID = try #require(store.session.apps.first?.logicalID)
+
+  #expect(store.saveProfile(named: "   ", appIDs: [appID], captureLevels: false) == .blankName)
+  #expect(
+    store.saveProfile(named: String(repeating: "a", count: 101), appIDs: [appID], captureLevels: false)
+      == .nameTooLong(maximum: 100)
+  )
+  #expect(store.saveProfile(named: "Empty", appIDs: [], captureLevels: false) == .noEligibleApps)
+
+  let focus = try #require(
+    store.saveProfile(named: "Task 9 Focus", appIDs: [appID], captureLevels: false).savedProfileID)
+  let work = try #require(
+    store.saveProfile(named: "Task 9 Work", appIDs: [appID], captureLevels: false).savedProfileID)
+  #expect(
+    store.saveProfile(named: " task 9 focus ", appIDs: [appID], captureLevels: false)
+      == .duplicateName("Task 9 Focus")
+  )
+  #expect(
+    store.saveProfile(id: work, named: "TASK 9 FOCUS", appIDs: [appID], captureLevels: false)
+      == .duplicateName("Task 9 Focus")
+  )
+
+  store.preferences.excludedAppIDs = [appID]
+  #expect(
+    store.saveProfile(id: focus, named: "Task 9 Focus", appIDs: [appID], captureLevels: false)
+      == .noEligibleApps)
+  #expect(store.profiles.contains { $0.name == "Task 9 Focus" })
+  #expect(store.profiles.contains { $0.name == "Task 9 Work" })
+}
+
+@MainActor
+@Test func profileSaveReportsShutdownInsteadOfSilentlyReturning() async {
+  let store = await makeControlStoreFixture(startupState: .shuttingDown)
+  #expect(
+    store.saveProfile(named: "Focus", appIDs: ["com.example.render"], captureLevels: false)
+      == .unavailableDuringShutdown)
+}
+
+@Test func routeHealthPresentationDistinguishesEveryManagedAudioCondition() {
+  let ordinary = task9App(state: .monitorOnly)
+  let publicClaim = task9App(state: .monitorOnly, context: .verifiedRouterOwnership)
+  let fallback = task9App(state: .monitorOnly, context: .unattributableRouterFallback)
+  let recovering = task9App(state: .managed, context: .geometryRecoveryInProgress)
+  let exhausted = task9App(state: .error, context: .geometryRecoveryExhausted)
+
+  #expect(RouteHealthPresentation(app: ordinary).title == "Monitoring only")
+  #expect(RouteHealthPresentation(app: publicClaim).title == "Wave Link route")
+  #expect(RouteHealthPresentation(app: fallback).title == "Conservative handoff")
+  #expect(RouteHealthPresentation(app: recovering).title == "Recovering route")
+  #expect(RouteHealthPresentation(app: exhausted).title == "Recovery failed")
+  #expect(RouteHealthPresentation(app: publicClaim).title != "Ready")
+  #expect(RouteHealthPresentation(app: fallback).title != "Ready")
+
+  for app in [ordinary, publicClaim, fallback, recovering, exhausted] {
+    let presentation = RouteHealthPresentation(app: app)
+    #expect(!presentation.symbolName.isEmpty)
+    #expect(!presentation.accessibilityLabel.isEmpty)
+    #expect(!presentation.accessibilityValue.isEmpty)
+    #expect(!presentation.help.isEmpty)
+  }
+}
+
+@Test func routeHealthContextDecodingIsAdditiveForLegacySessions() throws {
+  let app = task9App(state: .monitorOnly)
+  var object = try #require(
+    JSONSerialization.jsonObject(with: JSONEncoder().encode(app)) as? [String: Any])
+  object.removeValue(forKey: "routeHealthContext")
+  let legacy = try JSONSerialization.data(withJSONObject: object)
+  #expect(try JSONDecoder().decode(AudioApp.self, from: legacy).routeHealthContext == nil)
+}
+
+@MainActor
+@Test func pausedHotkeyCenterAcceptsLatestBindingsWithoutReregisteringUntilResume() throws {
+  let center = HotkeyCenter()
+  defer { center.unregisterAll() }
+  let first = task9Chord(kVK_F15)
+  let second = task9Chord(kVK_F16)
+  try #require(center.isChordAvailable(first) && center.isChordAvailable(second))
+
+  center.apply([task9Binding(first, .frontmostMute)])
+  center.pause()
+  #expect(center.isChordAvailable(first))
+  #expect(center.apply([task9Binding(second, .frontmostVolumeUp)]).isEmpty)
+  #expect(center.isPaused)
+  #expect(center.isChordAvailable(first))
+  #expect(center.isChordAvailable(second))
+
+  center.resume()
+  #expect(center.isChordAvailable(first))
+  #expect(center.isChordAvailable(second) == false)
+}
+
+@MainActor
+@Test func overlappingRecorderRequestsResumeOnlyForTheCurrentOwner() {
+  let draft = ControlSettingsDraft()
+  let first = HotkeyAction.frontmostMute
+  let second = HotkeyAction.showMixer
+
+  #expect(draft.beginRecording(first))
+  #expect(draft.beginRecording(second) == false)
+  #expect(draft.finishRecording(first) == false)
+  #expect(draft.recordingAction == second)
+  #expect(draft.finishRecording(second))
+  #expect(draft.finishRecording(second) == false)
+}
+
+@Test func shortcutRecorderMotionContractDisablesChangedMotionUnderReduceMotion() {
+  #expect(ShortcutRecorderMotion.allowsAnimation(reduceMotion: false))
+  #expect(ShortcutRecorderMotion.allowsAnimation(reduceMotion: true) == false)
+}
+
+@MainActor
+@Test func iconEncodingSuspendsBeforeBlockingWorkSoMainActorHeartbeatProgresses() async {
+  let raster = AppIconRaster(width: 1, height: 1, bytesPerRow: 4, rgbaBytes: Data([0, 0, 0, 255]))
+  let encoder = AppIconEncoder { _ in
+    Thread.sleep(forTimeInterval: 0.75)
+    return Data([1])
+  }
+  let clock = ContinuousClock()
+  let start = clock.now
+  let task = Task { @MainActor in await encoder.encode(raster) }
+
+  await Task.yield()
+  let elapsed = start.duration(to: clock.now)
+  #expect(elapsed < .milliseconds(500))
+  #expect(await task.value == Data([1]))
+}
+
+@MainActor
+@Test func levelMeterModelUsesDeterministicAttackReleaseHoldAndStallClamp() {
+  let model = LevelMeterModel()
+  let start = Date(timeIntervalSinceReferenceDate: 1_000)
+  model.update(barTarget: 1, peakTarget: 1, at: start)
+  let initialBar = model.bar
+  #expect(initialBar > 0 && initialBar < 1)
+  #expect(model.peak == 1)
+
+  model.update(barTarget: 0, peakTarget: 0, at: start.addingTimeInterval(0.1))
+  #expect(model.bar > 0)
+  #expect(model.peak == 1)
+  let releasedBar = model.bar
+
+  model.update(barTarget: 0, peakTarget: 0, at: start.addingTimeInterval(10))
+  #expect(model.bar < releasedBar)
+  #expect(model.bar > 0, "the 100 ms stall clamp must prevent a snap to zero")
+  #expect(model.peak == 1, "the fixed hold must consume clamped time, not the full stall")
+
+  let beforeNegativeDelta = model.bar
+  model.update(barTarget: 1, peakTarget: 1, at: start.addingTimeInterval(9))
+  #expect(
+    model.bar == beforeNegativeDelta,
+    "negative time deltas are clamped to zero and cannot reverse state"
+  )
+
+  model.reset()
+  #expect(model.bar == 0)
+  #expect(model.peak == 0)
+  #expect(model.isSettled)
+}
+
+private func task9App(
+  state: RoutingState,
+  context: RouteHealthContext? = nil
+) -> AudioApp {
+  AudioApp(
+    id: "task9.runtime",
+    logicalID: "com.example.task9",
+    displayName: "Task 9 App",
+    category: .media,
+    routingState: state,
+    compatibility: .supported,
+    routeHealthContext: context
+  )
+}
+
+@MainActor
+private func task9Chord(_ keyCode: Int) -> HotkeyChord {
+  HotkeyChord(
+    keyCode: UInt16(keyCode),
+    carbonModifiers: UInt32(controlKey | optionKey | shiftKey | cmdKey)
+  )
+}
+
+@MainActor
+private func task9Binding(_ chord: HotkeyChord, _ action: HotkeyAction) -> HotkeyBinding {
+  HotkeyBinding(action: action, keyCode: chord.keyCode, carbonModifiers: chord.carbonModifiers)
+}

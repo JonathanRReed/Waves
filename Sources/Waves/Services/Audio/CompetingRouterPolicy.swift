@@ -14,7 +14,18 @@ enum CompetingRouterPolicy {
     return conflict?.detail
   }
 
+  static func conflict(for app: AudioApp, verifiedConflict: VerifiedRouterConflict?) -> VerifiedRouterConflict? {
+    if let detail = mixedOutputExclusion(for: app) {
+      return VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .routerMixedOutput,
+        detail: detail
+      )
+    }
+    return verifiedConflict
+  }
+
   static func conflictDetail(for app: AudioApp, conflict: VerifiedRouterConflict?) -> String? {
-    mixedOutputExclusion(for: app) ?? upstreamOwnershipDetail(for: app, conflict: conflict)
+    self.conflict(for: app, verifiedConflict: conflict)?.detail
   }
 }
