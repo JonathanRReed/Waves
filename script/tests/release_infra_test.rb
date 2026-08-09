@@ -5,6 +5,7 @@ require "base64"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "shellwords"
 require "tmpdir"
 
 require_relative "../release_tool"
@@ -406,7 +407,222 @@ class ReleaseInfraTest < Minitest::Test
 
   def test_packager_uses_the_stable_macos_system_bash
     packager = File.expand_path("../build_and_run.sh", __dir__)
-    assert_equal "#!/bin/bash", File.foreach(packager).first.chomp
+    assert_equal "#!/bin/bash -p", File.foreach(packager).first.chomp
+  end
+
+  def test_task12d_release_entrypoints_suppress_bash_env_before_the_first_command
+    with_startup_attack_fixture do |directory, marker, bash_hook, _ruby_hook|
+      entrypoints = [
+        ["release-gate.sh", "not-a-phase"],
+        ["build_and_run.sh", "not-a-mode"],
+        ["make_appcast.sh"],
+      ]
+
+      entrypoints.each do |entrypoint, *arguments|
+        FileUtils.rm_f(marker)
+        _stdout, _stderr, status = Open3.capture3(
+          {
+            "BASH_ENV" => bash_hook,
+            "WAVES_ATTACK_MARKER" => marker,
+          },
+          File.expand_path("../#{entrypoint}", __dir__),
+          *arguments
+        )
+
+        refute status.success?, "#{entrypoint} attack fixture must stop on normal argument validation"
+        refute File.exist?(marker), "#{entrypoint} must suppress BASH_ENV before its first command"
+      end
+    end
+  end
+
+  def test_task12d_release_entrypoints_clear_ruby_startup_injection_before_system_ruby
+    with_startup_attack_fixture do |directory, marker, _bash_hook, ruby_hook|
+      entrypoints = [
+        ["release-gate.sh", "preflight"],
+        ["build_and_run.sh", "not-a-mode"],
+        ["make_appcast.sh", VERSION],
+      ]
+
+      entrypoints.each do |entrypoint, *arguments|
+        FileUtils.rm_f(marker)
+        _stdout, _stderr, _status = Open3.capture3(
+          {
+            "RUBYOPT" => "-rwaves_startup_attack",
+            "RUBYLIB" => directory,
+            "WAVES_ATTACK_MARKER" => marker,
+          },
+          File.expand_path("../#{entrypoint}", __dir__),
+          *arguments
+        )
+
+        refute File.exist?(marker), "#{entrypoint} must clear RUBYOPT and RUBYLIB before system Ruby"
+      end
+    end
+  end
+
+  def test_task12d_release_bootstrap_clears_adjacent_authority_and_restores_only_validated_inputs
+    helper = File.expand_path("../release_environment.sh", __dir__)
+    assert File.file?(helper), "expected the shared release environment bootstrap"
+    return unless File.file?(helper)
+
+    Dir.mktmpdir("waves-release-environment") do |directory|
+      probe = File.join(directory, "probe.sh")
+      marker = File.join(directory, "git-config-ran")
+      expected_revision = "b" * 40
+      expected_digest = "c" * 64
+      signing_identity = DEVELOPER_IDENTITY
+      File.write(probe, <<~SHELL)
+        #!/bin/bash -p
+        source #{Shellwords.escape(helper)}
+        waves_release_environment_bootstrap \
+          SIGN_IDENTITY NOTARY_PROFILE WAVES_EXPECTED_REVISION WAVES_RELEASE_EVIDENCE \
+          WAVES_RELEASE_TAG EXPECTED_SHA256 SMOKE_SECONDS SMOKE_LOG_PATH
+        /usr/bin/env
+        /usr/bin/stat -f 'WAVES_HOME_STAT=%u:%Lp:%HT' "$HOME"
+        /usr/bin/stat -f 'WAVES_TMP_STAT=%u:%Lp:%HT' "$TMPDIR"
+      SHELL
+      FileUtils.chmod(0o700, probe)
+
+      poisoned = {
+        "SIGN_IDENTITY" => signing_identity,
+        "NOTARY_PROFILE" => "waves-notary",
+        "WAVES_EXPECTED_REVISION" => expected_revision,
+        "WAVES_RELEASE_EVIDENCE" => "dist/release-evidence.candidate.json",
+        "WAVES_RELEASE_TAG" => "v1.5.0",
+        "EXPECTED_SHA256" => expected_digest,
+        "SMOKE_SECONDS" => "5",
+        "SMOKE_LOG_PATH" => File.join(directory, "package-smoke.log"),
+        "HOME" => File.join(directory, "attacker-home"),
+        "TMPDIR" => File.join(directory, "attacker-tmp"),
+        "BASH_ENV" => File.join(directory, "missing-bash-env"),
+        "ENV" => File.join(directory, "missing-posix-env"),
+        "RUBYOPT" => "-rbundler/setup",
+        "RUBYLIB" => directory,
+        "GEM_HOME" => directory,
+        "GEM_PATH" => directory,
+        "BUNDLE_GEMFILE" => File.join(directory, "Gemfile"),
+        "RUBYGEMS_GEMDEPS" => "-",
+        "GIT_DIR" => File.join(directory, "redirected-git-dir"),
+        "GIT_WORK_TREE" => directory,
+        "GIT_CONFIG_COUNT" => "1",
+        "GIT_CONFIG_KEY_0" => "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0" => marker,
+        "GIT_ASKPASS" => marker,
+        "SSH_ASKPASS" => marker,
+        "DYLD_INSERT_LIBRARIES" => File.join(directory, "attack.dylib"),
+        "DYLD_LIBRARY_PATH" => directory,
+        "LD_PRELOAD" => File.join(directory, "attack.so"),
+      }
+      stdout, stderr, status = Open3.capture3(poisoned, probe)
+
+      assert status.success?, stderr
+      environment = stdout.lines(chomp: true).to_h { |line| line.split("=", 2) }
+      assert_equal signing_identity, environment["SIGN_IDENTITY"]
+      assert_equal "waves-notary", environment["NOTARY_PROFILE"]
+      assert_equal expected_revision, environment["WAVES_EXPECTED_REVISION"]
+      assert_equal "dist/release-evidence.candidate.json", environment["WAVES_RELEASE_EVIDENCE"]
+      assert_equal "v1.5.0", environment["WAVES_RELEASE_TAG"]
+      assert_equal expected_digest, environment["EXPECTED_SHA256"]
+      assert_equal "5", environment["SMOKE_SECONDS"]
+      assert_equal File.join(directory, "package-smoke.log"), environment["SMOKE_LOG_PATH"]
+      poisoned.each_key do |name|
+        next if %w[
+          SIGN_IDENTITY NOTARY_PROFILE WAVES_EXPECTED_REVISION WAVES_RELEASE_EVIDENCE
+          WAVES_RELEASE_TAG EXPECTED_SHA256 SMOKE_SECONDS SMOKE_LOG_PATH HOME TMPDIR
+          GIT_ASKPASS SSH_ASKPASS
+        ].include?(name)
+
+        refute environment.key?(name), "release bootstrap retained #{name}"
+      end
+      assert_equal "/usr/bin:/bin:/usr/sbin:/sbin", environment["PATH"]
+      assert_equal "/dev/null", environment["GIT_CONFIG_GLOBAL"]
+      assert_equal "1", environment["GIT_CONFIG_NOSYSTEM"]
+      assert_equal "0", environment["GIT_TERMINAL_PROMPT"]
+      assert_equal "/usr/bin/false", environment["GIT_ASKPASS"]
+      assert_equal "/usr/bin/false", environment["SSH_ASKPASS"]
+      assert_equal "C.UTF-8", environment["LC_ALL"]
+      assert_match(%r{\A/private/tmp/waves-release-environment\.[^/]+/home\z}, environment.fetch("HOME"))
+      assert_match(%r{\A/private/tmp/waves-release-environment\.[^/]+/tmp\z}, environment.fetch("TMPDIR"))
+      refute_equal poisoned.fetch("HOME"), environment.fetch("HOME")
+      refute_equal poisoned.fetch("TMPDIR"), environment.fetch("TMPDIR")
+      assert_equal "#{Process.uid}:700:Directory", environment["WAVES_HOME_STAT"]
+      assert_equal "#{Process.uid}:700:Directory", environment["WAVES_TMP_STAT"]
+    end
+  end
+
+  def test_task12d_release_bootstrap_rejects_invalid_documented_inputs
+    helper = File.expand_path("../release_environment.sh", __dir__)
+    assert File.file?(helper), "expected the shared release environment bootstrap"
+    return unless File.file?(helper)
+
+    Dir.mktmpdir("waves-release-environment") do |directory|
+      probe = File.join(directory, "probe.sh")
+      File.write(probe, <<~SHELL)
+        #!/bin/bash -p
+        source #{Shellwords.escape(helper)}
+        waves_release_environment_bootstrap WAVES_EXPECTED_REVISION NOTARY_PROFILE
+      SHELL
+      FileUtils.chmod(0o700, probe)
+
+      _stdout, stderr, status = Open3.capture3(
+        {
+          "WAVES_EXPECTED_REVISION" => "main",
+          "NOTARY_PROFILE" => "profile\ncommand",
+        },
+        probe
+      )
+
+      refute status.success?
+      assert_match(/WAVES_EXPECTED_REVISION/, stderr)
+    end
+  end
+
+  def test_task12d_release_entrypoints_validate_each_documented_input_they_restore
+    cases = [
+      ["release-gate.sh", ["not-a-phase"], {"WAVES_EXPECTED_REVISION" => "main"}, /WAVES_EXPECTED_REVISION/],
+      ["release-gate.sh", ["not-a-phase"], {"WAVES_RELEASE_EVIDENCE" => "bad\npath"}, /WAVES_RELEASE_EVIDENCE/],
+      ["release-gate.sh", ["not-a-phase"], {"WAVES_RELEASE_TAG" => "release"}, /WAVES_RELEASE_TAG/],
+      ["build_and_run.sh", ["not-a-mode"], {"SIGN_IDENTITY" => "bad\nidentity"}, /SIGN_IDENTITY/],
+      ["build_and_run.sh", ["not-a-mode"], {"NOTARY_PROFILE" => "bad/profile"}, /NOTARY_PROFILE/],
+      ["build_and_run.sh", ["not-a-mode"], {"SMOKE_SECONDS" => "0"}, /SMOKE_SECONDS/],
+      ["build_and_run.sh", ["not-a-mode"], {"SMOKE_LOG_PATH" => "relative.log"}, /SMOKE_LOG_PATH/],
+      ["make_appcast.sh", [], {"EXPECTED_SHA256" => "bad"}, /EXPECTED_SHA256/],
+      ["make_appcast.sh", [], {"WAVES_RELEASE_TAG" => "release"}, /WAVES_RELEASE_TAG/],
+    ]
+
+    cases.each do |entrypoint, arguments, environment, error|
+      _stdout, stderr, status = Open3.capture3(
+        environment,
+        File.expand_path("../#{entrypoint}", __dir__),
+        *arguments
+      )
+
+      refute status.success?
+      assert_match error, stderr
+    end
+  end
+
+  def test_task12d_tracked_callers_execute_release_entrypoints_directly
+    root = File.expand_path("../..", __dir__)
+    tracked = git(root, "ls-files", "-z").split("\0")
+    offenders = tracked.each_with_object([]) do |relative, result|
+      next if relative == "script/tests/release_infra_test.rb"
+
+      path = File.join(root, relative)
+      next unless File.file?(path)
+
+      contents = File.binread(path)
+      next unless contents.valid_encoding?
+      interpreted = contents.match?(
+        %r{(?:^|[[:space:]])(?:/bin/)?bash[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast)\.sh}
+      )
+      sourced = contents.match?(
+        %r{(?:^|[[:space:]])(?:source|\.)[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast)\.sh}
+      )
+      result << relative if interpreted || sourced
+    end
+
+    assert_empty offenders, "release entrypoint shebangs must be honored by every tracked caller: #{offenders.join(', ')}"
   end
 
   def test_publication_seal_requires_all_results_and_derives_eligibility
@@ -1394,7 +1610,7 @@ class ReleaseInfraTest < Minitest::Test
       )
 
       refute status.success?
-      assert_match(/WAVES_RELEASE_TAG/, stderr)
+      assert_match(/overrides are prohibited|WAVES_RELEASE_TAG/, stderr)
       refute File.exist?(marker), "sign_update must not run before publication authorization"
     end
   end
@@ -1449,6 +1665,24 @@ class ReleaseInfraTest < Minitest::Test
   end
 
   private
+
+  def with_startup_attack_fixture
+    Dir.mktmpdir("waves-startup-attack") do |directory|
+      marker = File.join(directory, "startup-code-ran")
+      bash_hook = File.join(directory, "bash-env.sh")
+      ruby_hook = File.join(directory, "waves_startup_attack.rb")
+      File.write(bash_hook, <<~SHELL)
+        : > "$WAVES_ATTACK_MARKER"
+        exit 92
+      SHELL
+      File.write(ruby_hook, <<~RUBY)
+        File.write(ENV.fetch("WAVES_ATTACK_MARKER"), "ruby startup code ran\n")
+        exit 91
+      RUBY
+
+      yield directory, marker, bash_hook, ruby_hook
+    end
+  end
 
   def write_repository_contract_fixture(root)
     write_json(File.join(root, "release/metadata.json"), metadata_hash)
@@ -1562,6 +1796,7 @@ class ReleaseInfraTest < Minitest::Test
       FileUtils.mkdir_p(File.join(root, "release"))
       FileUtils.mkdir_p(File.join(root, "Sources"))
       FileUtils.cp(File.expand_path("../build_and_run.sh", __dir__), File.join(root, "script/build_and_run.sh"))
+      FileUtils.cp(File.expand_path("../release_environment.sh", __dir__), File.join(root, "script/release_environment.sh"))
       FileUtils.cp(File.expand_path("../release_tool.rb", __dir__), File.join(root, "script/release_tool.rb"))
       write_json(File.join(root, "release/metadata.json"), metadata_hash)
       File.write(File.join(root, "Package.swift"), "// fixture\n")

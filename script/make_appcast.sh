@@ -1,15 +1,42 @@
-#!/usr/bin/env bash
-set -euo pipefail
-umask 077
+#!/bin/bash -p
 
+unset CDPATH WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
+  WAVES_RELEASE_PROHIBITED_OVERRIDE 2>/dev/null || :
+case "${BASH_SOURCE[0]}" in
+  */*) ;;
+  *)
+    printf 'Error: make_appcast.sh must be executed through a direct path.\n' >&2
+    exit 2
+    ;;
+esac
+WAVES_RELEASE_ENTRY_DIRECTORY="$(builtin cd -P -- "${BASH_SOURCE[0]%/*}" && builtin pwd -P)" || exit 2
+WAVES_RELEASE_ENVIRONMENT_HELPER="$WAVES_RELEASE_ENTRY_DIRECTORY/release_environment.sh"
+if [ ! -f "$WAVES_RELEASE_ENVIRONMENT_HELPER" ] || [ -L "$WAVES_RELEASE_ENVIRONMENT_HELPER" ]; then
+  printf 'Error: trusted release environment helper is missing or is a symbolic link.\n' >&2
+  exit 2
+fi
 if [ -n "${WAVES_RELEASE_METADATA+x}" ] \
   || [ -n "${SWIFT_SDK+x}" ] \
-  || [ -n "${WAVES_DSYM_BINARY+x}" ]; then
+  || [ -n "${WAVES_DSYM_BINARY+x}" ] \
+  || [ -n "${SIGN_UPDATE+x}" ]; then
+  WAVES_RELEASE_PROHIBITED_OVERRIDE=1
+fi
+source "$WAVES_RELEASE_ENVIRONMENT_HELPER"
+waves_release_environment_bootstrap EXPECTED_SHA256 WAVES_RELEASE_TAG
+if [ -n "$WAVES_RELEASE_PROHIBITED_OVERRIDE" ]; then
   echo "Error: Release environment overrides are prohibited for appcast publication." >&2
   exit 2
 fi
+unset WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
+  WAVES_RELEASE_PROHIBITED_OVERRIDE
 PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
+set -euo pipefail
+umask 077
+
+run_release_ruby() {
+  /usr/bin/ruby --disable-gems "$@"
+}
 
 usage() {
   echo "usage: $0 VERSION [DMG_PATH] [OUTPUT_PATH]" >&2
@@ -49,10 +76,13 @@ if [ ! -f "$RELEASE_TOOL" ]; then
   echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
   exit 1
 fi
-require_command ruby "to read canonical release metadata"
-CANONICAL_VERSION="$(ruby "$RELEASE_TOOL" metadata version)"
-CANONICAL_BUILD="$(ruby "$RELEASE_TOOL" metadata build)"
-MIN_SYSTEM_VERSION="$(ruby "$RELEASE_TOOL" metadata minimumMacOSVersion)"
+if [ ! -x /usr/bin/ruby ]; then
+  echo "Error: system Ruby is required to read canonical release metadata." >&2
+  exit 1
+fi
+CANONICAL_VERSION="$(run_release_ruby "$RELEASE_TOOL" metadata version)"
+CANONICAL_BUILD="$(run_release_ruby "$RELEASE_TOOL" metadata build)"
+MIN_SYSTEM_VERSION="$(run_release_ruby "$RELEASE_TOOL" metadata minimumMacOSVersion)"
 if [ "$VERSION" != "$CANONICAL_VERSION" ]; then
   echo "Error: VERSION $VERSION does not match canonical release version $CANONICAL_VERSION." >&2
   exit 2
@@ -69,15 +99,10 @@ if [ -z "$RELEASE_TAG" ]; then
   echo "Error: WAVES_RELEASE_TAG must name the exact annotated publication tag." >&2
   exit 2
 fi
-if [ -n "${SIGN_UPDATE:-}" ]; then
-  echo "Error: SIGN_UPDATE overrides are forbidden; the tool is resolved from a fresh verified Sparkle artifact." >&2
-  exit 2
-fi
-
 TRUSTED_DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
 TRUSTED_SWIFT="$(/usr/bin/xcrun --find swift)"
 TRUSTED_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
-ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
+run_release_ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/waves-appcast.XXXXXX")"
 chmod 700 "$TMP_DIR"
@@ -89,11 +114,12 @@ cleanup() {
     /usr/bin/hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
   fi
   rm -rf "$TMP_DIR"
+  waves_release_environment_cleanup
 }
 trap cleanup EXIT
 
 PUBLICATION_MANIFEST="$TMP_DIR/release-evidence.publication.json"
-ruby "$RELEASE_TOOL" publication-tag "$RELEASE_TAG" "$PUBLICATION_MANIFEST"
+run_release_ruby "$RELEASE_TOOL" publication-tag "$RELEASE_TAG" "$PUBLICATION_MANIFEST"
 REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 
 require_command awk "to extract and format release notes"
@@ -113,11 +139,11 @@ if [ ! -f "$DSYM_BINARY" ]; then
   exit 1
 fi
 
-DMG_PATH="$(ruby "$RELEASE_TOOL" private-stage-file "$DMG_PATH" "$TMP_DIR" Waves.dmg)"
-DSYM_BINARY="$(ruby "$RELEASE_TOOL" private-stage-file "$DSYM_BINARY" "$TMP_DIR" Waves.dSYM)"
+DMG_PATH="$(run_release_ruby "$RELEASE_TOOL" private-stage-file "$DMG_PATH" "$TMP_DIR" Waves.dmg)"
+DSYM_BINARY="$(run_release_ruby "$RELEASE_TOOL" private-stage-file "$DSYM_BINARY" "$TMP_DIR" Waves.dSYM)"
 if [ -e "$OUTPUT_PATH" ] || [ -L "$OUTPUT_PATH" ]; then
   EXISTING_APPCAST=1
-  SOURCE_APPCAST="$(ruby "$RELEASE_TOOL" private-stage-file "$OUTPUT_PATH" "$TMP_DIR" source-appcast.xml)"
+  SOURCE_APPCAST="$(run_release_ruby "$RELEASE_TOOL" private-stage-file "$OUTPUT_PATH" "$TMP_DIR" source-appcast.xml)"
 else
   EXISTING_APPCAST=0
   SOURCE_APPCAST="$TMP_DIR/source-appcast.xml"
@@ -129,7 +155,7 @@ SIGNER_SCRATCH="$TMP_DIR/swiftpm"
 SIGNER_IDENTITY="$TMP_DIR/source-identity.json"
 mkdir -p "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
 chmod 700 "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
-ruby "$RELEASE_TOOL" source-identity "$REVISION" "$SIGNER_ARCHIVE" >"$SIGNER_IDENTITY"
+run_release_ruby "$RELEASE_TOOL" source-identity "$REVISION" "$SIGNER_ARCHIVE" >"$SIGNER_IDENTITY"
 tar -xf "$SIGNER_ARCHIVE" -C "$SIGNER_SOURCE"
 CHANGELOG_PATH="$SIGNER_SOURCE/CHANGELOG.md"
 if [ ! -f "$CHANGELOG_PATH" ]; then
@@ -278,7 +304,7 @@ if [ "$BUILD_NUMBER" != "$CANONICAL_BUILD" ]; then
   echo "Error: $DMG_PATH contains build $BUILD_NUMBER; canonical release build is $CANONICAL_BUILD." >&2
   exit 1
 fi
-ruby "$RELEASE_TOOL" verify-release-artifacts \
+run_release_ruby "$RELEASE_TOOL" verify-release-artifacts \
   "$PUBLICATION_MANIFEST" "$MOUNT_POINT/Waves.app" "$DMG_PATH" "$DSYM_BINARY" \
   "$SIGNER_IDENTITY"
 /usr/bin/hdiutil detach "$MOUNT_POINT" -quiet
@@ -297,7 +323,7 @@ if [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
   exit 2
 fi
 ACTUAL_SHA256="$(shasum -a 256 "$DMG_PATH" | cut -d ' ' -f 1)"
-SEALED_SHA256="$(ruby -rjson -e '
+SEALED_SHA256="$(run_release_ruby -rjson -e '
   puts JSON.parse(File.read(ARGV.fetch(0))).fetch("package").fetch("hashes").fetch("dmg")
 ' "$PUBLICATION_MANIFEST")"
 if [ "$(printf '%s' "$ACTUAL_SHA256" | tr 'A-F' 'a-f')" \
@@ -337,7 +363,7 @@ if [ "$RESOLVED_AFTER" != "$RESOLVED_BEFORE" ]; then
   exit 1
 fi
 DMG_LENGTH="$(stat -f '%z' "$DMG_PATH")"
-ED_SIGNATURE="$(ruby "$RELEASE_TOOL" sparkle-sign-and-verify \
+ED_SIGNATURE="$(run_release_ruby "$RELEASE_TOOL" sparkle-sign-and-verify \
   "$SIGNER_SCRATCH" "$DMG_PATH" "$PACKAGED_SPARKLE_PUBLIC_KEY")"
 if [[ ! "$DMG_LENGTH" =~ ^[0-9]+$ ]]; then
   echo "Error: Could not determine the byte length of $DMG_PATH." >&2
@@ -425,5 +451,5 @@ if ! awk -v version="$VERSION" -v item_path="$NEW_ITEM" '
 fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
-ruby "$RELEASE_TOOL" private-publish-file "$RENDERED_APPCAST" "$OUTPUT_PATH" >/dev/null
+run_release_ruby "$RELEASE_TOOL" private-publish-file "$RENDERED_APPCAST" "$OUTPUT_PATH" >/dev/null
 printf 'Wrote %s for Waves %s (build %s).\n' "$OUTPUT_PATH" "$VERSION" "$BUILD_NUMBER"

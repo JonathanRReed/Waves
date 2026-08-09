@@ -1,12 +1,39 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash -p
 
+unset CDPATH WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
+  WAVES_RELEASE_PROHIBITED_OVERRIDE 2>/dev/null || :
+case "${BASH_SOURCE[0]}" in
+  */*) ;;
+  *)
+    printf 'Error: release-gate.sh must be executed through a direct path.\n' >&2
+    exit 2
+    ;;
+esac
+WAVES_RELEASE_ENTRY_DIRECTORY="$(builtin cd -P -- "${BASH_SOURCE[0]%/*}" && builtin pwd -P)" || exit 2
+WAVES_RELEASE_ENVIRONMENT_HELPER="$WAVES_RELEASE_ENTRY_DIRECTORY/release_environment.sh"
+if [ ! -f "$WAVES_RELEASE_ENVIRONMENT_HELPER" ] || [ -L "$WAVES_RELEASE_ENVIRONMENT_HELPER" ]; then
+  printf 'Error: trusted release environment helper is missing or is a symbolic link.\n' >&2
+  exit 2
+fi
 if [ -n "${WAVES_RELEASE_METADATA+x}" ] || [ -n "${SWIFT_SDK+x}" ]; then
+  WAVES_RELEASE_PROHIBITED_OVERRIDE=1
+fi
+source "$WAVES_RELEASE_ENVIRONMENT_HELPER"
+waves_release_environment_bootstrap \
+  WAVES_EXPECTED_REVISION WAVES_RELEASE_EVIDENCE WAVES_RELEASE_TAG
+if [ -n "$WAVES_RELEASE_PROHIBITED_OVERRIDE" ]; then
   echo "Error: Release environment overrides are prohibited." >&2
   exit 2
 fi
+unset WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
+  WAVES_RELEASE_PROHIBITED_OVERRIDE
 PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
+set -euo pipefail
+
+run_release_ruby() {
+  /usr/bin/ruby --disable-gems "$@"
+}
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
@@ -29,9 +56,13 @@ require_command() {
   fi
 }
 
-for command_name in git ruby swift; do
+for command_name in git swift; do
   require_command "$command_name" "for the Waves release preflight"
 done
+if [ ! -x /usr/bin/ruby ]; then
+  echo "Error: system Ruby is required for the Waves release preflight." >&2
+  exit 1
+fi
 
 if [ ! -f "$RELEASE_TOOL" ]; then
   echo "Error: Release evidence contract not found at $RELEASE_TOOL." >&2
@@ -53,11 +84,11 @@ run_preflight() {
   local expected_revision
   expected_revision="${WAVES_EXPECTED_REVISION:-$(git rev-parse HEAD)}"
 
-  ruby "$RELEASE_TOOL" metadata validate >/dev/null
-  ruby "$RELEASE_TOOL" validate-repository
-  ruby "$RELEASE_TOOL" validate-workflows
+  run_release_ruby "$RELEASE_TOOL" metadata validate >/dev/null
+  run_release_ruby "$RELEASE_TOOL" validate-repository
+  run_release_ruby "$RELEASE_TOOL" validate-workflows
 
-  ruby -I"$ROOT_DIR/script" -e '
+  run_release_ruby -I"$ROOT_DIR/script" -e '
     require "release_tool"
     WavesRelease::GitContract.clean_exact_revision!(
       root: ARGV.fetch(0), expected_revision: ARGV.fetch(1)
@@ -81,7 +112,7 @@ run_preflight() {
   if [ -n "$evidence_path" ]; then
     history_arguments+=("$evidence_path")
   fi
-  ruby "$RELEASE_TOOL" "${history_arguments[@]}"
+  run_release_ruby "$RELEASE_TOOL" "${history_arguments[@]}"
   echo "Waves release preflight passed at $expected_revision."
 }
 
@@ -94,7 +125,7 @@ verify_signed_candidate() {
   developer_dir="$(/usr/bin/xcode-select -p)"
   swift_path="$(/usr/bin/xcrun --find swift)"
   sdk_path="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
-  ruby "$RELEASE_TOOL" trusted-toolchain "$developer_dir" "$sdk_path" "$swift_path" >/dev/null
+  run_release_ruby "$RELEASE_TOOL" trusted-toolchain "$developer_dir" "$sdk_path" "$swift_path" >/dev/null
 
   for command_name in codesign hdiutil lipo otool plutil shasum spctl xcrun; do
     require_command "$command_name" "to validate the signed candidate"
@@ -106,9 +137,9 @@ verify_signed_candidate() {
     exit 1
   fi
 
-  ruby "$RELEASE_TOOL" evidence validate "$profile" "$evidence_path" "$revision"
+  run_release_ruby "$RELEASE_TOOL" evidence validate "$profile" "$evidence_path" "$revision"
   "$ROOT_DIR/script/build_and_run.sh" --publication-check
-  ruby "$RELEASE_TOOL" verify-artifacts "$evidence_path"
+  run_release_ruby "$RELEASE_TOOL" verify-artifacts "$evidence_path"
   echo "Signed candidate artifacts match $profile evidence at $revision."
 }
 
@@ -128,13 +159,13 @@ case "$PHASE" in
   publication)
     tag="${WAVES_RELEASE_TAG:-$(git describe --tags --exact-match 2>/dev/null || true)}"
     if [ -z "$tag" ]; then
-      echo "Error: Publication release gate requires exact annotated tag v$(ruby "$RELEASE_TOOL" metadata version)." >&2
+      echo "Error: Publication release gate requires exact annotated tag v$(run_release_ruby "$RELEASE_TOOL" metadata version)." >&2
       exit 1
     fi
     temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/waves-publication-evidence.XXXXXX")"
-    trap 'rm -rf "$temporary_directory"' EXIT INT TERM HUP
+    trap 'rm -rf "$temporary_directory"; waves_release_environment_cleanup' EXIT INT TERM HUP
     embedded_manifest="$temporary_directory/release-evidence.publication.json"
-    ruby "$RELEASE_TOOL" publication-tag "$tag" "$embedded_manifest"
+    run_release_ruby "$RELEASE_TOOL" publication-tag "$tag" "$embedded_manifest"
     run_preflight "$embedded_manifest"
     verify_signed_candidate "$embedded_manifest" publication
     ;;

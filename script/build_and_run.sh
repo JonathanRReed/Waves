@@ -1,18 +1,46 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/bash -p
 
-MODE="${1:-run}"
-
-case "$MODE" in
-  --dmg|--release-check|release-check|--publication-check|publication-check|--notarize|notarize|--verify|verify|--package-smoke|package-smoke)
-    if [ -n "${WAVES_RELEASE_METADATA+x}" ] || [ -n "${SWIFT_SDK+x}" ]; then
-      echo "Error: Release environment overrides WAVES_RELEASE_METADATA and SWIFT_SDK are prohibited." >&2
-      exit 2
-    fi
-    PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-    export PATH
+unset CDPATH WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
+  WAVES_RELEASE_MODE WAVES_RELEASE_PROHIBITED_OVERRIDE 2>/dev/null || :
+case "${BASH_SOURCE[0]}" in
+  */*) ;;
+  *)
+    printf 'Error: build_and_run.sh must be executed through a direct path.\n' >&2
+    exit 2
     ;;
 esac
+WAVES_RELEASE_ENTRY_DIRECTORY="$(builtin cd -P -- "${BASH_SOURCE[0]%/*}" && builtin pwd -P)" || exit 2
+WAVES_RELEASE_ENVIRONMENT_HELPER="$WAVES_RELEASE_ENTRY_DIRECTORY/release_environment.sh"
+if [ ! -f "$WAVES_RELEASE_ENVIRONMENT_HELPER" ] || [ -L "$WAVES_RELEASE_ENVIRONMENT_HELPER" ]; then
+  printf 'Error: trusted release environment helper is missing or is a symbolic link.\n' >&2
+  exit 2
+fi
+WAVES_RELEASE_MODE="${1:-run}"
+
+case "$WAVES_RELEASE_MODE" in
+  --dmg|--release-check|release-check|--publication-check|publication-check|--notarize|notarize|--verify|verify|--package-smoke|package-smoke)
+    if [ -n "${WAVES_RELEASE_METADATA+x}" ] || [ -n "${SWIFT_SDK+x}" ]; then
+      WAVES_RELEASE_PROHIBITED_OVERRIDE=1
+    fi
+    ;;
+esac
+source "$WAVES_RELEASE_ENVIRONMENT_HELPER"
+waves_release_environment_bootstrap SIGN_IDENTITY NOTARY_PROFILE SMOKE_SECONDS SMOKE_LOG_PATH
+if [ -n "$WAVES_RELEASE_PROHIBITED_OVERRIDE" ]; then
+  echo "Error: Release environment overrides WAVES_RELEASE_METADATA and SWIFT_SDK are prohibited." >&2
+  exit 2
+fi
+MODE="$WAVES_RELEASE_MODE"
+unset WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
+  WAVES_RELEASE_MODE WAVES_RELEASE_PROHIBITED_OVERRIDE
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+set -euo pipefail
+
+run_release_ruby() {
+  /usr/bin/ruby --disable-gems "$@"
+}
+
 APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 LOG_SUBSYSTEM="com.jonathanreed.Waves"
@@ -25,23 +53,23 @@ if [ ! -f "$RELEASE_TOOL" ]; then
   echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
   exit 1
 fi
-if ! command -v ruby >/dev/null 2>&1; then
-  echo "Error: ruby is required to read canonical release metadata." >&2
+if [ ! -x /usr/bin/ruby ]; then
+  echo "Error: system Ruby is required to read canonical release metadata." >&2
   exit 1
 fi
-CANONICAL_APP_VERSION="$(ruby "$RELEASE_TOOL" metadata version)"
-CANONICAL_APP_BUILD="$(ruby "$RELEASE_TOOL" metadata build)"
-CANONICAL_MIN_SYSTEM_VERSION="$(ruby "$RELEASE_TOOL" metadata minimumMacOSVersion)"
-CANONICAL_BUNDLE_ID="$(ruby "$RELEASE_TOOL" metadata bundleIdentifier)"
-CANONICAL_SIGN_IDENTITY="$(ruby -I"$ROOT_DIR/script" -e '
+CANONICAL_APP_VERSION="$(run_release_ruby "$RELEASE_TOOL" metadata version)"
+CANONICAL_APP_BUILD="$(run_release_ruby "$RELEASE_TOOL" metadata build)"
+CANONICAL_MIN_SYSTEM_VERSION="$(run_release_ruby "$RELEASE_TOOL" metadata minimumMacOSVersion)"
+CANONICAL_BUNDLE_ID="$(run_release_ruby "$RELEASE_TOOL" metadata bundleIdentifier)"
+CANONICAL_SIGN_IDENTITY="$(run_release_ruby -I"$ROOT_DIR/script" -e '
   require "release_tool"
   puts WavesRelease::Metadata.load(ARGV.fetch(0)).fetch("developerID").fetch("identity")
 ' "$ROOT_DIR/release/metadata.json")"
-CANONICAL_SIGN_TEAM="$(ruby -I"$ROOT_DIR/script" -e '
+CANONICAL_SIGN_TEAM="$(run_release_ruby -I"$ROOT_DIR/script" -e '
   require "release_tool"
   puts WavesRelease::Metadata.load(ARGV.fetch(0)).fetch("developerID").fetch("teamIdentifier")
 ' "$ROOT_DIR/release/metadata.json")"
-CANONICAL_DESIGNATED_REQUIREMENT="$(ruby -I"$ROOT_DIR/script" -e '
+CANONICAL_DESIGNATED_REQUIREMENT="$(run_release_ruby -I"$ROOT_DIR/script" -e '
   require "release_tool"
   puts WavesRelease::Metadata.load(ARGV.fetch(0)).fetch("developerID").fetch("designatedRequirement")
 ' "$ROOT_DIR/release/metadata.json")"
@@ -89,7 +117,7 @@ if [ "$MODE" = "--dmg" ] \
   TRUSTED_DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
   TRUSTED_SWIFT="$(/usr/bin/xcrun --find swift)"
   TRUSTED_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
-  ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
+  run_release_ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
   SWIFT_SDK="$TRUSTED_SDK"
 fi
 
@@ -175,6 +203,7 @@ cleanup_isolated_distribution_build() {
     rm -rf "$ACTIVE_ISOLATION_ROOT"
   fi
   ACTIVE_ISOLATION_ROOT=""
+  waves_release_environment_cleanup
 }
 trap cleanup_isolated_distribution_build EXIT
 
@@ -213,18 +242,18 @@ prepare_isolated_distribution_build() {
   mkdir -p "$source_root" "$scratch_root"
   chmod 700 "$source_root" "$scratch_root"
 
-  if ! ruby "$RELEASE_TOOL" source-identity "$revision" "$archive_path" >"$identity_path"; then
+  if ! run_release_ruby "$RELEASE_TOOL" source-identity "$revision" "$archive_path" >"$identity_path"; then
     return 1
   fi
   tar -xf "$archive_path" -C "$source_root"
-  source_archive_sha256="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("sourceArchiveSHA256")' "$identity_path")"
-  build_recipe_sha256="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("buildRecipeSHA256")' "$identity_path")"
+  source_archive_sha256="$(run_release_ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("sourceArchiveSHA256")' "$identity_path")"
+  build_recipe_sha256="$(run_release_ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("buildRecipeSHA256")' "$identity_path")"
   actual_archive_sha256="$(shasum -a 256 "$archive_path" | cut -d ' ' -f 1)"
   if [ "$actual_archive_sha256" != "$source_archive_sha256" ]; then
     echo "Error: Exact-revision source archive does not match its computed identity." >&2
     exit 1
   fi
-  actual_recipe_sha256="$(ruby "$RELEASE_TOOL" build-recipe-digest "$source_root")"
+  actual_recipe_sha256="$(run_release_ruby "$RELEASE_TOOL" build-recipe-digest "$source_root")"
   if [ "$actual_recipe_sha256" != "$build_recipe_sha256" ]; then
     echo "Error: Extracted exact-revision build recipe does not match its computed identity." >&2
     exit 1
@@ -262,7 +291,7 @@ prepare_isolated_existing_package() {
   private_artifacts="$ACTIVE_ISOLATION_ROOT/artifacts"
   mkdir -p "$private_artifacts"
   chmod 700 "$private_artifacts"
-  ruby "$CALLER_RELEASE_TOOL" private-stage-release-artifacts \
+  run_release_ruby "$CALLER_RELEASE_TOOL" private-stage-release-artifacts \
     "$CALLER_ROOT_DIR/dist" "$private_artifacts" >/dev/null
   WAVES_RELEASE_OUTPUT_DIR="$private_artifacts"
 }
@@ -281,7 +310,7 @@ if is_distribution_build_mode; then
     echo "Error: Isolated release build requires valid source archive and build recipe SHA-256 stamps." >&2
     exit 1
   fi
-  actual_recipe_sha256="$(ruby "$RELEASE_TOOL" build-recipe-digest "$ROOT_DIR")"
+  actual_recipe_sha256="$(run_release_ruby "$RELEASE_TOOL" build-recipe-digest "$ROOT_DIR")"
   if [ "$actual_recipe_sha256" != "$APP_BUILD_RECIPE_SHA256" ]; then
     echo "Error: Isolated release build recipe does not match its provenance stamp." >&2
     exit 1
@@ -1353,7 +1382,7 @@ package_smoke() {
 }
 
 publish_finalized_distribution() {
-  ruby "$CALLER_RELEASE_TOOL" publish-release-artifacts "$DIST_DIR" "$CALLER_ROOT_DIR/dist"
+  run_release_ruby "$CALLER_RELEASE_TOOL" publish-release-artifacts "$DIST_DIR" "$CALLER_ROOT_DIR/dist"
 }
 
 if ! is_existing_package_mode; then
@@ -1396,7 +1425,7 @@ case "$MODE" in
     ;;
   --package-smoke|package-smoke)
     package_smoke
-    ruby "$CALLER_RELEASE_TOOL" private-publish-file \
+    run_release_ruby "$CALLER_RELEASE_TOOL" private-publish-file \
       "$SMOKE_LOG_PATH" "$CALLER_ROOT_DIR/dist/package-smoke.log" >/dev/null
     ;;
   *)
