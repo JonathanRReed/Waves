@@ -58,6 +58,16 @@ variables are not inherited. Release metadata is always the canonical tracked
 `release/metadata.json`, and release Ruby commands use `/usr/bin/ruby` with gems
 disabled.
 
+Every release Git operation, including the hosted exact-revision check, runs
+the tracked `script/release_git` launcher by its repository path. The launcher
+clears inherited exports before executing `/usr/bin/git`, disables filesystem
+monitors even when checkout-local or included configuration enables one, and
+pins SSH tag verification to `/usr/bin/ssh-keygen`. Source-dirty comparisons
+also pass `--no-ext-diff --no-textconv`, so checkout-local attributes and diff
+drivers cannot execute helper programs. Repository-local configuration remains
+available only for ordinary repository semantics that the release checks need;
+included configuration cannot override these command-line safety settings.
+
 Only these documented inputs cross the startup boundary, and each is validated
 before restoration:
 
@@ -208,7 +218,8 @@ Capture the exact source identity for the evidence input from the same clean
 revision. This command does not build or sign:
 
 ```bash
-ruby script/release_tool.rb source-identity "$(git rev-parse HEAD)" \
+/usr/bin/ruby --disable-gems script/release_tool.rb source-identity \
+  "$(./script/release_git rev-parse HEAD)" \
   > dist/release-source-identity.json
 ```
 
