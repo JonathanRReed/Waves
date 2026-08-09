@@ -11,19 +11,45 @@ struct AppIconRaster: Sendable {
   let rgbaBytes: Data
 }
 
+struct AppIconEncodingExecutor: Sendable {
+  typealias Operation = @Sendable () -> Data?
+  typealias Execute = @Sendable (@escaping Operation) async -> Data?
+
+  private let execute: Execute
+
+  init(execute: @escaping Execute) {
+    self.execute = execute
+  }
+
+  func callAsFunction(_ operation: @escaping Operation) async -> Data? {
+    await execute(operation)
+  }
+
+  static let detached = AppIconEncodingExecutor { operation in
+    await Task.detached(priority: .utility) {
+      operation()
+    }.value
+  }
+}
+
 struct AppIconEncoder: Sendable {
   typealias Encode = @Sendable (AppIconRaster) -> Data?
   private let operation: Encode
+  private let executor: AppIconEncodingExecutor
 
-  init(operation: @escaping Encode = Self.encodePNG) {
+  init(
+    operation: @escaping Encode = Self.encodePNG,
+    executor: AppIconEncodingExecutor = .detached
+  ) {
     self.operation = operation
+    self.executor = executor
   }
 
   func encode(_ raster: AppIconRaster) async -> Data? {
     let operation = operation
-    return await Task.detached(priority: .utility) {
+    return await executor {
       operation(raster)
-    }.value
+    }
   }
 
   private static func encodePNG(_ raster: AppIconRaster) -> Data? {

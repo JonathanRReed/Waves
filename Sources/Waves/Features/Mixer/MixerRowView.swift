@@ -4,6 +4,8 @@ import WavesAudioCore
 
 enum MixerRowAccessibility {
   static let outputDeviceMenuLabel = "Output Device"
+  static let recoveryHelp = "Rebuild all managed Waves routes"
+  static let recoveryHint = "Reattaches every active per-app audio route managed by Waves."
 
   static func volumeLabel(for app: AudioApp) -> String {
     "Volume for \(app.displayName)"
@@ -18,7 +20,7 @@ enum MixerRowAccessibility {
   }
 
   static func recoveryLabel(for app: AudioApp) -> String {
-    "Recover \(app.displayName) route"
+    "Recover all managed Waves routes"
   }
 }
 
@@ -652,9 +654,9 @@ private struct RouteRecoveryButton: View {
     .buttonStyle(.borderless)
     .controlSize(.small)
     .disabled(store.isRecovering)
-    .help("Recover this route")
+    .help(MixerRowAccessibility.recoveryHelp)
     .accessibilityLabel(MixerRowAccessibility.recoveryLabel(for: app))
-    .accessibilityHint("Reattaches active per-app audio routes through Waves.")
+    .accessibilityHint(MixerRowAccessibility.recoveryHint)
   }
 }
 

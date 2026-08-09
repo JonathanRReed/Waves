@@ -152,7 +152,15 @@ import WavesAudioCore
   #expect(exhausted.allowsAudioControl == false)
   #expect(exhausted.offersRecovery)
   #expect(exhausted.controlHint.contains("Recover Routes"))
-  #expect(MixerRowAccessibility.recoveryLabel(for: task9App(state: .error)) == "Recover Task 9 App route")
+  #expect(
+    MixerRowAccessibility.recoveryLabel(for: task9App(state: .error))
+      == "Recover all managed Waves routes"
+  )
+  #expect(MixerRowAccessibility.recoveryHelp == "Rebuild all managed Waves routes")
+  #expect(
+    MixerRowAccessibility.recoveryHint
+      == "Reattaches every active per-app audio route managed by Waves."
+  )
 }
 
 @Test func routeHealthContextDecodingIsAdditiveForLegacySessions() throws {
@@ -237,36 +245,41 @@ import WavesAudioCore
   #expect(ShortcutRecorderMotion.allowsAnimation(reduceMotion: true) == false)
 }
 
-@Test func iconEncodingSuspendsBeforeBlockingWorkSoMainActorHeartbeatProgresses() async {
+@Test func iconEncodingTraversesInjectedExecutorBeforeBlockingWork() async {
+  let events = Task9StringEvents()
+  let executor = AppIconEncodingExecutor { operation in
+    events.append("executor")
+    return operation()
+  }
+  let raster = AppIconRaster(width: 1, height: 1, bytesPerRow: 4, rgbaBytes: Data([0, 0, 0, 255]))
+  let encoder = AppIconEncoder(
+    operation: { _ in
+      events.append("operation")
+      return Data([1])
+    },
+    executor: executor
+  )
+
+  #expect(await encoder.encode(raster) == Data([1]))
+  #expect(events.values == ["executor", "operation"])
+}
+
+@Test(.timeLimit(.minutes(1)))
+func defaultIconEncodingExecutorSuspendsMainActorBeforeBlockingWork() async {
   let raster = AppIconRaster(width: 1, height: 1, bytesPerRow: 4, rgbaBytes: Data([0, 0, 0, 255]))
   let encodingStarted = Task9Signal()
-  let heartbeatGate = Task9BlockingGate()
-  let order = Task9EventOrder()
+  let mainActorRelease = Task9BlockingGate()
   let encoder = AppIconEncoder { _ in
     encodingStarted.signal()
-    _ = heartbeatGate.wait(timeout: 20)
-    order.append(.encodingCompleted)
-    return Data([1])
+    return Data([mainActorRelease.wait(timeout: 20) ? 1 : 0])
   }
   let task = Task { @MainActor in await encoder.encode(raster) }
 
   await encodingStarted.wait()
-  let watchdog = Task.detached {
-    try? await Task.sleep(for: .seconds(5))
-    guard !Task.isCancelled else { return }
-    heartbeatGate.open()
-  }
-  let heartbeat = Task { @MainActor in
-    order.append(.heartbeat)
-    heartbeatGate.open()
+  await MainActor.run {
+    mainActorRelease.open()
   }
   #expect(await task.value == Data([1]))
-  await heartbeat.value
-  watchdog.cancel()
-  #expect(
-    order.events == [.heartbeat, .encodingCompleted],
-    "the main-actor heartbeat must run before encoding can finish"
-  )
 }
 
 @MainActor
@@ -414,18 +427,13 @@ private final class Task9Signal: @unchecked Sendable {
   }
 }
 
-private final class Task9EventOrder: @unchecked Sendable {
-  enum Event: Equatable {
-    case heartbeat
-    case encodingCompleted
-  }
-
+private final class Task9StringEvents: @unchecked Sendable {
   private let lock = NSLock()
-  private var recordedEvents: [Event] = []
+  private var recordedValues: [String] = []
 
-  func append(_ event: Event) {
-    lock.withLock { recordedEvents.append(event) }
+  func append(_ value: String) {
+    lock.withLock { recordedValues.append(value) }
   }
 
-  var events: [Event] { lock.withLock { recordedEvents } }
+  var values: [String] { lock.withLock { recordedValues } }
 }
