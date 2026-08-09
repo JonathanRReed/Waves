@@ -1,0 +1,19 @@
+{
+  "payload": [
+    {
+      "name": "Legacy Focus",
+      "entries": [
+        {
+          "volumeBoost": 1.5,
+          "appID": "com.example.waves-1-4-4.music",
+          "desiredVolume": 0.44,
+          "isMuted": false
+        }
+      ],
+      "updatedAt": 744523200,
+      "createdAt": 744523200,
+      "id": "22222222-2222-2222-2222-222222222222"
+    }
+  ],
+  "schemaVersion": 1
+}

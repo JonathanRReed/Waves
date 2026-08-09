@@ -16,7 +16,9 @@ import WavesAudioCore
   )
   defer { try? FileManager.default.removeItem(at: directory) }
 
-  let expected = try await OneFourFourFixtureBuilder.write(to: directory)
+  try OneFourFourFixtureLoader.copyRawFiles(to: directory)
+  let rawSnapshot = try #require(SessionStore(directory: directory).load())
+  let expected = OneFourFourFixtureLoader.expected(snapshot: rawSnapshot)
   let first = makeUpgradeStore(directory: directory, snapshot: expected.snapshot)
   await first.drainPersistenceTasks()
 
@@ -31,7 +33,8 @@ import WavesAudioCore
   _ = await first.shutdown()
   #expect(first.lifecycleSnapshot.isIdle)
 
-  let second = makeUpgradeStore(directory: directory, snapshot: expected.snapshot)
+  let relaunchSnapshot = try #require(SessionStore(directory: directory).load())
+  let second = makeUpgradeStore(directory: directory, snapshot: relaunchSnapshot)
   await second.drainPersistenceTasks()
 
   assertUpgradedState(second, expected: expected)
@@ -87,6 +90,9 @@ private func assertUpgradedState(
   #expect(intent?.volumeBoost == expected.app.volumeBoost)
   #expect(intent?.equalizerSettings == expected.equalizer)
   #expect(intent?.targetDeviceUID == expected.app.targetDeviceUID)
+  #expect(expected.app.isMuted)
+  #expect(expected.app.muteSource == .autoConferencing)
+  #expect(intent?.isMuted == false)
   #expect(store.profiles == [expected.profile])
   #expect(
     store.deviceVolumePresets.getVolumeSettings(
@@ -108,14 +114,59 @@ private struct OneFourFourFixture {
   let preset: AppVolumeSettings
 }
 
-private enum OneFourFourFixtureBuilder {
-  static func write(to directory: URL) async throws -> OneFourFourFixture {
+private enum OneFourFourFixtureLoader {
+  static let fileNames = [
+    "preferences.json",
+    "profiles.json",
+    "session.json",
+    "deviceVolumePresets.json",
+  ]
+
+  static func copyRawFiles(to directory: URL) throws {
+    let sourceDirectory = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .appendingPathComponent("Fixtures/Waves-1.4.4", isDirectory: true)
+    for fileName in fileNames {
+      let source = sourceDirectory.appendingPathComponent(fileName)
+      let destination = directory.appendingPathComponent(fileName)
+      let sourceBytes = try Data(contentsOf: source)
+      try validateHistoricalShape(sourceBytes, fileName: fileName)
+      try FileManager.default.copyItem(at: source, to: destination)
+      try FileManager.default.setAttributes(
+        [.posixPermissions: 0o600],
+        ofItemAtPath: destination.path
+      )
+      #expect(try Data(contentsOf: destination) == sourceBytes)
+    }
+  }
+
+  private static func validateHistoricalShape(_ data: Data, fileName: String) throws {
+    guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      throw FixtureError.notAnEnvelope(fileName)
+    }
+    #expect(envelope["schemaVersion"] as? Int == 1)
+    if fileName == "preferences.json" {
+      let payload = try #require(envelope["payload"] as? [String: Any])
+      #expect(payload["appAudioIntentMigrationVersion"] as? Int == 0)
+      #expect(payload["pinMigrationVersion"] == nil)
+      let hotkeys = try #require(payload["hotkeys"] as? [String: Any])
+      let bindings = try #require(hotkeys["bindings"] as? [[String: Any]])
+      let action = try #require(bindings.first?["action"] as? [String: Any])
+      #expect(action["muteApp"] != nil)
+    }
+    if fileName == "session.json" {
+      let payload = try #require(envelope["payload"] as? [String: Any])
+      let apps = try #require(payload["apps"] as? [[String: Any]])
+      let app = try #require(apps.first)
+      #expect(app["isPinned"] as? Bool == true)
+      #expect(app["muteSource"] as? String == "autoConferencing")
+    }
+  }
+
+  static func expected(snapshot: AudioSessionSnapshot) -> OneFourFourFixture {
     let appID = "com.example.waves-1-4-4.music"
-    let device = AudioDevice(
-      id: "device.1-4-4",
-      name: "Legacy Speakers",
-      kind: .builtInOutput
-    )
+    let device = snapshot.currentDevice!
     var equalizer = EqualizerSettings(isEnabled: true, mode: .advanced)
     equalizer.setGain(4.5, at: 2, mode: .advanced)
     let policy = AdaptiveAppPolicy(contentType: .music, priority: .background)
@@ -128,44 +179,7 @@ private enum OneFourFourFixtureBuilder {
           carbonModifiers: UInt32(cmdKey | optionKey)
         )
       ])
-    let app = AudioApp(
-      id: "legacy.runtime",
-      logicalID: appID,
-      pid: 144,
-      bundleID: appID,
-      displayName: "Legacy Music",
-      category: .media,
-      isActive: true,
-      desiredVolume: 0.37,
-      appliedVolume: 0,
-      isMuted: true,
-      isPinned: true,
-      routingState: .managed,
-      compatibility: .supported,
-      volumeBoost: 2.5,
-      muteSource: .autoConferencing,
-      targetDeviceUID: "device.per-app-target"
-    )
-    let snapshot = AudioSessionSnapshot(
-      apps: [app],
-      currentDevice: device,
-      recentDeviceIDs: [device.id],
-      supportMatrix: SupportMatrix(
-        entries: [
-          SupportMatrixEntry(
-            appID: appID,
-            displayName: app.displayName,
-            category: .media,
-            state: .supported
-          )
-        ]),
-      backendStatus: BackendStatus(
-        isAudioComponentInstalled: true,
-        hasRequiredPermissions: true,
-        isRouteRecoveryHealthy: true
-      ),
-      updatedAt: Date(timeIntervalSince1970: 1_722_830_400)
-    )
+    let app = snapshot.apps[0]
     let profile = Profile(
       id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
       name: "Legacy Focus",
@@ -186,51 +200,6 @@ private enum OneFourFourFixtureBuilder {
       volumeBoost: 3
     )
 
-    var preferences = UserPreferences()
-    preferences.hasCompletedPrivacySetup = true
-    preferences.hasCompletedGuidedSetup = true
-    preferences.enableKeyboardShortcuts = true
-    preferences.hotkeys = hotkeys
-    preferences.hotkeyMigrationVersion = 1
-    preferences.enablePerDeviceVolumePresets = true
-    preferences.autoRestoreDevice = false
-    preferences.enableURLScheme = true
-    preferences.urlSchemeAutomationAcknowledged = true
-    preferences.enableExternalControl = true
-    preferences.adaptiveMixMode = .both
-    preferences.adaptiveStrategy = .lectureFocus
-    preferences.adaptiveFocusMode = .followFrontApp
-    preferences.adaptiveAppPolicies[appID] = policy
-    preferences.appEqualizerSettings[appID] = equalizer
-    preferences.pinnedAppIDs = []
-    preferences.pinMigrationVersion = 0
-    preferences.appAudioIntents = [:]
-    preferences.appAudioIntentMigrationVersion = 0
-
-    var presets = DeviceVolumePresets()
-    presets.saveVolumeSettings(
-      for: appID,
-      deviceID: device.id,
-      settings: preset
-    )
-
-    let preferencesStore = PreferencesStore(directory: directory)
-    let profileStore = ProfileStore(directory: directory)
-    let sessionStore = SessionStore(directory: directory)
-    let presetsStore = DeviceVolumePresetsStore(directory: directory)
-    try await preferencesStore.save(preferences)
-    try await profileStore.save([profile])
-    try await sessionStore.save(snapshot)
-    try await presetsStore.save(presets)
-    try await preferencesStore.flush()
-    try await profileStore.flush()
-    try await sessionStore.flush()
-    try await presetsStore.flush()
-
-    try removePostOneFourFourMigrationMarkers(
-      from: directory.appendingPathComponent("preferences.json")
-    )
-
     return OneFourFourFixture(
       appID: appID,
       app: app,
@@ -244,29 +213,8 @@ private enum OneFourFourFixtureBuilder {
     )
   }
 
-  private static func removePostOneFourFourMigrationMarkers(from url: URL) throws {
-    let data = try Data(contentsOf: url)
-    guard var envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-      var payload = envelope["payload"] as? [String: Any]
-    else {
-      throw FixtureError.invalidPreferencesEnvelope
-    }
-    payload.removeValue(forKey: "pinMigrationVersion")
-    payload.removeValue(forKey: "appAudioIntentMigrationVersion")
-    envelope["payload"] = payload
-    let legacyData = try JSONSerialization.data(
-      withJSONObject: envelope,
-      options: [.prettyPrinted, .sortedKeys]
-    )
-    try legacyData.write(to: url, options: .atomic)
-    try FileManager.default.setAttributes(
-      [.posixPermissions: 0o600],
-      ofItemAtPath: url.path
-    )
-  }
-
   private enum FixtureError: Error {
-    case invalidPreferencesEnvelope
+    case notAnEnvelope(String)
   }
 }
 

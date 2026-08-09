@@ -1,0 +1,52 @@
+{
+  "payload": {
+    "recentDeviceIDs": ["device.1-4-4"],
+    "backendStatus": {
+      "isAudioComponentInstalled": true,
+      "isRouteRecoveryHealthy": true,
+      "hasRequiredPermissions": true
+    },
+    "apps": [
+      {
+        "isMuted": true,
+        "appliedVolume": 0,
+        "routingState": "managed",
+        "logicalID": "com.example.waves-1-4-4.music",
+        "targetDeviceUID": "device.per-app-target",
+        "isPinned": true,
+        "bundleID": "com.example.waves-1-4-4.music",
+        "displayName": "Legacy Music",
+        "compatibility": "supported",
+        "category": "media",
+        "volumeBoost": 2.5,
+        "isActive": true,
+        "rmsLevel": 0,
+        "pid": 144,
+        "id": "legacy.runtime",
+        "desiredVolume": 0.37,
+        "peakLevel": 0,
+        "muteSource": "autoConferencing"
+      }
+    ],
+    "updatedAt": 744523200,
+    "supportMatrix": {
+      "entries": [
+        {
+          "appID": "com.example.waves-1-4-4.music",
+          "state": "supported",
+          "displayName": "Legacy Music",
+          "category": "media"
+        }
+      ]
+    },
+    "currentDevice": {
+      "isManagedRouteAvailable": false,
+      "isCurrent": false,
+      "kind": "built_in_output",
+      "volumeControlMode": "software",
+      "id": "device.1-4-4",
+      "name": "Legacy Speakers"
+    }
+  },
+  "schemaVersion": 1
+}
