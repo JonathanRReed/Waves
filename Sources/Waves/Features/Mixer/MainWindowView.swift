@@ -601,9 +601,9 @@ private struct SourceListView: View {
   /// `store.liveApps` walks `visibleApps`, which reconciles pin state and sorts
   /// the whole roster. Reading it from inside a `filter` closure ran all of that
   /// once per app, on every level-poll tick, whether or not VoiceOver was on.
-  private var playingRotorApps: [AudioApp] {
+  private var rotorCatalog: MixerRotorCatalog {
     let liveIDs = Set(store.liveApps.map(\.logicalID))
-    return apps.filter { liveIDs.contains($0.logicalID) }
+    return MixerRotorCatalog(apps: apps, liveAppIDs: liveIDs)
   }
 
   var body: some View {
@@ -727,28 +727,22 @@ private struct SourceListView: View {
         // Keyboard operation: arrow keys move the selection (List), and these
         // keys act on the selected row so the mixer is fully drivable without a
         // mouse — including muting, which the borderless button can't reach.
-        .onKeyPress(.space) { handleKey(.toggleMute) }
-        .onKeyPress("m") { handleKey(.toggleMute) }
-        .onKeyPress("=") { handleKey(.increaseVolume) }
-        // Also accept the shifted "+" so a user reaching for the obvious "louder"
-        // key isn't met with silence (the hint still reads "equals or minus").
-        .onKeyPress("+") { handleKey(.increaseVolume) }
-        .onKeyPress("-") { handleKey(.decreaseVolume) }
-        .onKeyPress("b") { handleKey(.cycleBoost) }
-        .onKeyPress("p") { handleKey(.togglePin) }
+        .modifier(
+          MixerKeyboardCommandsModifier(
+            selectedAppID: $selectedAppID,
+            apps: apps
+          )
+        )
         // Surface the otherwise-undocumented in-row keys: without this hint a
         // user can only discover them by reading source. Mirrors the toolbar
         // controls, which advertise their shortcuts via help/accessibility text.
         .accessibilityHint(
-          "Use arrow keys to select an app. On the selected app, press Space or M to mute, "
-            + "equals or minus to adjust volume, B to cycle boost, and P to pin."
+          MixerKeyboardCommandsModifier.accessibilityHint
         )
-        .help(
-          "Select an app with the arrow keys, then: Space or M mute, = / - volume, B boost, P pin."
-        )
+        .help(MixerKeyboardCommandsModifier.help)
         // Jump straight to playing apps or apps needing attention.
         .accessibilityRotor("Playing apps") {
-          ForEach(playingRotorApps) { app in
+          ForEach(rotorCatalog.playing) { app in
             AccessibilityRotorEntry(app.displayName, id: app.id)
           }
         }
@@ -757,7 +751,7 @@ private struct SourceListView: View {
           // the sibling "Playing apps" rotor. Enumerating cross-scope apps would
           // yield entries whose ids have no rendered row, so selecting them would
           // move VoiceOver focus to a nonexistent element (a silent no-op).
-          ForEach(apps.filter { $0.routingState == .error }) { app in
+          ForEach(rotorCatalog.needsAttention) { app in
             AccessibilityRotorEntry(app.displayName, id: app.id)
           }
         }
@@ -831,18 +825,45 @@ private struct SourceListView: View {
       && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
-  /// Runs `action` on the currently selected row, if any.
-  ///
-  /// These are focused-window keys that work while the mixer window (this
-  /// list) is focused, like the Help copy's ⌘N/⌘R. They are intentionally NOT
-  /// gated on `preferences.enableKeyboardShortcuts` — that toggle governs the
-  /// user-assignable global hotkeys, not in-list keys. Gating here
-  /// would silently strip keyboard control of the mixer (including the only
-  /// keyboard mute path) whenever a user disables global hotkeys.
+}
+
+struct MixerKeyboardCommandsModifier: ViewModifier {
+  @Environment(AppStore.self) private var store
+  @Binding var selectedAppID: AudioApp.ID?
+  let apps: [AudioApp]
+
+  static let accessibilityHint =
+    "Use arrow keys to select an app. On the selected app, press Space or M to mute, "
+    + "equals or minus to adjust volume, B to cycle boost, P to pin, E for equalizer, "
+    + "O to change output, or R to recover all managed routes when recovery has stopped."
+
+  static let help =
+    "Select an app with the arrow keys, then: Space or M mute, = / - volume, "
+    + "B boost, P pin, E equalizer, O output, R recover all managed routes."
+
+  func body(content: Content) -> some View {
+    content
+      .onKeyPress(phases: .down) { keyPress in
+        guard keyPress.modifiers.isEmpty else { return .ignored }
+        return switch keyPress.key {
+        case .space, "m": handleKey(.toggleMute)
+        case "=", "+": handleKey(.increaseVolume)
+        case "-": handleKey(.decreaseVolume)
+        case "b": handleKey(.cycleBoost)
+        case "p": handleKey(.togglePin)
+        case "e": openEqualizer()
+        case "o": cycleOutputDevice()
+        case "r": recoverRoutes()
+        default: .ignored
+        }
+      }
+  }
+
+  /// These are focused-window keys, intentionally independent of the global
+  /// hotkey preference. Disabling user-assigned system-wide shortcuts must not
+  /// remove keyboard control from the focused mixer list.
   private func handleKey(_ command: MixerKeyboardCommand) -> KeyPress.Result {
-    guard let id = selectedAppID, let app = apps.first(where: { $0.id == id }) else {
-      return .ignored
-    }
+    guard let app = selectedApp else { return .ignored }
     if command != .togglePin, !MixerRouteControlPolicy(app: app).allowsAudioControl {
       return .ignored
     }
@@ -859,6 +880,50 @@ private struct SourceListView: View {
       store.togglePinned(app)
     }
     return .handled
+  }
+
+  private func openEqualizer() -> KeyPress.Result {
+    guard let app = selectedApp, MixerRouteControlPolicy(app: app).allowsAudioControl else {
+      return .ignored
+    }
+    store.focusEqualizer(for: app)
+    return .handled
+  }
+
+  private func cycleOutputDevice() -> KeyPress.Result {
+    guard let app = selectedApp, MixerRouteControlPolicy(app: app).allowsAudioControl else {
+      return .ignored
+    }
+    let devices =
+      store.availableDevices.isEmpty
+      ? store.session.currentDevice.map { [$0] } ?? []
+      : store.availableDevices
+    guard !devices.isEmpty else { return .ignored }
+
+    let nextDevice: AudioDevice?
+    if let currentID = app.targetDeviceUID,
+      let currentIndex = devices.firstIndex(where: { $0.id == currentID })
+    {
+      let nextIndex = devices.index(after: currentIndex)
+      nextDevice = nextIndex == devices.endIndex ? nil : devices[nextIndex]
+    } else {
+      nextDevice = devices.first
+    }
+    store.setOutputDevice(nextDevice, for: app)
+    return .handled
+  }
+
+  private func recoverRoutes() -> KeyPress.Result {
+    guard let app = selectedApp, MixerRouteControlPolicy(app: app).offersRecovery else {
+      return .ignored
+    }
+    store.recoverRoutes()
+    return .handled
+  }
+
+  private var selectedApp: AudioApp? {
+    guard let selectedAppID else { return nil }
+    return apps.first { $0.id == selectedAppID }
   }
 }
 

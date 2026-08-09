@@ -361,7 +361,7 @@ struct ProfileEditorSheet: View {
       dismiss()
     default:
       if let message = result.message {
-        AccessibilityNotification.Announcement(message).post()
+        store.postAccessibilityAnnouncement(message)
       }
     }
   }

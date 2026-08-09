@@ -441,6 +441,7 @@ final class AppStore {
   // clears it and runs exactly one more pass, which re-reads the *current*
   // frontmost app — so the latest app switch always wins and none are dropped.
   private var pendingAutoPausePassRerun = false
+  private let accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster
 
   init(
     backend: any AudioControlBackend,
@@ -453,12 +454,14 @@ final class AppStore {
     deviceChangeSuppressionInterval: Duration = .seconds(5),
     deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
       duration in try await Task.sleep(for: duration)
-    }
+    },
+    accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster = .live
   ) {
     self.backend = backend
     self.loginItemService = loginItemService
     self.startupState = initialStartupState
     self.hasStartedAudioBackend = initialStartupState == .running
+    self.accessibilityAnnouncementPoster = accessibilityAnnouncementPoster
     let loadedPreferences = preferencesStore.load()
     let loadedDeviceVolumePresets = deviceVolumePresetsStore.load()
     self.persistenceCoordinator = AppStorePersistenceCoordinator(
@@ -4755,6 +4758,10 @@ final class AppStore {
     }
   }
 
+  func postAccessibilityAnnouncement(_ message: String) {
+    accessibilityAnnouncementPoster.post(AttributedString(message))
+  }
+
   func refreshDiagnostics() {
     guard requireAudioRunning() else { return }
     startOwnedOperation { [self] _ in
@@ -5426,7 +5433,7 @@ final class AppStore {
     case .success, .info:
       break
     }
-    AccessibilityNotification.Announcement(announcement).post()
+    accessibilityAnnouncementPoster.post(announcement)
 
     scheduleDismissal(id: toast.id, after: toast.duration)
   }

@@ -132,7 +132,7 @@ struct ShortcutRecorder: View {
       // would be completely silent — the user hears nothing, the field stays
       // open, and nothing explains why their chord didn't take.
       guard let new else { return }
-      AccessibilityNotification.Announcement(new).post()
+      store.postAccessibilityAnnouncement(new)
     }
     .onDisappear {
       if draft == nil { stop() }

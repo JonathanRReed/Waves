@@ -77,6 +77,10 @@ struct SettingsView: View {
     _workspace = State(initialValue: SettingsWorkspace(selection: initialPane))
   }
 
+  init(workspace: SettingsWorkspace) {
+    _workspace = State(initialValue: workspace)
+  }
+
   var body: some View {
     @Bindable var workspace = workspace
     HStack(spacing: 0) {
@@ -139,7 +143,7 @@ struct SettingsView: View {
 /// concrete `Color` values (never a hierarchical style erased through
 /// `AnyShapeStyle`, see the note in DesignSystem.swift) so the selected state
 /// is always `WavesDesign.accent`, never the system accent color.
-private struct SettingsSidebar: View {
+struct SettingsSidebar: View {
   @Binding var selection: SettingsPane
 
   var body: some View {
@@ -154,6 +158,17 @@ private struct SettingsSidebar: View {
     // same as SettingsForm's grouped Form elsewhere in this file, instead of
     // List's own opaque system list background.
     .scrollContentBackground(.hidden)
+    .focusable()
+    .onKeyPress(.downArrow) { moveSelection(by: 1) }
+    .onKeyPress(.upArrow) { moveSelection(by: -1) }
+  }
+
+  private func moveSelection(by offset: Int) -> KeyPress.Result {
+    guard let index = SettingsPane.allCases.firstIndex(of: selection) else { return .ignored }
+    let nextIndex = min(max(index + offset, SettingsPane.allCases.startIndex), SettingsPane.allCases.index(before: SettingsPane.allCases.endIndex))
+    guard nextIndex != index else { return .ignored }
+    selection = SettingsPane.allCases[nextIndex]
+    return .handled
   }
 }
 
