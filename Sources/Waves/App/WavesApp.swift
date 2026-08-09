@@ -257,7 +257,7 @@ final class AppTerminationCoordinator {
   private var state: State = .idle
   private var terminationTask: Task<Void, Never>?
 
-  init(timeout: Duration = .seconds(5)) {
+  init(timeout: Duration = .milliseconds(250)) {
     self.timeout = timeout
   }
 

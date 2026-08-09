@@ -99,6 +99,20 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func shutdownDeduplicatesEquivalentSaveAndFlushFailuresInStableOrder() async {
+  let fixture = await makeShutdownFixture(initialStartupState: .running)
+  fixture.preferencesStore.failSaves = true
+  fixture.preferencesStore.failFlushes = true
+
+  let result = await fixture.store.shutdown()
+
+  #expect(result.completion == .degraded)
+  #expect(result.persistenceDegradations.count == 1)
+  #expect(result.persistenceDegradations.first?.contains("settings") == true)
+  #expect(result.persistenceDegradations.first?.isEmpty == false)
+}
+
+@MainActor
 @Test func terminationTimeoutDecisionReturnsWithoutWaitingForSlowCleanup() async {
   let outcome = await AppTerminationTimeoutDecision.awaitShutdown(
     timeout: .milliseconds(5)
@@ -136,6 +150,66 @@ import WavesAudioCore
     return AppShutdownResult()
   }
   try? await Task.sleep(for: .milliseconds(60))
+}
+
+@MainActor
+@Test func productionTerminationCoordinatorTimesOutWithinTwoHundredFiftyMilliseconds() async {
+  let coordinator = AppTerminationCoordinator()
+  let recorder = TerminationReplyRecorder()
+
+  #expect(
+    coordinator.requestTermination(
+      shutdown: {
+        try? await Task.sleep(for: .milliseconds(400))
+        return AppShutdownResult()
+      },
+      report: { recorder.outcomes.append($0) },
+      reply: { recorder.replies.append($0) }
+    ) == .terminateLater
+  )
+
+  for _ in 0..<150 where coordinator.completedOutcome == nil {
+    try? await Task.sleep(for: .milliseconds(5))
+  }
+
+  #expect(coordinator.completedOutcome == .timedOut)
+  #expect(recorder.outcomes == [.timedOut])
+  #expect(recorder.replies == [true])
+}
+
+@MainActor
+@Test func timedOutTerminationPersistsTruthBeforeReplyAndRepliesOnce() async throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("waves-timeout-report-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let reportStore = ShutdownReportStore(directory: directory)
+  let coordinator = AppTerminationCoordinator(timeout: .milliseconds(5))
+  var replyCount = 0
+  var reportSeenAtReply: ShutdownReport?
+
+  #expect(
+    coordinator.requestTermination(
+      shutdown: {
+        try? await Task.sleep(for: .milliseconds(50))
+        return AppShutdownResult()
+      },
+      report: { reportStore.save(ShutdownReport(outcome: $0)) },
+      reply: { _ in
+        replyCount += 1
+        reportSeenAtReply = reportStore.load()
+      }
+    ) == .terminateLater
+  )
+
+  for _ in 0..<100 where coordinator.completedOutcome == nil {
+    try? await Task.sleep(for: .milliseconds(2))
+  }
+
+  #expect(coordinator.completedOutcome == .timedOut)
+  #expect(replyCount == 1)
+  #expect(reportSeenAtReply?.completion == "timedOut")
+  try? await Task.sleep(for: .milliseconds(60))
+  #expect(replyCount == 1)
 }
 
 @Test func cleanupAggregationFiltersSuccessAndPreservesFailureOrder() {
@@ -480,6 +554,7 @@ private final class ShutdownPreferencesStore: PreferencesPersisting, @unchecked 
   private var saveResume: CheckedContinuation<Void, Never>?
   private var saveWaiters: [CheckedContinuation<Void, Never>] = []
   var failSaves = false
+  var failFlushes = false
 
   init(value: UserPreferences, recorder: ShutdownRecorder) {
     self.storedValue = value
@@ -537,7 +612,10 @@ private final class ShutdownPreferencesStore: PreferencesPersisting, @unchecked 
     recorder.append("preferences.save.end")
   }
 
-  func flush() async throws { recorder.append("preferences.flush") }
+  func flush() async throws {
+    recorder.append("preferences.flush")
+    if failFlushes { throw ShutdownTestError.persistence }
+  }
   func consumeDidRecoverFromCorruptFile() -> Bool { false }
 }
 

@@ -141,6 +141,24 @@ enum AppShutdownCompletion: Hashable, Sendable {
   case degraded
 }
 
+enum PersistenceStoreIdentifier: String, Hashable, Sendable {
+  case preferences
+  case profiles
+  case session
+  case deviceVolumePresets
+  case privacySetup
+
+  var displayName: String {
+    switch self {
+    case .preferences: "settings"
+    case .profiles: "profiles"
+    case .session: "session"
+    case .deviceVolumePresets: "device presets"
+    case .privacySetup: "privacy setup"
+    }
+  }
+}
+
 struct AppShutdownResult: Hashable, Sendable {
   let completion: AppShutdownCompletion
   let persistenceDegradations: [String]
@@ -150,11 +168,14 @@ struct AppShutdownResult: Hashable, Sendable {
     persistenceDegradations: [String] = [],
     backendResult: BackendShutdownResult? = nil
   ) {
-    self.persistenceDegradations = persistenceDegradations
+    var seen = Set<String>()
+    self.persistenceDegradations = persistenceDegradations.filter {
+      seen.insert($0).inserted
+    }
     self.backendResult = backendResult
     let backendIsClean = backendResult.map { $0.completion == .clean } ?? true
     self.completion =
-      persistenceDegradations.isEmpty && backendIsClean
+      self.persistenceDegradations.isEmpty && backendIsClean
       ? .clean
       : .degraded
   }
@@ -450,13 +471,19 @@ final class AppStore {
     self.didRecoverCorruptSession = sessionStore.consumeDidRecoverFromCorruptFile()
     var shouldPersistPreferences = false
     // Migrate pins recorded only on the persisted session (builds before pin
-    // state moved into preferences) into the authoritative set, just once.
-    if preferences.pinnedAppIDs.isEmpty {
-      let sessionPins = session.apps.filter(\.isPinned).map(\.logicalID)
-      if !sessionPins.isEmpty {
-        preferences.pinnedAppIDs = Array(Set(sessionPins))
-        shouldPersistPreferences = true
+    // state moved into preferences) into the authoritative set exactly once.
+    // Advancing the explicit marker even for an empty legacy cache prevents a
+    // later stale session from resurrecting pins the user intentionally cleared.
+    if preferences.pinMigrationVersion == 0 {
+      if preferences.pinnedAppIDs.isEmpty {
+        var seen = Set<String>()
+        preferences.pinnedAppIDs = session.apps.compactMap { app in
+          guard app.isPinned, seen.insert(app.logicalID).inserted else { return nil }
+          return app.logicalID
+        }
       }
+      preferences.pinMigrationVersion = 1
+      shouldPersistPreferences = true
     }
     // Only manual sort depends on a saved order; fall back to name if it is
     // missing. Activity sort needs no stored order and must be preserved across
@@ -1199,7 +1226,7 @@ final class AppStore {
       privacySetupError = "Waves couldn't save your setup choice. Check that your user Library is writable, then try again. \(error.localizedDescription)"
       startupState = .awaitingPrivacy
       privacySetupTask = nil
-      reportPersistenceFailure(storeName: "privacy setup", error: error, showWarning: false)
+      reportPersistenceFailure(store: .privacySetup, error: error, showWarning: false)
       showToast(
         title: "Setup wasn't saved",
         detail: privacySetupError,
@@ -1949,7 +1976,7 @@ final class AppStore {
         }
         durableIntentMutationGeneration.removeValue(forKey: appID)
       }
-      reportPersistenceFailure(storeName: "settings", error: error, showWarning: false)
+      reportPersistenceFailure(store: .preferences, error: error, showWarning: false)
       return .settingsFailed(error.localizedDescription)
     }
     guard durableIntentMutationGeneration[appID] == intent.generation else {
@@ -1997,7 +2024,7 @@ final class AppStore {
         }
         devicePresetMutationGeneration.removeValue(forKey: mutationKey)
       }
-      reportPersistenceFailure(storeName: "device presets", error: error, showWarning: false)
+      reportPersistenceFailure(store: .deviceVolumePresets, error: error, showWarning: false)
       return .devicePresetFailed(error.localizedDescription)
     }
     if devicePresetMutationGeneration[mutationKey] == intent.generation {
@@ -4125,7 +4152,7 @@ final class AppStore {
           }
           durableIntentMutationGeneration.removeValue(forKey: appID)
         }
-        reportPersistenceFailure(storeName: "settings", error: error, showWarning: false)
+        reportPersistenceFailure(store: .preferences, error: error, showWarning: false)
         persistenceResult.settingsError = error.localizedDescription
       }
     }
@@ -4160,7 +4187,7 @@ final class AppStore {
           }
           devicePresetMutationGeneration.removeValue(forKey: mutationKey)
         }
-        reportPersistenceFailure(storeName: "device presets", error: error, showWarning: false)
+        reportPersistenceFailure(store: .deviceVolumePresets, error: error, showWarning: false)
         persistenceResult.devicePresetError = error.localizedDescription
       }
     }
@@ -5026,7 +5053,7 @@ final class AppStore {
         try await preferencesStore.save(snapshot)
         durablySavedPreferences = snapshot
       } catch {
-        reportPersistenceFailure(storeName: "settings", error: error)
+        reportPersistenceFailure(store: .preferences, error: error)
       }
     }
   }
@@ -5038,7 +5065,7 @@ final class AppStore {
       do {
         try await profileStore.save(snapshot)
       } catch {
-        reportPersistenceFailure(storeName: "profiles", error: error)
+        reportPersistenceFailure(store: .profiles, error: error)
       }
     }
   }
@@ -5050,7 +5077,7 @@ final class AppStore {
       do {
         try await sessionStore.save(snapshot)
       } catch {
-        reportPersistenceFailure(storeName: "session cache", error: error)
+        reportPersistenceFailure(store: .session, error: error)
       }
     }
   }
@@ -5063,7 +5090,7 @@ final class AppStore {
         try await deviceVolumePresetsStore.save(snapshot)
         durablySavedDeviceVolumePresets = snapshot
       } catch {
-        reportPersistenceFailure(storeName: "device presets", error: error)
+        reportPersistenceFailure(store: .deviceVolumePresets, error: error)
       }
     }
   }
@@ -5157,27 +5184,28 @@ final class AppStore {
   func drainAndFlushPersistence() async {
     await drainPersistenceTasks()
 
-    let flushes: [(name: String, flush: () async throws -> Void)] = [
-      ("settings", preferencesStore.flush),
-      ("profiles", profileStore.flush),
-      ("session", sessionStore.flush),
-      ("device volume presets", deviceVolumePresetsStore.flush),
+    let flushes: [(store: PersistenceStoreIdentifier, flush: () async throws -> Void)] = [
+      (.preferences, preferencesStore.flush),
+      (.profiles, profileStore.flush),
+      (.session, sessionStore.flush),
+      (.deviceVolumePresets, deviceVolumePresetsStore.flush),
     ]
 
     for entry in flushes {
       do {
         try await entry.flush()
       } catch {
-        reportPersistenceFailure(storeName: entry.name, error: error, showWarning: false)
+        reportPersistenceFailure(store: entry.store, error: error, showWarning: false)
       }
     }
   }
 
   private func reportPersistenceFailure(
-    storeName: String,
+    store: PersistenceStoreIdentifier,
     error: Error,
     showWarning: Bool = true
   ) {
+    let storeName = store.displayName
     let message = "\(storeName): \(error.localizedDescription)"
     logger.error("Persistence failed for \(storeName): \(error.localizedDescription)")
     persistenceFailureCount += 1

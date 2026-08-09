@@ -211,6 +211,75 @@ import WavesAudioCore
   _ = await probeFailure.store.shutdown()
 }
 
+@MainActor
+@Test func legacySessionPinsImportOnceAndAdvanceExplicitMarker() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.pinMigrationVersion = 0
+  let legacyPinnedApp = AudioApp(
+    id: "legacy.pin.runtime",
+    logicalID: "legacy.pin",
+    displayName: "Legacy Pin",
+    category: .media,
+    isPinned: true
+  )
+
+  let fixture = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [legacyPinnedApp])
+  )
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.preferences.pinnedAppIDs == ["legacy.pin"])
+  #expect(fixture.store.preferences.pinMigrationVersion == 1)
+  #expect(fixture.preferencesStore.value.pinMigrationVersion == 1)
+}
+
+@MainActor
+@Test func emptyLegacySessionStillAdvancesPinMigrationMarker() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.pinMigrationVersion = 0
+
+  let fixture = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [])
+  )
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.preferences.pinnedAppIDs.isEmpty)
+  #expect(fixture.store.preferences.pinMigrationVersion == 1)
+  #expect(fixture.preferencesStore.value.pinMigrationVersion == 1)
+}
+
+@MainActor
+@Test func completedEmptyPinMigrationNeverReimportsSessionPins() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.pinMigrationVersion = 1
+  preferences.pinnedAppIDs = []
+  let legacyPinnedApp = AudioApp(
+    id: "cleared.pin.runtime",
+    logicalID: "cleared.pin",
+    displayName: "Cleared Pin",
+    category: .media,
+    isPinned: true
+  )
+
+  let firstLaunch = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [legacyPinnedApp])
+  )
+  await firstLaunch.store.drainPersistenceTasks()
+  let persisted = firstLaunch.preferencesStore.value
+  let secondLaunch = makePrivacyFixture(
+    preferences: persisted,
+    cachedSession: privacyTestSnapshot(apps: [legacyPinnedApp])
+  )
+  await secondLaunch.store.drainPersistenceTasks()
+
+  #expect(firstLaunch.store.preferences.pinnedAppIDs.isEmpty)
+  #expect(secondLaunch.store.preferences.pinnedAppIDs.isEmpty)
+  #expect(secondLaunch.store.preferences.pinMigrationVersion == 1)
+}
+
 private struct PrivacyFixture {
   let store: AppStore
   let backend: PrivacyRecordingBackend
