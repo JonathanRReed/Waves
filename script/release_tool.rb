@@ -834,8 +834,11 @@ module WavesRelease
       validate_private_root!(root)
       identity = capture_identity!(path: source)
       raise Error, "staged release artifact must be a regular file" unless identity["type"] == "file"
-      destination = File.join(root, name)
-      raise Error, "private staging destination escapes its root" unless File.dirname(destination) == File.expand_path(root)
+      expanded_root = File.expand_path(root)
+      destination = File.expand_path(File.join(expanded_root, name))
+      unless File.basename(name) == name && File.dirname(destination) == expanded_root
+        raise Error, "private staging destination escapes its root"
+      end
       raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
       File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
         File.open(destination, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |output|
@@ -856,8 +859,11 @@ module WavesRelease
       validate_private_root!(root)
       identity = capture_identity!(path: source)
       raise Error, "staged release artifact must be a directory" unless identity["type"] == "directory"
-      destination = File.join(root, name)
-      raise Error, "private staging destination escapes its root" unless File.dirname(destination) == File.expand_path(root)
+      expanded_root = File.expand_path(root)
+      destination = File.expand_path(File.join(expanded_root, name))
+      unless File.basename(name) == name && File.dirname(destination) == expanded_root
+        raise Error, "private staging destination escapes its root"
+      end
       raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
       expected = tree_digest(source)
       with_stable_identity!(path: source, identity: identity) do

@@ -592,6 +592,31 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_task12d_private_stage_normalizes_benign_root_spelling_without_permitting_escape
+    Dir.mktmpdir("waves-private-root-normalization") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      File.write(source, "dmg")
+      FileUtils.mkdir_p(private_root)
+      FileUtils.chmod(0o700, private_root)
+
+      staged = WavesRelease::PrivateArtifacts.stage_file!(
+        source: source,
+        root: "#{private_root}/.",
+        name: "Waves.dmg"
+      )
+      assert_equal File.join(private_root, "Waves.dmg"), staged
+
+      assert_release_error(/escapes/) do
+        WavesRelease::PrivateArtifacts.stage_file!(
+          source: source,
+          root: private_root,
+          name: "../escaped.dmg"
+        )
+      end
+    end
+  end
+
   def test_derived_artifact_identity_must_match_metadata_and_sealed_evidence
     verifier = WavesRelease::ArtifactEvidence
     assert_respond_to verifier, :verify_identity_facts!
