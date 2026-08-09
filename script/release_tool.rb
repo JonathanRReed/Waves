@@ -291,9 +291,16 @@ module WavesRelease
       Validation.exact_keys!(package["developerID"], %w[status identity], "package developerID")
       raise Error, "package Developer ID signature must have passed" unless package["developerID"]["status"] == "passed"
       Validation.nonempty_string!(package["developerID"]["identity"], "package developerID.identity")
-      %w[hardenedRuntime notarization stapling gatekeeper].each do |name|
+      %w[hardenedRuntime stapling gatekeeper].each do |name|
         Validation.passed_result!(package[name], "package.#{name}")
       end
+      notarization = package["notarization"]
+      Validation.exact_keys!(notarization, %w[status submissionID detail], "package.notarization")
+      raise Error, "package.notarization status must be passed" unless notarization["status"] == "passed"
+      unless notarization["submissionID"].is_a?(String) && notarization["submissionID"].match?(/\A[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\z/)
+        raise Error, "package.notarization.submissionID must be an Apple notarization UUID"
+      end
+      Validation.nonempty_string!(notarization["detail"], "package.notarization.detail")
     end
 
     def validate_gates!(gates, profile)
@@ -499,14 +506,21 @@ module WavesRelease
       unless on_release.is_a?(Hash) && on_release.keys == ["workflow_dispatch"]
         raise Error, "release workflow must remain manual-only"
       end
+      dispatch = on_release["workflow_dispatch"]
+      revision_input = dispatch.is_a?(Hash) && dispatch["inputs"].is_a?(Hash) ? dispatch["inputs"]["revision"] : nil
+      unless revision_input.is_a?(Hash) && revision_input["required"] == true
+        raise Error, "release workflow must require an exact revision input"
+      end
       permissions_read!(release, "release workflow")
       concurrency!(release, cancel: false, context: "release workflow")
       jobs_with_timeouts!(release, "release workflow")
       validate_release_job_permissions!(release)
       raise Error, "release workflow must call the shared quality-gate" unless release_source.include?("./script/quality-gate.sh full")
       raise Error, "release workflow must call the preflight release-gate" unless release_source.include?("./script/release-gate.sh preflight")
-      raise Error, "release workflow must call the publication release-gate" unless release_source.include?("./script/release-gate.sh publication")
       raise Error, "release artifact retention must be 14 days" unless release_source.match?(/retention-days:\s*14\b/)
+      if release_source.include?("contents: write") || release_source.include?("action-gh-release") || release_source.include?("download-artifact") || release_source.include?("release-gate.sh publication")
+        raise Error, "hosted release workflow must remain a read-only candidate builder, not a publication path"
+      end
 
       validate_action_pins!(ci_source, "CI workflow")
       validate_action_pins!(release_source, "release workflow")
@@ -556,11 +570,9 @@ module WavesRelease
 
     def validate_release_job_permissions!(workflow)
       jobs = workflow.fetch("jobs")
-      raise Error, "release workflow must define draft-publication job" unless jobs.key?("draft-publication")
       jobs.each do |name, job|
         contents = job.is_a?(Hash) && job["permissions"].is_a?(Hash) ? job["permissions"]["contents"] : nil
-        expected = name == "draft-publication" ? "write" : "read"
-        raise Error, "release job #{name} must use contents: #{expected}" unless contents == expected
+        raise Error, "release job #{name} must remain read-only with contents: read" unless contents == "read"
       end
     end
 

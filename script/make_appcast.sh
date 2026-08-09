@@ -265,8 +265,8 @@ if [ -f "$OUTPUT_PATH" ]; then
     "$OUTPUT_PATH" | sort -n | tail -1)"
   if [ -n "$HIGHEST_PUBLISHED" ] && [ "$BUILD_NUMBER" -le "$HIGHEST_PUBLISHED" ]; then
     echo "Error: build $BUILD_NUMBER is not greater than published build $HIGHEST_PUBLISHED." >&2
-    echo "       Sparkle would never offer this update. Bump APP_BUILD in" >&2
-    echo "       script/build_and_run.sh and RELEASE_BUILD in the release workflow." >&2
+    echo "       Sparkle would never offer this update. Bump build in" >&2
+    echo "       release/metadata.json before producing another candidate." >&2
     exit 1
   fi
 fi

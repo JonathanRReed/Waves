@@ -1,38 +1,58 @@
-name: Release
+name: Release Candidate
 
-# Manual only. Waves 1.5 is signed and notarized locally on the maintainer Mac.
-# This hosted path remains configured for future use, but it is not authoritative
-# for 1.5 and never creates or pushes a tag. The dispatched tag must already be
-# annotated with publication-sealed exact-revision evidence before the draft job
-# can pass the shared publication gate.
+# Manual, read-only candidate builder for possible future hosted signing.
+# Waves 1.5 is signed and notarized locally on the maintainer Mac. This workflow
+# does not accept a tag, create a release, or publish anything. If it is used in
+# the future, the maintainer must test the exact downloaded bytes, complete the
+# remaining evidence, and use the strict local annotated-tag publication path.
+#
+# Dormant hosted signing secret names are intentionally preserved:
+#   DEVELOPER_ID_CERT_P12
+#   DEVELOPER_ID_CERT_PASSWORD
+#   SIGN_IDENTITY
+#   KEYCHAIN_PASSWORD
+#   NOTARY_APPLE_ID
+#   NOTARY_TEAM_ID
+#   NOTARY_PASSWORD
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Existing annotated release tag to validate"
+      revision:
+        description: "Exact lowercase 40-character source revision"
         required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.repository }}
+  group: release-candidate-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
   verify:
-    name: Verify source and unsigned package
+    name: Verify exact source and unsigned package
     runs-on: macos-26
     timeout-minutes: 180
     permissions:
       contents: read
     steps:
-      - name: Check out tagged repository
+      - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.revision }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Validate exact revision input
+        env:
+          REQUESTED_REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUESTED_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::revision must be a lowercase 40-character Git revision."
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"
 
       - name: Select latest available Xcode
         run: |
@@ -45,29 +65,29 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE"
           swift --version
 
-      - name: Run shared source and package quality gate
+      - name: Run shared source and unsigned-package gate
         run: ./script/quality-gate.sh full
 
   sign:
-    name: Hosted signing and notarization
+    name: Sign and notarize exact candidate
     needs: verify
     runs-on: macos-26
     timeout-minutes: 120
     permissions:
       contents: read
     steps:
-      - name: Check out tagged repository
+      - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.revision }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate release preflight before credentials
+      - name: Validate shared release preflight before credentials
+        env:
+          WAVES_EXPECTED_REVISION: ${{ inputs.revision }}
         run: ./script/release-gate.sh preflight
 
-      # These names are intentionally preserved for the dormant hosted path.
-      # They are not used by the authoritative local 1.5 release process.
       - name: Import Developer ID certificate
         env:
           CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
@@ -105,19 +125,19 @@ jobs:
             --team-id "$NOTARY_TEAM_ID" \
             --password "$NOTARY_PASSWORD"
 
-      - name: Build, sign, notarize, and staple
+      - name: Build, sign, notarize, and staple exact revision
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
           NOTARY_PROFILE: waves-notary
         run: ./script/build_and_run.sh --notarize
 
-      - name: Validate trust and packaged GUI before upload
+      - name: Validate trust and packaged GUI
         run: |
           ./script/build_and_run.sh --publication-check
           SMOKE_LOG_PATH="$GITHUB_WORKSPACE/dist/signed-package-smoke-process.log" \
             ./script/build_and_run.sh --package-smoke
 
-      - name: Produce checksum, dSYM archive, and cask artifact
+      - name: Produce checksum, dSYM archive, and cask candidate
         run: |
           set -euo pipefail
           VERSION=$(ruby script/release_tool.rb metadata version)
@@ -138,7 +158,7 @@ jobs:
           '
           ruby -c dist/waves.rb
 
-      - name: Upload signed artifacts for the least-privilege draft job
+      - name: Upload exact signed candidate for maintainer testing
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: waves-signed-candidate-${{ github.run_number }}
@@ -152,54 +172,3 @@ jobs:
             dist/*package*.log
           if-no-files-found: error
           retention-days: 14
-
-  draft-publication:
-    name: Validate and create draft release
-    needs: sign
-    runs-on: macos-26
-    timeout-minutes: 30
-    permissions:
-      contents: write
-    steps:
-      - name: Check out exact annotated tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Download signed artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: waves-signed-candidate-${{ github.run_number }}
-          path: dist
-
-      - name: Run exact-revision publication gate
-        env:
-          WAVES_RELEASE_TAG: ${{ inputs.tag }}
-        run: ./script/release-gate.sh publication
-
-      - name: Extract canonical release notes
-        run: |
-          set -euo pipefail
-          VERSION=$(ruby script/release_tool.rb metadata version)
-          awk -v version="$VERSION" '
-            BEGIN { heading = "## [" version "]" }
-            $0 == heading || index($0, heading " - ") == 1 { found = 1; inside = 1; next }
-            inside && /^## \[/ { exit }
-            inside { print }
-            END { if (!found) exit 2 }
-          ' CHANGELOG.md > dist/release-notes.md
-          test -s dist/release-notes.md
-
-      - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          tag_name: ${{ inputs.tag }}
-          files: |
-            dist/Waves.dmg
-            dist/Waves.dmg.sha256
-            dist/Waves.app.dSYM.zip
-            dist/waves.rb
-          draft: true
-          body_path: dist/release-notes.md

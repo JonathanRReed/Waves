@@ -2,8 +2,8 @@
 
 Use this checklist before publishing a Waves build. None of the local commands
 below create or push a tag, publish a release, change repository visibility, or
-upload an artifact. The GitHub release workflow only runs after a maintainer
-separately pushes a valid release tag.
+upload an artifact. The hosted release-candidate workflow is manual and accepts
+an exact revision only. It does not accept tags or publish releases.
 
 ## Current release boundary
 
@@ -28,20 +28,26 @@ architectures, hashes, signatures, notarization, Gatekeeper result, local QA,
 and remote Elgato result. A source build or local package check cannot substitute
 for any missing field.
 
+`release/metadata.json` is the only release value authority. Its strict reader
+rejects malformed JSON, duplicate or unknown keys, noncanonical versions and
+deployment floors, and nonpositive build numbers. The build, appcast, package,
+workflow, changelog, cask, and evidence checks all read that file rather than
+carrying their own defaults.
+
 ## Prepare Release Metadata
 
 Before creating a tag:
 
-- Move the release notes out of `Unreleased` into exactly one
+- Set the version, positive integer build, and minimum macOS version once in
+  `release/metadata.json`.
+- Move the release notes out of `Unreleased` into exactly one matching
   `## [X.Y.Z]` or `## [X.Y.Z] - YYYY-MM-DD` heading in `CHANGELOG.md`.
-- Set the matching version in `Casks/waves.rb`.
-- Bump the build number in **both** `script/build_and_run.sh` (`APP_BUILD`) and
-  `.github/workflows/release.yml` (`RELEASE_BUILD`) to the same new integer, and
-  make it strictly greater than the last published build. Sparkle compares
-  `sparkle:version` numerically, so a repeated or lower build is never offered —
-  which is how 1.3.0 shipped twice under build 6. The workflow now fails if the
-  two files disagree, and `make_appcast.sh` fails if the build is not higher
-  than everything already in the appcast.
+- Set the same version in `Casks/waves.rb`. The repository contract rejects a
+  mismatch between either file and canonical metadata.
+- Keep the build strictly greater than the last published build. Sparkle
+  compares `sparkle:version` numerically, so a repeated or lower build is never
+  offered. `make_appcast.sh` checks the packaged build against canonical
+  metadata and the prior appcast before it writes an entry.
 - Leave `sha256 "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"` unchanged. It is an
   intentionally invalid template value and cannot be used as a published cask
   checksum.
@@ -71,24 +77,27 @@ Then, for each release:
 SIGN_IDENTITY="Developer ID Application: Jonathan Reed (AJ9VWBRNZN)" NOTARY_PROFILE=waves-notary ./script/build_and_run.sh --notarize
 ```
 
-`.github/workflows/release.yml` is therefore **manual-only** (`workflow_dispatch`,
-taking an existing tag). Pushing a tag does not start a build. The workflow
-remains runnable if CI signing is ever wanted: add the secrets it documents and
-dispatch it against a tag. It accepts only tags matching `vX.Y.Z` exactly, and
-requires the tagged commit to equal `origin/main` before reading any secret.
+`.github/workflows/release.yml` is manual-only and accepts an exact lowercase
+40-character revision. Pushing a tag does not start a build. The workflow
+remains runnable if hosted candidate signing is ever wanted: add the documented
+secrets and dispatch it against that revision. Every job stays read-only. The
+workflow uploads a 14-day candidate artifact for maintainer testing, never a
+GitHub release.
 
 ## Unsigned or Ad Hoc Local Validation
 
-These checks require normal macOS build/package tools, but do not require a
-Developer ID certificate or notarization credentials:
+The shared gate below requires normal macOS build/package tools, but does not
+require a Developer ID certificate or notarization credentials:
 
 ```bash
-swift test
-swift build -c release
-./script/build_and_run.sh --release-check
-./script/build_and_run.sh --verify
-./script/build_and_run.sh --package-smoke
+./script/quality-gate.sh full
 ```
+
+The same checked-in command runs locally and in CI. It applies process-group
+deadlines to strict Swift formatting, debug and release builds, the ordinary
+isolated test suite, focused Thread Sanitizer tests, universal package
+construction, package verification, packaged GUI smoke, the realtime callback
+audit, and release-infrastructure self-tests.
 
 `--release-check` is the fresh distribution build path. It builds arm64 and
 x86_64 release slices, creates `dist/Waves.app`, creates a matching universal
@@ -137,23 +146,49 @@ Store a notarytool profile once if needed:
 xcrun notarytool store-credentials waves-notary --apple-id <apple-id> --team-id <team-id>
 ```
 
-Build, sign, submit, staple, and run the shared unsigned package checks:
+Build, sign, submit, and staple using canonical release metadata:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 NOTARY_PROFILE="waves-notary" \
-APP_VERSION="X.Y.Z" \
-APP_BUILD="<build-number>" \
 ./script/build_and_run.sh --notarize
 ```
 
-Then run the strict publication gate and packaged-app smoke against those
-existing artifacts; neither command rebuilds them:
+Task 12 must then assemble the complete evidence input and seal the exact local
+candidate. Candidate sealing allows only remote Elgato to remain pending and
+always records `publicationEligible: false`:
 
 ```bash
-APP_VERSION="X.Y.Z" APP_BUILD="<build-number>" ./script/build_and_run.sh --publication-check
-APP_VERSION="X.Y.Z" APP_BUILD="<build-number>" ./script/build_and_run.sh --package-smoke
+./script/generate-release-evidence.sh candidate \
+  dist/release-evidence-input.json \
+  dist/release-evidence.candidate.json
+WAVES_RELEASE_EVIDENCE=dist/release-evidence.candidate.json \
+  ./script/release-gate.sh candidate
 ```
+
+The generator writes canonical key-ordered JSON plus a SHA-256 sidecar. The
+candidate gate never signs, notarizes, tags, uploads, or publishes. It validates
+the clean exact revision, source history, app, DMG, dSYM, universal
+architectures, deployment floor, Developer ID signature, hardened runtime,
+notarization UUID, stapling, Gatekeeper, and artifact hashes.
+
+After remote Wave Link and Stream Deck hardware evidence passes, seal the
+publication profile and create the annotated-tag envelope for review. These
+commands still do not create the tag:
+
+```bash
+./script/generate-release-evidence.sh publication \
+  dist/release-evidence-input.json \
+  dist/release-evidence.publication.json
+ruby script/release_tool.rb tag-envelope \
+  dist/release-evidence.publication.json \
+  dist/release-tag-annotation.txt
+```
+
+Only an annotated `vX.Y.Z` tag whose annotation embeds that canonical manifest
+and sidecar hash can pass `./script/release-gate.sh publication`. A lightweight
+tag, wrong revision, dirty tree, mismatched `origin/main`, missing or skipped
+gate, pending remote result, or changed artifact hash fails.
 
 Publication validation reuses all unsigned package checks and additionally
 requires:
@@ -163,19 +198,24 @@ requires:
 - Gatekeeper acceptance of the app.
 - A valid stapled notarization ticket and Gatekeeper acceptance of the DMG.
 
-The dispatched workflow performs tests and unsigned checks before importing
-credentials. After notarization it runs publication validation and package
-smoke, then produces and uploads these workflow artifacts:
+The manual hosted workflow remains configured for future candidate signing.
+Every job has read-only contents permission. It uses the same quality and
+release-preflight scripts, pinned actions, bounded jobs, serialized noncanceling
+concurrency, and 14-day artifact retention. It accepts an exact revision rather
+than a tag and cannot create a release. The maintainer Mac remains authoritative
+for 1.5, so a hosted run is not required evidence and has not been claimed.
+
+After notarization the dormant hosted path produces these workflow artifacts:
 
 - `Waves.dmg`
 - `Waves.dmg.sha256`
 - `Waves.app.dSYM.zip`
 - `waves.rb`, generated from `Casks/waves.rb` with the final checksum
-- package, smoke, and publication logs
+- package and smoke logs
 
-The workflow creates the GitHub release as a draft with the matching curated
-`CHANGELOG.md` section as its body. A maintainer reviews the draft notes and
-assets, then clicks **Publish release** manually.
+If this dormant path is ever used, the maintainer must download and retain those
+exact bytes, complete performance and hardware verification against them, seal
+their hashes in publication evidence, and create the annotated tag locally.
 
 The generated cask is a release artifact; the workflow does not replace the
 checksum placeholder in the repository. Audit the generated file before
