@@ -315,6 +315,14 @@ if is_notarize_mode; then
 fi
 
 if [ -n "$SIGN_IDENTITY" ]; then
+  sip_status="$(/usr/bin/csrutil status 2>&1 || true)"
+  case "$sip_status" in
+    *"System Integrity Protection status: enabled."*) ;;
+    *)
+      echo "Error: credentialed release signing requires System Integrity Protection to be enabled." >&2
+      exit 1
+      ;;
+  esac
   signing_identities=""
   resolve_signing_account_paths
   signing_identities="$(run_signing_security find-identity -v -p codesigning "$SIGNING_KEYCHAIN")" || {

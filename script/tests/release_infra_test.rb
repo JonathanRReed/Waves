@@ -654,6 +654,8 @@ class ReleaseInfraTest < Minitest::Test
       expected_revision = "b" * 40
       expected_digest = "c" * 64
       signing_identity = DEVELOPER_IDENTITY
+      sip_stdout, sip_stderr, sip_status = Open3.capture3("/usr/bin/csrutil", "status")
+      sip_enabled = sip_status.success? && sip_stdout.include?("System Integrity Protection status: enabled.")
       File.write(probe, <<~SHELL)
         #!/bin/bash -p
         source #{Shellwords.escape(helper)}
@@ -692,10 +694,16 @@ class ReleaseInfraTest < Minitest::Test
         "GIT_CONFIG_VALUE_0" => marker,
         "GIT_ASKPASS" => marker,
         "SSH_ASKPASS" => marker,
-        "DYLD_INSERT_LIBRARIES" => File.join(directory, "attack.dylib"),
-        "DYLD_LIBRARY_PATH" => directory,
-        "LD_PRELOAD" => File.join(directory, "attack.so"),
       }
+      if sip_enabled
+        poisoned.merge!(
+          "DYLD_INSERT_LIBRARIES" => File.join(directory, "attack.dylib"),
+          "DYLD_LIBRARY_PATH" => directory,
+          "LD_PRELOAD" => File.join(directory, "attack.so")
+        )
+      else
+        assert_match(/System Integrity Protection status: (?:disabled|unknown)/, sip_stdout + sip_stderr)
+      end
       stdout, stderr, status = Open3.capture3(poisoned, probe)
 
       assert status.success?, stderr
@@ -2267,6 +2275,8 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes source, '/usr/bin/dscl . -read "/Users/$account_name" NFSHomeDirectory'
     assert_includes source, "run_signing_security()"
     assert_includes source, 'run_signing_security find-identity -v -p codesigning "$SIGNING_KEYCHAIN"'
+    assert_includes source, "/usr/bin/csrutil status"
+    assert_includes source, "credentialed release signing requires System Integrity Protection"
 
     assert_includes source,
       '/usr/bin/codesign --keychain "$SIGNING_KEYCHAIN" "${args[@]}" --sign "$identity" "$target"'
