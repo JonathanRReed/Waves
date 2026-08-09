@@ -242,6 +242,12 @@ struct AppStoreLifecycleSnapshot: Equatable, Sendable {
   }
 }
 
+struct GuidedMixerTourPresentation: Equatable, Sendable {
+  let moment: GuidedMixerTourMoment
+  let appName: String
+  let isTargetAvailable: Bool
+}
+
 enum PrivacySetupPresentationState: Equatable {
   case hidden
   case awaitingPrivacy
@@ -302,6 +308,10 @@ final class AppStore {
   private(set) var muteShortcutRequest: String?
   private(set) var muteShortcutToken = 0
   var onboarding = OnboardingState()
+  private(set) var installLocationClassification: InstallLocationClassification
+  private(set) var installationAdvisoryAcknowledged = false
+  private(set) var requestedSetupReplay = false
+  private(set) var requestedWhatsNew = false
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
   var isRefreshing = false
@@ -341,6 +351,7 @@ final class AppStore {
   private let runtimeProcessProbe: RuntimeProcessProbeProvider
   private let appIntentCoordinator = AppIntentCoordinator()
   private let adaptiveMixCoordinator = AdaptiveMixCoordinator()
+  let guidedMixerTourCoordinator = GuidedMixerTourCoordinator()
   private let automationParser = AutomationCommandParser()
   private let urlInvocationLimiter = URLInvocationLimiter()
   private let persistenceCoordinator: AppStorePersistenceCoordinator
@@ -468,7 +479,8 @@ final class AppStore {
     deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
       duration in try await Task.sleep(for: duration)
     },
-    accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster = .live
+    accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster = .live,
+    installLocation: InstallLocationClassification = .applications
   ) {
     self.backend = backend
     self.loginItemService = loginItemService
@@ -476,6 +488,7 @@ final class AppStore {
     self.startupState = initialStartupState
     self.hasStartedAudioBackend = initialStartupState == .running
     self.accessibilityAnnouncementPoster = accessibilityAnnouncementPoster
+    self.installLocationClassification = installLocation
     let loadedPreferences = preferencesStore.load()
     let loadedDeviceVolumePresets = deviceVolumePresetsStore.load()
     self.persistenceCoordinator = AppStorePersistenceCoordinator(
@@ -800,6 +813,168 @@ final class AppStore {
       return .hidden
     case let .failed(detail):
       return .startupFailed(detail)
+    }
+  }
+
+  var guidedSetupFacts: GuidedSetupFacts {
+    GuidedSetupFacts(
+      hasAcceptedPrivacy: preferences.hasCompletedPrivacySetup,
+      captureAuthorization: onboarding.captureAuthorization,
+      audioComponentInstalled: onboarding.audioComponentInstalled,
+      outputDeviceVisible: onboarding.outputDeviceVisible,
+      routeHealthReady: onboarding.routeHealthReady,
+      isAudioRunning: isAudioRunning
+    )
+  }
+
+  var onboardingLaunchDecision: OnboardingLaunchDecision {
+    OnboardingLaunchPolicy.decide(
+      OnboardingLaunchContext(
+        preferences: preferences,
+        installLocation: installLocationClassification,
+        installationAdvisoryAcknowledged: installationAdvisoryAcknowledged,
+        requestedSetupReplay: requestedSetupReplay,
+        hasEligibleTourApp: session.apps.contains { app in
+          app.routingState == .managed
+            && isLive(app)
+            && !preferences.excludedAppIDs.contains(app.logicalID)
+        }
+      )
+    )
+  }
+
+  var guidedMixerTourTargetApp: AudioApp? {
+    guard case let .active(_, appID) = guidedMixerTourCoordinator.state else { return nil }
+    return session.apps.first { $0.logicalID == appID }
+  }
+
+  var guidedMixerTourPresentation: GuidedMixerTourPresentation? {
+    guard case let .active(moment, _) = guidedMixerTourCoordinator.state else {
+      return nil
+    }
+    let target = guidedMixerTourTargetApp
+    return GuidedMixerTourPresentation(
+      moment: moment,
+      appName: target?.displayName ?? guidedMixerTourCoordinator.targetDisplayName ?? "This app",
+      isTargetAvailable: target != nil
+    )
+  }
+
+  var shouldShowWhatsNew: Bool {
+    if requestedWhatsNew { return true }
+    guard case let .mixer(showWhatsNew, _) = onboardingLaunchDecision else {
+      return false
+    }
+    return showWhatsNew
+  }
+
+  func continueFromInstallationAdvisory() {
+    installationAdvisoryAcknowledged = true
+  }
+
+  func runRequiredSetupReplay() {
+    requestedSetupReplay = true
+    onShowMixerRequested?()
+  }
+
+  func cancelRequiredSetupReplay() {
+    requestedSetupReplay = false
+  }
+
+  func showWhatsNew() {
+    requestedWhatsNew = true
+    onShowMixerRequested?()
+  }
+
+  func startGuidedMixerTour() {
+    requestedWhatsNew = false
+    focusSource(.running)
+    onShowMixerRequested?()
+    preferences.whatsNewDismissedVersion = max(
+      preferences.whatsNewDismissedVersion,
+      OnboardingExperience.currentVersion
+    )
+
+    guard let app = eligibleGuidedTourApp else {
+      preferences.deferredTourVersion = OnboardingExperience.currentVersion
+      persistPreferences()
+      showToast(
+        title: "Tour ready when an app is playing",
+        detail: "Start compatible audio and Waves will offer Show Me How in the mixer.",
+        kind: .info
+      )
+      return
+    }
+
+    preferences.deferredTourVersion = 0
+    persistPreferences()
+    guidedMixerTourCoordinator.start(
+      appID: app.logicalID,
+      displayName: app.displayName,
+      originalVolume: app.desiredVolume,
+      originalMuted: app.isMuted
+    )
+  }
+
+  func advanceGuidedMixerTour() {
+    if case let .active(moment, _) = guidedMixerTourCoordinator.state,
+      moment.requiresAcceptedMixerIntent,
+      guidedMixerTourTargetApp != nil
+    {
+      return
+    }
+    guard guidedMixerTourCoordinator.advance() == .completed else { return }
+    preferences.guidedTourCompletedVersion = max(
+      preferences.guidedTourCompletedVersion,
+      OnboardingExperience.currentVersion
+    )
+    preferences.deferredTourVersion = 0
+    persistPreferences()
+    showToast(
+      title: "Tour complete",
+      detail: "Replay it any time from Setup & Repair or Help.",
+      kind: .success
+    )
+  }
+
+  func backGuidedMixerTour() {
+    guidedMixerTourCoordinator.back()
+  }
+
+  func endGuidedMixerTour(reason: GuidedMixerTourEndReason) {
+    guard guidedMixerTourCoordinator.end(reason: reason) else { return }
+    preferences.guidedTourDismissedVersion = max(
+      preferences.guidedTourDismissedVersion,
+      OnboardingExperience.currentVersion
+    )
+    preferences.deferredTourVersion = 0
+    persistPreferences()
+  }
+
+  func dismissGuidedTourTip() {
+    preferences.guidedTourDismissedVersion = max(
+      preferences.guidedTourDismissedVersion,
+      OnboardingExperience.currentVersion
+    )
+    preferences.deferredTourVersion = 0
+    persistPreferences()
+  }
+
+  func dismissWhatsNew() {
+    requestedWhatsNew = false
+    preferences.whatsNewDismissedVersion = max(
+      preferences.whatsNewDismissedVersion,
+      OnboardingExperience.currentVersion
+    )
+    persistPreferences()
+  }
+
+  private var eligibleGuidedTourApp: AudioApp? {
+    visibleApps.first { app in
+      app.routingState == .managed
+        && isLive(app)
+        && !preferences.excludedAppIDs.contains(app.logicalID)
+        && MixerRouteControlPolicy(app: app).allowsAudioControl
     }
   }
 
@@ -1230,11 +1405,67 @@ final class AppStore {
     presentFinishSetupMessage()
   }
 
-  func completeGuidedSetup() {
-    guard startupState != .shuttingDown else { return }
-    guard !preferences.hasCompletedGuidedSetup else { return }
-    preferences.hasCompletedGuidedSetup = true
-    persistPreferences()
+  func completeRequiredSetup(version: Int) async -> Bool {
+    guard startupState != .shuttingDown,
+      version == OnboardingExperience.currentVersion,
+      guidedSetupFacts.isReadyForCoreMixing
+    else {
+      return false
+    }
+
+    let completesFirstRun = preferences.requiredSetupVersion < version
+    var completedPreferences = preferences
+    completedPreferences.requiredSetupVersion = max(
+      completedPreferences.requiredSetupVersion,
+      version
+    )
+    completedPreferences.hasCompletedGuidedSetup = true
+    if completesFirstRun {
+      completedPreferences.whatsNewDismissedVersion = max(
+        completedPreferences.whatsNewDismissedVersion,
+        version
+      )
+    }
+
+    do {
+      try await persistenceCoordinator.savePreferencesDurably(
+        completedPreferences,
+        mergePendingWith: { pending in
+          pending.requiredSetupVersion = max(pending.requiredSetupVersion, version)
+          pending.hasCompletedGuidedSetup = true
+          if completesFirstRun {
+            pending.whatsNewDismissedVersion = max(
+              pending.whatsNewDismissedVersion,
+              version
+            )
+          }
+        },
+        onDurable: { [weak self] in
+          guard let self else { return }
+          preferences.requiredSetupVersion = max(
+            preferences.requiredSetupVersion,
+            version
+          )
+          preferences.hasCompletedGuidedSetup = true
+          if completesFirstRun {
+            preferences.whatsNewDismissedVersion = max(
+              preferences.whatsNewDismissedVersion,
+              version
+            )
+          }
+          requestedSetupReplay = false
+        }
+      )
+      return true
+    } catch {
+      reportPersistenceFailure(store: .preferences, error: error, showWarning: false)
+      showToast(
+        title: "Setup may appear again",
+        detail: "Waves is ready to mix, but the completed setup state could not be saved. \(error.localizedDescription)",
+        kind: .warning
+      )
+      return false
+    }
   }
 
   private func performSafeBootstrapIfNeeded() {
@@ -1833,6 +2064,18 @@ final class AppStore {
         persistenceResult: persistenceResult,
         policy: feedbackPolicy
       )
+      if backendResult.outcome == .applied || backendResult.outcome == .noChange,
+        let acceptedApp = backendResult.resultingApp
+          ?? session.apps.first(matchingAppKey: appID)
+      {
+        guidedMixerTourCoordinator.observe(
+          .acceptedIntent(
+            appID: appID,
+            desiredVolume: acceptedApp.desiredVolume,
+            isMuted: acceptedApp.isMuted
+          )
+        )
+      }
     }
     return backendResult
   }

@@ -403,6 +403,21 @@ struct MixerRowView: View {
         Button(action.name) { action.perform() }
       }
     }
+    .overlay {
+      if store.guidedMixerTourTargetApp?.logicalID == app.logicalID {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .strokeBorder(theme.accent, lineWidth: 2)
+          .padding(-5)
+          .allowsHitTesting(false)
+          .accessibilityHidden(true)
+      }
+    }
+    .anchorPreference(
+      key: GuidedTourTargetBoundsPreferenceKey.self,
+      value: .bounds
+    ) { anchor in
+      store.guidedMixerTourTargetApp?.logicalID == app.logicalID ? anchor : nil
+    }
   }
 
   private var isExcluded: Bool { store.isExcluded(app) }

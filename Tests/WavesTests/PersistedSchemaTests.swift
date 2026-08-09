@@ -35,6 +35,9 @@ import WavesAudioCore
   )
   prefs.appAudioIntentMigrationVersion = 1
   prefs.hasCompletedPrivacySetup = true
+  prefs.hasCompletedGuidedSetup = true
+  prefs.requiredSetupVersion = OnboardingExperience.currentVersion
+  prefs.guidedTourDismissedVersion = OnboardingExperience.currentVersion
 
   let data = try JSONEncoder().encode(VersionedPayload(schemaVersion: 1, payload: prefs))
   let decoded = try PersistedSchema.decode(UserPreferences.self, from: data, using: JSONDecoder())
@@ -43,6 +46,8 @@ import WavesAudioCore
   #expect(decoded.appAudioIntents["com.example.player"]?.isMuted == true)
   #expect(decoded.appAudioIntentMigrationVersion == 1)
   #expect(decoded.hasCompletedPrivacySetup == true)
+  #expect(decoded.requiredSetupVersion == OnboardingExperience.currentVersion)
+  #expect(decoded.guidedTourDismissedVersion == OnboardingExperience.currentVersion)
 }
 
 @Test func decodeRejectsPartialEnvelopeKeys() {

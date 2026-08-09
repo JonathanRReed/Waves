@@ -9,6 +9,27 @@ import WavesAudioCore
 @Suite(.serialized)
 struct HostedUIInteractionTask9Tests {
   @MainActor
+  @Test func hostedMixerTourEscapeEndsImmediately() throws {
+    var endReason: GuidedMixerTourEndReason?
+    let surface = try Task9HostedSurface(
+      rootView: MixerTourOverlay(
+        moment: .setLevel,
+        appName: "Keyboard Player",
+        isTargetAvailable: true,
+        onBack: {},
+        onNext: {},
+        onOpenSettings: {},
+        onEnd: { endReason = $0 }
+      )
+      .frame(width: 640, height: 600)
+    )
+    defer { surface.close() }
+
+    #expect(surface.performCancelAction())
+    #expect(endReason == .button)
+  }
+
+  @MainActor
   @Test func hostedMixerKeysExerciseMuteEqualizerOutputAndGlobalRecovery() async throws {
     let announcements = Task9AnnouncementRecorder()
     let managed = task9InteractionApp()
@@ -305,6 +326,26 @@ private final class Task9HostedSurface<Content: View> {
         charactersIgnoringModifiers: "\r",
         isARepeat: false,
         keyCode: UInt16(kVK_Return)
+      )
+    else { return false }
+    let handled = window.performKeyEquivalent(with: event)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    return handled
+  }
+
+  func performCancelAction() -> Bool {
+    guard
+      let event = NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber,
+        context: nil,
+        characters: String(UnicodeScalar(0x1B)!),
+        charactersIgnoringModifiers: String(UnicodeScalar(0x1B)!),
+        isARepeat: false,
+        keyCode: UInt16(kVK_Escape)
       )
     else { return false }
     let handled = window.performKeyEquivalent(with: event)

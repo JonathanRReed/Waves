@@ -67,6 +67,17 @@ struct UserPreferences: Codable, Sendable {
   /// New installs continue through readiness and personalization after consent.
   /// Existing preference files skip the new walkthrough and can reopen it from Setup & Repair.
   var hasCompletedGuidedSetup = false
+  /// Highest required setup experience completed. Version 1 is Waves 1.5.
+  /// A legacy file with both completion booleans set migrates to version 1.
+  var requiredSetupVersion = 0
+  /// Highest optional mixer tour completed through its final moment.
+  var guidedTourCompletedVersion = 0
+  /// Highest optional mixer tour explicitly ended or declined.
+  var guidedTourDismissedVersion = 0
+  /// Highest What's New experience dismissed.
+  var whatsNewDismissedVersion = 0
+  /// Tour version waiting to offer one contextual tip when an eligible app appears.
+  var deferredTourVersion = 0
   /// Global adaptive processing mode. Temporary gains themselves are never persisted.
   var adaptiveMixMode: AdaptiveMixMode = .off
   /// Curated starting point for app content and priority policies.
@@ -111,6 +122,11 @@ struct UserPreferences: Codable, Sendable {
     case appAudioIntentMigrationVersion
     case hasCompletedPrivacySetup
     case hasCompletedGuidedSetup
+    case requiredSetupVersion
+    case guidedTourCompletedVersion
+    case guidedTourDismissedVersion
+    case whatsNewDismissedVersion
+    case deferredTourVersion
     case adaptiveMixMode
     case adaptiveStrategy
     case adaptiveFocusMode
@@ -159,6 +175,16 @@ struct UserPreferences: Codable, Sendable {
     // A preference file predating guided setup belongs to an existing install.
     hasCompletedPrivacySetup = try value(.hasCompletedPrivacySetup, true)
     hasCompletedGuidedSetup = try value(.hasCompletedGuidedSetup, true)
+    requiredSetupVersion = try value(
+      .requiredSetupVersion,
+      hasCompletedPrivacySetup && hasCompletedGuidedSetup
+        ? OnboardingExperience.currentVersion
+        : 0
+    )
+    guidedTourCompletedVersion = try value(.guidedTourCompletedVersion, 0)
+    guidedTourDismissedVersion = try value(.guidedTourDismissedVersion, 0)
+    whatsNewDismissedVersion = try value(.whatsNewDismissedVersion, 0)
+    deferredTourVersion = try value(.deferredTourVersion, 0)
     adaptiveMixMode = try value(.adaptiveMixMode, defaults.adaptiveMixMode)
     adaptiveStrategy = try value(.adaptiveStrategy, defaults.adaptiveStrategy)
     adaptiveFocusMode = try value(.adaptiveFocusMode, defaults.adaptiveFocusMode)

@@ -8,6 +8,7 @@ struct HelpView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
         headerSection
+        educationSection
         quickStartSection
         soundSection
         routingSection
@@ -20,6 +21,39 @@ struct HelpView: View {
       .padding(20)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+  }
+
+  private var educationSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Learn Waves")
+        .font(.headline)
+
+      Text(
+        "Review the 1.5 update, rerun the required Mac readiness guide, or take the optional tour on the live mixer. Your saved mix and preferences stay in place."
+      )
+      .font(.callout)
+      .foregroundStyle(.secondary)
+      .fixedSize(horizontal: false, vertical: true)
+
+      HStack(spacing: 10) {
+        Button("What’s New in 1.5") {
+          store.showWhatsNew()
+        }
+        .buttonStyle(.bordered)
+
+        Button("Run Guided Setup") {
+          store.runRequiredSetupReplay()
+        }
+        .buttonStyle(.bordered)
+
+        Button("Take the Mixer Tour") {
+          store.startGuidedMixerTour()
+        }
+        .wavesGlassProminentButton()
+      }
+    }
+    .padding(16)
+    .wavesCard(cornerRadius: 12)
   }
 
   private var soundSection: some View {

@@ -128,6 +128,11 @@ import WavesAudioCore
   #expect(prefs.appearance == .system)
   #expect(prefs.managedAudioEqualizer == GlobalEqualizerSettings())
   #expect(prefs.hasCompletedGuidedSetup == true)
+  #expect(prefs.requiredSetupVersion == OnboardingExperience.currentVersion)
+  #expect(prefs.guidedTourCompletedVersion == 0)
+  #expect(prefs.guidedTourDismissedVersion == 0)
+  #expect(prefs.whatsNewDismissedVersion == 0)
+  #expect(prefs.deferredTourVersion == 0)
 }
 
 @Test func userPreferencesPreservesKnownKeysAndDefaultsMissingOnes() throws {

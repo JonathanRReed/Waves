@@ -39,6 +39,9 @@ struct WavesComposition {
     liveBackendFactory: () -> any AudioControlBackend = { makeLiveBackend() }
   ) -> AppStore {
     let backend = configuredBackend(environment: environment, liveBackendFactory: liveBackendFactory)
+    let installLocation =
+      (try? InstallLocationAdvisor().classify(bundleURL: Bundle.main.bundleURL))
+      ?? .ordinaryWritable
     if let fixedHome = environment["CFFIXED_USER_HOME"], !fixedHome.isEmpty {
       let dataDirectory = URL(fileURLWithPath: fixedHome, isDirectory: true)
         .appendingPathComponent("Library/Application Support/Waves", isDirectory: true)
@@ -48,7 +51,8 @@ struct WavesComposition {
         profileStore: ProfileStore(directory: dataDirectory),
         sessionStore: SessionStore(directory: dataDirectory),
         loginItemService: LoginItemService(),
-        deviceVolumePresetsStore: DeviceVolumePresetsStore(directory: dataDirectory)
+        deviceVolumePresetsStore: DeviceVolumePresetsStore(directory: dataDirectory),
+        installLocation: installLocation
       )
     }
 
@@ -58,7 +62,8 @@ struct WavesComposition {
       profileStore: ProfileStore(),
       sessionStore: SessionStore(),
       loginItemService: LoginItemService(),
-      deviceVolumePresetsStore: DeviceVolumePresetsStore()
+      deviceVolumePresetsStore: DeviceVolumePresetsStore(),
+      installLocation: installLocation
     )
   }
 

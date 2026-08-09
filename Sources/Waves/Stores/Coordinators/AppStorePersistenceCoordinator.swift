@@ -1,6 +1,11 @@
 import Foundation
 import WavesAudioCore
 
+@MainActor
+private final class DurablePreferencesSaveOutcome {
+  var error: Error?
+}
+
 struct AppStorePersistenceFailure: Equatable, Sendable {
   let store: PersistenceStoreIdentifier
   let message: String
@@ -41,6 +46,7 @@ final class AppStorePersistenceCoordinator {
   private var profilesTask: Task<Void, Never>?
   private var sessionTask: Task<Void, Never>?
   private var devicePresetsTask: Task<Void, Never>?
+  private var durablePreferencesTasks: [UUID: Task<Void, Never>] = [:]
   private var isShuttingDown = false
   private var isFinalizing = false
   private var lastWarningDate: Date?
@@ -72,7 +78,7 @@ final class AppStorePersistenceCoordinator {
 
   var trackedTaskCount: Int {
     [preferencesTask, profilesTask, sessionTask, devicePresetsTask]
-      .compactMap { $0 }.count
+      .compactMap { $0 }.count + durablePreferencesTasks.count
   }
 
   var pendingSnapshotCount: Int {
@@ -95,10 +101,7 @@ final class AppStorePersistenceCoordinator {
   func enqueuePreferences(_ snapshot: UserPreferences) {
     guard acceptsWork else { return }
     pendingPreferences = snapshot
-    guard preferencesTask == nil else { return }
-    preferencesTask = Task { @MainActor [weak self] in
-      await self?.runPreferences()
-    }
+    startPreferencesRunnerIfNeeded()
   }
 
   func enqueueProfiles(_ snapshot: [Profile]) {
@@ -130,17 +133,72 @@ final class AppStorePersistenceCoordinator {
 
   func drain() async {
     while true {
-      let tasks = [preferencesTask, profilesTask, sessionTask, devicePresetsTask]
+      var tasks = [preferencesTask, profilesTask, sessionTask, devicePresetsTask]
         .compactMap { $0 }
+      tasks.append(contentsOf: durablePreferencesTasks.values)
       guard !tasks.isEmpty else { return }
       for task in tasks { await task.value }
     }
   }
 
   func savePreferencesDurably(_ snapshot: UserPreferences) async throws {
+    try await savePreferencesDurably(
+      snapshot,
+      mergePendingWith: nil,
+      onDurable: {}
+    )
+  }
+
+  func savePreferencesDurably(
+    _ snapshot: UserPreferences,
+    mergePendingWith mergePending: (@MainActor (inout UserPreferences) -> Void)?,
+    onDurable: @escaping @MainActor () -> Void
+  ) async throws {
     await drain()
-    try await preferencesStore.save(snapshot)
-    durablySavedPreferences = snapshot
+    let token = UUID()
+    let outcome = DurablePreferencesSaveOutcome()
+    let task = Task { @MainActor [weak self] in
+      guard let self else {
+        outcome.error = CancellationError()
+        return
+      }
+      defer {
+        durablePreferencesTasks.removeValue(forKey: token)
+        startPreferencesRunnerIfNeeded()
+      }
+      do {
+        try await preferencesStore.save(snapshot)
+        guard !Task.isCancelled, acceptsWork else {
+          throw CancellationError()
+        }
+        durablySavedPreferences = snapshot
+        onDurable()
+
+        guard let mergePending else { return }
+        while var pending = pendingPreferences {
+          pendingPreferences = nil
+          mergePending(&pending)
+          do {
+            try await preferencesStore.save(pending)
+            durablySavedPreferences = pending
+          } catch {
+            recordFailure(store: .preferences, error: error)
+            if var newest = pendingPreferences {
+              mergePending(&newest)
+              pendingPreferences = newest
+            } else {
+              pendingPreferences = pending
+            }
+            return
+          }
+        }
+      } catch {
+        outcome.error = error
+      }
+    }
+    durablePreferencesTasks[token] = task
+    await task.value
+    if let error = outcome.error { throw error }
   }
 
   func saveProfilesDurably(_ snapshot: [Profile]) async throws {
@@ -179,13 +237,15 @@ final class AppStorePersistenceCoordinator {
   @discardableResult
   func beginShutdown() -> [Task<Void, Never>] {
     isShuttingDown = true
-    let tasks = [preferencesTask, profilesTask, sessionTask, devicePresetsTask]
+    var tasks = [preferencesTask, profilesTask, sessionTask, devicePresetsTask]
       .compactMap { $0 }
+    tasks.append(contentsOf: durablePreferencesTasks.values)
     for task in tasks { task.cancel() }
     preferencesTask = nil
     profilesTask = nil
     sessionTask = nil
     devicePresetsTask = nil
+    durablePreferencesTasks.removeAll()
     return tasks
   }
 
@@ -231,6 +291,17 @@ final class AppStorePersistenceCoordinator {
   }
 
   private var acceptsWork: Bool { !isShuttingDown || isFinalizing }
+
+  private func startPreferencesRunnerIfNeeded() {
+    guard acceptsWork,
+      preferencesTask == nil,
+      durablePreferencesTasks.isEmpty,
+      pendingPreferences != nil
+    else { return }
+    preferencesTask = Task { @MainActor [weak self] in
+      await self?.runPreferences()
+    }
+  }
 
   private func runPreferences() async {
     defer { preferencesTask = nil }

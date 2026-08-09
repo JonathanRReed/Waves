@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 import WavesAudioCore
 
 struct MainWindowView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.openSettings) private var openSettings
   @Environment(\.wavesTheme) private var theme
   @State private var searchText = ""
   // Restored across launches so the user returns to the scope they left.
@@ -45,6 +47,14 @@ struct MainWindowView: View {
       }
     }
     .background(WavesBackground())
+    .overlayPreferenceValue(GuidedTourTargetBoundsPreferenceKey.self) { targetBounds in
+      GeometryReader { proxy in
+        onboardingEducationOverlay(
+          targetFrame: targetBounds.map { proxy[$0] },
+          containerSize: proxy.size
+        )
+      }
+    }
     .sheet(item: $editorContext) { context in
       ProfileEditorSheet(context: context)
         .environment(store)
@@ -113,19 +123,78 @@ struct MainWindowView: View {
 
   @ViewBuilder
   private var primarySurface: some View {
-    if store.showsWarmStartMixer {
-      // A returning user's session is already in memory — `sessionStore.load()`
-      // is synchronous in `AppStore.init` — so making them watch a full-window
-      // "Starting Waves" splash was showing a spinner for data we already had,
-      // and then reflowing the entire window when the real surface replaced it.
-      // Go straight to the mixer; audio startup catches up underneath.
+    switch store.onboardingLaunchDecision {
+    case let .installationAdvisory(classification):
+      InstallLocationAdvisoryView(
+        classification: classification,
+        openInFinder: {
+          NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+        },
+        continueForNow: store.continueFromInstallationAdvisory
+      )
+    case let .requiredSetup(initialPhase):
+      OnboardingView(
+        initialPhase: initialPhase,
+        onStartTour: store.startGuidedMixerTour,
+        onCancel: requiredSetupCancelAction
+      )
+    case .mixer:
       mixerNavigation
-    } else if store.privacySetupPresentationState != .hidden {
-      PrivacySetupSurface()
-    } else if !store.preferences.hasCompletedGuidedSetup {
-      OnboardingView()
-    } else {
-      mixerNavigation
+    }
+  }
+
+  private var requiredSetupCancelAction: (() -> Void)? {
+    guard store.requestedSetupReplay else { return nil }
+    return { store.cancelRequiredSetupReplay() }
+  }
+
+  @ViewBuilder
+  private func onboardingEducationOverlay(
+    targetFrame: CGRect?,
+    containerSize: CGSize
+  ) -> some View {
+    if case .mixer = store.onboardingLaunchDecision {
+      if let presentation = store.guidedMixerTourPresentation {
+        MixerTourOverlay(
+          moment: presentation.moment,
+          appName: presentation.appName,
+          isTargetAvailable: presentation.isTargetAvailable,
+          onBack: store.backGuidedMixerTour,
+          onNext: store.advanceGuidedMixerTour,
+          onOpenSettings: {
+            store.requestSettingsPane(.mixer)
+            openSettings()
+          },
+          onEnd: store.endGuidedMixerTour
+        )
+        .padding(24)
+        .frame(
+          maxWidth: .infinity,
+          maxHeight: .infinity,
+          alignment: GuidedTourOverlayPlacement.resolve(
+            targetFrame: targetFrame,
+            containerHeight: containerSize.height
+          ).alignment
+        )
+      } else if case let .mixer(showWhatsNew, showTourTip) =
+        store.onboardingLaunchDecision
+      {
+        if store.shouldShowWhatsNew || showWhatsNew {
+          WhatsNewCard(
+            onTakeTour: store.startGuidedMixerTour,
+            onDismiss: store.dismissWhatsNew
+          )
+          .padding(24)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        } else if showTourTip {
+          DeferredTourTip(
+            onStart: store.startGuidedMixerTour,
+            onDismiss: store.dismissGuidedTourTip
+          )
+          .padding(24)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        }
+      }
     }
   }
 

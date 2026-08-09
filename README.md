@@ -104,7 +104,10 @@ better fit.
 
 Download the latest signed and notarized `Waves.dmg` from
 [GitHub Releases](https://github.com/JonathanRReed/Waves/releases/latest), open
-it, and drag **Waves** to **Applications**.
+it, and drag **Waves** to **Applications**. The disk image uses a focused Finder
+layout with one clear installation action. If Waves is opened from the disk
+image or another temporary location, it explains why Applications is preferred
+before continuing. It never moves or copies itself without your action.
 
 ### Homebrew
 
@@ -156,15 +159,23 @@ See `docs/RELEASE.md` for the full release checklist.
 
 ### Quick Start
 
-1. Launch Waves and review the first-run privacy setup. Waves records your local
-   consent before starting its audio backend or attempting Core Audio capture;
-   macOS may then present its audio-capture permission prompt.
-2. After setup, Waves detects manageable running apps and audio-active processes
-   when Core Audio exposes them.
-3. Adjust volume sliders for individual apps.
-4. Use the boost menu when an app is too quiet.
-5. Use the mute button to silence specific applications.
-6. Pin important apps to keep them easily accessible.
+1. Launch Waves. The guided setup explains local processing before the first
+   audio request, then macOS may present its audio-capture permission prompt.
+   Waves never asks for Accessibility permission.
+2. Follow only the readiness items that need attention. Healthy checks stay out
+   of the way, and route recovery is clearly presented as optional when the core
+   mixer is already usable.
+3. Choose **Start Mixing**, or take the optional 60-second tour on a real playing
+   app. **End Tour** and Escape stop the tour immediately without changing your
+   saved mix.
+4. Adjust per-app volume, mute, output, EQ, and boost from the mixer. Accepted
+   controls advance the tour, while failed or unavailable controls leave the
+   current explanation in place.
+5. Replay **Guided Setup**, **What's New**, or the mixer tour later from Help or
+   **Settings ▸ Setup**. Replaying setup keeps profiles, levels, equalizers,
+   privacy choices, and preferences intact.
+6. Use the mute button to silence specific applications.
+7. Pin important apps to keep them easily accessible.
 
 ### Keyboard Shortcuts
 

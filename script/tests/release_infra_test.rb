@@ -28,6 +28,52 @@ class ReleaseInfraTest < Minitest::Test
   SPARKLE_ACCOUNT = "com.jonathanreed.Waves"
   SPARKLE_PUBLIC_KEY = "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
 
+  def test_dmg_builder_configures_and_verifies_premium_finder_layout
+    root = File.expand_path("../..", __dir__)
+    build_script = File.read(File.join(root, "script/build_and_run.sh"))
+    renderer_path = File.join(root, "script/render-dmg-background.swift")
+    finder_script_path = File.join(root, "script/configure-dmg.applescript")
+
+    assert File.file?(renderer_path), "DMG background renderer must be checked in"
+    assert File.file?(finder_script_path), "Finder layout script must be checked in"
+    assert_includes build_script, "render-dmg-background.swift"
+    assert_includes build_script, "configure-dmg.applescript"
+    assert_includes build_script, "-format UDRW"
+    assert_includes build_script, "hdiutil convert"
+    assert_includes build_script, ".background"
+    assert_includes build_script, ".DS_Store"
+
+    finder_script = File.read(finder_script_path)
+    assert_includes finder_script, "set bounds of layoutWindow to {100, 100, 760, 530}"
+    assert_includes finder_script, "set icon size of icon view options of layoutWindow to 128"
+    assert_includes finder_script, "set toolbar visible of layoutWindow to false"
+    assert_includes finder_script, "set sidebar width of layoutWindow to 0"
+  end
+
+  def test_dmg_background_renderer_produces_exact_1320_by_860_png
+    root = File.expand_path("../..", __dir__)
+    renderer_path = File.join(root, "script/render-dmg-background.swift")
+    Dir.mktmpdir("waves-dmg-background") do |directory|
+      output = File.join(directory, "Waves.png")
+      swift = Open3.capture2("/usr/bin/xcrun", "--find", "swift").first.strip
+      stdout, stderr, status = Open3.capture3(swift, renderer_path, output)
+      assert status.success?, "renderer failed: #{stdout}\n#{stderr}"
+      assert File.file?(output)
+
+      dimensions, dimension_error, dimension_status = Open3.capture3(
+        "/usr/bin/sips",
+        "-g",
+        "pixelWidth",
+        "-g",
+        "pixelHeight",
+        output
+      )
+      assert dimension_status.success?, dimension_error
+      assert_match(/pixelWidth: 1320/, dimensions)
+      assert_match(/pixelHeight: 860/, dimensions)
+    end
+  end
+
   def metadata_hash
     security_metadata_hash
   end

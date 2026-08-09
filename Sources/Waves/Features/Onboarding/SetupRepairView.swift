@@ -4,7 +4,6 @@ import WavesAudioCore
 struct SetupRepairView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.scenePhase) private var scenePhase
-  @State private var showsGuidedSetup = false
 
   var body: some View {
     ScrollView {
@@ -62,7 +61,12 @@ struct SetupRepairView: View {
           .disabled(!store.isAudioRunning || store.isRefreshing)
 
           Button("Redo Guided Setup…") {
-            showsGuidedSetup = true
+            store.runRequiredSetupReplay()
+          }
+          .buttonStyle(.bordered)
+
+          Button("Take the Mixer Tour") {
+            store.startGuidedMixerTour()
           }
           .buttonStyle(.bordered)
         }
@@ -81,11 +85,6 @@ struct SetupRepairView: View {
     .onAppear { refreshIfPossible() }
     .onChange(of: scenePhase) { _, phase in
       if phase == .active { refreshIfPossible() }
-    }
-    .sheet(isPresented: $showsGuidedSetup) {
-      OnboardingView()
-        .environment(store)
-        .frame(minWidth: 680, minHeight: 620)
     }
   }
 

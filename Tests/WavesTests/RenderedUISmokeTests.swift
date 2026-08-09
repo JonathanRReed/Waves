@@ -47,10 +47,81 @@ import WavesAudioCore
   ]
 
   for (palette, appearance) in variants {
-    let onboarding = OnboardingView()
+    let welcome = OnboardingView()
       .environment(fixture.store)
       .wavesTheme(palette: palette, appearance: appearance)
       .frame(width: 760, height: 700)
+    let permission = ZStack {
+      WavesBackground()
+      OnboardingPermissionView(
+        isWaiting: false,
+        startupError: nil,
+        onContinue: {}
+      )
+    }
+    .wavesTheme(palette: palette, appearance: appearance)
+    .frame(width: 760, height: 700)
+    let readiness = ZStack {
+      WavesBackground()
+      OnboardingReadinessView(
+        issues: [
+          RequiredReadinessIssue(
+            id: .audioCapture,
+            title: "Audio Capture access needs attention",
+            detail: "Enable Waves under Privacy & Security, then return here.",
+            severity: .blocking,
+            repairAction: .openCaptureSettings
+          ),
+          RequiredReadinessIssue(
+            id: .managedRoutes,
+            title: "Managed routes need repair",
+            detail: "Waves can open the mixer now, or rebuild managed routes before you continue.",
+            severity: .warning,
+            repairAction: .recoverRoutes
+          ),
+        ],
+        isStabilizing: false,
+        onRepair: { _ in }
+      )
+    }
+    .wavesTheme(palette: palette, appearance: appearance)
+    .frame(width: 760, height: 700)
+    let ready = ZStack {
+      WavesBackground()
+      OnboardingReadyView(
+        isCompleting: false,
+        completionError: nil,
+        onStartMixing: {},
+        onTakeTour: {}
+      )
+    }
+    .wavesTheme(palette: palette, appearance: appearance)
+    .frame(width: 760, height: 700)
+    let install = InstallLocationAdvisoryView(
+      classification: .mountedDiskImage,
+      openInFinder: {},
+      continueForNow: {}
+    )
+    .wavesTheme(palette: palette, appearance: appearance)
+    .frame(width: 760, height: 700)
+    let education = ZStack(alignment: .bottomTrailing) {
+      WavesBackground()
+      VStack(alignment: .trailing, spacing: 18) {
+        WhatsNewCard(onTakeTour: {}, onDismiss: {})
+        MixerTourOverlay(
+          moment: .setLevel,
+          appName: "Lecture Player",
+          isTargetAvailable: true,
+          onBack: {},
+          onNext: {},
+          onOpenSettings: {},
+          onEnd: { _ in }
+        )
+      }
+      .padding(28)
+    }
+    .wavesTheme(palette: palette, appearance: appearance)
+    .frame(width: 900, height: 760)
     let setupRepair = ZStack {
       WavesBackground()
       SetupRepairView()
@@ -59,29 +130,54 @@ import WavesAudioCore
     .wavesTheme(palette: palette, appearance: appearance)
     .frame(width: 760, height: 700)
 
-    let onboardingImage = try hostedImage(
-      onboarding,
-      size: NSSize(width: 760, height: 700),
-      scale: 2,
-      appearance: appearance
-    )
     let setupRepairImage = try hostedImage(
       setupRepair,
       size: NSSize(width: 760, height: 700),
       scale: 2,
       appearance: appearance
     )
-    #expect(onboardingImage.size == NSSize(width: 760, height: 700))
     #expect(setupRepairImage.size == NSSize(width: 760, height: 700))
+
+    try renderEvidence(
+      welcome,
+      filename: "onboarding-welcome-\(palette.rawValue)-\(appearance.rawValue).png",
+      size: NSSize(width: 760, height: 700),
+      appearance: appearance
+    )
+    try renderEvidence(
+      permission,
+      filename: "onboarding-permission-\(palette.rawValue)-\(appearance.rawValue).png",
+      size: NSSize(width: 760, height: 700),
+      appearance: appearance
+    )
+    try renderEvidence(
+      readiness,
+      filename: "onboarding-readiness-\(palette.rawValue)-\(appearance.rawValue).png",
+      size: NSSize(width: 760, height: 700),
+      appearance: appearance
+    )
+    try renderEvidence(
+      ready,
+      filename: "onboarding-ready-\(palette.rawValue)-\(appearance.rawValue).png",
+      size: NSSize(width: 760, height: 700),
+      appearance: appearance
+    )
+    try renderEvidence(
+      install,
+      filename: "onboarding-install-\(palette.rawValue)-\(appearance.rawValue).png",
+      size: NSSize(width: 760, height: 700),
+      appearance: appearance
+    )
+    try renderEvidence(
+      education,
+      filename: "onboarding-education-\(palette.rawValue)-\(appearance.rawValue).png",
+      size: NSSize(width: 900, height: 760),
+      appearance: appearance
+    )
 
     if let outputPath = ProcessInfo.processInfo.environment["WAVES_QA_OUTPUT"] {
       let output = URL(fileURLWithPath: outputPath, isDirectory: true)
       try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-      try pngData(from: onboardingImage).write(
-        to: output.appendingPathComponent(
-          "onboarding-\(palette.rawValue)-\(appearance.rawValue).png"),
-        options: .atomic
-      )
       try pngData(from: setupRepairImage).write(
         to: output.appendingPathComponent(
           "setup-repair-\(palette.rawValue)-\(appearance.rawValue).png"),
@@ -118,6 +214,33 @@ import WavesAudioCore
       appearance: appearance
     )
   }
+
+  let originalSession = fixture.store.session
+  fixture.store.startGuidedMixerTour()
+  let activeTour = MainWindowView()
+    .environment(fixture.store)
+    .wavesTheme(palette: .waves, appearance: .dark)
+    .frame(width: 1100, height: 760)
+  try renderEvidence(
+    activeTour,
+    filename: "main-tour-active-dark.png",
+    size: NSSize(width: 1100, height: 760),
+    appearance: .dark
+  )
+
+  fixture.store.session.apps = []
+  let unavailableTour = MainWindowView()
+    .environment(fixture.store)
+    .wavesTheme(palette: .waves, appearance: .dark)
+    .frame(width: 1100, height: 760)
+  try renderEvidence(
+    unavailableTour,
+    filename: "main-tour-target-unavailable-dark.png",
+    size: NSSize(width: 1100, height: 760),
+    appearance: .dark
+  )
+  fixture.store.session = originalSession
+  fixture.store.endGuidedMixerTour(reason: .button)
 
   for pane in SettingsPane.allCases {
     let settings = SettingsView(initialPane: pane)
@@ -348,6 +471,8 @@ private func makeRenderedUIFixture(
   var preferences = UserPreferences()
   preferences.hasCompletedPrivacySetup = true
   preferences.hasCompletedGuidedSetup = true
+  preferences.requiredSetupVersion = OnboardingExperience.currentVersion
+  preferences.whatsNewDismissedVersion = OnboardingExperience.currentVersion
   preferences.urlSchemeAutomationAcknowledged = true
   preferences.adaptiveMixMode = .both
   preferences.adaptiveStrategy = .lectureFocus

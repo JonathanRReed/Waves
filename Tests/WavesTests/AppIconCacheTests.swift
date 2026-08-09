@@ -44,6 +44,46 @@ struct AppIconCacheTests {
     #expect(first === hit)
   }
 
+  @Test func appIconCacheStorageEnforcesExactCountCostAndRecency() {
+    let first = NSImage(size: NSSize(width: 1, height: 1))
+    let second = NSImage(size: NSSize(width: 1, height: 1))
+    let third = NSImage(size: NSSize(width: 1, height: 1))
+    let fourth = NSImage(size: NSSize(width: 1, height: 1))
+
+    let countBoundStorage = AppIconCache.Storage(
+      configuration: AppIconCache.Configuration(countLimit: 2, totalCostLimit: 1_000)
+    )
+    countBoundStorage.setObject(first, forKey: "first", cost: 40)
+    countBoundStorage.setObject(second, forKey: "second", cost: 40)
+    _ = countBoundStorage.object(forKey: "first")
+    countBoundStorage.setObject(third, forKey: "third", cost: 40)
+
+    #expect(countBoundStorage.object(forKey: "first") === first)
+    #expect(countBoundStorage.object(forKey: "second") == nil)
+    #expect(countBoundStorage.object(forKey: "third") === third)
+    #expect(countBoundStorage.count == 2)
+
+    let costBoundStorage = AppIconCache.Storage(
+      configuration: AppIconCache.Configuration(countLimit: 10, totalCostLimit: 100)
+    )
+    costBoundStorage.setObject(first, forKey: "first", cost: 40)
+    costBoundStorage.setObject(second, forKey: "second", cost: 40)
+    _ = costBoundStorage.object(forKey: "first")
+    costBoundStorage.setObject(third, forKey: "third", cost: 40)
+
+    #expect(costBoundStorage.object(forKey: "first") === first)
+    #expect(costBoundStorage.object(forKey: "second") == nil)
+    #expect(costBoundStorage.object(forKey: "third") === third)
+
+    costBoundStorage.setObject(fourth, forKey: "fourth", cost: 70)
+
+    #expect(costBoundStorage.object(forKey: "first") == nil)
+    #expect(costBoundStorage.object(forKey: "third") == nil)
+    #expect(costBoundStorage.object(forKey: "fourth") === fourth)
+    #expect(costBoundStorage.count == 1)
+    #expect(costBoundStorage.totalCost == 70)
+  }
+
   @Test func appIconCachePrunesOnlyRuntimeIDsThatDepartedTheAuthoritativeRoster() throws {
     AppIconCache.resetForTesting()
     let retained = iconApp(id: "runtime.retained", category: .media)

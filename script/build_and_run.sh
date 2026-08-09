@@ -373,6 +373,8 @@ SPARKLE_FRAMEWORK_NAME="Sparkle.framework"
 SPARKLE_FRAMEWORK="$APP_FRAMEWORKS/$SPARKLE_FRAMEWORK_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
+DMG_BACKGROUND_RENDERER="$ROOT_DIR/script/render-dmg-background.swift"
+DMG_FINDER_LAYOUT="$ROOT_DIR/script/configure-dmg.applescript"
 DSYM_BUNDLE="$DIST_DIR/$APP_NAME.app.dSYM"
 DSYM_BINARY="$DSYM_BUNDLE/Contents/Resources/DWARF/$APP_NAME"
 LOGO_RESOURCE="$ROOT_DIR/Sources/Waves/Resources/waves-logo.png"
@@ -381,6 +383,7 @@ RESOURCE_BUNDLE_NAME="${APP_NAME}_${APP_NAME}.bundle"
 SMOKE_LOG_PATH="${SMOKE_LOG_PATH:-$DIST_DIR/package-smoke.log}"
 ACTIVE_MOUNT_DIR=""
 ACTIVE_STAGING_DIR=""
+ACTIVE_WRITABLE_DMG=""
 ACTIVE_SMOKE_HOME=""
 SMOKE_PID=""
 
@@ -419,6 +422,11 @@ cleanup() {
     rm -rf "$ACTIVE_STAGING_DIR"
   fi
   ACTIVE_STAGING_DIR=""
+
+  if [ -n "$ACTIVE_WRITABLE_DMG" ]; then
+    rm -f "$ACTIVE_WRITABLE_DMG"
+  fi
+  ACTIVE_WRITABLE_DMG=""
 
   if [ -n "$ACTIVE_SMOKE_HOME" ]; then
     rm -rf "$ACTIVE_SMOKE_HOME"
@@ -1122,13 +1130,33 @@ unmount_dmg() {
   fi
 }
 
+render_dmg_background() {
+  local output_path="$1"
+  local swift_path="${TRUSTED_SWIFT:-}"
+
+  if [ ! -f "$DMG_BACKGROUND_RENDERER" ] || [ -L "$DMG_BACKGROUND_RENDERER" ]; then
+    echo "Error: Trusted DMG background renderer is missing." >&2
+    exit 1
+  fi
+  if [ -z "$swift_path" ]; then
+    swift_path="$(/usr/bin/xcrun --find swift)"
+  fi
+  "$swift_path" "$DMG_BACKGROUND_RENDERER" "$output_path"
+}
+
 validate_mounted_layout_and_identity() {
   local mounted_app="$ACTIVE_MOUNT_DIR/$APP_NAME.app"
   local applications_link="$ACTIVE_MOUNT_DIR/Applications"
+  local background_directory="$ACTIVE_MOUNT_DIR/.background"
+  local background_path="$ACTIVE_MOUNT_DIR/.background/Waves.png"
+  local finder_metadata="$ACTIVE_MOUNT_DIR/.DS_Store"
+  local expected_background
   local entry
   local entry_count=0
   local saw_app=0
   local saw_applications=0
+  local saw_background=0
+  local saw_finder_metadata=0
   local built_cdhash
   local mounted_cdhash
 
@@ -1137,6 +1165,8 @@ validate_mounted_layout_and_identity() {
     case "${entry##*/}" in
       "$APP_NAME.app") saw_app=1 ;;
       Applications) saw_applications=1 ;;
+      .background) saw_background=1 ;;
+      .DS_Store) saw_finder_metadata=1 ;;
       *)
         echo "Error: $DMG_PATH contains unexpected volume-root entry ${entry##*/}." >&2
         exit 1
@@ -1144,8 +1174,12 @@ validate_mounted_layout_and_identity() {
     esac
   done < <(find "$ACTIVE_MOUNT_DIR" -mindepth 1 -maxdepth 1 -print0)
 
-  if [ "$entry_count" -ne 2 ] || [ "$saw_app" -ne 1 ] || [ "$saw_applications" -ne 1 ]; then
-    echo "Error: $DMG_PATH root must contain only $APP_NAME.app and Applications." >&2
+  if [ "$entry_count" -ne 4 ] \
+    || [ "$saw_app" -ne 1 ] \
+    || [ "$saw_applications" -ne 1 ] \
+    || [ "$saw_background" -ne 1 ] \
+    || [ "$saw_finder_metadata" -ne 1 ]; then
+    echo "Error: $DMG_PATH root must contain only $APP_NAME.app, Applications, .background, and .DS_Store." >&2
     exit 1
   fi
   if [ ! -L "$applications_link" ]; then
@@ -1160,6 +1194,33 @@ validate_mounted_layout_and_identity() {
     echo "Error: $DMG_PATH does not contain $APP_NAME.app at its volume root." >&2
     exit 1
   fi
+  if [ ! -d "$background_directory" ] || [ -L "$background_directory" ]; then
+    echo "Error: $DMG_PATH .background must be a real directory." >&2
+    exit 1
+  fi
+  if [ ! -f "$background_path" ] || [ -L "$background_path" ] || [ -x "$background_path" ]; then
+    echo "Error: $DMG_PATH background must be one non-executable regular PNG." >&2
+    exit 1
+  fi
+  if [ ! -f "$finder_metadata" ] || [ -L "$finder_metadata" ] || [ -x "$finder_metadata" ]; then
+    echo "Error: $DMG_PATH Finder metadata must be one non-executable regular file." >&2
+    exit 1
+  fi
+  if [ "$(find -P "$background_directory" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -ne 1 ]; then
+    echo "Error: $DMG_PATH .background contains unexpected content." >&2
+    exit 1
+  fi
+
+  expected_background="$(mktemp "${TMPDIR:-/tmp}/waves-dmg-background.XXXXXX")"
+  rm -f "$expected_background"
+  expected_background="$expected_background.png"
+  render_dmg_background "$expected_background"
+  if ! cmp -s "$expected_background" "$background_path"; then
+    rm -f "$expected_background"
+    echo "Error: $DMG_PATH background does not match the canonical renderer." >&2
+    exit 1
+  fi
+  rm -f "$expected_background"
 
   validate_app_bundle "$mounted_app" "mounted $APP_NAME.app"
 
@@ -1211,6 +1272,13 @@ validate_unsigned_package() {
 create_dmg() {
   require_command hdiutil "to create $DMG_PATH"
   require_command ditto "to stage $APP_NAME.app"
+  require_command osascript "to configure the Finder disk image"
+  require_command sync "to flush Finder metadata"
+
+  if [ ! -f "$DMG_FINDER_LAYOUT" ] || [ -L "$DMG_FINDER_LAYOUT" ]; then
+    echo "Error: Trusted DMG Finder layout script is missing." >&2
+    exit 1
+  fi
 
   mkdir -p "$DIST_DIR"
   if command -v xattr >/dev/null 2>&1; then
@@ -1219,9 +1287,48 @@ create_dmg() {
   ACTIVE_STAGING_DIR="$(mktemp -d "$DIST_DIR/.dmg-staging.XXXXXX")"
   ditto "$APP_BUNDLE" "$ACTIVE_STAGING_DIR/$APP_NAME.app"
   ln -s /Applications "$ACTIVE_STAGING_DIR/Applications"
+  mkdir -p "$ACTIVE_STAGING_DIR/.background"
+  render_dmg_background "$ACTIVE_STAGING_DIR/.background/Waves.png"
+  chmod 755 "$ACTIVE_STAGING_DIR/.background"
+  chmod 644 "$ACTIVE_STAGING_DIR/.background/Waves.png"
+
+  ACTIVE_WRITABLE_DMG="$(mktemp "$DIST_DIR/.dmg-layout.XXXXXX")"
+  rm -f "$ACTIVE_WRITABLE_DMG"
+  ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"
+  /usr/bin/hdiutil create \
+    -volname "$APP_NAME" \
+    -srcfolder "$ACTIVE_STAGING_DIR" \
+    -ov \
+    -format UDRW \
+    "$ACTIVE_WRITABLE_DMG"
+
+  ACTIVE_MOUNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/waves-dmg-mount.XXXXXX")"
+  /usr/bin/hdiutil attach \
+    "$ACTIVE_WRITABLE_DMG" \
+    -noautoopen \
+    -readwrite \
+    -mountpoint "$ACTIVE_MOUNT_DIR" >/dev/null
+  /usr/bin/osascript "$DMG_FINDER_LAYOUT" "$ACTIVE_MOUNT_DIR"
+  /bin/sync
+  rm -rf \
+    "$ACTIVE_MOUNT_DIR/.Trashes" \
+    "$ACTIVE_MOUNT_DIR/.fseventsd" \
+    "$ACTIVE_MOUNT_DIR/.Spotlight-V100"
+  if [ ! -f "$ACTIVE_MOUNT_DIR/.DS_Store" ]; then
+    echo "Error: Finder did not create the required DMG layout metadata." >&2
+    exit 1
+  fi
+  /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet
+  rm -rf "$ACTIVE_MOUNT_DIR"
+  ACTIVE_MOUNT_DIR=""
 
   rm -f "$DMG_PATH"
-  /usr/bin/hdiutil create -volname "$APP_NAME" -srcfolder "$ACTIVE_STAGING_DIR" -ov -format UDZO "$DMG_PATH"
+  /usr/bin/hdiutil convert \
+    "$ACTIVE_WRITABLE_DMG" \
+    -ov \
+    -format UDZO \
+    -imagekey zlib-level=9 \
+    -o "$DMG_PATH"
   /usr/bin/hdiutil imageinfo "$DMG_PATH" >/dev/null
 
   # The disk image needs its own Developer ID signature: Gatekeeper's
@@ -1233,6 +1340,8 @@ create_dmg() {
 
   rm -rf "$ACTIVE_STAGING_DIR"
   ACTIVE_STAGING_DIR=""
+  rm -f "$ACTIVE_WRITABLE_DMG"
+  ACTIVE_WRITABLE_DMG=""
 }
 
 release_check() {

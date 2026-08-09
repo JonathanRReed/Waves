@@ -159,9 +159,11 @@ creates an exact Git archive in a private temporary source tree, and uses new
 private SwiftPM scratch directories for both slices. It builds arm64 and x86_64,
 stamps the full source revision plus source-archive and build-recipe hashes into
 `Info.plist`, creates and validates `Waves.app`, and creates a matching universal
-`Waves.app.dSYM` when
-`dsymutil` is available, stages a clean installer layout, creates `Waves.dmg`,
-and runs the common package checks inside one fresh mode-0700 root. Only
+`Waves.app.dSYM` when `dsymutil` is available. It then renders the checked-in
+1320 by 860 Waves background, creates a writable image, configures a 660 by 430
+Finder window with 128-point app and Applications icons, and converts the
+verified result to `Waves.dmg`. The common package checks run inside one fresh
+mode-0700 root. Only
 finalized, hash-identical outputs are copied to `dist` through guarded atomic
 publication. Without `SIGN_IDENTITY`, the app is ad hoc signed for local
 validation.
@@ -183,8 +185,11 @@ Expected unsigned/ad hoc validation results:
   expected release values.
 - The app contains its generated icon, SwiftPM `Waves_Waves.bundle`, valid
   `PrivacyInfo.xcprivacy`, and `com.apple.security.device.audio-input = true`.
-- The DMG root contains only `Waves.app` and `Applications`, with `Applications`
-  linking to `/Applications`.
+- The DMG has exactly two visible root items, `Waves.app` and `Applications`,
+  with `Applications` linking to `/Applications`. The only hidden layout inputs
+  are `.background/Waves.png` and Finder's `.DS_Store`; the canonical renderer
+  bytes, background dimensions, item types, and absence of hidden executables
+  are reverified after mounting.
 - The mounted app content and code identity match `dist/Waves.app`.
 - The packaged app remains alive for the smoke window and its test process is
   cleaned up.

@@ -5,6 +5,82 @@ import WavesAudioCore
 @testable import Waves
 
 @MainActor
+@Test func guidedTourAdvancesOnlyAfterAcceptedAppStoreIntents() async {
+  var app = transactionTestApp(desiredVolume: 0.7)
+  app.peakLevel = 0.25
+  app.rmsLevel = 0.1
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
+
+  fixture.store.startGuidedMixerTour()
+  #expect(fixture.store.consumeSourceFocusRequest() == .running)
+  fixture.store.advanceGuidedMixerTour()
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .setLevel, appID: app.logicalID)
+  )
+  fixture.store.advanceGuidedMixerTour()
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .setLevel, appID: app.logicalID)
+  )
+
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(desiredVolume: 0.4),
+    reason: .userEdit
+  )
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .muteAndRestore, appID: app.logicalID)
+  )
+
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(isMuted: true),
+    reason: .userEdit
+  )
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .muteAndRestore, appID: app.logicalID)
+  )
+
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(isMuted: false),
+    reason: .userEdit
+  )
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .goFurther, appID: app.logicalID)
+  )
+}
+
+@MainActor
+@Test func failedAppStoreIntentDoesNotAdvanceGuidedTour() async {
+  var app = transactionTestApp(desiredVolume: 0.7)
+  app.peakLevel = 0.25
+  app.rmsLevel = 0.1
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    outcomes: [.failed]
+  )
+
+  fixture.store.startGuidedMixerTour()
+  fixture.store.advanceGuidedMixerTour()
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(desiredVolume: 0.4),
+    reason: .userEdit
+  )
+
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .setLevel, appID: app.logicalID)
+  )
+}
+
+@MainActor
 @Test func silentMaintenancePublishesOnlySemanticSessionAndDiagnosticsChanges() async throws {
   let app = transactionTestApp()
   let device = transactionTestDevice()
