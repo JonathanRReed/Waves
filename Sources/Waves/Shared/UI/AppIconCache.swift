@@ -44,12 +44,13 @@ enum AppIconCache {
     return image
   }
 
-  static func prune(using authoritativeSession: AudioSessionSnapshot) {
-    prune(retainingRuntimeIDs: Set(authoritativeSession.apps.map(\.id)))
-  }
-
-  private static func prune(retainingRuntimeIDs authoritativeRuntimeIDs: Set<String>) {
-    let departedRuntimeIDs = trackedRuntimeIDs.subtracting(authoritativeRuntimeIDs)
+  static func prune(
+    from previousSession: AudioSessionSnapshot,
+    using currentSession: AudioSessionSnapshot
+  ) {
+    let previousRuntimeIDs = Set(previousSession.apps.map(\.id))
+    let currentRuntimeIDs = Set(currentSession.apps.map(\.id))
+    let departedRuntimeIDs = previousRuntimeIDs.subtracting(currentRuntimeIDs)
     for runtimeID in departedRuntimeIDs {
       shared.removeObject(forKey: runtimeID as NSString)
     }

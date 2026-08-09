@@ -258,7 +258,7 @@ final class AppStore {
       let previousRuntimeIDs = Set(oldValue.apps.map(\.id))
       let currentRuntimeIDs = Set(session.apps.map(\.id))
       if previousRuntimeIDs != currentRuntimeIDs {
-        AppIconCache.prune(using: session)
+        AppIconCache.prune(from: oldValue, using: session)
       }
     }
   }
@@ -553,7 +553,6 @@ final class AppStore {
       enqueuePreferencesPersistence(preferences)
     }
     syncOnboarding(using: session)
-    AppIconCache.prune(using: session)
   }
 
   var visibleApps: [AudioApp] {

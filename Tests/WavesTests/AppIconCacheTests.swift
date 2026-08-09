@@ -44,14 +44,17 @@ struct AppIconCacheTests {
     #expect(first === hit)
   }
 
-  @Test func appIconCachePrunesOnlyRuntimeIDsMissingFromTheAuthoritativeRoster() throws {
+  @Test func appIconCachePrunesOnlyRuntimeIDsThatDepartedTheAuthoritativeRoster() throws {
     AppIconCache.resetForTesting()
     let retained = iconApp(id: "runtime.retained", category: .media)
     let departed = iconApp(id: "runtime.departed", category: .media)
     _ = try #require(AppIconCache.icon(for: retained))
     _ = try #require(AppIconCache.icon(for: departed))
 
-    AppIconCache.prune(using: iconSession(apps: [retained]))
+    AppIconCache.prune(
+      from: iconSession(apps: [retained, departed]),
+      using: iconSession(apps: [retained])
+    )
 
     #expect(AppIconCache.contains(runtimeID: retained.id))
     #expect(!AppIconCache.contains(runtimeID: departed.id))
@@ -67,7 +70,10 @@ struct AppIconCacheTests {
     _ = try #require(AppIconCache.icon(for: visible))
     _ = try #require(AppIconCache.icon(for: filteredSystemApp))
 
-    AppIconCache.prune(using: iconSession(apps: sessionRoster))
+    AppIconCache.prune(
+      from: iconSession(apps: sessionRoster),
+      using: iconSession(apps: sessionRoster)
+    )
 
     #expect(AppIconCache.contains(runtimeID: visible.id))
     #expect(AppIconCache.contains(runtimeID: filteredSystemApp.id))
@@ -90,6 +96,23 @@ struct AppIconCacheTests {
 
     #expect(AppIconCache.contains(runtimeID: visible.id))
     #expect(!AppIconCache.contains(runtimeID: filteredSystemApp.id))
+  }
+
+  @Test func oneAppStoreCannotEvictAnotherStoresRuntimeIcon() async throws {
+    let firstStore = await makeControlStoreFixture()
+    let secondStore = await makeControlStoreFixture()
+    let firstApp = iconApp(id: "runtime.store.first", category: .media)
+    let secondApp = iconApp(id: "runtime.store.second", category: .media)
+    firstStore.session.apps = [firstApp]
+    secondStore.session.apps = [secondApp]
+    AppIconCache.resetForTesting()
+    _ = try #require(AppIconCache.icon(for: firstApp))
+    _ = try #require(AppIconCache.icon(for: secondApp))
+
+    firstStore.session.apps = []
+
+    #expect(!AppIconCache.contains(runtimeID: firstApp.id))
+    #expect(AppIconCache.contains(runtimeID: secondApp.id))
   }
 }
 
