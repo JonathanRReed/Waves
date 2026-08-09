@@ -40,6 +40,39 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
+## Protected command environment
+
+Execute `script/release-gate.sh`, `script/build_and_run.sh`, and
+`script/make_appcast.sh` directly as shown in this checklist. Do not invoke or
+source them through another shell. Their `/bin/bash -p` shebang must run so Bash
+suppresses `BASH_ENV`, imported shell functions, and inherited shell-option
+startup behavior before the first command.
+
+Each entry point then removes every inherited exported variable with Bash
+builtins before it launches Ruby, Git, Swift, or an Apple signing tool. It
+installs the fixed system `PATH`, a deterministic UTF-8 locale, noninteractive
+Git policy with global and system configuration disabled, and fresh private
+mode-0700 `HOME` and `TMPDIR` roots. Release metadata, SDK, artifact staging,
+Ruby/Gem/Bundler, Git redirection, prompt, shell-startup, and dynamic-loader
+variables are not inherited. Release metadata is always the canonical tracked
+`release/metadata.json`, and release Ruby commands use `/usr/bin/ruby` with gems
+disabled.
+
+Only these documented inputs cross the startup boundary, and each is validated
+before restoration:
+
+- `SIGN_IDENTITY` and `NOTARY_PROFILE` for `build_and_run.sh --notarize`;
+- `WAVES_EXPECTED_REVISION`, `WAVES_RELEASE_EVIDENCE`, and
+  `WAVES_RELEASE_TAG` for the matching release-gate phase;
+- `WAVES_RELEASE_TAG` and `EXPECTED_SHA256` for appcast publication;
+- bounded absolute `SMOKE_LOG_PATH` and positive `SMOKE_SECONDS` values for the
+  packaged smoke runner.
+
+The isolated `HOME` does not create, migrate, or select credentials. Developer
+ID, notarytool, signed-tag, and Sparkle private material remains in the current
+login Keychain or its separately authorized store and is addressed only by the
+validated identity, profile, principal, or account name.
+
 ## Prepare Release Metadata
 
 Before creating a tag:

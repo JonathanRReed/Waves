@@ -49,6 +49,16 @@ and hash checks. Only finalized outputs are copied to `dist` atomically. The
 release gate derives source values and every trust fact from the packaged
 artifact before comparing them with sealed evidence.
 
+The three release-sensitive entry points must be executed directly so their
+`/bin/bash -p` shebangs suppress shell startup injection. Before any child
+interpreter runs, a shared shell-builtin boundary deletes all inherited exports
+and restores only the validated inputs documented in `docs/RELEASE.md`. It then
+uses a fixed system path, `C.UTF-8`, noninteractive Git with ambient global and
+system configuration disabled, `/usr/bin/ruby --disable-gems`, and new
+mode-0700 `HOME` and `TMPDIR` roots. Inherited Ruby, Gem, Bundler, Git
+redirection, prompt, shell-function, loader, metadata, SDK, and staging
+authority cannot reach release operations.
+
 Sparkle publication uses the explicit account `com.jonathanreed.Waves`, derives
 its public key through the exact isolated Sparkle tool, requires equality with
 the packaged `SUPublicEDKey`, and verifies the produced signature. The release
