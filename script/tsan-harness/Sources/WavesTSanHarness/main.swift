@@ -387,8 +387,15 @@ private final class TSanControlSocketClient {
 }
 
 private func makeTemporaryDirectory(prefix: String) throws -> URL {
-  let directory = URL(fileURLWithPath: NSTemporaryDirectory())
-    .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  return directory
+  var template = Array("/private/tmp/\(prefix).XXXXXX".utf8CString)
+  let path = template.withUnsafeMutableBufferPointer { buffer -> String? in
+    guard let baseAddress = buffer.baseAddress,
+      let created = Darwin.mkdtemp(baseAddress)
+    else { return nil }
+    return String(cString: created)
+  }
+  guard let path else {
+    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+  }
+  return URL(fileURLWithPath: path, isDirectory: true)
 }

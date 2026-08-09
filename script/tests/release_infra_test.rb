@@ -481,6 +481,17 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_tsan_socket_fixture_uses_an_atomic_short_private_directory
+    harness = File.read(
+      File.expand_path("../tsan-harness/Sources/WavesTSanHarness/main.swift", __dir__)
+    )
+
+    assert_includes harness, '"/private/tmp/\(prefix).XXXXXX"'
+    assert_includes harness, "Darwin.mkdtemp"
+    refute_includes harness, "NSTemporaryDirectory()"
+    assert_operator "/private/tmp/waves-tsan-control.XXXXXX/control.sock".bytesize, :<, 104
+  end
+
   def test_packager_uses_the_stable_macos_system_bash
     packager = File.expand_path("../build_and_run.sh", __dir__)
     assert_equal "#!/bin/bash -p", File.foreach(packager).first.chomp
