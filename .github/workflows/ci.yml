@@ -25,15 +25,34 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Select latest available Xcode
+      - name: Select a trusted Apple toolchain
         run: |
           set -euo pipefail
-          LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
-          if [ -z "$LATEST_XCODE" ]; then
-            echo "::error::No versioned Xcode installation found on this runner."
+          TRUSTED_DEVELOPER_DIR=""
+          candidates=(
+            /Library/Developer/CommandLineTools
+            /Applications/Xcode_*.app/Contents/Developer
+          )
+          for candidate in "${candidates[@]}"; do
+            [ -d "$candidate" ] || continue
+            SWIFT_PATH="$(DEVELOPER_DIR="$candidate" /usr/bin/xcrun --find swift 2>/dev/null || true)"
+            SDK_PATH="$(DEVELOPER_DIR="$candidate" /usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+            [ -n "$SWIFT_PATH" ] && [ -n "$SDK_PATH" ] || continue
+            if /usr/bin/ruby script/release_tool.rb trusted-toolchain \
+              "$candidate" "$SDK_PATH" "$SWIFT_PATH" >/dev/null 2>&1; then
+              TRUSTED_DEVELOPER_DIR="$candidate"
+              break
+            fi
+          done
+          if [ -z "$TRUSTED_DEVELOPER_DIR" ]; then
+            echo "::error::No root-owned, non-writable Apple toolchain is available on this runner."
             exit 1
           fi
-          sudo xcode-select -s "$LATEST_XCODE"
+          sudo xcode-select -s "$TRUSTED_DEVELOPER_DIR"
+          SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+          SWIFT_PATH="$(/usr/bin/xcrun --find swift)"
+          /usr/bin/ruby script/release_tool.rb trusted-toolchain \
+            "$TRUSTED_DEVELOPER_DIR" "$SDK_PATH" "$SWIFT_PATH" >/dev/null
           swift --version
 
       - name: Run the same bounded quality gate used by the maintainer Mac

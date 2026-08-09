@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHASE_RUNNER="$ROOT_DIR/script/run_phase.rb"
+RELEASE_RUBY="/usr/bin/ruby"
 REQUESTED_PHASE="${1:-full}"
 
 if [ ! -f "$PHASE_RUNNER" ]; then
@@ -29,18 +30,18 @@ run_phase() {
   local timeout="$1"
   local label="$2"
   shift 2
-  ruby "$PHASE_RUNNER" "$timeout" "$label" "$@"
+  "$RELEASE_RUBY" "$PHASE_RUNNER" "$timeout" "$label" "$@"
 }
 
 run_infra() {
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Release infrastructure self-tests" \
-    ruby -I"$ROOT_DIR/script" "$ROOT_DIR/script/tests/release_infra_test.rb"
+    "$RELEASE_RUBY" -I"$ROOT_DIR/script" "$ROOT_DIR/script/tests/release_infra_test.rb"
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Process-group deadline self-tests" \
-    ruby "$ROOT_DIR/script/tests/run_phase_test.rb"
+    "$RELEASE_RUBY" "$ROOT_DIR/script/tests/run_phase_test.rb"
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Repository release contract" \
-    ruby "$ROOT_DIR/script/release_tool.rb" validate-repository
+    "$RELEASE_RUBY" "$ROOT_DIR/script/release_tool.rb" validate-repository
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Repository workflow contract" \
-    ruby "$ROOT_DIR/script/release_tool.rb" validate-workflows
+    "$RELEASE_RUBY" "$ROOT_DIR/script/release_tool.rb" validate-workflows
 }
 
 run_format() {

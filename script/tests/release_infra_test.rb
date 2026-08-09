@@ -2279,6 +2279,23 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes source, 'run_notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait'
   end
 
+  def test_hosted_quality_gate_uses_the_release_ruby_and_only_a_trusted_apple_toolchain
+    root = File.expand_path("../..", __dir__)
+    quality_gate = File.read(File.join(root, "script/quality-gate.sh"))
+    workflows = %w[ci.yml release.yml].to_h do |name|
+      [name, File.read(File.join(root, ".github/workflows", name))]
+    end
+
+    assert_includes quality_gate, 'RELEASE_RUBY="/usr/bin/ruby"'
+    refute_match(/(?:^|[[:space:]])ruby(?:[[:space:]]|$)/, quality_gate)
+    workflows.each do |name, workflow|
+      assert_includes workflow, "/Library/Developer/CommandLineTools", name
+      assert_includes workflow, "trusted-toolchain", name
+      assert_includes workflow, 'sudo xcode-select -s "$TRUSTED_DEVELOPER_DIR"', name
+      refute_includes workflow, "Select latest available Xcode", name
+    end
+  end
+
   private
 
   def evidence_authoring_entrypoints(directory = nil)
