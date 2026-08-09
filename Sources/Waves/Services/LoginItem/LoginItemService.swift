@@ -1,7 +1,7 @@
 import Foundation
 import ServiceManagement
 
-struct LoginItemStatus: Sendable {
+struct LoginItemStatus: Equatable, Sendable {
   var isEnabled: Bool
   /// True when the item is registered or enabled, including the intermediate
   /// state where macOS is waiting for approval in System Settings.

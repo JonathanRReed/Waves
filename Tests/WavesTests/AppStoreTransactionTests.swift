@@ -5,6 +5,56 @@ import WavesAudioCore
 @testable import Waves
 
 @MainActor
+@Test func silentMaintenancePublishesOnlySemanticSessionChanges() async {
+  let app = transactionTestApp()
+  let device = transactionTestDevice()
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: device,
+    refreshApps: [app]
+  )
+
+  await fixture.store.performSilentSessionRefresh()
+  await fixture.store.drainPersistenceTasks()
+  #expect(await fixture.backend.refreshCallCount() == 1)
+  #expect(await fixture.backend.diagnosticsCallCount() == 1)
+  let unchangedSession = fixture.store.session
+  let unchangedDiagnostics = fixture.store.diagnostics
+  let unchangedAuthorization = fixture.store.onboarding.captureAuthorization
+  let unchangedDevices = fixture.store.availableDevices
+  let unchangedSaveCount = fixture.sessionStore.saveCount
+
+  await fixture.store.performSilentSessionRefresh()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(await fixture.backend.refreshCallCount() == 2)
+  #expect(await fixture.backend.diagnosticsCallCount() == 2)
+  #expect(fixture.store.session == unchangedSession)
+  #expect(fixture.store.diagnostics == unchangedDiagnostics)
+  #expect(fixture.store.onboarding.captureAuthorization == unchangedAuthorization)
+  #expect(fixture.store.availableDevices == unchangedDevices)
+  #expect(fixture.sessionStore.saveCount == unchangedSaveCount)
+
+  var changedApp = app
+  changedApp.desiredVolume = 0.7
+  let changedDevice = AudioDevice(id: "device.changed", name: "Changed Device", kind: .bluetooth)
+  var changedSnapshot = transactionSnapshot(apps: [changedApp], device: changedDevice)
+  changedSnapshot.backendStatus.isRouteRecoveryHealthy = false
+  changedSnapshot.backendStatus.lastError = "Injected maintenance change"
+  await fixture.backend.setRefreshSnapshot(changedSnapshot)
+
+  await fixture.store.performSilentSessionRefresh()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(await fixture.backend.refreshCallCount() == 3)
+  #expect(await fixture.backend.diagnosticsCallCount() == 3)
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.7)
+  #expect(fixture.store.session.currentDevice == changedDevice)
+  #expect(fixture.store.session.backendStatus == changedSnapshot.backendStatus)
+  #expect(fixture.sessionStore.saveCount == unchangedSaveCount + 1)
+}
+
+@MainActor
 @Test func failedDirectControlsPreserveDurableIntentAndDevicePreset() async {
   let app = transactionTestApp()
   let device = transactionTestDevice()
@@ -1474,7 +1524,8 @@ private func makeTransactionFixture(
     store: store,
     backend: backend,
     preferencesStore: preferencesStore,
-    presetsStore: presetsStore
+    presetsStore: presetsStore,
+    sessionStore: sessionStore
   )
 }
 
@@ -1483,6 +1534,7 @@ private struct TransactionFixture {
   let backend: TransactionBackend
   let preferencesStore: TransactionPreferencesStore
   let presetsStore: TransactionDevicePresetsStore
+  let sessionStore: TransactionSessionStore
 }
 
 private func transactionSnapshot(apps: [AudioApp], device: AudioDevice) -> AudioSessionSnapshot {
@@ -1512,7 +1564,7 @@ private actor TransactionBackend: AudioControlBackend {
   nonisolated let deviceChangeEvents: AsyncStream<Void> = AsyncStream { $0.finish() }
 
   private var snapshot: AudioSessionSnapshot
-  private let refreshSnapshot: AudioSessionSnapshot?
+  private var refreshSnapshot: AudioSessionSnapshot?
   private var outcomes: [AppIntentApplyOutcome]
   private var profileOutcomes: [ProfileRowApplyOutcome]
   private let suspendFirstIntent: Bool
@@ -1522,6 +1574,7 @@ private actor TransactionBackend: AudioControlBackend {
   private var profileCalls: [(profile: Profile, generation: UInt64)] = []
   private var latestGenerationByAppID: [String: UInt64] = [:]
   private var completedIntents = 0
+  private var refreshCalls = 0
   private var diagnosticsCalls = 0
   private var firstIntentIsSuspended = false
   private var firstIntentResume: CheckedContinuation<Void, Never>?
@@ -1551,8 +1604,12 @@ private actor TransactionBackend: AudioControlBackend {
   func recordedIntents() -> [AppRouteIntent] { intents }
   func recordedProfileCalls() -> [(profile: Profile, generation: UInt64)] { profileCalls }
   func completedIntentCount() -> Int { completedIntents }
+  func refreshCallCount() -> Int { refreshCalls }
   func diagnosticsCallCount() -> Int { diagnosticsCalls }
   func currentDeviceID() -> String? { snapshot.currentDevice?.id }
+  func setRefreshSnapshot(_ replacement: AudioSessionSnapshot) {
+    refreshSnapshot = replacement
+  }
   func replaceCurrentDevice(_ device: AudioDevice) {
     snapshot.currentDevice = device
   }
@@ -1673,7 +1730,12 @@ private actor TransactionBackend: AudioControlBackend {
   func stop() async {}
   func currentSnapshot() async -> AudioSessionSnapshot { snapshot }
   func refresh() async throws -> AudioSessionSnapshot {
-    if let refreshSnapshot { snapshot = refreshSnapshot }
+    refreshCalls += 1
+    if var refreshSnapshot {
+      refreshSnapshot.updatedAt = .now
+      snapshot = refreshSnapshot
+      self.refreshSnapshot = refreshSnapshot
+    }
     return snapshot
   }
   func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws {}
@@ -1913,8 +1975,16 @@ private final class TransactionProfilesStore: ProfilesPersisting, @unchecked Sen
 
 private final class TransactionSessionStore: SessionPersisting, @unchecked Sendable {
   var value: AudioSessionSnapshot?
+  private let lock = NSLock()
+  private var saves = 0
+  var saveCount: Int { lock.withLock { saves } }
   func load() -> AudioSessionSnapshot? { value }
-  func save(_ snapshot: AudioSessionSnapshot) async throws { value = snapshot }
+  func save(_ snapshot: AudioSessionSnapshot) async throws {
+    lock.withLock {
+      value = snapshot
+      saves += 1
+    }
+  }
   func flush() async throws {}
   func consumeDidRecoverFromCorruptFile() -> Bool { false }
 }

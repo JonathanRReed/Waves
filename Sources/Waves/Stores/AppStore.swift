@@ -1462,7 +1462,7 @@ final class AppStore {
     }
   }
 
-  private func performSilentSessionRefresh() async {
+  func performSilentSessionRefresh() async {
     guard startupState == .running,
       !isRefreshing,
       !isRecovering,
@@ -1479,18 +1479,52 @@ final class AppStore {
     do {
       let knownAppIDs = Set(session.apps.map(\.logicalID))
       let rebuilt = try await backend.refresh()
-      session = mergedSession(with: rebuilt, cached: session)
-      cleanupStaleEntries()
-      await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
-      persistSessionSnapshot()
-      diagnostics = await backend.diagnosticsReport()
-      onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-      availableDevices = await backend.availableOutputDevices()
+      let merged = mergedSession(with: rebuilt, cached: session)
+      if !Self.sessionContentMatches(merged, session) {
+        session = merged
+        cleanupStaleEntries()
+        await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
+        persistSessionSnapshot()
+      }
+      let refreshedDiagnostics = await backend.diagnosticsReport()
+      if !Self.diagnosticsContentMatches(refreshedDiagnostics, diagnostics) {
+        diagnostics = refreshedDiagnostics
+      }
+      let captureAuthorization = await backend.captureAuthorizationResult()
+      if onboarding.captureAuthorization != captureAuthorization {
+        onboarding.captureAuthorization = captureAuthorization
+      }
+      let devices = await backend.availableOutputDevices()
+      if availableDevices != devices {
+        availableDevices = devices
+      }
       syncOnboarding(using: session)
       checkAutoPauseMusic()
     } catch {
       logger.debug("Silent session refresh failed: \(error.localizedDescription)")
     }
+  }
+
+  private static func sessionContentMatches(
+    _ lhs: AudioSessionSnapshot,
+    _ rhs: AudioSessionSnapshot
+  ) -> Bool {
+    var normalizedLHS = lhs
+    var normalizedRHS = rhs
+    normalizedLHS.updatedAt = .distantPast
+    normalizedRHS.updatedAt = .distantPast
+    return normalizedLHS == normalizedRHS
+  }
+
+  private static func diagnosticsContentMatches(
+    _ lhs: DiagnosticsReport,
+    _ rhs: DiagnosticsReport?
+  ) -> Bool {
+    guard var normalizedRHS = rhs else { return false }
+    var normalizedLHS = lhs
+    normalizedLHS.generatedAt = .distantPast
+    normalizedRHS.generatedAt = .distantPast
+    return normalizedLHS == normalizedRHS
   }
 
   func handleURLScheme(_ url: URL) {
@@ -5105,23 +5139,27 @@ final class AppStore {
   }
 
   private func syncOnboarding(using snapshot: AudioSessionSnapshot) {
-    onboarding.hasCompletedPrivacySetup = preferences.hasCompletedPrivacySetup
-    onboarding.audioComponentInstalled = snapshot.backendStatus.isAudioComponentInstalled
-    switch onboarding.captureAuthorization {
+    var next = onboarding
+    next.hasCompletedPrivacySetup = preferences.hasCompletedPrivacySetup
+    next.audioComponentInstalled = snapshot.backendStatus.isAudioComponentInstalled
+    switch next.captureAuthorization {
     case .some(.authorized):
-      onboarding.permissionsGranted = true
+      next.permissionsGranted = true
     case .some(.notGranted), .some(.undetermined), .some(.unsupported), .some(.probeFailed):
-      onboarding.permissionsGranted = false
+      next.permissionsGranted = false
     case .none:
-      onboarding.permissionsGranted =
+      next.permissionsGranted =
         preferences.hasCompletedPrivacySetup
         && snapshot.backendStatus.hasRequiredPermissions
     }
-    onboarding.outputDeviceVisible = snapshot.currentDevice != nil
-    onboarding.routeHealthReady =
+    next.outputDeviceVisible = snapshot.currentDevice != nil
+    next.routeHealthReady =
       preferences.hasCompletedPrivacySetup
-      && onboarding.permissionsGranted
+      && next.permissionsGranted
       && snapshot.backendStatus.isRouteRecoveryHealthy
+    if onboarding != next {
+      onboarding = next
+    }
     reconcileLoginItemStatus()
   }
 
@@ -5138,10 +5176,16 @@ final class AppStore {
   func reconcileLoginItemStatus() {
     guard startupState != .shuttingDown else { return }
     let status = loginItemService.status
-    loginItemStatus = status
+    if loginItemStatus != status {
+      loginItemStatus = status
+    }
     let launchAtLoginIntentEnabled = status.isUserIntentEnabled
-    onboarding.launchAtLoginEnabled = status.isEnabled
-    onboarding.launchAtLoginRequiresApproval = status.requiresApproval
+    if onboarding.launchAtLoginEnabled != status.isEnabled
+      || onboarding.launchAtLoginRequiresApproval != status.requiresApproval
+    {
+      onboarding.launchAtLoginEnabled = status.isEnabled
+      onboarding.launchAtLoginRequiresApproval = status.requiresApproval
+    }
     // Persist the OS-derived launch-at-login state on every reconcile so a
     // mid-session change reaches disk, not only when Settings happens to be
     // open at quit. Guarded by a change check so the frequent refresh/level
@@ -5389,7 +5433,7 @@ private extension Array where Element == AudioApp {
   }
 }
 
-struct OnboardingState {
+struct OnboardingState: Equatable {
   var hasCompletedPrivacySetup = false
   var captureAuthorization: CaptureAuthorizationResult?
   var audioComponentInstalled = false
