@@ -492,6 +492,15 @@ class ReleaseInfraTest < Minitest::Test
     assert_operator "/private/tmp/waves-tsan-control.XXXXXX/control.sock".bytesize, :<, 104
   end
 
+  def test_quality_gate_isolates_rendered_ui_from_timing_sensitive_tests
+    quality_gate = File.read(File.expand_path("../quality-gate.sh", __dir__))
+
+    assert_includes quality_gate, "swift test --skip RenderedUISmokeTests"
+    assert_includes quality_gate, "CI=1"
+    assert_includes quality_gate, 'WAVES_QA_OUTPUT="$QUALITY_HOME/rendered-ui"'
+    assert_includes quality_gate, "swift test --filter RenderedUISmokeTests"
+  end
+
   def test_packager_uses_the_stable_macos_system_bash
     packager = File.expand_path("../build_and_run.sh", __dir__)
     assert_equal "#!/bin/bash -p", File.foreach(packager).first.chomp

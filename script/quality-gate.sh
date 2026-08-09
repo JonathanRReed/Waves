@@ -56,8 +56,13 @@ run_build() {
 }
 
 run_tests() {
-  run_phase "${WAVES_PHASE_TIMEOUT_TESTS:-1800}" "Ordinary isolated Swift test suite" \
-    /usr/bin/env HOME="$QUALITY_HOME" CFFIXED_USER_HOME="$QUALITY_HOME" swift test
+  run_phase "${WAVES_PHASE_TIMEOUT_TESTS:-1800}" "Ordinary isolated Swift non-rendered suite" \
+    /usr/bin/env HOME="$QUALITY_HOME" CFFIXED_USER_HOME="$QUALITY_HOME" \
+    swift test --skip RenderedUISmokeTests
+  run_phase "${WAVES_PHASE_TIMEOUT_TESTS:-1800}" "Isolated rendered UI suite" \
+    /usr/bin/env HOME="$QUALITY_HOME" CFFIXED_USER_HOME="$QUALITY_HOME" \
+    CI=1 WAVES_QA_OUTPUT="$QUALITY_HOME/rendered-ui" \
+    swift test --filter RenderedUISmokeTests
 }
 
 run_tsan() {
