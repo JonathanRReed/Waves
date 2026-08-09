@@ -96,7 +96,7 @@ import Testing
 @MainActor
 @Test func unsubscribingRearmsTheRealSocketIdleTimeout() async throws {
   let fixture = await ControlSocketFixture.make(
-    timeouts: ControlConnectionTimeouts(handshake: .milliseconds(100), idle: .milliseconds(250)))
+    timeouts: ControlConnectionTimeouts(handshake: .milliseconds(100), idle: .seconds(1)))
   defer { fixture.stop() }
   try fixture.server.start()
 
@@ -109,12 +109,12 @@ import Testing
 
   // Stay connected well past the idle threshold while subscribed, then prove
   // unsubscribe re-arms the ordinary idle timer on the real socket.
-  try? await Task.sleep(for: .milliseconds(500))
+  try? await Task.sleep(for: .milliseconds(1_500))
   #expect(fixture.server.connectionCount == 1)
 
   try client.write("{\"id\":3,\"cmd\":\"unsubscribe\"}\n")
   #expect((try await client.readLine()).contains(#""id":3"#))
-  #expect(await client.reachesEOF(timeout: .seconds(1)))
+  #expect(await client.reachesEOF(timeout: .seconds(2)))
   #expect(fixture.server.connectionCount == 0)
 }
 
