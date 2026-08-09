@@ -85,9 +85,11 @@ import WavesAudioCore
   fixture.store.setMuted(true, for: app)
   await fixture.backend.waitUntilFirstIntentIsSuspended()
   fixture.store.setVolumeBoost(3, for: app)
-  await fixture.store.drainAppIntentTransactions()
-
+  let drain = Task { @MainActor in await fixture.store.drainAppIntentTransactions() }
+  await Task.yield()
+  #expect(fixture.store.trackedAppIntentTaskCount == 2)
   await fixture.backend.resumeFirstIntent()
+  await drain.value
   await waitUntil { await fixture.backend.completedIntentCount() == 2 }
 
   let current = fixture.store.session.apps.first
@@ -107,6 +109,34 @@ import WavesAudioCore
   #expect(!fixture.store.toasts.contains { $0.title == "Mute toggle failed" })
   #expect(fixture.preferencesStore.saveCount == 1)
   #expect(fixture.presetsStore.saveCount == 1)
+}
+
+@MainActor
+@Test func shutdownWaitsForCancellationInsensitiveSupersededIntent() async {
+  let app = transactionTestApp(id: "shutdown.retained")
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    outcomes: [.failed, .applied],
+    suspendFirstIntent: true
+  )
+
+  fixture.store.setMuted(true, for: app)
+  await fixture.backend.waitUntilFirstIntentIsSuspended()
+  fixture.store.setVolumeBoost(2, for: app)
+  #expect(fixture.store.trackedAppIntentTaskCount == 2)
+
+  let shutdown = Task { @MainActor in await fixture.store.shutdown() }
+  await Task.yield()
+  await Task.yield()
+  #expect(fixture.store.startupState == .shuttingDown)
+  #expect(fixture.store.shutdownResult == nil)
+  #expect(fixture.store.trackedAppIntentTaskCount > 0)
+
+  await fixture.backend.resumeFirstIntent()
+  _ = await shutdown.value
+  #expect(fixture.store.trackedAppIntentTaskCount == 0)
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
 }
 
 @MainActor

@@ -132,6 +132,50 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func appIntentCoordinatorRetainsCancellationInsensitiveSupersededWorkUntilSettlement() async {
+  let coordinator = AppIntentCoordinator()
+  let gate = CoordinatorIntentGate()
+  let firstGeneration = coordinator.allocateGeneration()
+  coordinator.setCurrentGeneration(firstGeneration, for: "music")
+  let first = Task<AppIntentApplyResult, Never> {
+    await gate.wait()
+    return coordinatorIntentResult(generation: firstGeneration)
+  }
+  coordinator.registerAppTask(first, for: "music")
+  await gate.waitUntilStarted()
+
+  let secondGeneration = coordinator.allocateGeneration()
+  coordinator.setCurrentGeneration(secondGeneration, for: "music")
+  let second = Task<AppIntentApplyResult, Never> {
+    coordinatorIntentResult(generation: secondGeneration)
+  }
+  coordinator.registerAppTask(second, for: "music")
+
+  #expect(coordinator.lifecycleSnapshot.appTransactions == 2)
+  let drain = Task { @MainActor in await coordinator.drain() }
+  await Task.yield()
+  #expect(coordinator.lifecycleSnapshot.appTransactions == 2)
+
+  await gate.release()
+  await drain.value
+  #expect(coordinator.lifecycleSnapshot.trackedTaskCount == 0)
+}
+
+private func coordinatorIntentResult(generation: UInt64) -> AppIntentApplyResult {
+  AppIntentApplyResult(
+    appID: "music",
+    generation: generation,
+    outcome: .noChange,
+    resultingApp: nil,
+    backendStatus: BackendStatus(
+      isAudioComponentInstalled: true,
+      hasRequiredPermissions: true,
+      isRouteRecoveryHealthy: true
+    )
+  )
+}
+
+@MainActor
 @Test func adaptiveCoordinatorDeduplicatesAndPeriodicallyRepublishes() {
   let clock = CoordinatorTestMonotonicClock(now: 100)
   let coordinator = AdaptiveMixCoordinator(republishPasses: 2, now: clock.read)
@@ -353,6 +397,25 @@ final class CoordinatorTestClock: @unchecked Sendable {
       if hasSleeper { return }
       await Task.yield()
     }
+  }
+}
+
+private actor CoordinatorIntentGate {
+  private var continuation: CheckedContinuation<Void, Never>?
+  private var started = false
+
+  func wait() async {
+    started = true
+    await withCheckedContinuation { continuation = $0 }
+  }
+
+  func waitUntilStarted() async {
+    while !started { await Task.yield() }
+  }
+
+  func release() {
+    continuation?.resume()
+    continuation = nil
   }
 }
 
