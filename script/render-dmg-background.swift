@@ -49,6 +49,16 @@ let glow = NSGradient(
 )
 glow?.draw(in: NSBezierPath(ovalIn: glowRect), relativeCenterPosition: .zero)
 
+let labelPlateColor = NSColor(calibratedWhite: 0.88, alpha: 0.94)
+labelPlateColor.setFill()
+for originX in [110.0, 430.0] {
+  NSBezierPath(
+    roundedRect: NSRect(x: originX, y: 32, width: 120, height: 38),
+    xRadius: 10,
+    yRadius: 10
+  ).fill()
+}
+
 let instructionStyle = NSMutableParagraphStyle()
 instructionStyle.alignment = .center
 let titleAttributes: [NSAttributedString.Key: Any] = [

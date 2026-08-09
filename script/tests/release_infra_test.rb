@@ -71,6 +71,36 @@ class ReleaseInfraTest < Minitest::Test
       assert dimension_status.success?, dimension_error
       assert_match(/pixelWidth: 660/, dimensions)
       assert_match(/pixelHeight: 430/, dimensions)
+
+      contrast_probe = File.join(directory, "contrast-probe.swift")
+      File.write(
+        contrast_probe,
+        <<~SWIFT
+          import AppKit
+          import Foundation
+
+          let url = URL(fileURLWithPath: CommandLine.arguments[1])
+          guard let data = try? Data(contentsOf: url),
+                let bitmap = NSBitmapImageRep(data: data) else {
+            exit(2)
+          }
+          for point in [NSPoint(x: 170, y: 380), NSPoint(x: 490, y: 380)] {
+            guard let color = bitmap.colorAt(x: Int(point.x), y: Int(point.y))?.usingColorSpace(.deviceRGB) else {
+              exit(3)
+            }
+            let luminance = (0.2126 * color.redComponent)
+              + (0.7152 * color.greenComponent)
+              + (0.0722 * color.blueComponent)
+            print(luminance)
+          }
+        SWIFT
+      )
+      contrast, contrast_error, contrast_status = Open3.capture3(swift, contrast_probe, output)
+      assert contrast_status.success?, contrast_error
+      luminances = contrast.lines.map { |line| Float(line) }
+      assert_equal 2, luminances.length
+      assert luminances.all? { |value| value >= 0.6 },
+             "Finder icon label zones must remain light enough for its black labels: #{luminances.inspect}"
     end
   end
 
