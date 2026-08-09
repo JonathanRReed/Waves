@@ -1148,48 +1148,126 @@ private struct OutputSummaryView: View {
   }
 }
 
+struct RouteHealthBadgeSemantics: Equatable, Sendable {
+  enum Interaction: Equatable, Sendable {
+    case statusOnly
+    case recoverAllRoutes
+  }
+
+  let interaction: Interaction
+  let visibleLabel: String
+  let accessibilityLabel: String
+  let accessibilityValue: String?
+  let help: String
+  let hint: String?
+
+  init(contextual presentation: RouteHealthPresentation) {
+    if presentation.tone == .error {
+      self.init(
+        recoveryStatus: presentation.title,
+        detail: presentation.accessibilityValue
+      )
+    } else {
+      self.init(
+        interaction: .statusOnly,
+        visibleLabel: presentation.title,
+        accessibilityLabel: presentation.accessibilityLabel,
+        accessibilityValue: presentation.accessibilityValue,
+        help: presentation.help,
+        hint: presentation.help
+      )
+    }
+  }
+
+  init(genericTitle: String, isHealthy: Bool) {
+    if isHealthy {
+      self.init(
+        interaction: .statusOnly,
+        visibleLabel: genericTitle,
+        accessibilityLabel: "Routing status: \(genericTitle)",
+        accessibilityValue: nil,
+        help: "Routing status: \(genericTitle)",
+        hint: nil
+      )
+    } else {
+      self.init(recoveryStatus: genericTitle, detail: nil)
+    }
+  }
+
+  private init(recoveryStatus: String, detail: String?) {
+    interaction = .recoverAllRoutes
+    visibleLabel = "Recover All Routes"
+    accessibilityLabel = "Recover all managed Waves routes"
+    accessibilityValue = [recoveryStatus, detail]
+      .compactMap { $0 }
+      .joined(separator: ". ")
+    help = "\(recoveryStatus). Rebuild all managed Waves routes."
+    hint = "Reattaches every active per-app audio route managed by Waves."
+  }
+
+  private init(
+    interaction: Interaction,
+    visibleLabel: String,
+    accessibilityLabel: String,
+    accessibilityValue: String?,
+    help: String,
+    hint: String?
+  ) {
+    self.interaction = interaction
+    self.visibleLabel = visibleLabel
+    self.accessibilityLabel = accessibilityLabel
+    self.accessibilityValue = accessibilityValue
+    self.help = help
+    self.hint = hint
+  }
+}
+
 private struct RouteHealthBadge: View {
   @Environment(AppStore.self) private var store
 
   var body: some View {
     if let contextualPresentation {
-      if contextualPresentation.tone == .error {
+      let semantics = RouteHealthBadgeSemantics(contextual: contextualPresentation)
+      if semantics.interaction == .recoverAllRoutes {
         Button {
           store.recoverRoutes()
         } label: {
-          contextualBadge(contextualPresentation)
+          contextualBadge(contextualPresentation, label: semantics.visibleLabel)
         }
         .buttonStyle(.plain)
         .disabled(store.isRecovering)
-        .help(Text(contextualPresentation.help))
-        .accessibilityLabel(Text(contextualPresentation.accessibilityLabel))
-        .accessibilityValue(Text(contextualPresentation.accessibilityValue))
-        .accessibilityHint("Reattaches active per-app audio routes.")
+        .help(Text(semantics.help))
+        .accessibilityLabel(Text(semantics.accessibilityLabel))
+        .accessibilityValue(Text(semantics.accessibilityValue ?? ""))
+        .accessibilityHint(Text(semantics.hint ?? ""))
       } else {
-        contextualBadge(contextualPresentation)
-          .help(Text(contextualPresentation.help))
-          .accessibilityLabel(Text(contextualPresentation.accessibilityLabel))
-          .accessibilityValue(Text(contextualPresentation.accessibilityValue))
-          .accessibilityHint(Text(contextualPresentation.help))
+        contextualBadge(contextualPresentation, label: semantics.visibleLabel)
+          .help(Text(semantics.help))
+          .accessibilityLabel(Text(semantics.accessibilityLabel))
+          .accessibilityValue(Text(semantics.accessibilityValue ?? ""))
+          .accessibilityHint(Text(semantics.hint ?? ""))
       }
       // Healthy: a quiet status chip. Degraded: a button that runs recovery right
       // from where the problem is reported, instead of dead-ending in a tooltip and
       // hiding the remedy behind an obscure toolbar glyph.
     } else if isHealthy {
-      badge
-        .help(Text("Routing status: \(title)"))
-        .accessibilityLabel(Text("Routing status: \(title)"))
+      let semantics = RouteHealthBadgeSemantics(genericTitle: title, isHealthy: true)
+      badge(label: semantics.visibleLabel)
+        .help(Text(semantics.help))
+        .accessibilityLabel(Text(semantics.accessibilityLabel))
     } else {
+      let semantics = RouteHealthBadgeSemantics(genericTitle: title, isHealthy: false)
       Button {
         store.recoverRoutes()
       } label: {
-        badge
+        badge(label: semantics.visibleLabel)
       }
       .buttonStyle(.plain)
       .disabled(store.isRecovering)
-      .help(Text("\(title). Click to recover managed routes."))
-      .accessibilityLabel(Text("Routing status: \(title)"))
-      .accessibilityHint("Reattaches active per-app audio routes.")
+      .help(Text(semantics.help))
+      .accessibilityLabel(Text(semantics.accessibilityLabel))
+      .accessibilityValue(Text(semantics.accessibilityValue ?? ""))
+      .accessibilityHint(Text(semantics.hint ?? ""))
     }
   }
 
@@ -1209,8 +1287,11 @@ private struct RouteHealthBadge: View {
     return nil
   }
 
-  private func contextualBadge(_ presentation: RouteHealthPresentation) -> some View {
-    Label(presentation.title, systemImage: presentation.symbolName)
+  private func contextualBadge(
+    _ presentation: RouteHealthPresentation,
+    label: String
+  ) -> some View {
+    Label(label, systemImage: presentation.symbolName)
       .font(.caption.weight(.medium))
       .foregroundStyle(contextualColor(presentation.tone))
       .padding(.horizontal, 8)
@@ -1228,8 +1309,8 @@ private struct RouteHealthBadge: View {
     }
   }
 
-  private var badge: some View {
-    Label(title, systemImage: systemImage)
+  private func badge(label: String) -> some View {
+    Label(label, systemImage: systemImage)
       .font(.caption.weight(.medium))
       .foregroundStyle(color)
       .padding(.horizontal, 8)

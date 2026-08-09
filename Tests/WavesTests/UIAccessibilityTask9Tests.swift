@@ -119,6 +119,55 @@ import WavesAudioCore
   }
 }
 
+@Test func headerRouteHealthBadgeMakesEveryRecoveryActionExplicitlyGlobal() {
+  let exhausted = RouteHealthPresentation(
+    app: task9App(state: .error, context: .geometryRecoveryExhausted)
+  )
+  let contextualError = RouteHealthBadgeSemantics(contextual: exhausted)
+  #expect(contextualError.interaction == .recoverAllRoutes)
+  #expect(contextualError.visibleLabel == "Recover All Routes")
+  #expect(contextualError.accessibilityLabel == "Recover all managed Waves routes")
+  #expect(contextualError.accessibilityValue == "Recovery failed. Geometry retry limit reached")
+  #expect(contextualError.help == "Recovery failed. Rebuild all managed Waves routes.")
+  #expect(
+    contextualError.hint
+      == "Reattaches every active per-app audio route managed by Waves."
+  )
+
+  let genericUnhealthy = RouteHealthBadgeSemantics(
+    genericTitle: "Needs attention",
+    isHealthy: false
+  )
+  #expect(genericUnhealthy.interaction == .recoverAllRoutes)
+  #expect(genericUnhealthy.visibleLabel == "Recover All Routes")
+  #expect(genericUnhealthy.accessibilityLabel == "Recover all managed Waves routes")
+  #expect(genericUnhealthy.accessibilityValue == "Needs attention")
+  #expect(genericUnhealthy.help == "Needs attention. Rebuild all managed Waves routes.")
+  #expect(
+    genericUnhealthy.hint
+      == "Reattaches every active per-app audio route managed by Waves."
+  )
+
+  let waveLink = RouteHealthPresentation(
+    app: task9App(state: .monitorOnly, context: .verifiedRouterOwnership)
+  )
+  let contextualStatus = RouteHealthBadgeSemantics(contextual: waveLink)
+  #expect(contextualStatus.interaction == .statusOnly)
+  #expect(contextualStatus.visibleLabel == "Wave Link route")
+  #expect(contextualStatus.accessibilityLabel == "Route status: Wave Link route")
+  #expect(contextualStatus.accessibilityValue == "Claimed by verified Wave Link")
+  #expect(contextualStatus.help == waveLink.help)
+  #expect(contextualStatus.hint == waveLink.help)
+
+  let genericHealthy = RouteHealthBadgeSemantics(genericTitle: "Ready", isHealthy: true)
+  #expect(genericHealthy.interaction == .statusOnly)
+  #expect(genericHealthy.visibleLabel == "Ready")
+  #expect(genericHealthy.accessibilityLabel == "Routing status: Ready")
+  #expect(genericHealthy.accessibilityValue == nil)
+  #expect(genericHealthy.help == "Routing status: Ready")
+  #expect(genericHealthy.hint == nil)
+}
+
 @Test func routeContextCapabilityPolicyPreventsMisleadingControl() {
   let ordinary = MixerRouteControlPolicy(app: task9App(state: .monitorOnly))
   #expect(ordinary.allowsAudioControl)
