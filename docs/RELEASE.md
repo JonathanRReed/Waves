@@ -30,12 +30,15 @@ architectures, hashes, signatures, notarization, Gatekeeper result, local QA,
 and remote Elgato result. A source build or local package check cannot substitute
 for any missing field.
 
-`release/metadata.json` is the only release value authority. Its strict reader
+`release/metadata.json` is the only release value and trust-policy authority. Its strict reader
 rejects malformed JSON, duplicate or unknown keys, noncanonical versions and
 deployment floors, nonpositive build numbers, and any bundle or Developer ID
 identity other than the pinned Waves values. The build, appcast, package,
 workflow, changelog, cask, and evidence checks all read that file rather than
-carrying their own defaults.
+carrying their own defaults. It also pins the SSH release-tag principal and
+public key, the external-receipt issuers, and the Waves-specific Sparkle account
+and Ed25519 public key. Private keys and Keychain contents never belong in this
+file.
 
 ## Prepare Release Metadata
 
@@ -103,18 +106,23 @@ isolated test suite, focused Thread Sanitizer tests, universal package
 construction, package verification, packaged GUI smoke, the realtime callback
 audit, and release-infrastructure self-tests.
 
-`--release-check` is the fresh distribution build path. It rejects tracked
+`--release-check` is the fresh distribution build path. It rejects caller
+metadata and SDK overrides, ignores caller `PATH` for compiler selection, and
+accepts only a root-owned Apple developer directory, SDK, and Swift compiler. It rejects tracked
 changes and ordinary or ignored untracked build inputs, creates an exact Git
 archive in a private temporary source tree, and uses new private SwiftPM scratch
 directories for both slices. It builds arm64 and x86_64, stamps the full source
 revision plus source-archive and build-recipe hashes into `Info.plist`, creates
-`dist/Waves.app`, creates a matching universal `dist/Waves.app.dSYM` when
-`dsymutil` is available, stages a clean installer layout, creates
-`dist/Waves.dmg`, and runs the common package checks. Without `SIGN_IDENTITY`,
-the app is ad hoc signed for local validation.
+and validates `Waves.app`, creates a matching universal `Waves.app.dSYM` when
+`dsymutil` is available, stages a clean installer layout, creates `Waves.dmg`,
+and runs the common package checks inside one fresh mode-0700 root. Only
+finalized, hash-identical outputs are copied to `dist` through guarded atomic
+publication. Without `SIGN_IDENTITY`, the app is ad hoc signed for local
+validation.
 
-`--verify` only validates the existing app, dSYM, and DMG. It does not build,
-recreate, or overwrite them. `--package-smoke` mounts the existing DMG, launches
+`--verify` first copies the existing app, dSYM, and DMG into one fresh private
+root, then validates only that stable snapshot. It does not build or recreate
+them. `--package-smoke` uses the same private snapshot, mounts its DMG, launches
 the packaged app executable for a short health window with isolated temporary
 home and Application Support directories, records a smoke log, verifies that no
 session was persisted before privacy consent, and terminates the launched test
@@ -203,10 +211,16 @@ ruby script/release_tool.rb tag-envelope \
   dist/release-tag-annotation.txt
 ```
 
-Only an annotated `vX.Y.Z` tag whose annotation embeds that canonical manifest
-and sidecar hash can pass `./script/release-gate.sh publication`. A lightweight
-tag, wrong revision, dirty tree, mismatched `origin/main`, missing or skipped
-gate, pending remote result, or changed artifact hash fails.
+Only a cryptographically signed annotated `vX.Y.Z` tag whose annotation embeds
+that canonical manifest and sidecar hash can pass
+`./script/release-gate.sh publication`. Git verifies the SSH signature against
+the public key and `waves-commit-signing` principal pinned in canonical metadata,
+without using global Git signing configuration. A lightweight or unsigned tag,
+wrong key or principal, wrong revision, dirty tree, mismatched `origin/main`,
+missing or skipped gate, pending remote result, or changed artifact hash fails.
+The manifest also binds the security-scan and remote-Elgato receipt digests to
+the exact source revision and DMG, and binds the Apple notary-log digest and
+submission to that same DMG.
 
 Publication validation reuses all unsigned package checks and additionally
 requires:
@@ -263,16 +277,24 @@ gh release download "vX.Y.Z" --pattern "Waves.dmg" --pattern "Waves.dmg.sha256" 
 
 ```bash
 WAVES_RELEASE_TAG="vX.Y.Z" \
-WAVES_DSYM_BINARY="$PWD/dist/Waves.app.dSYM/Contents/Resources/DWARF/Waves" \
 EXPECTED_SHA256="$(cut -d ' ' -f 1 /tmp/waves-release/Waves.dmg.sha256)" \
   ./script/make_appcast.sh X.Y.Z /tmp/waves-release/Waves.dmg
 ```
 
 The script ignores every persistent `.build` cache and rejects `SIGN_UPDATE`
-overrides. It creates a fresh private source archive and SwiftPM scratch root,
-uses the exact checked-in `Package.resolved`, and executes only
-`artifacts/sparkle/Sparkle/bin/sign_update` after SwiftPM verifies the Sparkle
-artifact.
+and artifact-path overrides. It privately stages the downloaded DMG, canonical
+dSYM, and existing appcast before validation, creates a fresh exact-revision
+source archive and SwiftPM scratch root, uses the exact checked-in
+`Package.resolved`, and executes only the isolated Sparkle `generate_keys` and
+`sign_update` tools. It names account `com.jonathanreed.Waves` explicitly,
+requires the account public key to equal both canonical metadata and the
+packaged `SUPublicEDKey`, verifies the signature over the staged DMG, and
+atomically publishes only the finalized appcast.
+
+The Sparkle account is intentionally not created or migrated by these scripts.
+Candidate building, Developer ID signing, notarization, and candidate gates do
+not require it. Appcast publication fails closed until a separately authorized
+Keychain setup provisions that exact account with the matching private key.
 
 ```bash
 cp dist/appcast.xml ../Waves-site/public/appcast.xml

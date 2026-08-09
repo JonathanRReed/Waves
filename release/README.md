@@ -1,9 +1,12 @@
 # Waves Release Contracts
 
 `metadata.json` is the sole version, build, deployment-floor, bundle identifier,
-Developer ID identity, team, and designated-requirement authority for the
-current Waves candidate. `script/release_tool.rb` validates and exposes it to
-every build, appcast, package, workflow, cask, changelog, and evidence check.
+Developer ID identity, team, designated-requirement, signed-tag authority,
+external-receipt issuer, and Sparkle public-key policy for the current Waves
+candidate. `script/release_tool.rb` validates and exposes it to every build,
+appcast, package, workflow, cask, changelog, and evidence check. The tracked SSH
+and Sparkle public keys are verification material only. Private credentials and
+Git signing configuration remain outside the repository.
 
 The evidence generator consumes a Task 12 input object with these required
 sections:
@@ -15,9 +18,12 @@ sections:
 - native, Rosetta, Tahoe, Sequoia, and honest Sonoma-host results;
 - bundle identity, universal architectures, deployment floor, app/DMG/dSYM
   hashes, exact Developer ID identity, team, designated requirement, hardened
-  runtime, notarization UUID, stapling, and Gatekeeper;
+  runtime, notarization UUID, exact DMG binding, notary-log digest, stapling,
+  and Gatekeeper;
 - local QA, security, sanitizer, stress, updater, soak, plugin, live socket, and
   remote Elgato results;
+- immutable security-scan and remote-Elgato receipt digests bound to the exact
+  source revision and DMG;
 - skipped-gate and source-changing skip-CI equivalence records.
 
 Candidate sealing requires every local field to pass and permits only
@@ -28,15 +34,27 @@ never trusted from input.
 Generated evidence is canonical key-ordered JSON with a SHA-256 sidecar. The
 publication tag annotation embeds the canonical JSON and its digest, avoiding a
 self-referential tracked manifest while binding evidence to the exact tagged
-revision and artifact hashes. The scripts validate only. They never sign,
-notarize, create tags, push, upload, deploy, or publish.
+revision and artifact hashes. Publication additionally requires an SSH tag
+signature from the pinned `waves-commit-signing` principal and public key. The
+scripts validate only. They never create tags, push, upload, deploy, or publish.
 
-Distribution builds reject tracked changes and both ordinary and ignored
+Distribution builds reject ambient compiler, SDK, and metadata authority,
+tracked changes, and both ordinary and ignored
 untracked build inputs. They archive the exact Git revision into a private
 temporary source tree, build both architectures in new private SwiftPM scratch
 directories, and stamp the full revision, source-archive digest, and build-recipe
-digest into `Info.plist`. The release gate derives those values and every trust
-fact from the packaged artifact before comparing them with sealed evidence.
+digest into `Info.plist`. Assembly, signing, notarization, stapling, validation,
+and appcast signing operate on mode-0700 private snapshots with stable identity
+and hash checks. Only finalized outputs are copied to `dist` atomically. The
+release gate derives source values and every trust fact from the packaged
+artifact before comparing them with sealed evidence.
+
+Sparkle publication uses the explicit account `com.jonathanreed.Waves`, derives
+its public key through the exact isolated Sparkle tool, requires equality with
+the packaged `SUPublicEDKey`, and verifies the produced signature. The release
+scripts never provision or migrate that Keychain account, so appcast publication
+fails closed until the matching account is separately authorized. Candidate
+package creation and notarization remain independent of Sparkle publication.
 
 The focused Thread Sanitizer phase uses an isolated macro-free package graph.
 It copies the exact production sources plus the tracked `Package.resolved`,
