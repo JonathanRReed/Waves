@@ -80,13 +80,7 @@ module WavesRelease
   end
 
   module Metadata
-    EXPECTED = {
-      "schemaVersion" => 1,
-      "version" => "1.5.0",
-      "build" => 13,
-      "minimumMacOSVersion" => "14.2",
-    }.freeze
-    KEYS = EXPECTED.keys.freeze
+    KEYS = %w[schemaVersion version build minimumMacOSVersion].freeze
 
     module_function
 
@@ -99,15 +93,12 @@ module WavesRelease
 
       version = value["version"]
       raise Error, "release metadata version must be a canonical X.Y.Z string without leading zeroes" unless version.is_a?(String) && version.match?(/\A(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z/)
-      raise Error, "release metadata version must be 1.5.0" unless version == EXPECTED["version"]
 
       build = value["build"]
-      raise Error, "release metadata build must be integer 13" unless build.is_a?(Integer)
-      raise Error, "release metadata build must be 13" unless build == EXPECTED["build"]
+      raise Error, "release metadata build must be a positive integer" unless build.is_a?(Integer) && build.positive?
 
       floor = value["minimumMacOSVersion"]
       raise Error, "release metadata minimum macOS version must be canonical major.minor without leading zeroes" unless floor.is_a?(String) && floor.match?(/\A(0|[1-9]\d*)\.(0|[1-9]\d*)\z/)
-      raise Error, "release metadata minimum macOS version must be 14.2" unless floor == EXPECTED["minimumMacOSVersion"]
 
       value.freeze
     end
@@ -359,6 +350,32 @@ module WavesRelease
       raise Error, "tag evidence JSON is not canonical" unless CanonicalJSON.generate(manifest) == json
 
       {"manifest" => manifest, "digest" => digest}
+    end
+  end
+
+  module ArtifactEvidence
+    module_function
+
+    def default_paths(root)
+      {
+        "appExecutable" => File.join(root, "dist/Waves.app/Contents/MacOS/Waves"),
+        "dmg" => File.join(root, "dist/Waves.dmg"),
+        "dSYM" => File.join(root, "dist/Waves.app.dSYM/Contents/Resources/DWARF/Waves"),
+      }
+    end
+
+    def verify_hashes!(manifest:, paths:)
+      expected = manifest.dig("package", "hashes")
+      Validation.exact_keys!(expected, %w[appExecutable dmg dSYM], "package hashes")
+      Validation.exact_keys!(paths, %w[appExecutable dmg dSYM], "artifact paths")
+      paths.each do |name, path|
+        raise Error, "#{name} artifact not found at #{path}" unless File.file?(path)
+        actual = Digest::SHA256.file(path).hexdigest
+        unless actual == expected[name]
+          raise Error, "#{name} SHA-256 #{actual} does not match sealed evidence #{expected[name]}"
+        end
+      end
+      true
     end
   end
 
@@ -642,8 +659,30 @@ module WavesRelease
         raise Error, "evidence SHA-256 sidecar is malformed" unless digest
         File.write(output_path, TagEnvelope.build(json: json, digest: digest))
         puts "Wrote annotated-tag evidence envelope to #{output_path}."
+      when "history"
+        from_revision, to_revision, manifest_path = arguments
+        raise Error, "usage: release_tool.rb history FROM TO [MANIFEST]" unless to_revision
+        manifest = manifest_path ? StrictJSON.load(manifest_path) : nil
+        History.validate!(repo: root, from_revision: from_revision, to_revision: to_revision, manifest: manifest)
+        puts "Release source history policy passed for #{from_revision}..#{to_revision}."
+      when "publication-tag"
+        tag = arguments.shift
+        raise Error, "usage: release_tool.rb publication-tag TAG [OUTPUT_MANIFEST]" unless tag
+        metadata = Metadata.load(metadata_path)
+        parsed = PublicationTag.validate!(root: root, tag: tag, metadata: metadata)
+        if (output = arguments.shift)
+          File.write(output, CanonicalJSON.generate(parsed.fetch("manifest")))
+          File.write("#{output}.sha256", "#{parsed.fetch('digest')}  #{File.basename(output)}\n")
+        end
+        puts "Annotated publication tag #{tag} carries valid exact-revision evidence."
+      when "verify-artifacts"
+        manifest_path = arguments.shift
+        raise Error, "usage: release_tool.rb verify-artifacts MANIFEST" unless manifest_path
+        manifest = StrictJSON.load(manifest_path)
+        ArtifactEvidence.verify_hashes!(manifest: manifest, paths: ArtifactEvidence.default_paths(root))
+        puts "Signed candidate artifact hashes match sealed evidence."
       else
-        raise Error, "usage: release_tool.rb metadata|validate-repository|validate-workflows|evidence|tag-envelope"
+        raise Error, "usage: release_tool.rb metadata|validate-repository|validate-workflows|evidence|tag-envelope|history|publication-tag|verify-artifacts"
       end
     rescue Error => error
       warn "Error: #{error.message}"

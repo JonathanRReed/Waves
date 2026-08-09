@@ -131,6 +131,20 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_tracked_metadata_names_the_waves_1_5_target
+    metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
+    assert_equal VERSION, metadata.fetch("version")
+    assert_equal BUILD, metadata.fetch("build")
+    assert_equal FLOOR, metadata.fetch("minimumMacOSVersion")
+  end
+
+  def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
+    future = metadata_hash.merge("version" => "1.5.1", "build" => 14)
+    with_metadata(future) do |path|
+      assert_equal future, WavesRelease::Metadata.load(path)
+    end
+  end
+
   def test_metadata_rejects_absent_malformed_duplicate_unknown_and_drifted_values
     assert_release_error(/not found/) { WavesRelease::Metadata.load("/missing/waves-release.json") }
 
@@ -139,11 +153,10 @@ class ReleaseInfraTest < Minitest::Test
       ['{"schemaVersion":1,"version":"1.5.0","version":"1.5.1","build":13,"minimumMacOSVersion":"14.2"}', /duplicate key/],
       [metadata_hash.merge("extra" => true), /unknown key/],
       [metadata_hash.merge("version" => "01.5.0"), /version/],
-      [metadata_hash.merge("version" => "1.5.1"), /must be 1.5.0/],
       [metadata_hash.merge("build" => "13"), /integer/],
-      [metadata_hash.merge("build" => 14), /must be 13/],
+      [metadata_hash.merge("build" => 0), /positive integer/],
       [metadata_hash.merge("minimumMacOSVersion" => "014.2"), /minimum macOS/],
-      [metadata_hash.merge("minimumMacOSVersion" => "14.3"), /must be 14.2/],
+      [metadata_hash.merge("minimumMacOSVersion" => "14.2.0"), /minimum macOS/],
     ].each do |contents, message|
       with_metadata(contents) { |path| assert_release_error(message) { WavesRelease::Metadata.load(path) } }
     end
@@ -245,6 +258,39 @@ class ReleaseInfraTest < Minitest::Test
 
     assert_release_error(/SHA-256/) do
       WavesRelease::TagEnvelope.parse(envelope.sub("482", "481"))
+    end
+  end
+
+  def test_artifact_hash_contract_rejects_bytes_that_do_not_match_the_manifest
+    Dir.mktmpdir("waves-artifact-hashes") do |root|
+      app = File.join(root, "Waves")
+      dmg = File.join(root, "Waves.dmg")
+      dsym = File.join(root, "Waves.dSYM")
+      File.write(app, "app bytes")
+      File.write(dmg, "dmg bytes")
+      File.write(dsym, "dsym bytes")
+      manifest = WavesRelease::Evidence.seal(
+        input: evidence_input(remote: "passed"),
+        metadata: load_metadata,
+        profile: "publication"
+      )
+      manifest.fetch("package")["hashes"] = {
+        "appExecutable" => Digest::SHA256.file(app).hexdigest,
+        "dmg" => Digest::SHA256.file(dmg).hexdigest,
+        "dSYM" => Digest::SHA256.file(dsym).hexdigest,
+      }
+
+      WavesRelease::ArtifactEvidence.verify_hashes!(
+        manifest: manifest,
+        paths: {"appExecutable" => app, "dmg" => dmg, "dSYM" => dsym}
+      )
+      File.write(dmg, "tampered dmg bytes")
+      assert_release_error(/dmg SHA-256/) do
+        WavesRelease::ArtifactEvidence.verify_hashes!(
+          manifest: manifest,
+          paths: {"appExecutable" => app, "dmg" => dmg, "dSYM" => dsym}
+        )
+      end
     end
   end
 
