@@ -108,12 +108,13 @@ audit, and release-infrastructure self-tests.
 
 `--release-check` is the fresh distribution build path. It rejects caller
 metadata and SDK overrides, ignores caller `PATH` for compiler selection, and
-accepts only a root-owned Apple developer directory, SDK, and Swift compiler. It rejects tracked
-changes and ordinary or ignored untracked build inputs, creates an exact Git
-archive in a private temporary source tree, and uses new private SwiftPM scratch
-directories for both slices. It builds arm64 and x86_64, stamps the full source
-revision plus source-archive and build-recipe hashes into `Info.plist`, creates
-and validates `Waves.app`, creates a matching universal `Waves.app.dSYM` when
+accepts only a root-owned Apple developer directory, SDK, and Swift compiler.
+It rejects tracked changes and ordinary or ignored untracked build inputs,
+creates an exact Git archive in a private temporary source tree, and uses new
+private SwiftPM scratch directories for both slices. It builds arm64 and x86_64,
+stamps the full source revision plus source-archive and build-recipe hashes into
+`Info.plist`, creates and validates `Waves.app`, and creates a matching universal
+`Waves.app.dSYM` when
 `dsymutil` is available, stages a clean installer layout, creates `Waves.dmg`,
 and runs the common package checks inside one fresh mode-0700 root. Only
 finalized, hash-identical outputs are copied to `dist` through guarded atomic
