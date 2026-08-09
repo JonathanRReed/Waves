@@ -157,6 +157,7 @@ import WavesAudioCore
       == "Recover all managed Waves routes"
   )
   #expect(MixerRowAccessibility.recoveryHelp == "Rebuild all managed Waves routes")
+  #expect(MixerRowAccessibility.recoveryVisibleLabel == "Recover All Routes")
   #expect(
     MixerRowAccessibility.recoveryHint
       == "Reattaches every active per-app audio route managed by Waves."

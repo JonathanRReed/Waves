@@ -4,6 +4,7 @@ import WavesAudioCore
 
 enum MixerRowAccessibility {
   static let outputDeviceMenuLabel = "Output Device"
+  static let recoveryVisibleLabel = "Recover All Routes"
   static let recoveryHelp = "Rebuild all managed Waves routes"
   static let recoveryHint = "Reattaches every active per-app audio route managed by Waves."
 
@@ -827,7 +828,7 @@ struct RouteRecoveryButton: View {
         Image(systemName: "arrow.clockwise")
           .frame(width: 18, height: 18)
       } else {
-        Label("Recover", systemImage: "arrow.clockwise")
+        Label(MixerRowAccessibility.recoveryVisibleLabel, systemImage: "arrow.clockwise")
       }
     }
     .buttonStyle(.borderless)
