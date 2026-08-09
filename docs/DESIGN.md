@@ -56,11 +56,15 @@ components:
 
 Waves should feel like a compact macOS system utility that happens to expose powerful audio routing. The interface is task-first, dense enough for repeated use, and visually quiet enough to live beside native settings, Control Center, and menu-bar extras without feeling like a web dashboard.
 
-The current design uses a dark, layered audio-console atmosphere with cyan reserved for signal and action. Liquid Glass should come from system materials and modern SwiftUI structure first. Custom translucent surfaces are allowed only where they clarify app-specific mixer state.
+The current design uses a layered audio-console atmosphere with cyan reserved
+for signal and action. Waves and Graphite palettes each support explicit light,
+dark, and system appearances. Liquid Glass should come from system materials
+and modern SwiftUI structure first. Custom translucent surfaces are allowed
+only where they clarify app-specific mixer state.
 
 **Key Characteristics:**
 - Native macOS density with system fonts and standard controls.
-- Restrained dark materials with one signal accent.
+- Restrained adaptive materials with one signal accent.
 - Clear route-state language for visible, monitored, and managed apps.
 - Slider-first interaction, with diagnostics nearby but never dominant.
 
@@ -86,6 +90,11 @@ The palette is restrained: tinted night neutrals carry the shell, while cyan mar
 ### Named Rules
 
 **The Signal Rarity Rule.** Cyan appears only where audio state or a primary control path is live. Do not use it as decoration.
+
+**The Appearance Truth Rule.** Semantic surfaces and system materials adapt to
+the selected appearance. The night palette is a design reference, not a reason
+to hardcode dark foregrounds or backgrounds. Increase Contrast and Reduce
+Transparency must preserve hierarchy without relying on one translucent value.
 
 ## 3. Typography
 
@@ -123,6 +132,7 @@ Depth is primarily material-based, not shadow-based. Use system window, sidebar,
 ### Chips
 - **Style:** Small, semantic route-state labels with text plus icon where useful.
 - **State:** Visible, monitored, managed, degraded, and failed states must be distinguishable without color alone.
+- **Ownership:** Verified-active Wave Link fallback and mixed-output states name the router and attribution limit directly. They never imply that public Core Audio identified a tap creator or that Waves can take control from the chip.
 
 ### Cards / Containers
 - **Corner Style:** Compact custom surfaces use 14px; larger panels use 22px only when they are genuine app-specific surfaces.
@@ -138,6 +148,31 @@ Depth is primarily material-based, not shadow-based. Use system window, sidebar,
 ### Navigation
 - **Style:** `NavigationSplitView` for the main window, native `MenuBarExtra` for the compact mixer, and a dedicated `Settings` scene for preferences.
 - **Behavior:** Search applies across the current app list. Profiles and source filters should stay close to the mixer, not buried in a dashboard.
+
+### Route controls
+
+- **Managed:** Volume, mute, boost, EQ, and output actions are available.
+- **Ordinary monitoring:** Controls may begin Waves management when the route is eligible.
+- **Yielded:** Verified-active Wave Link with unattributable targets, plus Wave Link's own mixed output, disable Waves audio controls and explain where control belongs. Unrelated system taps are not treated as Wave Link evidence.
+- **Recovering:** Automatic geometry recovery disables route control while work is in progress.
+- **Exhausted:** The row and the header expose Recover Routes. Its label and help must say that it rebuilds all Waves-managed routes, not only the selected row.
+
+The header action must remain visible at supported window widths. Its semantic
+label, value, help, and action scope are production data consumed by the
+rendered control, not test-only descriptions.
+
+### Keyboard and assistive technology
+
+Arrow keys select a mixer row. Space or M toggles mute, = and - adjust volume,
+B cycles boost, P toggles pin, E opens EQ, O cycles output, and R invokes global
+recovery only when the selected route is exhausted. E and O use the same route
+capability policy as pointer controls. Command-R remains the separate global
+refresh command.
+
+Full and compact rows share accessible labels, values, hints, sort order, and
+actions. Rotors list only rendered apps. Route changes, global recovery, and
+profile validation announce through product callers. Reduce Motion removes
+continuous movement without hiding live or route state.
 
 ### Signature Component
 

@@ -9,6 +9,13 @@
 
 Waves is a native macOS per-app audio mixer. It uses local Core Audio process taps on macOS 14.2 or newer to route selected app audio through per-app volume, mute, boost, equalizer, and adaptive mixing controls before playback.
 
+## Release status
+
+Version **1.4.4** is the latest published, signed, and notarized release. Version
+**1.5.0 build 13** is in development and is not available from the download or
+Homebrew links below. Its publication remains gated on packaged-app validation,
+signed release evidence, and remote Wave Link plus physical Stream Deck tests.
+
 ## Features
 
 ### Core Audio Control
@@ -18,23 +25,27 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 - **Audio-Aware Discovery**: Uses Core Audio process output state when available, with a manageable running-app fallback
 - **Browser & Electron support**: Attributes audio from helper subprocesses (Chrome, Helium, Brave, Edge, Arc, and Electron apps play through a sandboxed "Audio Service" helper) back to the parent app, so they show as **Live** and are fully controllable — including picture-in-picture / popout video
 
-### Equalizer & Adaptive Mixing
+### Equalizer and Adaptive Mixing
 - **Per-App Equalizer**: Choose a simple 3-band curve or an advanced 8-band curve for each app
 - **EQ Presets**: Start from Flat, Voice Focus, Warm, Bass Reduce, or Treble Soften
-- **Speech Focus**: Gently lowers media while a designated voice app carries speech
-- **Loudness Balance**: Smooths large loudness differences between active apps without moving manual volume sliders
-- **Explicit Roles and Modes**: Set each app to Auto, Voice, Media, or Ignore, then choose Speech Focus, Loudness Balance, Both, or Off
+- **Shared Equalizer**: Shape all audio managed by Waves with a second independent curve
+- **Adaptive Mix**: Temporarily adjusts gain from each app's content type, assigned priority, strategy, and focus mode without moving manual sliders
+- **Speech-Aware Focus**: Voice and meeting apps must carry actual speech before they can lower another app
+- **Loudness Balance**: Smooths large loudness differences between active apps while respecting the selected priority policy
 
 ### Device Management
 - **Per-App Output Routing**: Send each app to a chosen output device
 - **Global Output Switching**: Change the system output device from the menu-bar panel
 - **Device Auto-Restore**: Automatically re-establishes audio routes when switching output devices
 - **Per-Device Volume Memory**: Remember volume settings for each app across different audio devices
+- **Wave Link Coexistence**: Recognizes verified active Wave Link Core Audio output, conservatively yields affected ordinary routes when public APIs cannot attribute its targets, and never wraps Wave Link's own mixed output
+- **Asynchronous Route Recovery**: Rebuilds changed audio geometry outside realtime callbacks and exposes progress or a global recovery action
 
-### Automation & Integration
-- **Keyboard Shortcuts**: Global hotkeys you assign yourself — volume and mute for the app in front, plus a mute shortcut for any specific app. No Accessibility permission required
+### Automation and Integration
+- **Keyboard Shortcuts**: Assign global hotkeys for the app in front and app-specific volume or mute actions. The focused mixer also has complete keyboard control. No Accessibility permission is required
 - **URL Scheme Automation**: Opt-in custom URL schemes for integration with other tools
-- **Auto-Pause Music**: Automatically pause music apps when conferencing apps become active
+- **External Control**: Opt-in, same-user Unix socket protocol for the bundled `wavesctl` tool and the separately versioned Stream Deck companion. Protocol version 1 remains stable
+- **Session-Only Call Automation**: Automatically mute or resume configured media during conferencing without turning temporary mute into durable user intent
 
 ### Profiles & Organization
 - **Profiles**: Group the apps you use together — like **Work** (Slack, Teams, browsers) or **Gaming** (Discord, Steam) — and switch between them from the sidebar or menu bar
@@ -51,6 +62,7 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 - **Liquid Glass**: Genuine `glassEffect` / `.glassProminent` on the floating layer on macOS 26 (Tahoe), with native button styling and a real `NSVisualEffectView` window backdrop on macOS 14.2–15; content cards stay tonal (not glass); honors Reduce Transparency, Reduce Motion, and Increase Contrast
 - **Empty State UI**: Helpful guidance when no audio apps are detected
 - **Setup Checklist**: Settings-based setup status for permissions, output device visibility, and route health
+- **Accessible Route State**: Full and compact controls expose labels, values, hints, actions, focus order, VoiceOver rotors, status announcements, and Reduce Motion behavior
 
 ## How Waves compares
 
@@ -156,14 +168,12 @@ See `docs/RELEASE.md` for the full release checklist.
 
 ### Keyboard Shortcuts
 
-Enable them in **Settings ▸ Shortcuts**, then click any shortcut to record your own.
+Enable them in **Settings ▸ Shortcuts & Automation**, then click any shortcut to record your own.
 Press Delete while recording to remove it.
 
-Acting on the app in front, with these defaults:
-
-- **⌘⌥↑**: Increase volume
-- **⌘⌥↓**: Decrease volume
-- **⌘⌥M**: Toggle mute
+New installs have no global chord assigned. In **Global Shortcuts**, record the
+combinations you want for frontmost-app volume, frontmost-app mute, and Show
+Waves. Existing installs may retain migrated legacy bindings.
 
 You can also give one specific app its own mute shortcut, so it works no matter
 what is in front — add it under **App Shortcuts**, or right-click the app in the
@@ -175,14 +185,28 @@ Waves registers only the combinations you assign, through the system's own
 hot-key API. It needs no Accessibility permission and never observes any other
 keystroke.
 
+While the mixer list is focused, use the arrow keys to select an app. Press
+Space or M to mute, = or - to adjust volume, B to cycle boost, P to pin, E to
+open that app's equalizer, O to cycle output, or R to run global route recovery
+when the selected route has exhausted automatic recovery. Capability-gated
+routes, including conservative Wave Link handoff, ignore controls Waves must not
+claim.
+
 ### URL Scheme Automation
 
-URL scheme automation is disabled by default for security. Enable it in General Settings before using these commands:
+URL scheme automation is disabled by default for security. Enable it in
+**Settings ▸ Shortcuts & Automation** before using these commands:
 
 - `waves://set-volume?app=APP_ID&volume=0.5` - Set volume for an app (0.0 to 1.0)
 - `waves://mute?app=APP_ID&muted=true` - Mute or unmute an app
 - `waves://apply-profile?name=Focus` - Apply a named profile (`apply-preset` still works as a deprecated alias)
 - `waves://refresh` - Refresh the audio session
+
+External socket control is a separate opt-in in the same pane. It listens only
+at `~/Library/Application Support/Waves/control.sock`, requires the same macOS
+user, and never opens a network port. The repository's `wavesctl` executable
+uses protocol version 1 to list apps, change volume or mute, read icons, and
+watch state changes.
 
 ### Profiles
 
@@ -199,31 +223,13 @@ When switching audio devices:
 
 ## Settings
 
-### General Settings
-- **Launch at login**: Start Waves automatically when you log in
-- **Show recent apps**: Display background apps in the list
-- **Show system processes**: Include system audio processes
-- **Auto-pause music during calls**: Pause media when conferencing apps are active
-- **Enable keyboard shortcuts**: Use global hotkeys for volume control
-- **Per-device volume memory**: Remember volumes per audio device
-- **URL scheme automation**: Allow local `waves://` automation commands after explicit opt-in
-- **Automatic update checks**: Let Sparkle check after you approve its consent prompt
-- **Sort apps by**: Choose sorting method (Activity, Name, Category, Manual)
-
-### Audio Settings
-- View current output device information
-- Read how managed routing captures and plays back app audio
-- Recover managed routes if needed
-
-### Profiles
-- Create, edit, delete, and manage profiles
-- Export profiles to JSON files
-- Import profiles from JSON files
-
-### Advanced
-- View running app inventory
-- Check diagnostics and system status
-- Recover managed routes if needed
+- **General**: Launch at login, appearance, update consent, and general behavior
+- **Mixer**: App visibility, sorting, call automation, route behavior, and per-device volume memory
+- **Profiles**: Create, edit, delete, export, import, and select a startup profile
+- **Shortcuts & Automation**: Global and app-specific hotkeys, URL automation, and protocol-v1 external control
+- **Setup**: Permission, output, route, and login-item readiness with non-destructive repair actions
+- **Diagnostics**: Current device and route health, Recover Routes, refresh, and bounded diagnostic copy
+- **Help**: Current keyboard, automation, profile, routing, and troubleshooting guidance
 
 ## Troubleshooting
 
@@ -233,18 +239,19 @@ When switching audio devices:
 - Try refreshing the app list (⌘R)
 
 ### Volume changes not applying
-- Use "Recover Routes" in the toolbar or Audio settings to re-establish audio routing
-- Check the Diagnostics panel in Advanced settings
+- Read the route status first. Wave Link-owned routes are intentionally monitor-only and must be adjusted in Wave Link
+- Use Recover Routes from the main window status action, Setup, or Diagnostics to re-establish Waves-managed routing
+- Check the current route and permission details in Diagnostics
 - Ensure macOS 14.2+ is installed for per-app routing
 
 ### Keyboard shortcuts not working
-- Verify "Enable keyboard shortcuts" is on in Settings ▸ Shortcuts
+- Verify "Enable keyboard shortcuts" is on in Settings ▸ Shortcuts & Automation
 - A combination another app already claimed is marked in orange there — record a different one
 - An app shortcut only fires while that app is running
 - No permission is involved; Waves never asks for Accessibility
 
 ### Device switching issues
-- Managed routes re-establish automatically; if one didn't, recover routes manually from the Advanced tab
+- Managed routes re-establish automatically. If one did not, use Recover Routes from Setup or Diagnostics
 - Check that your audio device is properly connected
 
 ## Architecture
@@ -258,12 +265,12 @@ When switching audio devices:
 
 ### Key Modules
 
-- **AppStore**: Central state management using Swift Observation
+- **AppStore**: Main-actor observable facade over focused intent, adaptive-mix, persistence, and device-change coordinators
 - **AudioControlBackend**: Protocol for audio operations
 - **PerAppTapController**: Manages per-app audio routing taps
-- **PreferencesStore**: Persists user preferences
-- **ProfileStore**: Manages profiles (with one-time migration from legacy `presets.json`)
-- **SessionStore**: Caches audio session state
+- **JSONPersistenceEngine**: Internal atomic schema-1 storage shared by the existing persistence protocols
+- **ControlServer**: Same-user protocol-v1 Unix socket with bounded connection and output queues
+- **wavesctl**: Dependency-free command-line client for testing and trusted local automation
 
 ## Development
 
@@ -303,7 +310,7 @@ analytics or telemetry. Waves makes no network request before you start an
 update check or allow automatic checks. An allowed check fetches the signed
 appcast from `https://waves.jonathanrreed.com/appcast.xml` without sending an
 account, device identifier, audio, diagnostics, or telemetry. Turn automatic
-checks off in General Settings at any time. `Copy Diagnostics` contains no audio
+checks off in General at any time. `Copy Diagnostics` contains no audio
 samples, but it can include version and OS metadata, permission and route state,
 app and device names or identifiers, and bounded error text. Review it before
 sharing. See [`PRIVACY.md`](PRIVACY.md) for details, and

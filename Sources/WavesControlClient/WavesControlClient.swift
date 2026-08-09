@@ -185,7 +185,7 @@ public enum WavesCTLUsage {
     The socket path can be overridden with WAVES_CONTROL_SOCKET.
 
     If this cannot connect, check that Waves is running and that
-    Settings > Shortcuts > Automation > "Allow external control" is on.
+    Settings > Shortcuts & Automation > "Allow external control" is on.
     """
 }
 
@@ -529,7 +529,7 @@ extension WavesCTLTransportError: CustomStringConvertible {
         Could not connect to Waves at \(path)
 
         Check that Waves is running, and that
-        Settings > Shortcuts > Automation > "Allow external control" is turned on.
+        Settings > Shortcuts & Automation > "Allow external control" is turned on.
         """
     case .timeout(.write):
       return "Timed out writing to Waves."

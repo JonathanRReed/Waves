@@ -4755,7 +4755,7 @@ final class AppStore {
           } else if store.session.currentDevice == nil {
             reason = "No output device is available. Connect an output device, then try again."
           } else {
-            reason = status.lastError ?? "Routes are still not healthy. Check the Advanced tab for details."
+            reason = status.lastError ?? "Routes are still not healthy. Check Diagnostics for details."
           }
           store.showToast(
             title: "Routes still need attention",

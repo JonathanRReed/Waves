@@ -10,8 +10,10 @@ struct HelpView: View {
         headerSection
         quickStartSection
         soundSection
+        routingSection
         keyboardShortcutsSection
         urlSchemeSection
+        externalControlSection
         profilesSection
         troubleshootingSection
       }
@@ -61,6 +63,37 @@ struct HelpView: View {
         .font(.body)
         .foregroundStyle(.secondary)
     }
+  }
+
+  private var routingSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Routing and Wave Link")
+        .font(.headline)
+
+      VStack(alignment: .leading, spacing: 8) {
+        bullet("Managed means Waves owns the app's route and its audio controls are available")
+        bullet(
+          "Monitoring only means Waves can see the app but is not currently changing its audio path"
+        )
+        bullet(
+          "Public Core Audio APIs do not expose a supported tap-creator association. When a verified Wave Link process has active Core Audio output, Waves conservatively yields affected ordinary routes and explains the unattributable handoff"
+        )
+        bullet(
+          "Waves never wraps Wave Link's mixed output. Adjust upstream apps inside Wave Link"
+        )
+        bullet(
+          "If audio geometry changes, Waves retries in the background. Recovery failed exposes Recover Routes, which rebuilds every Waves-managed route"
+        )
+      }
+
+      Text(
+        "A yielded Wave Link row is working as intended. Unrelated system taps do not count as Wave Link evidence, and disabled controls prevent Waves from creating a duplicate route."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
+    .padding(16)
+    .wavesCard(cornerRadius: 12)
   }
 
   private var quickStartSection: some View {
@@ -114,7 +147,7 @@ struct HelpView: View {
       .font(.system(.body, design: .monospaced))
 
       Text(
-        "Turn these on in Settings ▸ Shortcuts, then click any of them to record your own. They act on whichever app is in front."
+        "Turn these on in Settings ▸ Shortcuts & Automation, then click any of them to record your own. They act on whichever app is in front."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -123,7 +156,7 @@ struct HelpView: View {
         .font(.subheadline.weight(.semibold))
 
       Text(
-        "Give one specific app its own mute shortcut and it works no matter what is in front. Add one under App Shortcuts in Settings ▸ Shortcuts, or right-click the app in the mixer and choose Assign Mute Shortcut. Nothing is assigned by default."
+        "Give one specific app its own mute or volume shortcut and it works no matter what is in front. Add one under App Shortcuts in Settings ▸ Shortcuts & Automation, or right-click the app in the mixer and choose Assign Mute Shortcut. Nothing is assigned by default."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -132,6 +165,30 @@ struct HelpView: View {
         .font(.subheadline.weight(.semibold))
 
       VStack(alignment: .leading, spacing: 8) {
+        shortcutRow(
+          action: "Select an app",
+          keys: "↑ / ↓"
+        )
+        shortcutRow(
+          action: "Mute selected app",
+          keys: "Space / M"
+        )
+        shortcutRow(
+          action: "Selected volume",
+          keys: "= / -"
+        )
+        shortcutRow(
+          action: "Boost / Pin",
+          keys: "B / P"
+        )
+        shortcutRow(
+          action: "Equalizer / Output",
+          keys: "E / O"
+        )
+        shortcutRow(
+          action: "Recover all managed routes",
+          keys: "R"
+        )
         shortcutRow(
           action: "Refresh app list",
           keys: "⌘R"
@@ -148,7 +205,7 @@ struct HelpView: View {
       .font(.system(.body, design: .monospaced))
 
       Text(
-        "⌘N and ⌘R work while the mixer window is focused; ⌘, opens Settings from any Waves window."
+        "The single-key commands act on the selected mixer row. E and O are disabled when Waves must yield control. R is available only when the selected route has exhausted automatic recovery, and it rebuilds all Waves-managed routes. ⌘N and ⌘R work while the mixer window is focused; ⌘, opens Settings from any Waves window."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -185,9 +242,41 @@ struct HelpView: View {
         )
       }
 
-      Text("Turn on URL scheme automation in Settings > Shortcuts before using these.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      Text(
+        "Turn on URL scheme automation in Settings > Shortcuts & Automation before using these. When it is off, external waves:// URLs are inert."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
+    .padding(16)
+    .wavesCard(cornerRadius: 12)
+  }
+
+  private var externalControlSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("External Control")
+        .font(.headline)
+
+      VStack(alignment: .leading, spacing: 8) {
+        bullet(
+          "Allow external control in Settings > Shortcuts & Automation only for local tools you trust"
+        )
+        bullet(
+          "Waves listens on a private Unix socket for your macOS user. It does not open a network port"
+        )
+        bullet(
+          "The repository's wavesctl tool lists apps, changes volume or mute, reads icons, and watches state changes using protocol version 1"
+        )
+        bullet(
+          "The Stream Deck companion is a separate app and is not bundled with Waves. It controls only routes Waves reports as managed"
+        )
+      }
+
+      Text(
+        "URL automation and external socket control are separate features. Both are off by default."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
     }
     .padding(16)
     .wavesCard(cornerRadius: 12)
@@ -236,7 +325,7 @@ struct HelpView: View {
         troubleshootingItem(
           issue: "Volume changes not applying",
           solution:
-            "Use Recover Routes (in the main window's status badge or Settings > Advanced), then check the diagnostics list there"
+            "Read the row's route status first. Wave Link-owned routes must be adjusted in Wave Link. For a failed Waves route, use Recover Routes from the main window, Setup, or Diagnostics, then check Diagnostics for the remaining cause"
         )
         troubleshootingItem(
           issue: "An app shows a red Core Audio error",
@@ -246,7 +335,7 @@ struct HelpView: View {
         troubleshootingItem(
           issue: "Keyboard shortcuts not working",
           solution:
-            "Check Settings > Shortcuts: shortcuts must be turned on, and a combination another app already claimed is shown there in orange. An app shortcut also needs that app to be running"
+            "Check Settings > Shortcuts & Automation: shortcuts must be turned on, and a combination another app already claimed is shown there in orange. An app shortcut also needs that app to be running"
         )
         troubleshootingItem(
           issue: "Device switching issues",

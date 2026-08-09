@@ -251,7 +251,7 @@ struct WavesSectionHeader: View {
 }
 
 /// Single source of truth for a diagnostics check's color/symbol/status word —
-/// previously reimplemented separately in Settings > Advanced's
+/// previously reimplemented separately in the Diagnostics settings
 /// `DiagnosticsCheckRow` and the main window's `DiagnosticsPanel`, which read
 /// the same `store.diagnostics.checks` data but could have drifted in styling
 /// since neither referenced the other.
