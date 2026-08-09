@@ -10,6 +10,30 @@ struct ProfileEditorContext: Identifiable {
   let preselectedAppIDs: [String]
 }
 
+enum ProfileValidationScope: String, Sendable {
+  case name = "Profile name"
+  case selection = "App selection"
+
+  func accessibilityErrorLabel(for result: ProfileSaveResult) -> String? {
+    result.message.map { "\(rawValue) error: \($0)" }
+  }
+}
+
+struct ProfileValidationFeedback: View {
+  let scope: ProfileValidationScope
+  let result: ProfileSaveResult
+
+  var body: some View {
+    if let message = result.message {
+      Text(message)
+        .font(.caption)
+        .foregroundStyle(.red)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(scope.accessibilityErrorLabel(for: result) ?? message)
+    }
+  }
+}
+
 /// Create or edit a profile: name it, choose which apps belong, and decide
 /// whether to capture the current volume/mute/boost levels or keep it a pure
 /// grouping.
@@ -19,6 +43,7 @@ struct ProfileEditorSheet: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(\.colorSchemeContrast) private var contrast
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+  @Environment(\.wavesAccessibilityOverrides) private var accessibilityOverrides
 
   let context: ProfileEditorContext
 
@@ -110,8 +135,8 @@ struct ProfileEditorSheet: View {
         .padding(8)
         .background(
           theme.fieldFill(
-            reduceTransparency: reduceTransparency,
-            increasedContrast: contrast == .increased
+            reduceTransparency: accessibilityOverrides?.reduceTransparency ?? reduceTransparency,
+            increasedContrast: accessibilityOverrides?.increasedContrast ?? (contrast == .increased)
           ),
           in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
@@ -123,11 +148,8 @@ struct ProfileEditorSheet: View {
         .accessibilityValue(name)
         .accessibilityHint(nameValidationMessage ?? "Enter a unique profile name.")
         .onChange(of: name) { _, _ in clearNameValidation() }
-      if let nameValidationMessage {
-        Text(nameValidationMessage)
-          .font(.caption)
-          .foregroundStyle(.red)
-          .accessibilityLabel("Profile name error: \(nameValidationMessage)")
+      if let nameValidationResult {
+        ProfileValidationFeedback(scope: .name, result: nameValidationResult)
       }
     }
   }
@@ -208,12 +230,7 @@ struct ProfileEditorSheet: View {
       }
 
       if case .noEligibleApps = validationResult {
-        Text(ProfileSaveResult.noEligibleApps.message ?? "Select an eligible app.")
-          .font(.caption)
-          .foregroundStyle(.red)
-          .accessibilityLabel(
-            "App selection error: \(ProfileSaveResult.noEligibleApps.message ?? "Select an eligible app.")"
-          )
+        ProfileValidationFeedback(scope: .selection, result: .noEligibleApps)
       }
     }
   }
@@ -350,12 +367,16 @@ struct ProfileEditorSheet: View {
   }
 
   private var nameValidationMessage: String? {
+    nameValidationResult?.message
+  }
+
+  private var nameValidationResult: ProfileSaveResult? {
     if isTooLong {
-      return ProfileSaveResult.nameTooLong(maximum: Self.maxNameLength).message
+      return .nameTooLong(maximum: Self.maxNameLength)
     }
     switch validationResult {
     case .blankName, .nameTooLong, .duplicateName:
-      return validationResult?.message
+      return validationResult
     default:
       return nil
     }
@@ -363,7 +384,9 @@ struct ProfileEditorSheet: View {
 
   private var nameFieldStroke: Color {
     nameValidationMessage == nil
-      ? theme.hairline(increasedContrast: contrast == .increased)
+      ? theme.hairline(
+        increasedContrast: accessibilityOverrides?.increasedContrast ?? (contrast == .increased)
+      )
       : WavesDesign.error
   }
 

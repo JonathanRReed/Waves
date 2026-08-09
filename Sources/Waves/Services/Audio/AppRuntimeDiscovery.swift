@@ -101,14 +101,12 @@ enum AppRuntimeDiscovery {
         bundleID: app.bundleIdentifier,
         displayName: localizedName
       )
-      let iconData: Data?
-      if let known = knownIconData[logicalID] {
-        iconData = known
-      } else if let raster = iconRaster(for: app) {
-        iconData = await iconEncoder.encode(raster)
-      } else {
-        iconData = nil
-      }
+      let iconData = await resolveIconData(
+        logicalID: logicalID,
+        knownIconData: knownIconData,
+        captureRaster: { iconRaster(for: app) },
+        iconEncoder: iconEncoder
+      )
       applications.append(
         CapturedApplication(
           pid: app.processIdentifier,
@@ -121,6 +119,20 @@ enum AppRuntimeDiscovery {
         ))
     }
     return Capture(applications: applications)
+  }
+
+  @MainActor
+  static func resolveIconData(
+    logicalID: String,
+    knownIconData: [String: Data],
+    captureRaster: @MainActor () -> AppIconRaster?,
+    iconEncoder: AppIconEncoder
+  ) async -> Data? {
+    if let known = knownIconData[logicalID] {
+      return known
+    }
+    guard let raster = captureRaster() else { return nil }
+    return await iconEncoder.encode(raster)
   }
 
   /// Pure transformation for detached discovery work. The input is Sendable and

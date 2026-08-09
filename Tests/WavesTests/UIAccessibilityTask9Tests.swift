@@ -81,6 +81,20 @@ import WavesAudioCore
       == .unavailableDuringShutdown)
 }
 
+@Test func everyProfileValidationFailureHasActionablePresentationCopy() {
+  let failures: [ProfileSaveResult] = [
+    .unavailableDuringShutdown,
+    .blankName,
+    .nameTooLong(maximum: 100),
+    .duplicateName("Focus"),
+    .noEligibleApps,
+  ]
+  for result in failures {
+    #expect(result.message?.isEmpty == false)
+  }
+  #expect(ProfileSaveResult.saved(UUID()).message == nil)
+}
+
 @Test func routeHealthPresentationDistinguishesEveryManagedAudioCondition() {
   let ordinary = task9App(state: .monitorOnly)
   let publicClaim = task9App(state: .monitorOnly, context: .verifiedRouterOwnership)
@@ -112,6 +126,26 @@ import WavesAudioCore
   object.removeValue(forKey: "routeHealthContext")
   let legacy = try JSONSerialization.data(withJSONObject: object)
   #expect(try JSONDecoder().decode(AudioApp.self, from: legacy).routeHealthContext == nil)
+}
+
+@Test func sessionPersistenceRetainsTypedRouteHealthContext() async throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("waves-task9-route-health-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let store = SessionStore(directory: directory)
+  let app = task9App(state: .monitorOnly, context: .verifiedRouterOwnership)
+  let snapshot = AudioSessionSnapshot(
+    apps: [app],
+    currentDevice: nil,
+    recentDeviceIDs: [],
+    supportMatrix: SupportMatrix(entries: []),
+    backendStatus: .unprobed
+  )
+
+  try await store.save(snapshot)
+  try await store.flush()
+
+  #expect(store.load()?.apps.first?.routeHealthContext == .verifiedRouterOwnership)
 }
 
 @MainActor
@@ -185,6 +219,34 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func knownIconBytesBypassRasterCaptureAndEncoding() async {
+  let captureCount = Task9Counter()
+  let encodingCount = Task9Counter()
+  let known = Data([1, 2, 3])
+  let result = await AppRuntimeDiscovery.resolveIconData(
+    logicalID: "com.example.known",
+    knownIconData: ["com.example.known": known],
+    captureRaster: {
+      captureCount.increment()
+      return AppIconRaster(
+        width: 1,
+        height: 1,
+        bytesPerRow: 4,
+        rgbaBytes: Data([0, 0, 0, 255])
+      )
+    },
+    iconEncoder: AppIconEncoder { raster in
+      encodingCount.increment()
+      return raster.rgbaBytes
+    }
+  )
+
+  #expect(result == known)
+  #expect(captureCount.value == 0)
+  #expect(encodingCount.value == 0)
+}
+
+@MainActor
 @Test func levelMeterModelUsesDeterministicAttackReleaseHoldAndStallClamp() {
   let model = LevelMeterModel()
   let start = Date(timeIntervalSinceReferenceDate: 1_000)
@@ -242,4 +304,15 @@ private func task9Chord(_ keyCode: Int) -> HotkeyChord {
 @MainActor
 private func task9Binding(_ chord: HotkeyChord, _ action: HotkeyAction) -> HotkeyBinding {
   HotkeyBinding(action: action, keyCode: chord.keyCode, carbonModifiers: chord.carbonModifiers)
+}
+
+private final class Task9Counter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+
+  func increment() {
+    lock.withLock { count += 1 }
+  }
+
+  var value: Int { lock.withLock { count } }
 }

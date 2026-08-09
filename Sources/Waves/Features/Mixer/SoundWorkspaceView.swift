@@ -1,6 +1,16 @@
 import SwiftUI
 import WavesAudioCore
 
+enum SoundControlAccessibility {
+  static func equalizerLabel(title: String) -> String {
+    "\(title) equalizer"
+  }
+
+  static func gainLabel(bandLabel: String) -> String {
+    "\(bandLabel) gain"
+  }
+}
+
 /// Which stream the Sound workspace's equalizer card is editing: the shared
 /// managed-audio EQ, or one app's own EQ. One card, one set of controls —
 /// replacing the old split between this workspace and a per-app side panel,
@@ -588,7 +598,7 @@ private struct EQScopeChip: View {
       .contentShape(Capsule())
     }
     .buttonStyle(.plain)
-    .accessibilityLabel("\(title) equalizer")
+    .accessibilityLabel(SoundControlAccessibility.equalizerLabel(title: title))
     .accessibilityValue(isEnabled ? "On" : "Off")
     .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
   }
@@ -687,7 +697,7 @@ private struct SoundEQBandControl: View {
         step: 0.5
       )
       .tint(accent)
-      .accessibilityLabel("\(band.label) gain")
+      .accessibilityLabel(SoundControlAccessibility.gainLabel(bandLabel: band.label))
       .accessibilityValue(formattedGain)
     }
   }

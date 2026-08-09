@@ -2,6 +2,22 @@ import AppKit
 import SwiftUI
 import WavesAudioCore
 
+enum MixerRowAccessibility {
+  static let outputDeviceMenuLabel = "Output Device"
+
+  static func volumeLabel(for app: AudioApp) -> String {
+    "Volume for \(app.displayName)"
+  }
+
+  static func equalizerLabel(for app: AudioApp) -> String {
+    "Open equalizer for \(app.displayName)"
+  }
+
+  static func muteLabel(for app: AudioApp) -> String {
+    app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)"
+  }
+}
+
 struct MixerRowView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.wavesTheme) private var theme
@@ -75,7 +91,7 @@ struct MixerRowView: View {
         .tint(theme.accent)
         .frame(minWidth: 150, idealWidth: 210, maxWidth: 250)
         .help(sliderHelp)
-        .accessibilityLabel("Volume for \(app.displayName)")
+        .accessibilityLabel(MixerRowAccessibility.volumeLabel(for: app))
         .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
         .accessibilityHint("Adjusts the per-app volume target.")
         .accessibilityAdjustableAction { direction in
@@ -106,7 +122,7 @@ struct MixerRowView: View {
         }
         .buttonStyle(.borderless)
         .help("Equalizer for \(app.displayName)")
-        .accessibilityLabel("Open equalizer for \(app.displayName)")
+        .accessibilityLabel(MixerRowAccessibility.equalizerLabel(for: app))
         .accessibilityValue(equalizerIsEnabled ? "On" : "Off")
         .disabled(isExcluded)
 
@@ -126,7 +142,7 @@ struct MixerRowView: View {
         }
         .buttonStyle(.borderless)
         .help(muteHelp)
-        .accessibilityLabel(app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)")
+        .accessibilityLabel(MixerRowAccessibility.muteLabel(for: app))
         .sensoryFeedback(.selection, trigger: app.isMuted)
         .disabled(isExcluded)
       }
@@ -315,7 +331,7 @@ private struct MixerRowContextMenuItems: View {
       store.togglePinned(app)
     }
     if !isExcluded {
-      Menu("Output Device") {
+      Menu(MixerRowAccessibility.outputDeviceMenuLabel) {
         Button {
           store.setOutputDevice(nil, for: app)
         } label: {
@@ -429,7 +445,7 @@ struct CompactMixerRow: View {
       .frame(width: 104)
       .padding(.trailing, 2)
       .help(sliderHelp)
-      .accessibilityLabel("Volume for \(app.displayName)")
+      .accessibilityLabel(MixerRowAccessibility.volumeLabel(for: app))
       .accessibilityValue("\(Int((app.desiredVolume * 100).rounded()))%")
       .accessibilityHint("Adjusts the per-app volume target.")
       .accessibilityAdjustableAction { direction in
@@ -463,7 +479,7 @@ struct CompactMixerRow: View {
       }
       .buttonStyle(.borderless)
       .help("Open equalizer for \(app.displayName)")
-      .accessibilityLabel("Open equalizer for \(app.displayName)")
+      .accessibilityLabel(MixerRowAccessibility.equalizerLabel(for: app))
       .accessibilityValue(equalizerIsEnabled ? "On" : "Off")
       .disabled(isExcluded)
 
@@ -480,7 +496,7 @@ struct CompactMixerRow: View {
       }
       .buttonStyle(.borderless)
       .help(muteHelp)
-      .accessibilityLabel(app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)")
+      .accessibilityLabel(MixerRowAccessibility.muteLabel(for: app))
       .accessibilityHint(app.isMuted ? "Restores audio for this app." : "Silences this app.")
       .disabled(isExcluded)
     }

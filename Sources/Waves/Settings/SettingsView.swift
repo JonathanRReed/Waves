@@ -48,6 +48,10 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .help: "questionmark.circle"
     }
   }
+
+  var accessibilityLabel: String {
+    "\(title) settings, \(subtitle)"
+  }
 }
 
 /// A modern System Settings-style preferences window: a fixed leading sidebar
@@ -68,6 +72,10 @@ struct SettingsView: View {
   @Environment(AppStore.self) private var store
   @Environment(\.wavesTheme) private var theme
   @State private var workspace = SettingsWorkspace()
+
+  init(initialPane: SettingsPane = .general) {
+    _workspace = State(initialValue: SettingsWorkspace(selection: initialPane))
+  }
 
   var body: some View {
     @Bindable var workspace = workspace
@@ -168,7 +176,7 @@ private struct SettingsSidebarRow: View {
       Image(systemName: pane.symbol)
         .foregroundStyle(theme.accentOrSecondary(isSelected))
     }
-    .accessibilityLabel("\(pane.title) settings, \(pane.subtitle)")
+    .accessibilityLabel(pane.accessibilityLabel)
   }
 }
 

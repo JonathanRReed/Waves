@@ -85,6 +85,23 @@ enum WavesDesign {
   }
 }
 
+struct WavesAccessibilityOverrides: Equatable, Sendable {
+  let reduceMotion: Bool
+  let reduceTransparency: Bool
+  let increasedContrast: Bool
+}
+
+private struct WavesAccessibilityOverridesKey: EnvironmentKey {
+  static let defaultValue: WavesAccessibilityOverrides? = nil
+}
+
+extension EnvironmentValues {
+  var wavesAccessibilityOverrides: WavesAccessibilityOverrides? {
+    get { self[WavesAccessibilityOverridesKey.self] }
+    set { self[WavesAccessibilityOverridesKey.self] = newValue }
+  }
+}
+
 // MARK: - Brand mark
 
 enum WavesBrandAssetLocator {

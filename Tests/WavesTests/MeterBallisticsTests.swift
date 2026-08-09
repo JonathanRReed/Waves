@@ -2,6 +2,8 @@ import Foundation
 import Testing
 import WavesAudioCore
 
+@testable import Waves
+
 // MARK: - dB normalization
 
 @Test func meterNormalizeFullScaleMapsToOne() {
@@ -57,4 +59,67 @@ import WavesAudioCore
   // Sanity: at 13.3 dB/s a full-scale dot drops ~20 dB (≈0.37 of travel) in 1.5 s.
   let droppedIn1_5s = MeterBallistics.peakFallPerSecond * 1.5
   #expect(droppedIn1_5s > 0.3 && droppedIn1_5s < 0.45)
+}
+
+@MainActor
+@Test func levelMeterModelInitialStepAndAttackAreDeterministic() {
+  let model = LevelMeterModel()
+  let start = Date(timeIntervalSinceReferenceDate: 10)
+  model.update(barTarget: 1, peakTarget: 0.8, at: start)
+
+  let expectedInitial = 1 - exp(-(1.0 / 60.0) / MeterBallistics.attack)
+  #expect(abs(model.bar - expectedInitial) < 1e-12)
+  #expect(model.peak == 0.8)
+
+  let beforeAttack = model.bar
+  model.update(barTarget: 1, peakTarget: 0.8, at: start.addingTimeInterval(0.1))
+  let attackGain = model.bar - beforeAttack
+  let beforeRelease = model.bar
+  model.update(barTarget: 0, peakTarget: 0, at: start.addingTimeInterval(0.2))
+  let releaseDrop = beforeRelease - model.bar
+  #expect(attackGain > releaseDrop, "attack must respond faster than release over the same timestep")
+}
+
+@MainActor
+@Test func levelMeterModelPeakHoldAndFixedFallUseSuppliedDates() {
+  let model = LevelMeterModel()
+  let start = Date(timeIntervalSinceReferenceDate: 20)
+  model.update(barTarget: 0, peakTarget: 1, at: start)
+
+  for step in 1...10 {
+    model.update(
+      barTarget: 0,
+      peakTarget: 0,
+      at: start.addingTimeInterval(Double(step) * 0.1)
+    )
+  }
+  #expect(model.peak == 1, "the peak must remain fixed throughout its hold interval")
+
+  model.update(barTarget: 0, peakTarget: 0, at: start.addingTimeInterval(1.1))
+  let expected = 1 - MeterBallistics.peakFallPerSecond * 0.1
+  #expect(abs(model.peak - expected) < 1e-12)
+}
+
+@MainActor
+@Test func levelMeterModelSettledThresholdResetAndNonpositiveTimeAreDeterministic() {
+  let model = LevelMeterModel()
+  let start = Date(timeIntervalSinceReferenceDate: 30)
+  model.update(barTarget: 0.001, peakTarget: 0.001, at: start)
+  #expect(model.isSettled)
+
+  model.reset()
+  model.update(barTarget: 1, peakTarget: 1, at: start)
+  let bar = model.bar
+  let peak = model.peak
+  model.update(barTarget: 0, peakTarget: 0, at: start)
+  #expect(model.bar == bar)
+  #expect(model.peak == peak)
+  model.update(barTarget: 0, peakTarget: 0, at: start.addingTimeInterval(-1))
+  #expect(model.bar == bar)
+  #expect(model.peak == peak)
+
+  model.reset()
+  #expect(model.bar == 0)
+  #expect(model.peak == 0)
+  #expect(model.isSettled)
 }

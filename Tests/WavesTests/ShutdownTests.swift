@@ -114,15 +114,16 @@ import WavesAudioCore
 
 @MainActor
 @Test func terminationTimeoutDecisionReturnsWithoutWaitingForSlowCleanup() async {
+  let gate = AsyncShutdownGate()
   let outcome = await AppTerminationTimeoutDecision.awaitShutdown(
     timeout: .milliseconds(5)
   ) {
-    try? await Task.sleep(for: .milliseconds(50))
+    await gate.wait()
     return AppShutdownResult()
   }
 
   #expect(outcome == .timedOut)
-  try? await Task.sleep(for: .milliseconds(60))
+  await gate.release()
 }
 
 @MainActor
@@ -142,25 +143,27 @@ import WavesAudioCore
     degraded
   }
 
+  let timeoutGate = AsyncShutdownGate()
   await verifyTerminationCoordinator(
     expected: .timedOut,
     timeout: .milliseconds(5)
   ) {
-    try? await Task.sleep(for: .milliseconds(50))
+    await timeoutGate.wait()
     return AppShutdownResult()
   }
-  try? await Task.sleep(for: .milliseconds(60))
+  await timeoutGate.release()
 }
 
 @MainActor
 @Test func productionTerminationCoordinatorTimesOutWithinTwoHundredFiftyMilliseconds() async {
   let coordinator = AppTerminationCoordinator()
   let recorder = TerminationReplyRecorder()
+  let gate = AsyncShutdownGate()
 
   #expect(
     coordinator.requestTermination(
       shutdown: {
-        try? await Task.sleep(for: .milliseconds(400))
+        await gate.wait()
         return AppShutdownResult()
       },
       report: { recorder.outcomes.append($0) },
@@ -168,13 +171,15 @@ import WavesAudioCore
     ) == .terminateLater
   )
 
-  for _ in 0..<150 where coordinator.completedOutcome == nil {
-    try? await Task.sleep(for: .milliseconds(5))
-  }
+  #expect(
+    await waitUntil(timeout: .seconds(1)) { coordinator.completedOutcome != nil },
+    "the production 250 ms deadline did not complete within the bounded observation window"
+  )
 
   #expect(coordinator.completedOutcome == .timedOut)
   #expect(recorder.outcomes == [.timedOut])
   #expect(recorder.replies == [true])
+  await gate.release()
 }
 
 @MainActor
@@ -184,13 +189,14 @@ import WavesAudioCore
   defer { try? FileManager.default.removeItem(at: directory) }
   let reportStore = ShutdownReportStore(directory: directory)
   let coordinator = AppTerminationCoordinator(timeout: .milliseconds(5))
+  let gate = AsyncShutdownGate()
   var replyCount = 0
   var reportSeenAtReply: ShutdownReport?
 
   #expect(
     coordinator.requestTermination(
       shutdown: {
-        try? await Task.sleep(for: .milliseconds(50))
+        await gate.wait()
         return AppShutdownResult()
       },
       report: { reportStore.save(ShutdownReport(outcome: $0)) },
@@ -201,14 +207,13 @@ import WavesAudioCore
     ) == .terminateLater
   )
 
-  for _ in 0..<100 where coordinator.completedOutcome == nil {
-    try? await Task.sleep(for: .milliseconds(2))
-  }
+  #expect(await waitUntil { coordinator.completedOutcome != nil })
 
   #expect(coordinator.completedOutcome == .timedOut)
   #expect(replyCount == 1)
   #expect(reportSeenAtReply?.completion == "timedOut")
-  try? await Task.sleep(for: .milliseconds(60))
+  await gate.release()
+  await Task.yield()
   #expect(replyCount == 1)
 }
 
@@ -298,7 +303,7 @@ private func verifyTerminationCoordinator(
 
   #expect(firstDecision == .terminateLater)
   #expect(repeatedDecision == .terminateLater)
-  await waitUntil { coordinator.completedOutcome != nil }
+  #expect(await waitUntil { coordinator.completedOutcome != nil })
   #expect(coordinator.completedOutcome == expected)
   #expect(recorder.outcomes == [expected])
   #expect(recorder.replies == [true])
@@ -318,13 +323,35 @@ private func verifyTerminationCoordinator(
 }
 
 @MainActor
+@discardableResult
 private func waitUntil(
-  attempts: Int = 2_000,
+  timeout: Duration = .seconds(5),
   _ condition: @MainActor () -> Bool
-) async {
-  for _ in 0..<attempts {
-    if condition() { return }
+) async -> Bool {
+  let deadline = ContinuousClock.now.advanced(by: timeout)
+  while ContinuousClock.now < deadline {
+    if condition() { return true }
     await Task.yield()
+  }
+  return condition()
+}
+
+private actor AsyncShutdownGate {
+  private var isReleased = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func wait() async {
+    guard !isReleased else { return }
+    await withCheckedContinuation { continuation in
+      waiters.append(continuation)
+    }
+  }
+
+  func release() {
+    isReleased = true
+    let current = waiters
+    waiters.removeAll()
+    for waiter in current { waiter.resume() }
   }
 }
 

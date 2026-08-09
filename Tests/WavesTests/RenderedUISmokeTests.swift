@@ -6,9 +6,6 @@ import WavesAudioCore
 @testable import Waves
 
 @Test @MainActor func soundWorkspaceRendersAcrossPalettesAndAppearances() async throws {
-  // GitHub's macOS runner has no usable WindowServer for AppKit bitmap capture.
-  // Keep this as a local rendered-QA gate while CI runs the functional suite.
-  guard ProcessInfo.processInfo.environment["CI"] == nil else { return }
   let fixture = try await makeRenderedUIFixture()
   let variants: [(WavesPalette, WavesAppearance)] = [
     (.waves, .light),
@@ -43,7 +40,6 @@ import WavesAudioCore
 }
 
 @Test @MainActor func onboardingAndSetupRepairRenderInLightAndDarkAppearances() async throws {
-  guard ProcessInfo.processInfo.environment["CI"] == nil else { return }
   let fixture = try await makeRenderedUIFixture()
   let variants: [(WavesPalette, WavesAppearance)] = [
     (.waves, .dark),
@@ -93,6 +89,176 @@ import WavesAudioCore
       )
     }
   }
+}
+
+@Test @MainActor func primarySurfacesSettingsAndAccessibilityVariantsRender() async throws {
+  let fixture = try await makeRenderedUIFixture()
+  let updater = UpdaterService()
+
+  for appearance in [WavesAppearance.light, .dark] {
+    let main = MainWindowView()
+      .environment(fixture.store)
+      .wavesTheme(palette: .waves, appearance: appearance)
+      .frame(width: 1100, height: 760)
+    let menu = MenuBarMixerView()
+      .environment(fixture.store)
+      .wavesTheme(palette: .waves, appearance: appearance)
+      .frame(width: WavesDesign.menuBarPanelWidth, height: 720)
+
+    try renderEvidence(
+      main,
+      filename: "main-\(appearance.rawValue).png",
+      size: NSSize(width: 1100, height: 760),
+      appearance: appearance
+    )
+    try renderEvidence(
+      menu,
+      filename: "menu-\(appearance.rawValue).png",
+      size: NSSize(width: WavesDesign.menuBarPanelWidth, height: 720),
+      appearance: appearance
+    )
+  }
+
+  for pane in SettingsPane.allCases {
+    let settings = SettingsView(initialPane: pane)
+      .environment(fixture.store)
+      .environment(updater)
+      .wavesTheme(palette: .waves, appearance: .dark)
+      .frame(width: 840, height: 680)
+    try renderEvidence(
+      settings,
+      filename: "settings-\(pane.rawValue).png",
+      size: NSSize(width: 840, height: 680),
+      appearance: .dark
+    )
+  }
+
+  let accessibilityVariant = VStack(alignment: .leading, spacing: 12) {
+    ProfileValidationFeedback(scope: .name, result: .duplicateName("Focus"))
+    ProfileValidationFeedback(scope: .selection, result: .noEligibleApps)
+    ReadinessChecklistRow(
+      title: "Audio capture permission",
+      detail: "macOS has not returned a decisive authorization state yet.",
+      status: .attention,
+      actionTitle: "Re-check Permission",
+      action: {}
+    )
+  }
+  .padding(24)
+  .environment(
+    \.wavesAccessibilityOverrides,
+    WavesAccessibilityOverrides(
+      reduceMotion: true,
+      reduceTransparency: true,
+      increasedContrast: true
+    )
+  )
+  .wavesTheme(palette: .graphite, appearance: .light)
+  .frame(width: 620, height: 300)
+  try renderEvidence(
+    accessibilityVariant,
+    filename: "accessibility-contrast-transparency-motion.png",
+    size: NSSize(width: 620, height: 300),
+    appearance: .light
+  )
+
+  let emptySnapshot = AudioSessionSnapshot(
+    apps: [],
+    currentDevice: renderedUISnapshot().currentDevice,
+    recentDeviceIDs: [],
+    supportMatrix: SupportMatrix(entries: []),
+    backendStatus: BackendStatus(
+      isAudioComponentInstalled: true,
+      hasRequiredPermissions: true,
+      isRouteRecoveryHealthy: true
+    )
+  )
+  let emptyFixture = try await makeRenderedUIFixture(snapshot: emptySnapshot)
+  let empty = SoundWorkspaceView()
+    .environment(emptyFixture.store)
+    .wavesTheme(palette: .waves, appearance: .dark)
+    .frame(width: 920, height: 760)
+  try renderEvidence(
+    empty,
+    filename: "sound-empty-dark.png",
+    size: NSSize(width: 920, height: 760),
+    appearance: .dark
+  )
+
+  let routeMatrix = ZStack {
+    WavesBackground()
+    HStack(alignment: .top, spacing: 24) {
+      VStack(alignment: .leading, spacing: 4) {
+        Text("Main mixer route states")
+          .font(.headline)
+        ForEach(fixture.store.session.apps) { app in
+          MixerRowView(app: app)
+        }
+      }
+      .frame(width: 760)
+
+      VStack(alignment: .leading, spacing: 4) {
+        Text("Menu mixer route states")
+          .font(.headline)
+        ForEach(fixture.store.session.apps) { app in
+          CompactMixerRow(app: app)
+        }
+      }
+      .frame(width: 380)
+    }
+    .padding(24)
+  }
+  .environment(fixture.store)
+  .wavesTheme(palette: .waves, appearance: .dark)
+  .frame(width: 1212, height: 860)
+  try renderEvidence(
+    routeMatrix,
+    filename: "route-health-main-menu-dark.png",
+    size: NSSize(width: 1212, height: 860),
+    appearance: .dark
+  )
+}
+
+@Test func primarySurfaceAccessibilityAndKeyboardContractsMatchRenderedControls() {
+  for pane in SettingsPane.allCases {
+    #expect(pane.accessibilityLabel == "\(pane.title) settings, \(pane.subtitle)")
+  }
+
+  let app = renderedRouteApp(
+    id: "keyboard.runtime",
+    name: "Keyboard Player",
+    state: .managed
+  )
+  #expect(MixerRowAccessibility.volumeLabel(for: app) == "Volume for Keyboard Player")
+  #expect(MixerRowAccessibility.equalizerLabel(for: app) == "Open equalizer for Keyboard Player")
+  #expect(MixerRowAccessibility.muteLabel(for: app) == "Mute Keyboard Player")
+  #expect(MixerRowAccessibility.outputDeviceMenuLabel == "Output Device")
+
+  #expect(MixerKeyboardCommand.toggleMute.updatedMute(for: app) == true)
+  #expect(MixerKeyboardCommand.increaseVolume.updatedVolume(for: app) == 0.67)
+  #expect(MixerKeyboardCommand.decreaseVolume.updatedVolume(for: app) == 0.57)
+  #expect(MixerKeyboardCommand.cycleBoost.updatedBoost(for: app) == 2)
+  #expect(MixerKeyboardCommand.togglePin.updatedPin(for: app) == true)
+
+  #expect(SoundControlAccessibility.equalizerLabel(title: "All Managed Audio") == "All Managed Audio equalizer")
+  #expect(SoundControlAccessibility.gainLabel(bandLabel: "Low") == "Low gain")
+
+  let profileError = ProfileSaveResult.duplicateName("Focus")
+  #expect(
+    ProfileValidationScope.name.accessibilityErrorLabel(for: profileError)
+      == "Profile name error: A profile named “Focus” already exists."
+  )
+
+  let exhausted = renderedRouteApp(
+    id: "recovery.runtime",
+    name: "Recovery",
+    state: .error,
+    context: .geometryRecoveryExhausted
+  )
+  let route = RouteHealthPresentation(app: exhausted)
+  #expect(route.accessibilityLabel == "Route status: Recovery failed")
+  #expect(route.accessibilityValue == "Geometry retry limit reached")
+  #expect(route.help.contains("retry limit"))
 }
 
 @MainActor
@@ -145,13 +311,33 @@ private func hostedImage<Content: View>(
   return image
 }
 
+@MainActor
+private func renderEvidence<Content: View>(
+  _ content: Content,
+  filename: String,
+  size: NSSize,
+  appearance: WavesAppearance
+) throws {
+  let image = try hostedImage(content, size: size, scale: 2, appearance: appearance)
+  #expect(image.size == size)
+  guard let outputPath = ProcessInfo.processInfo.environment["WAVES_QA_OUTPUT"] else { return }
+  let output = URL(fileURLWithPath: outputPath, isDirectory: true)
+  try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+  try pngData(from: image).write(
+    to: output.appendingPathComponent(filename),
+    options: .atomic
+  )
+}
+
 private struct RenderedUIFixture {
   let store: AppStore
   let directory: URL
 }
 
 @MainActor
-private func makeRenderedUIFixture() async throws -> RenderedUIFixture {
+private func makeRenderedUIFixture(
+  snapshot: AudioSessionSnapshot = renderedUISnapshot()
+) async throws -> RenderedUIFixture {
   let directory = FileManager.default.temporaryDirectory
     .appendingPathComponent("waves-rendered-ui-\(UUID().uuidString)", isDirectory: true)
   let preferencesStore = PreferencesStore(directory: directory)
@@ -175,7 +361,6 @@ private func makeRenderedUIFixture() async throws -> RenderedUIFixture {
   try await preferencesStore.save(preferences)
   try await preferencesStore.flush()
 
-  let snapshot = renderedUISnapshot()
   try await sessionStore.save(snapshot)
   try await sessionStore.flush()
 
@@ -231,6 +416,48 @@ private func renderedUISnapshot() -> AudioSessionSnapshot {
       routingState: .live,
       compatibility: .supported
     ),
+    renderedRouteApp(
+      id: "monitor.runtime",
+      name: "Visible, not yet managed",
+      state: .monitorOnly
+    ),
+    renderedRouteApp(
+      id: "error.runtime",
+      name: "Route setup error",
+      state: .error,
+      notes: "The route could not be attached."
+    ),
+    renderedRouteApp(
+      id: "geometry.recovering.runtime",
+      name: "Geometry recovery",
+      state: .managed,
+      context: .geometryRecoveryInProgress
+    ),
+    renderedRouteApp(
+      id: "geometry.exhausted.runtime",
+      name: "Geometry recovery exhausted",
+      state: .error,
+      context: .geometryRecoveryExhausted,
+      notes: "Retry limit reached. Recover routes to try again."
+    ),
+    renderedRouteApp(
+      id: "wave-link.claimed.runtime",
+      name: "Claimed by Wave Link",
+      state: .monitorOnly,
+      context: .verifiedRouterOwnership
+    ),
+    renderedRouteApp(
+      id: "wave-link.fallback.runtime",
+      name: "Unreadable Wave Link tap",
+      state: .monitorOnly,
+      context: .unattributableRouterFallback
+    ),
+    renderedRouteApp(
+      id: "wave-link.mix.runtime",
+      name: "Wave Link mixed output",
+      state: .monitorOnly,
+      context: .routerMixedOutput
+    ),
   ]
   let device = AudioDevice(id: "qa.output", name: "Studio Display", kind: .display)
   return AudioSessionSnapshot(
@@ -243,6 +470,27 @@ private func renderedUISnapshot() -> AudioSessionSnapshot {
       hasRequiredPermissions: true,
       isRouteRecoveryHealthy: true
     )
+  )
+}
+
+private func renderedRouteApp(
+  id: String,
+  name: String,
+  state: RoutingState,
+  context: RouteHealthContext? = nil,
+  notes: String? = nil
+) -> AudioApp {
+  AudioApp(
+    id: id,
+    logicalID: id,
+    displayName: name,
+    category: .media,
+    desiredVolume: 0.62,
+    appliedVolume: 0.62,
+    routingState: state,
+    compatibility: .supported,
+    notes: notes,
+    routeHealthContext: context
   )
 }
 

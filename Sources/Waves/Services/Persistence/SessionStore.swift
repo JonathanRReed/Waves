@@ -96,7 +96,8 @@ final class SessionStore: @unchecked Sendable {
           notes: app.notes,
           volumeBoost: app.volumeBoost,
           muteSource: app.muteSource,
-          targetDeviceUID: app.targetDeviceUID
+          targetDeviceUID: app.targetDeviceUID,
+          routeHealthContext: app.routeHealthContext
         )
       },
       currentDevice: snapshot.currentDevice,

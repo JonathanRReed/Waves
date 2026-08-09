@@ -14,6 +14,7 @@ struct ShortcutRecorder: View {
   @Environment(\.wavesTheme) private var theme
   @Environment(AppStore.self) private var store
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.wavesAccessibilityOverrides) private var accessibilityOverrides
 
   /// A shared Settings owner keeps these two values alive while pane content is
   /// replaced. Other recorder surfaces keep their existing view-local lifetime.
@@ -115,11 +116,14 @@ struct ShortcutRecorder: View {
           .foregroundStyle(.secondary)
           .multilineTextAlignment(.trailing)
           .frame(maxWidth: 260, alignment: .trailing)
-          .transition(ShortcutRecorderMotion.allowsAnimation(reduceMotion: reduceMotion) ? .opacity : .identity)
+          .transition(
+            ShortcutRecorderMotion.allowsAnimation(reduceMotion: effectiveReduceMotion)
+              ? .opacity : .identity
+          )
       }
     }
     .animation(
-      ShortcutRecorderMotion.allowsAnimation(reduceMotion: reduceMotion)
+      ShortcutRecorderMotion.allowsAnimation(reduceMotion: effectiveReduceMotion)
         ? .easeOut(duration: 0.15) : nil,
       value: message
     )
@@ -142,6 +146,10 @@ struct ShortcutRecorder: View {
   private var unavailableNote: String? {
     guard isUnavailable, !isRecording else { return nil }
     return "Registration was refused. This combination may be reserved by macOS or another app."
+  }
+
+  private var effectiveReduceMotion: Bool {
+    accessibilityOverrides?.reduceMotion ?? reduceMotion
   }
 
   private func record(_ chord: HotkeyChord) {

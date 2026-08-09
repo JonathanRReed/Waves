@@ -727,15 +727,15 @@ private struct SourceListView: View {
         // Keyboard operation: arrow keys move the selection (List), and these
         // keys act on the selected row so the mixer is fully drivable without a
         // mouse — including muting, which the borderless button can't reach.
-        .onKeyPress(.space) { handleKey { store.setMuted(!$0.isMuted, for: $0) } }
-        .onKeyPress("m") { handleKey { store.setMuted(!$0.isMuted, for: $0) } }
-        .onKeyPress("=") { handleKey { nudgeVolume($0, by: 0.05) } }
+        .onKeyPress(.space) { handleKey(.toggleMute) }
+        .onKeyPress("m") { handleKey(.toggleMute) }
+        .onKeyPress("=") { handleKey(.increaseVolume) }
         // Also accept the shifted "+" so a user reaching for the obvious "louder"
         // key isn't met with silence (the hint still reads "equals or minus").
-        .onKeyPress("+") { handleKey { nudgeVolume($0, by: 0.05) } }
-        .onKeyPress("-") { handleKey { nudgeVolume($0, by: -0.05) } }
-        .onKeyPress("b") { handleKey { cycleBoost($0) } }
-        .onKeyPress("p") { handleKey { store.togglePinned($0) } }
+        .onKeyPress("+") { handleKey(.increaseVolume) }
+        .onKeyPress("-") { handleKey(.decreaseVolume) }
+        .onKeyPress("b") { handleKey(.cycleBoost) }
+        .onKeyPress("p") { handleKey(.togglePin) }
         // Surface the otherwise-undocumented in-row keys: without this hint a
         // user can only discover them by reading source. Mirrors the toolbar
         // controls, which advertise their shortcuts via help/accessibility text.
@@ -839,23 +839,52 @@ private struct SourceListView: View {
   /// user-assignable global hotkeys, not in-list keys. Gating here
   /// would silently strip keyboard control of the mixer (including the only
   /// keyboard mute path) whenever a user disables global hotkeys.
-  private func handleKey(_ action: (AudioApp) -> Void) -> KeyPress.Result {
+  private func handleKey(_ command: MixerKeyboardCommand) -> KeyPress.Result {
     guard let id = selectedAppID, let app = apps.first(where: { $0.id == id }) else {
       return .ignored
     }
-    action(app)
+    switch command {
+    case .toggleMute:
+      store.setMuted(command.updatedMute(for: app) ?? app.isMuted, for: app)
+    case .increaseVolume, .decreaseVolume:
+      guard let volume = command.updatedVolume(for: app) else { return .ignored }
+      store.setDesiredVolume(volume, for: app)
+      store.commitDesiredVolume(for: app)
+    case .cycleBoost:
+      store.setVolumeBoost(command.updatedBoost(for: app) ?? app.volumeBoost, for: app)
+    case .togglePin:
+      store.togglePinned(app)
+    }
     return .handled
   }
+}
 
-  private func nudgeVolume(_ app: AudioApp, by delta: Float) {
-    let next = max(0, min(1, app.desiredVolume + delta))
-    store.setDesiredVolume(next, for: app)
-    store.commitDesiredVolume(for: app)
+enum MixerKeyboardCommand: Equatable, Sendable {
+  case toggleMute
+  case increaseVolume
+  case decreaseVolume
+  case cycleBoost
+  case togglePin
+
+  func updatedMute(for app: AudioApp) -> Bool? {
+    self == .toggleMute ? !app.isMuted : nil
   }
 
-  private func cycleBoost(_ app: AudioApp) {
-    let next = app.volumeBoost >= 4 ? 1 : (app.volumeBoost + 1).rounded()
-    store.setVolumeBoost(next, for: app)
+  func updatedVolume(for app: AudioApp) -> Float? {
+    switch self {
+    case .increaseVolume: min(1, app.desiredVolume + 0.05)
+    case .decreaseVolume: max(0, app.desiredVolume - 0.05)
+    case .toggleMute, .cycleBoost, .togglePin: nil
+    }
+  }
+
+  func updatedBoost(for app: AudioApp) -> Float? {
+    guard self == .cycleBoost else { return nil }
+    return app.volumeBoost >= 4 ? 1 : (app.volumeBoost + 1).rounded()
+  }
+
+  func updatedPin(for app: AudioApp) -> Bool? {
+    self == .togglePin ? !app.isPinned : nil
   }
 }
 
@@ -1055,10 +1084,30 @@ private struct RouteHealthBadge: View {
   @Environment(AppStore.self) private var store
 
   var body: some View {
-    // Healthy: a quiet status chip. Degraded: a button that runs recovery right
-    // from where the problem is reported, instead of dead-ending in a tooltip and
-    // hiding the remedy behind an obscure toolbar glyph.
-    if isHealthy {
+    if let contextualPresentation {
+      if contextualPresentation.tone == .error {
+        Button {
+          store.recoverRoutes()
+        } label: {
+          contextualBadge(contextualPresentation)
+        }
+        .buttonStyle(.plain)
+        .disabled(store.isRecovering)
+        .help(Text(contextualPresentation.help))
+        .accessibilityLabel(Text(contextualPresentation.accessibilityLabel))
+        .accessibilityValue(Text(contextualPresentation.accessibilityValue))
+        .accessibilityHint("Reattaches active per-app audio routes.")
+      } else {
+        contextualBadge(contextualPresentation)
+          .help(Text(contextualPresentation.help))
+          .accessibilityLabel(Text(contextualPresentation.accessibilityLabel))
+          .accessibilityValue(Text(contextualPresentation.accessibilityValue))
+          .accessibilityHint(Text(contextualPresentation.help))
+      }
+      // Healthy: a quiet status chip. Degraded: a button that runs recovery right
+      // from where the problem is reported, instead of dead-ending in a tooltip and
+      // hiding the remedy behind an obscure toolbar glyph.
+    } else if isHealthy {
       badge
         .help(Text("Routing status: \(title)"))
         .accessibilityLabel(Text("Routing status: \(title)"))
@@ -1073,6 +1122,41 @@ private struct RouteHealthBadge: View {
       .help(Text("\(title). Click to recover managed routes."))
       .accessibilityLabel(Text("Routing status: \(title)"))
       .accessibilityHint("Reattaches active per-app audio routes.")
+    }
+  }
+
+  private var contextualPresentation: RouteHealthPresentation? {
+    let priority: [RouteHealthContext] = [
+      .geometryRecoveryExhausted,
+      .geometryRecoveryInProgress,
+      .unattributableRouterFallback,
+      .verifiedRouterOwnership,
+      .routerMixedOutput,
+    ]
+    for context in priority {
+      if let app = store.session.apps.first(where: { $0.routeHealthContext == context }) {
+        return RouteHealthPresentation(app: app)
+      }
+    }
+    return nil
+  }
+
+  private func contextualBadge(_ presentation: RouteHealthPresentation) -> some View {
+    Label(presentation.title, systemImage: presentation.symbolName)
+      .font(.caption.weight(.medium))
+      .foregroundStyle(contextualColor(presentation.tone))
+      .padding(.horizontal, 8)
+      .padding(.vertical, 4)
+      .background(contextualColor(presentation.tone).opacity(0.12), in: Capsule())
+  }
+
+  private func contextualColor(_ tone: RouteHealthPresentation.Tone) -> Color {
+    switch tone {
+    case .active: WavesDesign.accent
+    case .success: WavesDesign.success
+    case .neutral: .secondary
+    case .warning: WavesDesign.warning
+    case .error: WavesDesign.error
     }
   }
 
