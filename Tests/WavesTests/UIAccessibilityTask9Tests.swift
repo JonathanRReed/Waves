@@ -240,7 +240,9 @@ import WavesAudioCore
 @MainActor
 @Test func iconEncodingSuspendsBeforeBlockingWorkSoMainActorHeartbeatProgresses() async {
   let raster = AppIconRaster(width: 1, height: 1, bytesPerRow: 4, rgbaBytes: Data([0, 0, 0, 255]))
+  let encodingStarted = Task9Counter()
   let encoder = AppIconEncoder { _ in
+    encodingStarted.increment()
     Thread.sleep(forTimeInterval: 0.75)
     return Data([1])
   }
@@ -248,7 +250,10 @@ import WavesAudioCore
   let start = clock.now
   let task = Task { @MainActor in await encoder.encode(raster) }
 
-  await Task.yield()
+  while encodingStarted.value == 0, start.duration(to: clock.now) < .seconds(2) {
+    await Task.yield()
+  }
+  #expect(encodingStarted.value == 1)
   let elapsed = start.duration(to: clock.now)
   #expect(elapsed < .milliseconds(500))
   #expect(await task.value == Data([1]))
