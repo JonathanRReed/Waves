@@ -44,10 +44,11 @@ file.
 
 Execute `script/release-gate.sh`, `script/build_and_run.sh`,
 `script/make_appcast.sh`, `script/generate-release-evidence.sh`, and
-`script/generate-release-tag-envelope.sh` directly as shown in this checklist.
-Do not invoke or source them through another shell. Their `/bin/bash -p`
-shebang must run so Bash suppresses `BASH_ENV`, imported shell functions, and
-inherited shell-option startup behavior before the first command.
+`script/generate-release-tag-envelope.sh`, and
+`script/prepare-elgato-handoff.sh` directly as shown in this checklist. Do not
+invoke or source them through another shell. Their `/bin/bash -p` shebang must
+run so Bash suppresses `BASH_ENV`, imported shell functions, and inherited
+shell-option startup behavior before the first command.
 
 Each entry point then removes every inherited exported variable with Bash
 builtins before it launches Ruby, Git, Swift, or an Apple signing tool. It
@@ -243,6 +244,38 @@ architectures, deployment floor, exact Developer ID identity, team, designated
 requirement, hardened runtime, notarized Developer ID status, stapling,
 Gatekeeper, source stamps, and artifact hashes. Trust values are derived from
 the app and DMG instead of being accepted from the evidence input.
+
+## Prepare the remote Elgato handoff
+
+Only after the candidate gate passes, prepare the exact remote Wave Link and
+Stream Deck test kit. The separately packaged plugin must come from a clean,
+tested plugin checkout, and `PLUGIN_40_CHARACTER_REVISION` must be replaced by
+that checkout's exact lowercase revision. The output directory must not exist.
+
+```bash
+./script/prepare-elgato-handoff.sh \
+  /ABSOLUTE/PATH/TO/dist/release-evidence.candidate.json \
+  /ABSOLUTE/PATH/TO/com.jonathanreed.waves.streamDeckPlugin \
+  PLUGIN_40_CHARACTER_REVISION \
+  /ABSOLUTE/PATH/TO/Waves-1.5.0-13-Elgato-Handoff
+```
+
+The command reruns the complete candidate gate, privately snapshots and
+verifies the signed Waves app, DMG, and dSYM, binds the exact DMG and plugin
+hashes to their source revisions, generates the ordered hardware checklist,
+diagnostic collector, rollback guide, pending result record, and receipt
+finalizer, verifies the exact handoff file set, then publishes the completed
+directory atomically. It does not sign, notarize, tag, push, upload, or publish.
+
+The remote tester verifies `SHA256SUMS`, installs the included DMG and plugin,
+runs every checklist group, records each result in `results.json`, collects the
+bounded diagnostics, and runs the included `finalize-receipt.rb`. The returned
+receipt is accepted only when every required result passes and the receipt is
+bound to the handoff revision, DMG, plugin revision and hash, candidate
+evidence, and returned diagnostic tree. The finalizer accepts only the named
+diagnostic files, caps each file at 10 MiB and the complete tree at 32 MiB, and
+rejects symlinks. `ELG-001` remains open until this kit is generated from and
+delivered with the final signed and notarized candidate.
 
 After remote Wave Link and Stream Deck hardware evidence passes, seal the
 publication profile and create the annotated-tag envelope for review. These

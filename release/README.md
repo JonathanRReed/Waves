@@ -49,15 +49,26 @@ and hash checks. Only finalized outputs are copied to `dist` atomically. The
 release gate derives source values and every trust fact from the packaged
 artifact before comparing them with sealed evidence.
 
-The three release-sensitive entry points must be executed directly so their
-`/bin/bash -p` shebangs suppress shell startup injection. Before any child
-interpreter runs, a shared shell-builtin boundary deletes all inherited exports
-and restores only the validated inputs documented in `docs/RELEASE.md`. It then
-uses a fixed system path, `C.UTF-8`, noninteractive Git with ambient global and
-system configuration disabled, `/usr/bin/ruby --disable-gems`, and new
-mode-0700 `HOME` and `TMPDIR` roots. Inherited Ruby, Gem, Bundler, Git
-redirection, prompt, shell-function, loader, metadata, SDK, and staging
-authority cannot reach release operations.
+The protected release-sensitive entry points must be executed directly so
+their `/bin/bash -p` shebangs suppress shell startup injection. Before any
+child interpreter runs, a shared shell-builtin boundary deletes all inherited
+exports and restores only the validated inputs documented in
+`docs/RELEASE.md`. It then uses a fixed system path, `C.UTF-8`, noninteractive
+Git with ambient global and system configuration disabled,
+`/usr/bin/ruby --disable-gems`, and new mode-0700 `HOME` and `TMPDIR` roots.
+Inherited Ruby, Gem, Bundler, Git redirection, prompt, shell-function, loader,
+metadata, SDK, and staging authority cannot reach release operations.
+
+`script/prepare-elgato-handoff.sh` is the only supported remote-hardware kit
+assembler. It requires a passing candidate evidence manifest, revalidates the
+privately staged signed app, DMG, and dSYM, and creates an exact file set bound
+to the Waves source revision, DMG SHA-256, Stream Deck plugin revision and
+SHA-256, and candidate evidence. The kit includes an ordered Wave Link and
+Stream Deck checklist, bounded diagnostic collector, 1.4.4 rollback procedure,
+mutable result record, and a finalizer that emits a canonical remote receipt
+only after every result passes. Preparing a kit does not close `ELG-001`; the
+final signed candidate must still be delivered and its returned physical
+hardware evidence reviewed before publication.
 
 Sparkle publication uses the explicit account `com.jonathanreed.Waves`, derives
 its public key through the exact isolated Sparkle tool, requires equality with

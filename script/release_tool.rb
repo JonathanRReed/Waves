@@ -1202,6 +1202,7 @@ module WavesRelease
       build = read(root, "script/build_and_run.sh")
       appcast = read(root, "script/make_appcast.sh")
       audit = read(root, "script/audit-realtime-callback.sh")
+      handoff = read(root, "script/prepare-elgato-handoff.sh")
 
       require_in_order!(
         build,
@@ -1244,6 +1245,23 @@ module WavesRelease
       end
       if audit.include?('WAVES_REALTIME_SOURCE:-') || !audit.include?("override is prohibited")
         raise Error, "realtime audit must use only its canonical tracked source"
+      end
+      unless handoff.lines.first&.chomp == "#!/bin/bash -p" &&
+          handoff.include?("waves_release_environment_bootstrap") &&
+          handoff.include?("/usr/bin/ruby --disable-gems")
+        raise Error, "Elgato handoff must enter through the protected release environment"
+      end
+      require_in_order!(
+        handoff,
+        [
+          'release-gate.sh" candidate',
+          'release_tool.rb" elgato-handoff prepare',
+          'release_tool.rb" elgato-handoff verify',
+        ],
+        "Elgato handoff must validate the candidate before assembly and verify the result"
+      )
+      if handoff.match?(/publication|tag-envelope|notarytool submit|gh release/)
+        raise Error, "Elgato handoff must not perform release publication actions"
       end
       true
     end
@@ -1566,6 +1584,468 @@ module WavesRelease
     end
   end
 
+  module ElgatoHandoff
+    ROLLBACK_DMG_SHA256 = "5887c0c46b824d610016dbfe7e34a1c1e2da2c4bc270555c15221ca5b694face"
+    PLUGIN_NAME = "com.jonathanreed.waves.streamDeckPlugin"
+    CHECK_IDS = %w[
+      launch-orders
+      routing-ownership
+      single-audible-path
+      arbitration-cycles
+      device-and-relaunch
+      stream-deck-controls
+    ].freeze
+    FILES = %w[
+      README.md
+      ROLLBACK.md
+      SHA256SUMS
+      TEST-CHECKLIST.md
+      Waves-1.5.0-13.dmg
+      collect-diagnostics.sh
+      com.jonathanreed.waves.streamDeckPlugin
+      finalize-receipt.rb
+      handoff.json
+      release-evidence.candidate.json
+      release-evidence.candidate.json.sha256
+      results.json
+    ].freeze
+
+    module_function
+
+    def prepare_from_repository!(
+      root:,
+      manifest_path:,
+      metadata:,
+      plugin_path:,
+      plugin_revision:,
+      templates_root:,
+      output_root:
+    )
+      manifest = Evidence.verify_file!(
+        path: manifest_path,
+        digest_path: "#{manifest_path}.sha256",
+        metadata: metadata,
+        profile: "candidate"
+      )
+      exact_identity = ReleaseSource.identity!(
+        root: root,
+        expected_revision: manifest.fetch("source").fetch("revision")
+      )
+      Dir.mktmpdir("waves-elgato-candidate") do |private_root|
+        FileUtils.chmod(0o700, private_root)
+        private_dist = File.join(private_root, "dist")
+        FileUtils.mkdir_p(private_dist)
+        FileUtils.chmod(0o700, private_dist)
+        PrivateArtifacts.stage_release_artifacts!(
+          source_root: File.join(root, "dist"),
+          destination_root: private_dist
+        )
+        ArtifactEvidence.verify_release_artifacts!(
+          manifest: manifest,
+          metadata: metadata,
+          app: File.join(private_dist, "Waves.app"),
+          dmg: File.join(private_dist, "Waves.dmg"),
+          dsym: File.join(private_dist, "Waves.app.dSYM"),
+          exact_source_identity: exact_identity
+        )
+        prepare!(
+          manifest_path: manifest_path,
+          metadata: metadata,
+          dmg_path: File.join(private_dist, "Waves.dmg"),
+          plugin_path: plugin_path,
+          plugin_revision: plugin_revision,
+          templates_root: templates_root,
+          output_root: output_root
+        )
+      end
+    end
+
+    def prepare!(
+      manifest_path:,
+      metadata:,
+      dmg_path:,
+      plugin_path:,
+      plugin_revision:,
+      templates_root:,
+      output_root:
+    )
+      Validation.revision!(plugin_revision, "Stream Deck plugin source revision")
+      raise Error, "Stream Deck plugin package must use the canonical filename" unless File.basename(plugin_path) == PLUGIN_NAME
+      raise Error, "Elgato handoff destination already exists" if File.exist?(output_root) || File.symlink?(output_root)
+
+      manifest = Evidence.verify_file!(
+        path: manifest_path,
+        digest_path: "#{manifest_path}.sha256",
+        metadata: metadata,
+        profile: "candidate"
+      )
+      source_revision = manifest.fetch("source").fetch("revision")
+      dmg_hash = manifest.fetch("package").fetch("hashes").fetch("dmg")
+      parent = File.expand_path(File.dirname(output_root))
+      raise Error, "Elgato handoff destination parent is unavailable" unless File.directory?(parent)
+      raise Error, "Elgato handoff destination parent must not be a symbolic link" if File.symlink?(parent)
+
+      staging = Dir.mktmpdir(".waves-elgato-handoff-", parent)
+      FileUtils.chmod(0o700, staging)
+      begin
+        staged_dmg = PrivateArtifacts.stage_file!(
+          source: dmg_path,
+          root: staging,
+          name: dmg_name(metadata)
+        )
+        unless Digest::SHA256.file(staged_dmg).hexdigest == dmg_hash
+          raise Error, "Elgato handoff DMG does not match sealed candidate evidence"
+        end
+        staged_plugin = PrivateArtifacts.stage_file!(
+          source: plugin_path,
+          root: staging,
+          name: PLUGIN_NAME
+        )
+        raise Error, "Stream Deck plugin package is empty" unless File.size(staged_plugin).positive?
+        raise Error, "Stream Deck plugin package exceeds 100 MiB" if File.size(staged_plugin) > 100 * 1024 * 1024
+
+        staged_manifest = PrivateArtifacts.stage_file!(
+          source: manifest_path,
+          root: staging,
+          name: "release-evidence.candidate.json"
+        )
+        PrivateArtifacts.stage_file!(
+          source: "#{manifest_path}.sha256",
+          root: staging,
+          name: "release-evidence.candidate.json.sha256"
+        )
+        collector = PrivateArtifacts.stage_file!(
+          source: File.join(templates_root, "collect-diagnostics.sh"),
+          root: staging,
+          name: "collect-diagnostics.sh"
+        )
+        FileUtils.chmod(0o700, collector)
+        finalizer = PrivateArtifacts.stage_file!(
+          source: File.join(templates_root, "finalize-receipt.rb"),
+          root: staging,
+          name: "finalize-receipt.rb"
+        )
+        FileUtils.chmod(0o700, finalizer)
+
+        handoff = {
+          "schemaVersion" => 1,
+          "issuer" => "waves-release",
+          "sourceRevision" => source_revision,
+          "version" => metadata.fetch("version"),
+          "build" => metadata.fetch("build"),
+          "bundleIdentifier" => metadata.fetch("bundleIdentifier"),
+          "candidateEvidenceSHA256" => Digest::SHA256.file(staged_manifest).hexdigest,
+          "artifacts" => {
+            "dmg" => {
+              "name" => dmg_name(metadata),
+              "sha256" => dmg_hash,
+            },
+            "streamDeckPlugin" => {
+              "name" => PLUGIN_NAME,
+              "sha256" => Digest::SHA256.file(staged_plugin).hexdigest,
+              "sourceRevision" => plugin_revision,
+            },
+          },
+          "remoteReceipt" => {
+            "issuer" => metadata.fetch("releaseAuthority").fetch("receiptIssuers").fetch("remoteElgato"),
+            "name" => "remote-elgato-receipt.json",
+          },
+        }
+        write_file!(File.join(staging, "handoff.json"), CanonicalJSON.generate(handoff))
+        write_file!(File.join(staging, "README.md"), readme(handoff))
+        write_file!(File.join(staging, "TEST-CHECKLIST.md"), checklist(handoff))
+        write_file!(File.join(staging, "ROLLBACK.md"), rollback(handoff))
+        write_file!(File.join(staging, "results.json"), CanonicalJSON.generate(pending_results(handoff)))
+        write_checksums!(staging)
+        verify!(root: staging, metadata: metadata)
+        File.rename(staging, output_root)
+        staging = nil
+      ensure
+        FileUtils.rm_rf(staging) if staging && File.exist?(staging)
+      end
+      output_root
+    end
+
+    def verify!(root:, metadata:)
+      stat = File.lstat(root)
+      raise Error, "Elgato handoff root must not be a symbolic link" if stat.symlink?
+      raise Error, "Elgato handoff root must be a directory" unless stat.directory?
+      actual = Dir.children(root).sort
+      raise Error, "Elgato handoff file set is not exact" unless actual == FILES
+      FILES.each do |name|
+        entry = File.lstat(File.join(root, name))
+        raise Error, "Elgato handoff entry must be a regular file: #{name}" unless entry.file?
+      end
+
+      handoff = StrictJSON.load(File.join(root, "handoff.json"))
+      Validation.exact_keys!(
+        handoff,
+        %w[
+          schemaVersion issuer sourceRevision version build bundleIdentifier
+          candidateEvidenceSHA256 artifacts remoteReceipt
+        ],
+        "Elgato handoff manifest"
+      )
+      raise Error, "Elgato handoff schemaVersion must be 1" unless handoff["schemaVersion"] == 1
+      raise Error, "Elgato handoff issuer must be waves-release" unless handoff["issuer"] == "waves-release"
+      Validation.revision!(handoff["sourceRevision"], "Elgato handoff source revision")
+      %w[version build bundleIdentifier].each do |field|
+        raise Error, "Elgato handoff #{field} does not match release metadata" unless handoff[field] == metadata[field]
+      end
+      Validation.sha256!(handoff["candidateEvidenceSHA256"], "Elgato handoff candidate evidence SHA-256")
+      evidence_path = File.join(root, "release-evidence.candidate.json")
+      unless Digest::SHA256.file(evidence_path).hexdigest == handoff["candidateEvidenceSHA256"]
+        raise Error, "Elgato handoff candidate evidence hash does not match"
+      end
+      evidence = Evidence.verify_file!(
+        path: evidence_path,
+        digest_path: "#{evidence_path}.sha256",
+        metadata: metadata,
+        profile: "candidate",
+        expected_revision: handoff["sourceRevision"]
+      )
+
+      Validation.exact_keys!(handoff["artifacts"], %w[dmg streamDeckPlugin], "Elgato handoff artifacts")
+      dmg = handoff["artifacts"].fetch("dmg")
+      Validation.exact_keys!(dmg, %w[name sha256], "Elgato handoff DMG")
+      raise Error, "Elgato handoff DMG name is not canonical" unless dmg["name"] == dmg_name(metadata)
+      verify_file_hash!(root: root, name: dmg["name"], digest: dmg["sha256"], label: "DMG")
+      unless dmg["sha256"] == evidence.fetch("package").fetch("hashes").fetch("dmg")
+        raise Error, "Elgato handoff DMG is not bound to candidate evidence"
+      end
+
+      plugin = handoff["artifacts"].fetch("streamDeckPlugin")
+      Validation.exact_keys!(plugin, %w[name sha256 sourceRevision], "Elgato handoff Stream Deck plugin")
+      raise Error, "Elgato handoff plugin name is not canonical" unless plugin["name"] == PLUGIN_NAME
+      Validation.revision!(plugin["sourceRevision"], "Stream Deck plugin source revision")
+      verify_file_hash!(root: root, name: plugin["name"], digest: plugin["sha256"], label: "Stream Deck plugin")
+
+      receipt = handoff["remoteReceipt"]
+      Validation.exact_keys!(receipt, %w[issuer name], "Elgato handoff remote receipt")
+      expected_issuer = metadata.fetch("releaseAuthority").fetch("receiptIssuers").fetch("remoteElgato")
+      raise Error, "Elgato handoff receipt issuer does not match metadata" unless receipt["issuer"] == expected_issuer
+      raise Error, "Elgato handoff receipt name is not canonical" unless receipt["name"] == "remote-elgato-receipt.json"
+
+      validate_results!(
+        StrictJSON.load(File.join(root, "results.json")),
+        handoff: handoff,
+        require_passed: false
+      )
+
+      verify_checksums!(root)
+      collector_mode = File.lstat(File.join(root, "collect-diagnostics.sh")).mode & 0o777
+      raise Error, "Elgato diagnostics collector must be mode 0700" unless collector_mode == 0o700
+      finalizer_mode = File.lstat(File.join(root, "finalize-receipt.rb")).mode & 0o777
+      raise Error, "Elgato receipt finalizer must be mode 0700" unless finalizer_mode == 0o700
+      true
+    rescue Errno::ENOENT => error
+      raise Error, "Elgato handoff is incomplete: #{error.message}"
+    end
+
+    def dmg_name(metadata)
+      "Waves-#{metadata.fetch('version')}-#{metadata.fetch('build')}.dmg"
+    end
+
+    def readme(handoff)
+      <<~MARKDOWN
+        # Waves #{handoff.fetch('version')} build #{handoff.fetch('build')} Elgato test handoff
+
+        This folder is bound to Waves revision `#{handoff.fetch('sourceRevision')}` and DMG
+        SHA-256 `#{handoff.dig('artifacts', 'dmg', 'sha256')}`. Do not substitute a rebuilt
+        app, a different DMG, or another Stream Deck package.
+
+        Stream Deck plugin revision: `#{handoff.dig('artifacts', 'streamDeckPlugin', 'sourceRevision')}`
+
+        Stream Deck plugin SHA-256: `#{handoff.dig('artifacts', 'streamDeckPlugin', 'sha256')}`
+
+        1. Run `/usr/bin/shasum -a 256 -c SHA256SUMS` in this folder.
+        2. Open `#{handoff.dig('artifacts', 'dmg', 'name')}` and drag Waves to Applications.
+        3. Open `#{PLUGIN_NAME}` to install the companion.
+        4. Follow `TEST-CHECKLIST.md` in order and record every pass or failure.
+        5. Use `./collect-diagnostics.sh ABSOLUTE_OUTPUT_DIRECTORY` after the final test and
+           immediately after any unexplained failure.
+        6. In `results.json`, change each test status to `passed` or `failed` and replace its
+           detail with the observed result. Do not change the revision or artifact hash.
+        7. If every group passed, create the return receipt with:
+
+           ```bash
+           ./finalize-receipt.rb "$PWD" "$PWD/results.json" \\
+             /ABSOLUTE/PATH/TO/DIAGNOSTICS \\
+             /ABSOLUTE/PATH/TO/RETURN/remote-elgato-receipt.json
+           ```
+
+        8. Return the completed checklist, diagnostics directory, `results.json`,
+           `remote-elgato-receipt.json`, its `.sha256` sidecar, and `handoff.json` to the
+           maintainer. Do not publish the candidate.
+
+        `ROLLBACK.md` restores the retained 1.4.4 release and matching pre-test state if the
+        candidate produces duplication, silence, state loss, or another unexplained failure.
+      MARKDOWN
+    end
+
+    def checklist(handoff)
+      <<~MARKDOWN
+        # Remote Wave Link and Stream Deck checklist
+
+        Candidate revision: `#{handoff.fetch('sourceRevision')}`
+
+        Candidate DMG SHA-256: `#{handoff.dig('artifacts', 'dmg', 'sha256')}`
+
+        Stream Deck package SHA-256: `#{handoff.dig('artifacts', 'streamDeckPlugin', 'sha256')}`
+
+        Stop at the first unexplained duplication, silence, route loss, signature mismatch,
+        or control-state disagreement. Record the failure and collect diagnostics before
+        changing launch order, devices, or app state.
+
+        ## launch-orders
+
+        - [ ] Waves first, then Wave Link, reaches a stable truthful route state.
+        - [ ] Wave Link first, then Waves, reaches the same stable truthful route state.
+
+        ## routing-ownership
+
+        - [ ] A Wave Link-claimed app is monitor-only in Waves.
+        - [ ] An unclaimed ordinary app remains manageable in Waves.
+        - [ ] Wave Link mixed output is never wrapped by Waves.
+        - [ ] Private or unreadable tap fallback is conservative and does not claim ownership.
+
+        ## single-audible-path
+
+        - [ ] Each test source has one audible path with no echo, duplication, delay, or silence.
+
+        ## arbitration-cycles
+
+        - [ ] Twenty consecutive yield and recovery cycles complete automatically.
+        - [ ] No cycle leaves a stale controller, disabled healthy route, or duplicate path.
+
+        ## device-and-relaunch
+
+        - [ ] Output-device changes preserve one intended audible path.
+        - [ ] Waves relaunch restores the truthful route state.
+        - [ ] Wave Link relaunch restores the truthful route state.
+        - [ ] Relaunching both apps in both orders restores the truthful route state.
+
+        ## stream-deck-controls
+
+        - [ ] Dial volume changes the selected managed app and reflects back on device and Mac.
+        - [ ] Mute stays synchronized in both directions.
+        - [ ] The app roster matches Waves' managed route roster.
+        - [ ] Disabled external control is reported without mutation or reconnect churn.
+        - [ ] Waves and Stream Deck relaunch reconnect without stale state.
+
+        ## Final record
+
+        - [ ] Copy Diagnostics from Waves Settings and save the text with the returned evidence.
+        - [ ] Run the bundled diagnostics collector.
+        - [ ] Record the exact Wave Link, Stream Deck, macOS, and hardware versions.
+        - [ ] Return this completed checklist even if every item passed.
+      MARKDOWN
+    end
+
+    def rollback(handoff)
+      <<~MARKDOWN
+        # Roll back to Waves 1.4.4
+
+        Use rollback after duplication, silence, state loss, signature mismatch, updater
+        failure, or any unexplained hardware result. Preserve the failed candidate diagnostics
+        before changing state.
+
+        1. Quit Waves, Wave Link, and Stream Deck.
+        2. Preserve the returned checklist, diagnostics, and `handoff.json`.
+        3. Move Waves #{handoff.fetch('version')} build #{handoff.fetch('build')} from Applications
+           to the Trash. Do not delete user state.
+        4. Download the retained signed Waves 1.4.4 DMG from
+           `https://github.com/JonathanRReed/Waves/releases/download/v1.4.4/Waves.dmg`.
+        5. Require SHA-256 `#{ROLLBACK_DMG_SHA256}` before opening the 1.4.4 DMG.
+        6. Drag Waves 1.4.4 to Applications and confirm version 1.4.4 build 12 before launch.
+        7. Restore the pre-test Application Support and preferences backup only if state itself
+           is implicated. Keep the failed state separately for diagnosis.
+        8. Re-run the single-audible-path check on 1.4.4 and report the result.
+
+        Never reuse a 1.5 release tag, checksum, or evidence manifest after rollback.
+      MARKDOWN
+    end
+
+    def pending_results(handoff)
+      {
+        "schemaVersion" => 1,
+        "sourceRevision" => handoff.fetch("sourceRevision"),
+        "artifactSHA256" => handoff.dig("artifacts", "dmg", "sha256"),
+        "tests" => CHECK_IDS.to_h do |identifier|
+          [identifier, {"status" => "pending", "detail" => "Not yet run."}]
+        end,
+      }
+    end
+    private_class_method :pending_results
+
+    def validate_results!(results, handoff:, require_passed:)
+      Validation.exact_keys!(
+        results,
+        %w[schemaVersion sourceRevision artifactSHA256 tests],
+        "Elgato test results"
+      )
+      raise Error, "Elgato test results schemaVersion must be 1" unless results["schemaVersion"] == 1
+      unless results["sourceRevision"] == handoff["sourceRevision"]
+        raise Error, "Elgato test results are not bound to the handoff source revision"
+      end
+      unless results["artifactSHA256"] == handoff.dig("artifacts", "dmg", "sha256")
+        raise Error, "Elgato test results are not bound to the handoff DMG"
+      end
+      Validation.exact_keys!(results["tests"], CHECK_IDS, "Elgato test result groups")
+      results["tests"].each do |identifier, result|
+        Validation.exact_keys!(result, %w[status detail], "Elgato test result #{identifier}")
+        allowed = require_passed ? ["passed"] : %w[pending passed failed]
+        unless allowed.include?(result["status"])
+          raise Error, "Elgato test result #{identifier} must #{require_passed ? 'pass' : 'have a valid status'}"
+        end
+        Validation.nonempty_string!(result["detail"], "Elgato test result #{identifier}.detail")
+      end
+      true
+    end
+
+    def write_file!(path, contents)
+      File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+        file.write(contents)
+        file.flush
+        file.fsync
+      end
+    end
+    private_class_method :write_file!
+
+    def write_checksums!(root)
+      names = FILES - %w[SHA256SUMS results.json]
+      contents = names.sort.map do |name|
+        "#{Digest::SHA256.file(File.join(root, name)).hexdigest}  #{name}"
+      end.join("\n") + "\n"
+      write_file!(File.join(root, "SHA256SUMS"), contents)
+    end
+    private_class_method :write_checksums!
+
+    def verify_checksums!(root)
+      expected_names = FILES - %w[SHA256SUMS results.json]
+      entries = File.readlines(File.join(root, "SHA256SUMS"), chomp: true).to_h do |line|
+        match = line.match(/\A([0-9a-f]{64})  ([^\/\n]+)\z/)
+        raise Error, "Elgato handoff checksum file is malformed" unless match
+        [match[2], match[1]]
+      end
+      raise Error, "Elgato handoff checksum file set is not exact" unless entries.keys.sort == expected_names.sort
+      entries.each do |name, expected|
+        actual = Digest::SHA256.file(File.join(root, name)).hexdigest
+        raise Error, "Elgato handoff checksum mismatch for #{name}" unless actual == expected
+      end
+      true
+    end
+    private_class_method :verify_checksums!
+
+    def verify_file_hash!(root:, name:, digest:, label:)
+      Validation.sha256!(digest, "Elgato handoff #{label} SHA-256")
+      actual = Digest::SHA256.file(File.join(root, name)).hexdigest
+      raise Error, "Elgato handoff #{label} SHA-256 does not match" unless actual == digest
+      true
+    end
+    private_class_method :verify_file_hash!
+  end
+
   module CLI
     module_function
 
@@ -1674,6 +2154,34 @@ module WavesRelease
           metadata: metadata,
           packaged_public_key: packaged_public_key
         )
+      when "elgato-handoff"
+        handoff_command = arguments.shift
+        metadata = Metadata.load(metadata_path)
+        case handoff_command
+        when "prepare"
+          manifest_path, plugin_path, plugin_revision, output_root = arguments
+          unless output_root
+            raise Error,
+              "usage: release_tool.rb elgato-handoff prepare MANIFEST PLUGIN PLUGIN_REVISION OUTPUT_ROOT"
+          end
+          ElgatoHandoff.prepare_from_repository!(
+            root: root,
+            manifest_path: manifest_path,
+            metadata: metadata,
+            plugin_path: plugin_path,
+            plugin_revision: plugin_revision,
+            templates_root: File.join(root, "release/elgato-handoff"),
+            output_root: output_root
+          )
+          puts "Prepared exact-candidate Elgato handoff at #{output_root}."
+        when "verify"
+          handoff_root = arguments.shift
+          raise Error, "usage: release_tool.rb elgato-handoff verify HANDOFF_ROOT" unless handoff_root
+          ElgatoHandoff.verify!(root: handoff_root, metadata: metadata)
+          puts "Elgato handoff is exact and candidate-bound."
+        else
+          raise Error, "unknown Elgato handoff command #{handoff_command.inspect}"
+        end
       when "trusted-toolchain"
         developer_dir, sdk_path, swift_path = arguments
         unless swift_path
@@ -1767,7 +2275,7 @@ module WavesRelease
         end
         puts "Signed candidate artifact identity, trust, and hashes match sealed evidence."
       else
-        raise Error, "usage: release_tool.rb metadata|validate-repository|validate-workflows|source-identity|build-recipe-digest|evidence|tag-envelope|history|publication-tag|sparkle-signing-tool|verify-release-artifacts|verify-artifacts"
+        raise Error, "usage: release_tool.rb metadata|validate-repository|validate-workflows|source-identity|build-recipe-digest|evidence|tag-envelope|history|publication-tag|sparkle-signing-tool|elgato-handoff|verify-release-artifacts|verify-artifacts"
       end
     rescue Error => error
       warn "Error: #{error.message}"

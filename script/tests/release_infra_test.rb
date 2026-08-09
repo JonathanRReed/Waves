@@ -721,10 +721,10 @@ class ReleaseInfraTest < Minitest::Test
       contents = File.binread(path)
       next unless contents.valid_encoding?
       interpreted = contents.match?(
-        %r{(?:^|[[:space:]])(?:/bin/)?bash[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast|generate-release-evidence|generate-release-tag-envelope)\.sh}
+        %r{(?:^|[[:space:]])(?:/bin/)?bash[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast|generate-release-evidence|generate-release-tag-envelope|prepare-elgato-handoff)\.sh}
       )
       sourced = contents.match?(
-        %r{(?:^|[[:space:]])(?:source|\.)[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast|generate-release-evidence|generate-release-tag-envelope)\.sh}
+        %r{(?:^|[[:space:]])(?:source|\.)[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast|generate-release-evidence|generate-release-tag-envelope|prepare-elgato-handoff)\.sh}
       )
       bare_tag_envelope = contents.match?(
         %r{(?:^|[[:space:]])(?:/usr/bin/)?ruby(?:[[:space:]]+--disable-gems)?[[:space:]]+script/release_tool\.rb[[:space:]]+tag-envelope}
@@ -932,6 +932,295 @@ class ReleaseInfraTest < Minitest::Test
           paths: {"appExecutable" => app, "dmg" => dmg, "dSYM" => dsym}
         )
       end
+    end
+  end
+
+  def test_elgato_handoff_prepares_an_exact_candidate_bound_test_kit
+    handoff = WavesRelease.const_defined?(:ElgatoHandoff) ? WavesRelease::ElgatoHandoff : nil
+    refute_nil handoff, "expected deterministic Elgato handoff assembly"
+    return unless handoff
+
+    Dir.mktmpdir("waves-elgato-handoff") do |root|
+      dmg = File.join(root, "Waves.dmg")
+      plugin = File.join(root, "com.jonathanreed.waves.streamDeckPlugin")
+      manifest = File.join(root, "release-evidence.candidate.json")
+      output = File.join(root, "Waves-1.5.0-13-Elgato-Handoff")
+      File.write(dmg, "signed candidate dmg bytes\n")
+      File.write(plugin, "stream deck package bytes\n")
+
+      input = evidence_input
+      dmg_hash = Digest::SHA256.file(dmg).hexdigest
+      input.fetch("package").fetch("hashes")["dmg"] = dmg_hash
+      input.fetch("package").fetch("notarization")["artifactSHA256"] = dmg_hash
+      input.fetch("externalReceipts").fetch("securityScan")["artifactSHA256"] = dmg_hash
+      WavesRelease::Evidence.write!(
+        input: input,
+        metadata: load_metadata,
+        profile: "candidate",
+        output: manifest
+      )
+
+      wrong_dmg = File.join(root, "wrong-Waves.dmg")
+      rejected_output = File.join(root, "Rejected-Elgato-Handoff")
+      File.write(wrong_dmg, "different candidate bytes\n")
+      assert_release_error(/DMG.*sealed candidate evidence/) do
+        handoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: wrong_dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: rejected_output
+        )
+      end
+      refute File.exist?(rejected_output)
+
+      handoff.prepare!(
+        manifest_path: manifest,
+        metadata: load_metadata,
+        dmg_path: dmg,
+        plugin_path: plugin,
+        plugin_revision: "b" * 40,
+        templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+        output_root: output
+      )
+
+      expected_files = %w[
+        README.md
+        ROLLBACK.md
+        SHA256SUMS
+        TEST-CHECKLIST.md
+        Waves-1.5.0-13.dmg
+        collect-diagnostics.sh
+        com.jonathanreed.waves.streamDeckPlugin
+        finalize-receipt.rb
+        handoff.json
+        release-evidence.candidate.json
+        release-evidence.candidate.json.sha256
+        results.json
+      ]
+      assert_equal expected_files, Dir.children(output).sort
+
+      handoff_manifest = WavesRelease::StrictJSON.load(File.join(output, "handoff.json"))
+      assert_equal 1, handoff_manifest.fetch("schemaVersion")
+      assert_equal REVISION, handoff_manifest.fetch("sourceRevision")
+      assert_equal VERSION, handoff_manifest.fetch("version")
+      assert_equal BUILD, handoff_manifest.fetch("build")
+      assert_equal dmg_hash, handoff_manifest.dig("artifacts", "dmg", "sha256")
+      assert_equal "b" * 40, handoff_manifest.dig("artifacts", "streamDeckPlugin", "sourceRevision")
+      assert_equal Digest::SHA256.file(plugin).hexdigest,
+        handoff_manifest.dig("artifacts", "streamDeckPlugin", "sha256")
+      assert_equal Digest::SHA256.file(manifest).hexdigest,
+        handoff_manifest.fetch("candidateEvidenceSHA256")
+
+      checklist = File.read(File.join(output, "TEST-CHECKLIST.md"))
+      %w[
+        launch-orders
+        routing-ownership
+        single-audible-path
+        arbitration-cycles
+        device-and-relaunch
+        stream-deck-controls
+      ].each { |test_id| assert_includes checklist, test_id }
+      assert_includes File.read(File.join(output, "ROLLBACK.md")),
+        "5887c0c46b824d610016dbfe7e34a1c1e2da2c4bc270555c15221ca5b694face"
+      instructions = File.read(File.join(output, "README.md"))
+      assert_includes instructions, "results.json"
+      assert_includes instructions, "finalize-receipt.rb"
+      assert_includes instructions, "remote-elgato-receipt.json"
+      assert_includes instructions, "b" * 40
+      assert_includes instructions, Digest::SHA256.file(plugin).hexdigest
+      assert_includes instructions, '"$PWD/results.json" \\' + "\n"
+      collector = File.read(File.join(output, "collect-diagnostics.sh"))
+      assert_equal "#!/bin/bash -p", collector.lines.first.chomp
+      assert_includes collector, "/usr/sbin/system_profiler"
+      refute_match(/defaults write|tccutil|killall|rm -rf/, collector)
+
+      handoff.verify!(root: output, metadata: load_metadata)
+    end
+  end
+
+  def test_elgato_handoff_finalizer_requires_every_result_and_binds_returned_diagnostics
+    handoff = WavesRelease.const_defined?(:ElgatoHandoff) ? WavesRelease::ElgatoHandoff : nil
+    refute_nil handoff, "expected deterministic Elgato handoff assembly"
+    return unless handoff
+
+    Dir.mktmpdir("waves-elgato-receipt") do |root|
+      dmg = File.join(root, "Waves.dmg")
+      plugin = File.join(root, "com.jonathanreed.waves.streamDeckPlugin")
+      manifest = File.join(root, "release-evidence.candidate.json")
+      output = File.join(root, "Waves-1.5.0-13-Elgato-Handoff")
+      diagnostics = File.join(root, "diagnostics")
+      receipt = File.join(root, "remote-elgato-receipt.json")
+      File.write(dmg, "signed candidate dmg bytes\n")
+      File.write(plugin, "stream deck package bytes\n")
+      input = evidence_input
+      dmg_hash = Digest::SHA256.file(dmg).hexdigest
+      input.fetch("package").fetch("hashes")["dmg"] = dmg_hash
+      input.fetch("package").fetch("notarization")["artifactSHA256"] = dmg_hash
+      input.fetch("externalReceipts").fetch("securityScan")["artifactSHA256"] = dmg_hash
+      WavesRelease::Evidence.write!(
+        input: input,
+        metadata: load_metadata,
+        profile: "candidate",
+        output: manifest
+      )
+      handoff.prepare!(
+        manifest_path: manifest,
+        metadata: load_metadata,
+        dmg_path: dmg,
+        plugin_path: plugin,
+        plugin_revision: "b" * 40,
+        templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+        output_root: output
+      )
+
+      finalizer = File.join(output, "finalize-receipt.rb")
+      results_path = File.join(output, "results.json")
+      assert File.executable?(finalizer), "expected a runnable receipt finalizer in the handoff"
+      return unless File.executable?(finalizer)
+
+      FileUtils.mkdir_p(diagnostics)
+      %w[
+        macos.txt
+        kernel.txt
+        audio-and-usb.txt
+        relevant-processes.txt
+        handoff-artifact-checksums.txt
+        installed-waves-identity.txt
+        waves-diagnostics.txt
+        handoff.json
+        TEST-CHECKLIST.md
+      ].each do |name|
+        if %w[handoff.json TEST-CHECKLIST.md].include?(name)
+          FileUtils.cp(File.join(output, name), File.join(diagnostics, name))
+        else
+          File.write(File.join(diagnostics, name), "verified #{name}\n")
+        end
+      end
+
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ruby",
+        "--disable-gems",
+        finalizer,
+        output,
+        results_path,
+        diagnostics,
+        receipt
+      )
+      refute status.success?
+      assert_match(/must pass/i, stderr)
+      refute File.exist?(receipt)
+
+      results = JSON.parse(JSON.generate(WavesRelease::StrictJSON.load(results_path)))
+      results.fetch("tests").each_value do |result|
+        result["status"] = "passed"
+        result["detail"] = "Passed on physical Wave Link and Stream Deck hardware."
+      end
+      write_json(results_path, results)
+
+      unexpected_receipt = File.join(root, "unexpected-remote-elgato-receipt.json")
+      File.write(File.join(diagnostics, "browser-cookies.txt"), "unrelated private data\n")
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ruby",
+        "--disable-gems",
+        finalizer,
+        output,
+        results_path,
+        diagnostics,
+        unexpected_receipt
+      )
+      refute status.success?
+      assert_match(/unexpected file/, stderr)
+      refute File.exist?(unexpected_receipt)
+      FileUtils.rm_f(File.join(diagnostics, "browser-cookies.txt"))
+
+      oversized_receipt = File.join(root, "oversized-remote-elgato-receipt.json")
+      File.binwrite(File.join(diagnostics, "waves-diagnostics.txt"), "x" * (10 * 1024 * 1024 + 1))
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ruby",
+        "--disable-gems",
+        finalizer,
+        output,
+        results_path,
+        diagnostics,
+        oversized_receipt
+      )
+      refute status.success?
+      assert_match(/size limit/, stderr)
+      refute File.exist?(oversized_receipt)
+      File.write(File.join(diagnostics, "waves-diagnostics.txt"), "verified waves-diagnostics.txt\n")
+
+      tampered_receipt = File.join(root, "tampered-remote-elgato-receipt.json")
+      File.open(File.join(diagnostics, "handoff.json"), "a") { |file| file << "tampered\n" }
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ruby",
+        "--disable-gems",
+        finalizer,
+        output,
+        results_path,
+        diagnostics,
+        tampered_receipt
+      )
+      refute status.success?
+      assert_match(/diagnostics handoff\.json does not match/, stderr)
+      refute File.exist?(tampered_receipt)
+      FileUtils.cp(File.join(output, "handoff.json"), File.join(diagnostics, "handoff.json"))
+
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ruby",
+        "--disable-gems",
+        finalizer,
+        output,
+        results_path,
+        diagnostics,
+        receipt
+      )
+      assert status.success?, stderr
+      returned = WavesRelease::StrictJSON.load(receipt)
+      assert_equal "golden-gate-elgato", returned.fetch("issuer")
+      assert_equal REVISION, returned.fetch("sourceRevision")
+      assert_equal dmg_hash, returned.fetch("artifactSHA256")
+      assert_equal "b" * 40, returned.fetch("pluginSourceRevision")
+      assert_equal Digest::SHA256.file(plugin).hexdigest, returned.fetch("pluginSHA256")
+      assert_match(/\A[0-9a-f]{64}\z/, returned.fetch("diagnosticsSHA256"))
+      assert returned.fetch("tests").values.all? { |result| result.fetch("status") == "passed" }
+      assert_equal Digest::SHA256.file(receipt).hexdigest,
+        File.read("#{receipt}.sha256").split.first
+    end
+  end
+
+  def test_elgato_handoff_entrypoint_requires_the_protected_candidate_gate_before_assembly
+    entrypoint = File.expand_path("../prepare-elgato-handoff.sh", __dir__)
+    assert File.executable?(entrypoint), "expected protected Elgato handoff entrypoint"
+    return unless File.executable?(entrypoint)
+
+    source = File.read(entrypoint)
+    assert_equal "#!/bin/bash -p", source.lines.first.chomp
+    assert_includes source, 'source "$WAVES_RELEASE_ENVIRONMENT_HELPER"'
+    assert_includes source, "waves_release_environment_bootstrap"
+    assert_includes source, "/usr/bin/ruby --disable-gems"
+    candidate_gate = source.index('release-gate.sh" candidate')
+    assembly = source.index("release_tool.rb\" elgato-handoff prepare")
+    refute_nil candidate_gate, "handoff entrypoint must run the candidate gate"
+    refute_nil assembly, "handoff entrypoint must call canonical assembly"
+    assert_operator candidate_gate, :<, assembly
+    refute_match(/publication|tag-envelope|notarytool submit|gh release/, source)
+
+    Dir.mktmpdir("waves-elgato-entrypoint") do |directory|
+      marker = File.join(directory, "bash-env-ran")
+      hook = File.join(directory, "hook.sh")
+      File.write(hook, "printf 'ran\\n' > #{Shellwords.escape(marker)}\n")
+      _stdout, _stderr, status = Open3.capture3(
+        {
+          "BASH_ENV" => hook,
+          "WAVES_ATTACK_MARKER" => marker,
+        },
+        entrypoint
+      )
+      refute status.success?
+      refute File.exist?(marker), "handoff entrypoint must suppress BASH_ENV before its first command"
     end
   end
 
@@ -1868,10 +2157,21 @@ class ReleaseInfraTest < Minitest::Test
         'SOURCE_PATH="${WAVES_REALTIME_SOURCE:-$ROOT_DIR/Sources/Waves/Services/Audio/PerAppTapController.swift}"',
         /canonical tracked source/,
       ],
+      [
+        "script/prepare-elgato-handoff.sh",
+        'release-gate.sh" candidate',
+        'release-gate.sh" preflight',
+        /candidate before assembly/,
+      ],
     ]
     mutations.each do |relative, before, after, error|
       Dir.mktmpdir("waves-script-security") do |fixture|
-        %w[script/build_and_run.sh script/make_appcast.sh script/audit-realtime-callback.sh].each do |path|
+        %w[
+          script/build_and_run.sh
+          script/make_appcast.sh
+          script/audit-realtime-callback.sh
+          script/prepare-elgato-handoff.sh
+        ].each do |path|
           destination = File.join(fixture, path)
           FileUtils.mkdir_p(File.dirname(destination))
           FileUtils.cp(File.join(root, path), destination)
@@ -1942,6 +2242,7 @@ class ReleaseInfraTest < Minitest::Test
         script/release-gate.sh
         script/build_and_run.sh
         script/make_appcast.sh
+        script/prepare-elgato-handoff.sh
       ].each do |relative|
         source = File.join(source_root, relative)
         next unless File.file?(source)
@@ -1950,7 +2251,17 @@ class ReleaseInfraTest < Minitest::Test
         FileUtils.mkdir_p(File.dirname(destination))
         FileUtils.cp(source, destination)
       end
-      git(root, "add", ".github/workflows/release.yml", "script/release_tool.rb", "script/release_environment.sh", "script/release-gate.sh", "script/build_and_run.sh", "script/make_appcast.sh")
+      git(
+        root,
+        "add",
+        ".github/workflows/release.yml",
+        "script/release_tool.rb",
+        "script/release_environment.sh",
+        "script/release-gate.sh",
+        "script/build_and_run.sh",
+        "script/make_appcast.sh",
+        "script/prepare-elgato-handoff.sh"
+      )
       git(root, "add", "script/release_git") if File.file?(File.join(root, "script/release_git"))
       _stdout, _stderr, status = Open3.capture3("/usr/bin/git", "-C", root, "diff", "--cached", "--quiet")
       git(root, "commit", "-q", "-m", "test: overlay release implementation") unless status.success?
