@@ -1006,24 +1006,6 @@ private struct RoutingStateDot: View {
   private var color: Color { presentation.tone.indicatorColor(accent: theme.accent) }
 }
 
-/// Caches decoded app icons so the icon PNG/TIFF is not re-decoded on every
-/// SwiftUI body evaluation (which happens on every level/volume update).
-@MainActor
-private enum AppIconCache {
-  static let shared = NSCache<NSString, NSImage>()
-
-  static func icon(for app: AudioApp) -> NSImage? {
-    guard let data = app.iconTIFFData else { return nil }
-    let key = app.id as NSString
-    if let cached = shared.object(forKey: key) {
-      return cached
-    }
-    guard let image = NSImage(data: data) else { return nil }
-    shared.setObject(image, forKey: key)
-    return image
-  }
-}
-
 struct AppIconView: View {
   let app: AudioApp
 

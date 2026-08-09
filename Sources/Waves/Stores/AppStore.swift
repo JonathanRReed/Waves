@@ -253,7 +253,15 @@ enum PrivacySetupPresentationState: Equatable {
 @Observable
 @MainActor
 final class AppStore {
-  var session: AudioSessionSnapshot
+  var session: AudioSessionSnapshot {
+    didSet {
+      let previousRuntimeIDs = Set(oldValue.apps.map(\.id))
+      let currentRuntimeIDs = Set(session.apps.map(\.id))
+      if previousRuntimeIDs != currentRuntimeIDs {
+        AppIconCache.prune(using: session)
+      }
+    }
+  }
   var profiles: [Profile]
   /// The most recent profile result after AppStore generation checks and row-level
   /// reconciliation. Retained so diagnostics/tests can inspect every source row in
@@ -545,6 +553,7 @@ final class AppStore {
       enqueuePreferencesPersistence(preferences)
     }
     syncOnboarding(using: session)
+    AppIconCache.prune(using: session)
   }
 
   var visibleApps: [AudioApp] {
