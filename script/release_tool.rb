@@ -70,6 +70,16 @@ module WavesRelease
     end
   end
 
+  module GitPolicy
+    LAUNCHER = File.expand_path("release_git", __dir__).freeze
+
+    module_function
+
+    def run(*arguments, **options)
+      Validation.run(LAUNCHER, *arguments, **options)
+    end
+  end
+
   class DuplicateCheckingHash < Hash
     def []=(key, value)
       raise Error, "malformed JSON: duplicate key #{key.inspect}" if key?(key)
@@ -1019,9 +1029,9 @@ module WavesRelease
 
     def clean_exact_revision!(root:, expected_revision:)
       Validation.revision!(expected_revision, "expected revision")
-      actual = Validation.run("git", "rev-parse", "HEAD", chdir: root).strip
+      actual = GitPolicy.run("rev-parse", "HEAD", chdir: root).strip
       raise Error, "repository revision #{actual} does not match expected revision #{expected_revision}" unless actual == expected_revision
-      dirty = Validation.run("git", "status", "--porcelain", "--untracked-files=no", chdir: root)
+      dirty = GitPolicy.run("status", "--porcelain", "--untracked-files=no", chdir: root)
       raise Error, "release gate requires a clean tracked tree" unless dirty.empty?
 
       actual
@@ -1031,11 +1041,11 @@ module WavesRelease
   module ReleaseSource
     BUILD_INPUT_PATHS = %w[
       Package.swift Package.resolved PrivacyInfo.xcprivacy Sources
-      script/build_and_run.sh script/release_tool.rb release/metadata.json
+      script/build_and_run.sh script/release_git script/release_tool.rb release/metadata.json
     ].freeze
     RECIPE_PATHS = %w[
       Package.swift Package.resolved PrivacyInfo.xcprivacy
-      script/build_and_run.sh script/release_tool.rb release/metadata.json
+      script/build_and_run.sh script/release_git script/release_tool.rb release/metadata.json
     ].freeze
 
     module_function
@@ -1046,13 +1056,13 @@ module WavesRelease
 
       archive = if archive_path
                   FileUtils.mkdir_p(File.dirname(archive_path))
-                  Validation.run(
-                    "git", "archive", "--format=tar", "--output=#{archive_path}", expected_revision,
+                  GitPolicy.run(
+                    "archive", "--format=tar", "--output=#{archive_path}", expected_revision,
                     chdir: root
                   )
                   File.binread(archive_path)
                 else
-                  Validation.run("git", "archive", "--format=tar", expected_revision, chdir: root)
+                  GitPolicy.run("archive", "--format=tar", expected_revision, chdir: root)
                 end
       {
         "revision" => expected_revision,
@@ -1066,7 +1076,7 @@ module WavesRelease
     def recipe_digest_from_git(root:, revision:)
       digest = Digest::SHA256.new
       RECIPE_PATHS.each do |path|
-        contents = Validation.run("git", "show", "#{revision}:#{path}", chdir: root)
+        contents = GitPolicy.run("show", "#{revision}:#{path}", chdir: root)
         append_recipe_entry(digest, path, contents)
       end
       digest.hexdigest
@@ -1084,12 +1094,12 @@ module WavesRelease
     end
 
     def reject_untracked_build_inputs!(root)
-      untracked = Validation.run(
-        "git", "ls-files", "--others", "--exclude-standard", "--", *BUILD_INPUT_PATHS,
+      untracked = GitPolicy.run(
+        "ls-files", "--others", "--exclude-standard", "--", *BUILD_INPUT_PATHS,
         chdir: root
       ).lines.map(&:strip)
-      ignored = Validation.run(
-        "git", "ls-files", "--others", "--ignored", "--exclude-standard", "--", *BUILD_INPUT_PATHS,
+      ignored = GitPolicy.run(
+        "ls-files", "--others", "--ignored", "--exclude-standard", "--", *BUILD_INPUT_PATHS,
         chdir: root
       ).lines.map(&:strip)
       inputs = (untracked + ignored).reject(&:empty?).uniq.sort
@@ -1113,13 +1123,13 @@ module WavesRelease
     module_function
 
     def validate!(repo:, from_revision:, to_revision:, manifest: nil)
-      commits = Validation.run("git", "rev-list", "--reverse", "#{from_revision}..#{to_revision}", chdir: repo).lines.map(&:strip)
+      commits = GitPolicy.run("rev-list", "--reverse", "#{from_revision}..#{to_revision}", chdir: repo).lines.map(&:strip)
       equivalents = Array(manifest && manifest["skipCIEquivalentEvidence"])
       commits.each do |commit|
-        message = Validation.run("git", "log", "-1", "--format=%B", commit, chdir: repo).strip
+        message = GitPolicy.run("log", "-1", "--format=%B", commit, chdir: repo).strip
         next unless message.match?(SKIP_PATTERN)
 
-        paths = Validation.run("git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit, chdir: repo).lines.map(&:strip)
+        paths = GitPolicy.run("diff-tree", "--no-commit-id", "--name-only", "-r", commit, chdir: repo).lines.map(&:strip)
         next unless paths.any? { |path| protected_path?(path) }
 
         equivalent = equivalents.find do |entry|
@@ -1266,7 +1276,7 @@ module WavesRelease
         echo "::error::revision must be a lowercase 40-character Git revision."
         exit 1
       fi
-      test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"
+      test "$(./script/release_git rev-parse HEAD)" = "$REQUESTED_REVISION"
     SHELL
     ACTIONS = {
       "actions/checkout" => "3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -1500,8 +1510,7 @@ module WavesRelease
         file.chmod(0o600)
         file.write("#{principal} #{parts.first} #{parts[1]}\n")
         file.flush
-        stdout, stderr, status = Validation.run(
-          "/usr/bin/git",
+        stdout, stderr, status = GitPolicy.run(
           "-c",
           "gpg.format=ssh",
           "-c",
@@ -1530,7 +1539,7 @@ module WavesRelease
     def validate!(root:, tag:, metadata:)
       expected_tag = "v#{metadata['version']}"
       raise Error, "publication tag must be exactly #{expected_tag}" unless tag == expected_tag
-      type = Validation.run("git", "cat-file", "-t", "refs/tags/#{tag}", chdir: root).strip
+      type = GitPolicy.run("cat-file", "-t", "refs/tags/#{tag}", chdir: root).strip
       raise Error, "publication tag #{tag} must be annotated, not lightweight" unless type == "tag"
       authority = metadata.fetch("releaseAuthority")
       TagAuthority.verify!(
@@ -1538,12 +1547,12 @@ module WavesRelease
         tag: tag,
         authority: authority.slice("principal", "publicKey", "fingerprint")
       )
-      tag_revision = Validation.run("git", "rev-list", "-n", "1", tag, chdir: root).strip
-      head_revision = Validation.run("git", "rev-parse", "HEAD", chdir: root).strip
+      tag_revision = GitPolicy.run("rev-list", "-n", "1", tag, chdir: root).strip
+      head_revision = GitPolicy.run("rev-parse", "HEAD", chdir: root).strip
       raise Error, "publication tag #{tag} does not name HEAD" unless tag_revision == head_revision
-      origin_main = Validation.run("git", "rev-parse", "refs/remotes/origin/main", chdir: root).strip
+      origin_main = GitPolicy.run("rev-parse", "refs/remotes/origin/main", chdir: root).strip
       raise Error, "publication tag #{tag} does not name exact origin/main" unless tag_revision == origin_main
-      annotation = Validation.run("git", "for-each-ref", "refs/tags/#{tag}", "--format=%(contents)", chdir: root)
+      annotation = GitPolicy.run("for-each-ref", "refs/tags/#{tag}", "--format=%(contents)", chdir: root)
       annotation = annotation.sub(/\n-----BEGIN SSH SIGNATURE-----.*\z/m, "\n")
       annotation = annotation.sub(/\n+\z/, "\n")
       parsed = TagEnvelope.parse(annotation)

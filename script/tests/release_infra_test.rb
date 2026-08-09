@@ -625,6 +625,114 @@ class ReleaseInfraTest < Minitest::Test
     assert_empty offenders, "release entrypoint shebangs must be honored by every tracked caller: #{offenders.join(', ')}"
   end
 
+  def test_task12d_release_preflight_disables_checkout_local_fsmonitor_program
+    assert_release_preflight_disables_fsmonitor(:local)
+  end
+
+  def test_task12d_release_preflight_disables_include_imported_fsmonitor_program
+    assert_release_preflight_disables_fsmonitor(:included)
+  end
+
+  def test_task12d_build_dirty_check_disables_checkout_textconv_programs
+    with_production_release_repo do |root, scratch|
+      marker = File.join(scratch, "textconv-ran")
+      textconv = write_executable(File.join(scratch, "textconv"), <<~SHELL)
+        #!/bin/sh
+        printf 'textconv ran\n' >> #{Shellwords.escape(marker)}
+        /bin/cat "$1"
+      SHELL
+      FileUtils.mkdir_p(File.join(root, ".git/info"))
+      File.write(File.join(root, ".git/info/attributes"), "README.md diff=wavesattack\n")
+      git(root, "config", "diff.wavesattack.textconv", textconv)
+      File.open(File.join(root, "README.md"), "a") { |file| file << "dirty source\n" }
+
+      _stdout, stderr, status = Open3.capture3(
+        File.join(root, "script/build_and_run.sh"),
+        "--release-check",
+        chdir: root
+      )
+
+      refute status.success?, "dirty source fixture must fail the release check"
+      assert_match(/clean tracked tree/, stderr)
+      refute File.exist?(marker), "diff textconv must not execute during the release source-dirty check"
+    end
+  end
+
+  def test_task12d_build_dirty_check_disables_checkout_external_diff_programs
+    with_production_release_repo do |root, scratch|
+      marker = File.join(scratch, "external-diff-ran")
+      external_diff = write_executable(File.join(scratch, "external-diff"), <<~SHELL)
+        #!/bin/sh
+        printf 'external diff ran\n' >> #{Shellwords.escape(marker)}
+        exit 1
+      SHELL
+      git(root, "config", "diff.external", external_diff)
+      git(root, "config", "diff.trustExitCode", "true")
+      File.open(File.join(root, "README.md"), "a") { |file| file << "dirty source\n" }
+
+      _stdout, stderr, status = Open3.capture3(
+        File.join(root, "script/build_and_run.sh"),
+        "--release-check",
+        chdir: root
+      )
+
+      refute status.success?, "dirty source fixture must fail the release check"
+      assert_match(/clean tracked tree/, stderr)
+      refute File.exist?(marker), "external diff must not execute during the release source-dirty check"
+    end
+  end
+
+  def test_task12d_tag_authority_pins_system_ssh_keygen_over_checkout_git_config
+    with_production_release_repo do |root, scratch|
+      with_ephemeral_ssh_keypair("waves-git-policy-tag") do |private_key, _public_key|
+        marker = File.join(scratch, "gpg-ssh-program-ran")
+        malicious_program = write_executable(File.join(scratch, "gpg-ssh-program"), <<~SHELL)
+          #!/bin/sh
+          printf 'gpg.ssh.program ran\n' >> #{Shellwords.escape(marker)}
+          exit 1
+        SHELL
+        create_signed_tag(root, "v1.5.0", "fixture release evidence\n", private_key)
+        git(root, "config", "gpg.ssh.program", malicious_program)
+
+        _stdout, stderr, status = Open3.capture3(
+          {"WAVES_RELEASE_TAG" => "v1.5.0"},
+          File.join(root, "script/release-gate.sh"),
+          "publication",
+          chdir: root
+        )
+
+        refute status.success?, "fixture tag must fail against the pinned release authority"
+        assert_match(/pinned release key/, stderr)
+        refute File.exist?(marker), "checkout-local gpg.ssh.program must not execute during tag verification"
+      end
+    end
+  end
+
+  def test_task12d_release_git_calls_use_only_the_repository_policy_launcher
+    launcher = File.read(File.expand_path("../release_git", __dir__))
+    assert_equal "#!/bin/bash -p", launcher.lines.first.chomp
+    assert_includes launcher, "exec /usr/bin/git"
+    assert_includes launcher, "-c core.fsmonitor=false"
+    assert_includes launcher, "-c gpg.ssh.program=/usr/bin/ssh-keygen"
+
+    release_tool = File.read(File.expand_path("../release_tool.rb", __dir__))
+    refute_match(
+      /Validation\.run\(\s*(?:"git"|"\/usr\/bin\/git")/m,
+      release_tool,
+      "Ruby release Git calls must use the canonical GitPolicy launcher"
+    )
+
+    %w[release-gate.sh build_and_run.sh make_appcast.sh].each do |entrypoint|
+      source = File.read(File.expand_path("../#{entrypoint}", __dir__))
+      raw_calls = source.lines.grep(/(?:\$\(|!\s+|^\s*)git(?:\s+-C|\s+rev-|\s+describe)/)
+      assert_empty raw_calls, "#{entrypoint} contains raw Git execution: #{raw_calls.join.strip}"
+    end
+
+    workflow = File.read(File.expand_path("../../.github/workflows/release.yml", __dir__))
+    refute_includes workflow, 'test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"'
+    assert_includes workflow, 'test "$(./script/release_git rev-parse HEAD)" = "$REQUESTED_REVISION"'
+  end
+
   def test_publication_seal_requires_all_results_and_derives_eligibility
     manifest = WavesRelease::Evidence.seal(
       input: evidence_input(remote: "passed"),
@@ -1550,7 +1658,7 @@ class ReleaseInfraTest < Minitest::Test
       mutate(
         root,
         ".github/workflows/release.yml",
-        'test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"',
+        'test "$(./script/release_git rev-parse HEAD)" = "$REQUESTED_REVISION"',
         "true"
       )
       assert_release_error(/revision validation/) { WavesRelease::WorkflowContract.validate!(root: root) }
@@ -1666,6 +1774,73 @@ class ReleaseInfraTest < Minitest::Test
 
   private
 
+  def assert_release_preflight_disables_fsmonitor(configuration)
+    with_production_release_repo do |root, scratch|
+      marker = File.join(scratch, "#{configuration}-fsmonitor-ran")
+      hook = write_executable(File.join(scratch, "#{configuration}-fsmonitor"), <<~SHELL)
+        #!/bin/sh
+        printf 'fsmonitor ran\n' >> #{Shellwords.escape(marker)}
+        printf 'token\n'
+      SHELL
+      if configuration == :local
+        git(root, "config", "core.fsmonitor", hook)
+      else
+        included_config = File.join(scratch, "included-git-config")
+        File.write(included_config, "[core]\n\tfsmonitor = #{hook.inspect}\n")
+        git(root, "config", "include.path", included_config)
+      end
+
+      revision = git(root, "rev-parse", "HEAD").strip
+      _stdout, stderr, status = Open3.capture3(
+        {"WAVES_EXPECTED_REVISION" => revision},
+        File.join(root, "script/release-gate.sh"),
+        "preflight",
+        chdir: root
+      )
+
+      assert status.success?, "#{configuration} fsmonitor fixture must preserve preflight: #{stderr}"
+      refute File.exist?(marker), "#{configuration} core.fsmonitor must not execute during release preflight"
+    end
+  end
+
+  def with_production_release_repo
+    source_root = File.expand_path("../..", __dir__)
+    Dir.mktmpdir("waves-release-git-policy") do |scratch|
+      root = File.join(scratch, "repo")
+      run_fixture_command!("/usr/bin/git", "clone", "-q", "--no-hardlinks", source_root, root)
+      git(root, "config", "user.name", "Waves Test")
+      git(root, "config", "user.email", "waves-test@example.com")
+      %w[
+        .github/workflows/release.yml
+        script/release_tool.rb
+        script/release_environment.sh
+        script/release_git
+        script/release-gate.sh
+        script/build_and_run.sh
+        script/make_appcast.sh
+      ].each do |relative|
+        source = File.join(source_root, relative)
+        next unless File.file?(source)
+
+        destination = File.join(root, relative)
+        FileUtils.mkdir_p(File.dirname(destination))
+        FileUtils.cp(source, destination)
+      end
+      git(root, "add", ".github/workflows/release.yml", "script/release_tool.rb", "script/release_environment.sh", "script/release-gate.sh", "script/build_and_run.sh", "script/make_appcast.sh")
+      git(root, "add", "script/release_git") if File.file?(File.join(root, "script/release_git"))
+      _stdout, _stderr, status = Open3.capture3("/usr/bin/git", "-C", root, "diff", "--cached", "--quiet")
+      git(root, "commit", "-q", "-m", "test: overlay release implementation") unless status.success?
+
+      yield root, scratch
+    end
+  end
+
+  def write_executable(path, contents)
+    File.write(path, contents)
+    FileUtils.chmod(0o700, path)
+    path
+  end
+
   def with_startup_attack_fixture
     Dir.mktmpdir("waves-startup-attack") do |directory|
       marker = File.join(directory, "startup-code-ran")
@@ -1757,7 +1932,7 @@ class ReleaseInfraTest < Minitest::Test
                   echo "::error::revision must be a lowercase 40-character Git revision."
                   exit 1
                 fi
-                test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"
+                test "$(./script/release_git rev-parse HEAD)" = "$REQUESTED_REVISION"
             - run: ./script/quality-gate.sh full
             - name: Validate release preflight
               env:
@@ -1797,6 +1972,7 @@ class ReleaseInfraTest < Minitest::Test
       FileUtils.mkdir_p(File.join(root, "Sources"))
       FileUtils.cp(File.expand_path("../build_and_run.sh", __dir__), File.join(root, "script/build_and_run.sh"))
       FileUtils.cp(File.expand_path("../release_environment.sh", __dir__), File.join(root, "script/release_environment.sh"))
+      FileUtils.cp(File.expand_path("../release_git", __dir__), File.join(root, "script/release_git"))
       FileUtils.cp(File.expand_path("../release_tool.rb", __dir__), File.join(root, "script/release_tool.rb"))
       write_json(File.join(root, "release/metadata.json"), metadata_hash)
       File.write(File.join(root, "Package.swift"), "// fixture\n")

@@ -1,0 +1,33 @@
+#!/bin/bash -p
+
+# Repository-native Git policy for release operations. Nothing before the final
+# exec starts an external process, so inherited startup and loader variables are
+# gone before Git enters the checkout and reads repository-local configuration.
+unset __waves_git_exported_names __waves_git_name 2>/dev/null || :
+IFS=$' \t\n'
+__waves_git_exported_names="$(compgen -e)"
+for __waves_git_name in $__waves_git_exported_names; do
+  export -n "$__waves_git_name" 2>/dev/null || :
+  unset "$__waves_git_name" 2>/dev/null || :
+done
+IFS=$' \t\n'
+
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+LC_ALL="C.UTF-8"
+LANG="C.UTF-8"
+HOME="/var/empty"
+TMPDIR="/private/tmp"
+GIT_CONFIG_GLOBAL="/dev/null"
+GIT_CONFIG_NOSYSTEM="1"
+GIT_TERMINAL_PROMPT="0"
+GCM_INTERACTIVE="never"
+GIT_ASKPASS="/usr/bin/false"
+SSH_ASKPASS="/usr/bin/false"
+GIT_SSH_COMMAND="/usr/bin/ssh -F /dev/null -oBatchMode=yes"
+export PATH LC_ALL LANG HOME TMPDIR GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM \
+  GIT_TERMINAL_PROMPT GCM_INTERACTIVE GIT_ASKPASS SSH_ASKPASS GIT_SSH_COMMAND
+
+exec /usr/bin/git \
+  -c core.fsmonitor=false \
+  -c gpg.ssh.program=/usr/bin/ssh-keygen \
+  "$@"

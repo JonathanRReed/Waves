@@ -49,12 +49,17 @@ CALLER_ROOT_DIR="$ROOT_DIR"
 ACTIVE_ISOLATION_ROOT=""
 RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
 CALLER_RELEASE_TOOL="$RELEASE_TOOL"
+RELEASE_GIT="$ROOT_DIR/script/release_git"
 if [ ! -f "$RELEASE_TOOL" ]; then
   echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
   exit 1
 fi
 if [ ! -x /usr/bin/ruby ]; then
   echo "Error: system Ruby is required to read canonical release metadata." >&2
+  exit 1
+fi
+if [ ! -x "$RELEASE_GIT" ]; then
+  echo "Error: Repository-native release Git policy is missing or not executable." >&2
   exit 1
 fi
 CANONICAL_APP_VERSION="$(run_release_ruby "$RELEASE_TOOL" metadata version)"
@@ -85,9 +90,9 @@ resolve_source_revision() {
   local root
   root="$(cd "$(dirname "$0")/.." && pwd)"
   local revision
-  revision="$(git -C "$root" rev-parse --short=12 HEAD 2>/dev/null)" || { echo unknown; return; }
+  revision="$("$RELEASE_GIT" -C "$root" rev-parse --short=12 HEAD 2>/dev/null)" || { echo unknown; return; }
   [ -n "$revision" ] || { echo unknown; return; }
-  if ! git -C "$root" diff --quiet HEAD 2>/dev/null; then
+  if ! "$RELEASE_GIT" -C "$root" diff --no-ext-diff --no-textconv --quiet HEAD 2>/dev/null; then
     revision="$revision-dirty"
   fi
   echo "$revision"
@@ -219,7 +224,7 @@ prepare_isolated_distribution_build() {
   local actual_archive_sha256
   local actual_recipe_sha256
 
-  for command_name in git tar mktemp chmod shasum; do
+  for command_name in tar mktemp chmod shasum; do
     require_command "$command_name" "for an isolated release build"
   done
 
@@ -232,7 +237,7 @@ prepare_isolated_distribution_build() {
     exit 1
   fi
 
-  revision="$(git -C "$checkout_root" rev-parse HEAD)"
+  revision="$("$RELEASE_GIT" -C "$checkout_root" rev-parse HEAD)"
   ACTIVE_ISOLATION_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/waves-release-build.XXXXXX")"
   chmod 700 "$ACTIVE_ISOLATION_ROOT"
   archive_path="$ACTIVE_ISOLATION_ROOT/source.tar"

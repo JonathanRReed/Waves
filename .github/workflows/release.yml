@@ -42,7 +42,7 @@ jobs:
             echo "::error::revision must be a lowercase 40-character Git revision."
             exit 1
           fi
-          test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"
+          test "$(./script/release_git rev-parse HEAD)" = "$REQUESTED_REVISION"
 
       - name: Select latest available Xcode
         run: |

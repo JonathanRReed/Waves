@@ -72,12 +72,17 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
+RELEASE_GIT="$ROOT_DIR/script/release_git"
 if [ ! -f "$RELEASE_TOOL" ]; then
   echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
   exit 1
 fi
 if [ ! -x /usr/bin/ruby ]; then
   echo "Error: system Ruby is required to read canonical release metadata." >&2
+  exit 1
+fi
+if [ ! -x "$RELEASE_GIT" ]; then
+  echo "Error: Repository-native release Git policy is missing or not executable." >&2
   exit 1
 fi
 CANONICAL_VERSION="$(run_release_ruby "$RELEASE_TOOL" metadata version)"
@@ -120,7 +125,7 @@ trap cleanup EXIT
 
 PUBLICATION_MANIFEST="$TMP_DIR/release-evidence.publication.json"
 run_release_ruby "$RELEASE_TOOL" publication-tag "$RELEASE_TAG" "$PUBLICATION_MANIFEST"
-REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+REVISION="$("$RELEASE_GIT" -C "$ROOT_DIR" rev-parse HEAD)"
 
 require_command awk "to extract and format release notes"
 require_command sed "to format release notes"

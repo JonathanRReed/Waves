@@ -37,6 +37,7 @@ run_release_ruby() {
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
+RELEASE_GIT="$ROOT_DIR/script/release_git"
 PHASE="${1:-preflight}"
 
 case "$PHASE" in
@@ -56,11 +57,15 @@ require_command() {
   fi
 }
 
-for command_name in git swift; do
+for command_name in swift; do
   require_command "$command_name" "for the Waves release preflight"
 done
 if [ ! -x /usr/bin/ruby ]; then
   echo "Error: system Ruby is required for the Waves release preflight." >&2
+  exit 1
+fi
+if [ ! -x "$RELEASE_GIT" ]; then
+  echo "Error: Repository-native release Git policy is missing or not executable." >&2
   exit 1
 fi
 
@@ -82,7 +87,7 @@ cd "$ROOT_DIR"
 run_preflight() {
   local evidence_path="${1:-}"
   local expected_revision
-  expected_revision="${WAVES_EXPECTED_REVISION:-$(git rev-parse HEAD)}"
+  expected_revision="${WAVES_EXPECTED_REVISION:-$("$RELEASE_GIT" rev-parse HEAD)}"
 
   run_release_ruby "$RELEASE_TOOL" metadata validate >/dev/null
   run_release_ruby "$RELEASE_TOOL" validate-repository
@@ -120,7 +125,7 @@ verify_signed_candidate() {
   local evidence_path="$1"
   local profile="$2"
   local revision
-  revision="$(git rev-parse HEAD)"
+  revision="$("$RELEASE_GIT" rev-parse HEAD)"
 
   developer_dir="$(/usr/bin/xcode-select -p)"
   swift_path="$(/usr/bin/xcrun --find swift)"
@@ -157,7 +162,7 @@ case "$PHASE" in
     verify_signed_candidate "$evidence_path" candidate
     ;;
   publication)
-    tag="${WAVES_RELEASE_TAG:-$(git describe --tags --exact-match 2>/dev/null || true)}"
+    tag="${WAVES_RELEASE_TAG:-$("$RELEASE_GIT" describe --tags --exact-match 2>/dev/null || true)}"
     if [ -z "$tag" ]; then
       echo "Error: Publication release gate requires exact annotated tag v$(run_release_ruby "$RELEASE_TOOL" metadata version)." >&2
       exit 1
