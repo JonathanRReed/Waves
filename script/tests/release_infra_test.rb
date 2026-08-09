@@ -48,6 +48,12 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes finder_script, "set icon size of icon view options of layoutWindow to 128"
     assert_includes finder_script, "set toolbar visible of layoutWindow to false"
     assert_includes finder_script, "set sidebar width of layoutWindow to 0"
+    assert_includes finder_script,
+                    'set backgroundFile to POSIX file (mountPath & "/.background/Waves.png") as alias'
+    assert_includes finder_script,
+                    "set background picture of icon view options of layoutWindow to backgroundFile"
+    refute_includes finder_script,
+                    'file "Waves.png" of folder ".background" of targetFolder'
   end
 
   def test_dmg_background_renderer_matches_the_660_by_430_finder_window

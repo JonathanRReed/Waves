@@ -2,6 +2,7 @@ on run arguments
   if (count of arguments) is not 1 then error "usage: configure-dmg.applescript MOUNT_PATH"
   set mountPath to item 1 of arguments
   set targetFolder to POSIX file mountPath as alias
+  set backgroundFile to POSIX file (mountPath & "/.background/Waves.png") as alias
 
   tell application "Finder"
     open targetFolder
@@ -22,7 +23,7 @@ on run arguments
     set arrangement of icon view options of layoutWindow to not arranged
     set icon size of icon view options of layoutWindow to 128
     set text size of icon view options of layoutWindow to 14
-    set background picture of icon view options of layoutWindow to file "Waves.png" of folder ".background" of targetFolder
+    set background picture of icon view options of layoutWindow to backgroundFile
     set position of item "Waves.app" of targetFolder to {170, 250}
     set position of item "Applications" of targetFolder to {490, 250}
     update targetFolder without registering applications
