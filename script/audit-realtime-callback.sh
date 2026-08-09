@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE_PATH="${WAVES_REALTIME_SOURCE:-$ROOT_DIR/Sources/Waves/Services/Audio/PerAppTapController.swift}"
+if [ -n "${WAVES_REALTIME_SOURCE+x}" ]; then
+  echo "Error: WAVES_REALTIME_SOURCE override is prohibited; audit uses the canonical source." >&2
+  exit 2
+fi
+SOURCE_PATH="$ROOT_DIR/Sources/Waves/Services/Audio/PerAppTapController.swift"
 
 if [ ! -f "$SOURCE_PATH" ]; then
   echo "Error: Realtime callback source not found at $SOURCE_PATH." >&2

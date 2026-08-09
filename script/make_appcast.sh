@@ -2,6 +2,15 @@
 set -euo pipefail
 umask 077
 
+if [ -n "${WAVES_RELEASE_METADATA+x}" ] \
+  || [ -n "${SWIFT_SDK+x}" ] \
+  || [ -n "${WAVES_DSYM_BINARY+x}" ]; then
+  echo "Error: Release environment overrides are prohibited for appcast publication." >&2
+  exit 2
+fi
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 usage() {
   echo "usage: $0 VERSION [DMG_PATH] [OUTPUT_PATH]" >&2
   echo "" >&2
@@ -53,7 +62,7 @@ OUTPUT_PATH="${3:-$ROOT_DIR/dist/appcast.xml}"
 CHANGELOG_PATH="$ROOT_DIR/CHANGELOG.md"
 EXPECTED_SHA256="${EXPECTED_SHA256:-}"
 RELEASE_TAG="${WAVES_RELEASE_TAG:-}"
-DSYM_BINARY="${WAVES_DSYM_BINARY:-$ROOT_DIR/dist/Waves.app.dSYM/Contents/Resources/DWARF/Waves}"
+DSYM_BINARY="$ROOT_DIR/dist/Waves.app.dSYM/Contents/Resources/DWARF/Waves"
 DOWNLOAD_URL="https://github.com/JonathanRReed/Waves/releases/download/v$VERSION/Waves.dmg"
 
 if [ -z "$RELEASE_TAG" ]; then
@@ -65,6 +74,11 @@ if [ -n "${SIGN_UPDATE:-}" ]; then
   exit 2
 fi
 
+TRUSTED_DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+TRUSTED_SWIFT="$(/usr/bin/xcrun --find swift)"
+TRUSTED_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
+
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/waves-appcast.XXXXXX")"
 chmod 700 "$TMP_DIR"
 MOUNT_POINT="$TMP_DIR/mount"
@@ -72,7 +86,7 @@ MOUNTED=0
 
 cleanup() {
   if [ "$MOUNTED" -eq 1 ]; then
-    hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
+    /usr/bin/hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
   fi
   rm -rf "$TMP_DIR"
 }
@@ -90,13 +104,23 @@ require_command stat "to measure the release disk image"
 require_command swift "to resolve the verified Sparkle signing tool"
 require_command tar "to extract exact revision source"
 
-if [ ! -f "$CHANGELOG_PATH" ]; then
-  echo "Error: Changelog not found at $CHANGELOG_PATH." >&2
-  exit 1
-fi
 if [ ! -f "$DMG_PATH" ]; then
   echo "Error: DMG not found at $DMG_PATH." >&2
   exit 1
+fi
+if [ ! -f "$DSYM_BINARY" ]; then
+  echo "Error: dSYM binary not found at $DSYM_BINARY." >&2
+  exit 1
+fi
+
+DMG_PATH="$(ruby "$RELEASE_TOOL" private-stage-file "$DMG_PATH" "$TMP_DIR" Waves.dmg)"
+DSYM_BINARY="$(ruby "$RELEASE_TOOL" private-stage-file "$DSYM_BINARY" "$TMP_DIR" Waves.dSYM)"
+if [ -e "$OUTPUT_PATH" ] || [ -L "$OUTPUT_PATH" ]; then
+  EXISTING_APPCAST=1
+  SOURCE_APPCAST="$(ruby "$RELEASE_TOOL" private-stage-file "$OUTPUT_PATH" "$TMP_DIR" source-appcast.xml)"
+else
+  EXISTING_APPCAST=0
+  SOURCE_APPCAST="$TMP_DIR/source-appcast.xml"
 fi
 
 SIGNER_ARCHIVE="$TMP_DIR/source.tar"
@@ -107,11 +131,15 @@ mkdir -p "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
 chmod 700 "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
 ruby "$RELEASE_TOOL" source-identity "$REVISION" "$SIGNER_ARCHIVE" >"$SIGNER_IDENTITY"
 tar -xf "$SIGNER_ARCHIVE" -C "$SIGNER_SOURCE"
+CHANGELOG_PATH="$SIGNER_SOURCE/CHANGELOG.md"
+if [ ! -f "$CHANGELOG_PATH" ]; then
+  echo "Error: Exact-revision changelog not found at $CHANGELOG_PATH." >&2
+  exit 1
+fi
 
 RELEASE_NOTES_MD="$TMP_DIR/release-notes.md"
 RELEASE_NOTES_HTML="$TMP_DIR/release-notes.html"
 NEW_ITEM="$TMP_DIR/item.xml"
-SOURCE_APPCAST="$TMP_DIR/source-appcast.xml"
 RENDERED_APPCAST="$TMP_DIR/appcast.xml"
 
 awk -v version="$VERSION" '
@@ -228,7 +256,7 @@ awk '
 ' "$RELEASE_NOTES_MD" | sed -E 's/\*\*([^*]+)\*\*/<strong>\1<\/strong>/g' >"$RELEASE_NOTES_HTML"
 
 mkdir -p "$MOUNT_POINT"
-hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null
+/usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null
 MOUNTED=1
 INFO_PLIST="$MOUNT_POINT/Waves.app/Contents/Info.plist"
 if [ ! -f "$INFO_PLIST" ]; then
@@ -237,6 +265,7 @@ if [ ! -f "$INFO_PLIST" ]; then
 fi
 SHORT_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$INFO_PLIST")"
 BUILD_NUMBER="$(plutil -extract CFBundleVersion raw -o - "$INFO_PLIST")"
+PACKAGED_SPARKLE_PUBLIC_KEY="$(plutil -extract SUPublicEDKey raw -o - "$INFO_PLIST")"
 if [ "$SHORT_VERSION" != "$VERSION" ]; then
   echo "Error: $DMG_PATH contains version $SHORT_VERSION; expected $VERSION." >&2
   exit 1
@@ -252,7 +281,7 @@ fi
 ruby "$RELEASE_TOOL" verify-release-artifacts \
   "$PUBLICATION_MANIFEST" "$MOUNT_POINT/Waves.app" "$DMG_PATH" "$DSYM_BINARY" \
   "$SIGNER_IDENTITY"
-hdiutil detach "$MOUNT_POINT" -quiet
+/usr/bin/hdiutil detach "$MOUNT_POINT" -quiet
 MOUNTED=0
 
 # Bind the bytes we are about to sign to the bytes that were published. Without
@@ -285,9 +314,9 @@ fi
 
 # Sparkle compares <sparkle:version> numerically, so a build number that is not
 # strictly greater than every published one is silently never offered.
-if [ -f "$OUTPUT_PATH" ]; then
+if [ "$EXISTING_APPCAST" -eq 1 ]; then
   HIGHEST_PUBLISHED="$(sed -n 's/.*<sparkle:version>\([0-9][0-9]*\)<\/sparkle:version>.*/\1/p' \
-    "$OUTPUT_PATH" | sort -n | tail -1)"
+    "$SOURCE_APPCAST" | sort -n | tail -1)"
   if [ -n "$HIGHEST_PUBLISHED" ] && [ "$BUILD_NUMBER" -le "$HIGHEST_PUBLISHED" ]; then
     echo "Error: build $BUILD_NUMBER is not greater than published build $HIGHEST_PUBLISHED." >&2
     echo "       Sparkle would never offer this update. Bump build in" >&2
@@ -297,7 +326,7 @@ if [ -f "$OUTPUT_PATH" ]; then
 fi
 
 RESOLVED_BEFORE="$(shasum -a 256 "$SIGNER_SOURCE/Package.resolved" | cut -d ' ' -f 1)"
-swift package \
+"$TRUSTED_SWIFT" package \
   --package-path "$SIGNER_SOURCE" \
   --scratch-path "$SIGNER_SCRATCH" \
   --only-use-versions-from-resolved-file \
@@ -307,11 +336,9 @@ if [ "$RESOLVED_AFTER" != "$RESOLVED_BEFORE" ]; then
   echo "Error: SwiftPM changed Package.resolved while preparing sign_update." >&2
   exit 1
 fi
-SIGN_UPDATE="$SIGNER_SCRATCH/artifacts/sparkle/Sparkle/bin/sign_update"
-ruby "$RELEASE_TOOL" sparkle-signing-tool "$SIGNER_SCRATCH" "$SIGN_UPDATE" >/dev/null
-
 DMG_LENGTH="$(stat -f '%z' "$DMG_PATH")"
-ED_SIGNATURE="$("$SIGN_UPDATE" -p "$DMG_PATH")"
+ED_SIGNATURE="$(ruby "$RELEASE_TOOL" sparkle-sign-and-verify \
+  "$SIGNER_SCRATCH" "$DMG_PATH" "$PACKAGED_SPARKLE_PUBLIC_KEY")"
 if [[ ! "$DMG_LENGTH" =~ ^[0-9]+$ ]]; then
   echo "Error: Could not determine the byte length of $DMG_PATH." >&2
   exit 1
@@ -334,9 +361,7 @@ fi
   echo '    </item>'
 } >"$NEW_ITEM"
 
-if [ -f "$OUTPUT_PATH" ]; then
-  cp "$OUTPUT_PATH" "$SOURCE_APPCAST"
-else
+if [ "$EXISTING_APPCAST" -eq 0 ]; then
   cat >"$SOURCE_APPCAST" <<'APPCAST'
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
@@ -400,5 +425,5 @@ if ! awk -v version="$VERSION" -v item_path="$NEW_ITEM" '
 fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
-cp "$RENDERED_APPCAST" "$OUTPUT_PATH"
+ruby "$RELEASE_TOOL" private-publish-file "$RENDERED_APPCAST" "$OUTPUT_PATH" >/dev/null
 printf 'Wrote %s for Waves %s (build %s).\n' "$OUTPUT_PATH" "$VERSION" "$BUILD_NUMBER"

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${WAVES_RELEASE_METADATA+x}" ]; then
+  echo "Error: WAVES_RELEASE_METADATA override is prohibited." >&2
+  exit 2
+fi
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 if [ "$#" -ne 3 ]; then
   echo "usage: $0 candidate|publication INPUT_JSON OUTPUT_JSON" >&2
   exit 2

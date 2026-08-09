@@ -2,12 +2,25 @@
 set -euo pipefail
 
 MODE="${1:-run}"
+
+case "$MODE" in
+  --dmg|--release-check|release-check|--publication-check|publication-check|--notarize|notarize|--verify|verify|--package-smoke|package-smoke)
+    if [ -n "${WAVES_RELEASE_METADATA+x}" ] || [ -n "${SWIFT_SDK+x}" ]; then
+      echo "Error: Release environment overrides WAVES_RELEASE_METADATA and SWIFT_SDK are prohibited." >&2
+      exit 2
+    fi
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    export PATH
+    ;;
+esac
 APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 LOG_SUBSYSTEM="com.jonathanreed.Waves"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CALLER_ROOT_DIR="$ROOT_DIR"
 ACTIVE_ISOLATION_ROOT=""
 RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
+CALLER_RELEASE_TOOL="$RELEASE_TOOL"
 if [ ! -f "$RELEASE_TOOL" ]; then
   echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
   exit 1
@@ -68,7 +81,19 @@ if [ -z "$SWIFT_SDK" ] \
   SWIFT_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
 fi
 
-SWIFT_BUILD=(swift build)
+if [ "$MODE" = "--dmg" ] \
+  || [ "$MODE" = "--release-check" ] \
+  || [ "$MODE" = "release-check" ] \
+  || [ "$MODE" = "--notarize" ] \
+  || [ "$MODE" = "notarize" ]; then
+  TRUSTED_DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+  TRUSTED_SWIFT="$(/usr/bin/xcrun --find swift)"
+  TRUSTED_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+  ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
+  SWIFT_SDK="$TRUSTED_SDK"
+fi
+
+SWIFT_BUILD=("${TRUSTED_SWIFT:-swift}" build)
 if [ -n "$SWIFT_SDK" ]; then
   SWIFT_BUILD+=(--sdk "$SWIFT_SDK")
 fi
@@ -211,7 +236,9 @@ prepare_isolated_distribution_build() {
   APP_SOURCE_REVISION="$revision"
   APP_SOURCE_ARCHIVE_SHA256="$source_archive_sha256"
   APP_BUILD_RECIPE_SHA256="$build_recipe_sha256"
-  WAVES_RELEASE_OUTPUT_DIR="$checkout_root/dist"
+  WAVES_RELEASE_OUTPUT_DIR="$ACTIVE_ISOLATION_ROOT/artifacts"
+  mkdir -p "$WAVES_RELEASE_OUTPUT_DIR"
+  chmod 700 "$WAVES_RELEASE_OUTPUT_DIR"
   WAVES_RELEASE_SCRATCH_ROOT="$scratch_root"
   ROOT_DIR="$source_root"
   RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
@@ -221,6 +248,27 @@ prepare_isolated_distribution_build() {
 
 if is_distribution_build_mode; then
   prepare_isolated_distribution_build
+fi
+
+prepare_isolated_existing_package() {
+  local private_artifacts
+
+  if [ -L "$CALLER_ROOT_DIR/dist" ]; then
+    echo "Error: Existing release artifact source dist must not be a symbolic link." >&2
+    exit 1
+  fi
+  ACTIVE_ISOLATION_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/waves-release-verify.XXXXXX")"
+  chmod 700 "$ACTIVE_ISOLATION_ROOT"
+  private_artifacts="$ACTIVE_ISOLATION_ROOT/artifacts"
+  mkdir -p "$private_artifacts"
+  chmod 700 "$private_artifacts"
+  ruby "$CALLER_RELEASE_TOOL" private-stage-release-artifacts \
+    "$CALLER_ROOT_DIR/dist" "$private_artifacts" >/dev/null
+  WAVES_RELEASE_OUTPUT_DIR="$private_artifacts"
+}
+
+if is_existing_package_mode; then
+  prepare_isolated_existing_package
 fi
 
 if is_distribution_build_mode; then
@@ -258,7 +306,7 @@ sign_runtime_item() {
     args+=(--entitlements "$entitlements")
   fi
 
-  codesign "${args[@]}" --sign "$identity" "$target"
+  /usr/bin/codesign "${args[@]}" --sign "$identity" "$target"
 }
 
 if is_notarize_mode; then
@@ -328,7 +376,7 @@ cleanup() {
   SMOKE_PID=""
 
   if [ -n "$ACTIVE_MOUNT_DIR" ]; then
-    hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null 2>&1 || true
+    /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null 2>&1 || true
     rm -rf "$ACTIVE_MOUNT_DIR"
   fi
   ACTIVE_MOUNT_DIR=""
@@ -801,7 +849,7 @@ ENTITLEMENTS_PLIST
 </plist>
 SPARKLE_ENTITLEMENTS_PLIST
 
-  if command -v codesign >/dev/null 2>&1; then
+  if [ -x /usr/bin/codesign ]; then
     local sparkle_version="$SPARKLE_FRAMEWORK/Versions/Current"
     local nested_item
     local nested_items=(
@@ -928,7 +976,7 @@ validate_app_bundle() {
   # Installer is intentionally re-signed without preserving entitlements.
   nested_item="$sparkle_framework/Versions/Current/XPCServices/Downloader.xpc"
   entitlement_file="$(mktemp)"
-  if ! codesign -d --entitlements :- "$nested_item" >"$entitlement_file" 2>/dev/null; then
+  if ! /usr/bin/codesign -d --entitlements :- "$nested_item" >"$entitlement_file" 2>/dev/null; then
     rm -f "$entitlement_file"
     echo "Error: Failed to read entitlements from Sparkle nested code at $nested_item." >&2
     exit 1
@@ -958,10 +1006,10 @@ validate_app_bundle() {
     echo "Error: $label executable is missing its Frameworks runtime search path." >&2
     exit 1
   fi
-  codesign --verify --deep --strict "$bundle_path"
+  /usr/bin/codesign --verify --deep --strict "$bundle_path"
 
   entitlement_file="$(mktemp)"
-  if ! codesign -d --entitlements :- "$bundle_path" >"$entitlement_file" 2>/dev/null; then
+  if ! /usr/bin/codesign -d --entitlements :- "$bundle_path" >"$entitlement_file" 2>/dev/null; then
     rm -f "$entitlement_file"
     echo "Error: Failed to read entitlements from $label." >&2
     exit 1
@@ -1021,7 +1069,7 @@ mount_dmg() {
   require_command hdiutil "to inspect $DMG_PATH"
 
   ACTIVE_MOUNT_DIR="$(mktemp -d)"
-  if ! hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$ACTIVE_MOUNT_DIR" >/dev/null; then
+  if ! /usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$ACTIVE_MOUNT_DIR" >/dev/null; then
     rm -rf "$ACTIVE_MOUNT_DIR"
     ACTIVE_MOUNT_DIR=""
     echo "Error: Failed to mount $DMG_PATH." >&2
@@ -1031,7 +1079,7 @@ mount_dmg() {
 
 unmount_dmg() {
   if [ -n "$ACTIVE_MOUNT_DIR" ]; then
-    if ! hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null; then
+    if ! /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null; then
       echo "Error: Failed to detach $ACTIVE_MOUNT_DIR." >&2
       exit 1
     fi
@@ -1094,8 +1142,8 @@ validate_mounted_layout_and_identity() {
     exit 1
   fi
 
-  built_cdhash="$(codesign -dvvv "$APP_BUNDLE" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
-  mounted_cdhash="$(codesign -dvvv "$mounted_app" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
+  built_cdhash="$(/usr/bin/codesign -dvvv "$APP_BUNDLE" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
+  mounted_cdhash="$(/usr/bin/codesign -dvvv "$mounted_app" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
   if [ -z "$built_cdhash" ] || [ "$built_cdhash" != "$mounted_cdhash" ]; then
     echo "Error: The mounted app code identity does not match $APP_BUNDLE." >&2
     exit 1
@@ -1116,7 +1164,7 @@ validate_unsigned_package() {
   if command -v xattr >/dev/null 2>&1; then
     xattr -cr "$APP_BUNDLE"
   fi
-  hdiutil imageinfo "$DMG_PATH" >/dev/null
+  /usr/bin/hdiutil imageinfo "$DMG_PATH" >/dev/null
   validate_app_bundle "$APP_BUNDLE" "built $APP_NAME.app"
   validate_dsym
   mount_dmg
@@ -1139,14 +1187,14 @@ create_dmg() {
   ln -s /Applications "$ACTIVE_STAGING_DIR/Applications"
 
   rm -f "$DMG_PATH"
-  hdiutil create -volname "$APP_NAME" -srcfolder "$ACTIVE_STAGING_DIR" -ov -format UDZO "$DMG_PATH"
-  hdiutil imageinfo "$DMG_PATH" >/dev/null
+  /usr/bin/hdiutil create -volname "$APP_NAME" -srcfolder "$ACTIVE_STAGING_DIR" -ov -format UDZO "$DMG_PATH"
+  /usr/bin/hdiutil imageinfo "$DMG_PATH" >/dev/null
 
   # The disk image needs its own Developer ID signature: Gatekeeper's
   # primary-signature assessment of the DMG (and the publication check below)
   # rejects an unsigned image even when the app inside is notarized.
-  if [ -n "$SIGN_IDENTITY" ] && command -v codesign >/dev/null 2>&1; then
-    codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+  if [ -n "$SIGN_IDENTITY" ] && [ -x /usr/bin/codesign ]; then
+    /usr/bin/codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
   fi
 
   rm -rf "$ACTIVE_STAGING_DIR"
@@ -1174,12 +1222,12 @@ notarize_release() {
 
   require_command xcrun "for notarytool and stapler"
   release_check
-  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
-  xcrun stapler staple "$DMG_PATH"
-  xcrun stapler validate "$DMG_PATH"
+  /usr/bin/xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  /usr/bin/xcrun stapler staple "$DMG_PATH"
+  /usr/bin/xcrun stapler validate "$DMG_PATH"
 
-  if command -v spctl >/dev/null 2>&1; then
-    spctl --assess --type open --context context:primary-signature --verbose "$DMG_PATH"
+  if [ -x /usr/sbin/spctl ]; then
+    /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose "$DMG_PATH"
   fi
 }
 
@@ -1194,7 +1242,7 @@ publication_check() {
   require_command spctl "for publication checks"
   require_command xcrun "for stapler validation"
 
-  signature_info="$(codesign -dvvv "$APP_BUNDLE" 2>&1 || true)"
+  signature_info="$(/usr/bin/codesign -dvvv "$APP_BUNDLE" 2>&1 || true)"
   if printf '%s\n' "$signature_info" | grep -Fq "Signature=adhoc"; then
     echo "Error: $APP_BUNDLE is ad hoc signed. Public builds require a Developer ID Application signature." >&2
     exit 1
@@ -1211,25 +1259,25 @@ publication_check() {
     echo "Error: $APP_BUNDLE is not signed with the hardened runtime." >&2
     exit 1
   fi
-  requirement_info="$(codesign -dr - "$APP_BUNDLE" 2>&1 || true)"
+  requirement_info="$(/usr/bin/codesign -dr - "$APP_BUNDLE" 2>&1 || true)"
   designated_requirement="$(printf '%s\n' "$requirement_info" | sed -n 's/^designated => //p')"
   if [ "$designated_requirement" != "$CANONICAL_DESIGNATED_REQUIREMENT" ]; then
     echo "Error: $APP_BUNDLE designated requirement does not match canonical release metadata." >&2
     exit 1
   fi
 
-  dmg_signature_info="$(codesign -dvvv "$DMG_PATH" 2>&1 || true)"
+  dmg_signature_info="$(/usr/bin/codesign -dvvv "$DMG_PATH" 2>&1 || true)"
   if ! printf '%s\n' "$dmg_signature_info" | grep -Fxq "Authority=$CANONICAL_SIGN_IDENTITY" \
     || ! printf '%s\n' "$dmg_signature_info" | grep -Fxq "TeamIdentifier=$CANONICAL_SIGN_TEAM"; then
     echo "Error: $DMG_PATH is not signed by the canonical Waves Developer ID identity and team." >&2
     exit 1
   fi
 
-  codesign --verify --deep --strict "$APP_BUNDLE"
-  codesign --verify --strict "$DMG_PATH"
-  spctl --assess --type execute --verbose "$APP_BUNDLE"
-  xcrun stapler validate "$DMG_PATH"
-  spctl --assess --type open --context context:primary-signature --verbose "$DMG_PATH"
+  /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
+  /usr/bin/codesign --verify --strict "$DMG_PATH"
+  /usr/sbin/spctl --assess --type execute --verbose "$APP_BUNDLE"
+  /usr/bin/xcrun stapler validate "$DMG_PATH"
+  /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose "$DMG_PATH"
 }
 
 append_system_smoke_log() {
@@ -1304,6 +1352,10 @@ package_smoke() {
   echo "Packaged $APP_NAME stayed alive for ${SMOKE_SECONDS} seconds; test process was terminated."
 }
 
+publish_finalized_distribution() {
+  ruby "$CALLER_RELEASE_TOOL" publish-release-artifacts "$DIST_DIR" "$CALLER_ROOT_DIR/dist"
+}
+
 if ! is_existing_package_mode; then
   build_app_bundle
 fi
@@ -1314,16 +1366,19 @@ case "$MODE" in
     ;;
   --dmg)
     release_check
-    /usr/bin/open "$DMG_PATH"
+    publish_finalized_distribution
+    /usr/bin/open "$CALLER_ROOT_DIR/dist/$APP_NAME.dmg"
     ;;
   --release-check|release-check)
     release_check
+    publish_finalized_distribution
     ;;
   --publication-check|publication-check)
     publication_check
     ;;
   --notarize|notarize)
     notarize_release
+    publish_finalized_distribution
     ;;
   --debug|debug)
     lldb -- "$APP_BINARY"
@@ -1341,6 +1396,8 @@ case "$MODE" in
     ;;
   --package-smoke|package-smoke)
     package_smoke
+    ruby "$CALLER_RELEASE_TOOL" private-publish-file \
+      "$SMOKE_LOG_PATH" "$CALLER_ROOT_DIR/dist/package-smoke.log" >/dev/null
     ;;
   *)
     echo "usage: $0 [run|--dmg|--release-check|--publication-check|--notarize|--debug|--logs|--telemetry|--verify|--package-smoke]" >&2

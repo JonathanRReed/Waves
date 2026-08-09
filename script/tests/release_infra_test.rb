@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "base64"
 require "json"
 require "minitest/autorun"
 require "open3"
@@ -19,8 +20,18 @@ class ReleaseInfraTest < Minitest::Test
   DESIGNATED_REQUIREMENT = <<~REQUIREMENT.strip
     identifier "com.jonathanreed.Waves" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = AJ9VWBRNZN
   REQUIREMENT
+  RELEASE_PRINCIPAL = "waves-commit-signing"
+  RELEASE_PUBLIC_KEY =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJaVZPTQXnIIPdGksw4PmO3yBLuqEkd+qE4SALWpFpQ waves-commit-signing"
+  RELEASE_FINGERPRINT = "SHA256:53uCiv5rg7roncACotblHKo4OvHAsvYw/+x/5pU0mCQ"
+  SPARKLE_ACCOUNT = "com.jonathanreed.Waves"
+  SPARKLE_PUBLIC_KEY = "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
 
   def metadata_hash
+    security_metadata_hash
+  end
+
+  def legacy_metadata_hash
     {
       "schemaVersion" => 1,
       "version" => VERSION,
@@ -33,6 +44,28 @@ class ReleaseInfraTest < Minitest::Test
         "designatedRequirement" => DESIGNATED_REQUIREMENT,
       },
     }
+  end
+
+  def security_metadata_hash(
+    public_key: RELEASE_PUBLIC_KEY,
+    fingerprint: RELEASE_FINGERPRINT,
+    principal: RELEASE_PRINCIPAL
+  )
+    legacy_metadata_hash.merge(
+      "releaseAuthority" => {
+        "principal" => principal,
+        "publicKey" => public_key,
+        "fingerprint" => fingerprint,
+        "receiptIssuers" => {
+          "securityScan" => "codex-security",
+          "remoteElgato" => "golden-gate-elgato",
+        },
+      },
+      "sparkle" => {
+        "keychainAccount" => SPARKLE_ACCOUNT,
+        "publicEDKey" => SPARKLE_PUBLIC_KEY,
+      }
+    )
   end
 
   def write_json(path, value)
@@ -106,6 +139,8 @@ class ReleaseInfraTest < Minitest::Test
           "status" => "passed",
           "submissionID" => "11111111-2222-3333-4444-555555555555",
           "detail" => "accepted submission",
+          "artifactSHA256" => "2" * 64,
+          "logSHA256" => "8" * 64,
         },
         "stapling" => passed_gate.call("ticket validated"),
         "gatekeeper" => passed_gate.call("app and DMG accepted"),
@@ -118,7 +153,51 @@ class ReleaseInfraTest < Minitest::Test
       ),
       "skippedGates" => [],
       "skipCIEquivalentEvidence" => [],
+      "externalReceipts" => {
+        "securityScan" => {
+          "issuer" => "codex-security",
+          "sourceRevision" => revision,
+          "artifactSHA256" => "2" * 64,
+          "receiptSHA256" => "6" * 64,
+        },
+      }.tap do |receipts|
+        if remote == "passed"
+          receipts["remoteElgato"] = {
+            "issuer" => "golden-gate-elgato",
+            "sourceRevision" => revision,
+            "artifactSHA256" => "2" * 64,
+            "receiptSHA256" => "7" * 64,
+          }
+        end
+      end,
     }
+  end
+
+  def security_evidence_input(remote: "pending", revision: REVISION)
+    input = evidence_input(remote: remote, revision: revision)
+    dmg_hash = input.fetch("package").fetch("hashes").fetch("dmg")
+    input.fetch("package").fetch("notarization").merge!(
+      "artifactSHA256" => dmg_hash,
+      "logSHA256" => "8" * 64
+    )
+    receipts = {
+      "securityScan" => {
+        "issuer" => "codex-security",
+        "sourceRevision" => revision,
+        "artifactSHA256" => dmg_hash,
+        "receiptSHA256" => "6" * 64,
+      },
+    }
+    if remote == "passed"
+      receipts["remoteElgato"] = {
+        "issuer" => "golden-gate-elgato",
+        "sourceRevision" => revision,
+        "artifactSHA256" => dmg_hash,
+        "receiptSHA256" => "7" * 64,
+      }
+    end
+    input["externalReceipts"] = receipts
+    input
   end
 
   def performance_metric
@@ -269,6 +348,30 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_task12d_evidence_binds_external_receipts_and_notary_log_to_source_and_dmg
+    assert_respond_to WavesRelease::Evidence, :validate_external_receipts!
+    return unless WavesRelease::Evidence.respond_to?(:validate_external_receipts!)
+
+    metadata = security_metadata_hash
+    input = security_evidence_input(remote: "passed")
+    manifest = WavesRelease::Evidence.seal(input: input, metadata: metadata, profile: "publication")
+    WavesRelease::Evidence.validate!(manifest, metadata: metadata, profile: "publication")
+
+    {
+      ["externalReceipts", "securityScan", "sourceRevision"] => "b" * 40,
+      ["externalReceipts", "remoteElgato", "artifactSHA256"] => "9" * 64,
+      ["externalReceipts", "securityScan", "receiptSHA256"] => "not-a-digest",
+      ["package", "notarization", "artifactSHA256"] => "9" * 64,
+      ["package", "notarization", "logSHA256"] => "not-a-digest",
+    }.each do |path, mutation|
+      wrong = Marshal.load(Marshal.dump(manifest))
+      path[0...-1].reduce(wrong) { |value, key| value.fetch(key) }[path.last] = mutation
+      assert_release_error(/receipt|notarization/) do
+        WavesRelease::Evidence.validate!(wrong, metadata: metadata, profile: "publication")
+      end
+    end
+  end
+
   def test_tsan_gate_uses_the_macro_free_harness_instead_of_instrumenting_macro_plugins
     quality_gate = File.read(File.expand_path("../quality-gate.sh", __dir__))
     runner = File.read(File.expand_path("../run-tsan-harness.sh", __dir__))
@@ -394,6 +497,97 @@ class ReleaseInfraTest < Minitest::Test
           manifest: manifest,
           paths: {"appExecutable" => app, "dmg" => dmg, "dSYM" => dsym}
         )
+      end
+    end
+  end
+
+  def test_task12d_private_artifact_stage_rejects_symlinks_and_swaps_before_sensitive_action
+    stage = WavesRelease.const_defined?(:PrivateArtifacts) ? WavesRelease::PrivateArtifacts : nil
+    refute_nil stage, "private release artifact staging must be implemented"
+    return unless stage
+
+    Dir.mktmpdir("waves-private-artifacts") do |root|
+      FileUtils.chmod(0o700, root)
+      %w[Waves.app Waves.dmg Waves.dSYM appcast.xml].each do |name|
+        path = File.join(root, name)
+        if name.end_with?(".app", ".dSYM")
+          FileUtils.mkdir_p(path)
+        else
+          File.write(path, "verified #{name}\n")
+        end
+        identity = stage.capture_identity!(path: path)
+        replacement = File.join(root, "replacement-#{name}")
+        File.rename(path, replacement)
+        if File.directory?(replacement)
+          FileUtils.mkdir_p(path)
+        else
+          File.write(path, "attacker bytes\n")
+        end
+        sensitive_action_ran = false
+        assert_release_error(/identity changed/) do
+          stage.with_stable_identity!(path: path, identity: identity) { sensitive_action_ran = true }
+        end
+        refute sensitive_action_ran, "#{name} must be rejected before the sensitive action"
+
+        FileUtils.rm_rf(path)
+        File.symlink(replacement, path)
+        assert_release_error(/symbolic link/) { stage.capture_identity!(path: path) }
+      end
+    end
+  end
+
+  def test_task12d_private_artifact_stage_publishes_only_hash_identical_finalized_files
+    stage = WavesRelease.const_defined?(:PrivateArtifacts) ? WavesRelease::PrivateArtifacts : nil
+    refute_nil stage, "private release artifact staging must be implemented"
+    return unless stage
+
+    Dir.mktmpdir("waves-private-publish") do |root|
+      private_root = File.join(root, "private")
+      public_root = File.join(root, "dist")
+      FileUtils.mkdir_p(private_root)
+      FileUtils.chmod(0o700, private_root)
+      FileUtils.mkdir_p(public_root)
+      %w[Waves.dmg Waves.dSYM appcast.xml].each do |name|
+        source = File.join(private_root, name)
+        destination = File.join(public_root, name)
+        File.write(source, "finalized #{name}\n")
+        expected = Digest::SHA256.file(source).hexdigest
+        stage.publish_file!(source: source, destination: destination)
+        assert_equal expected, Digest::SHA256.file(destination).hexdigest
+
+        FileUtils.rm_f(destination)
+        File.symlink(File.join(root, "attacker"), destination)
+        assert_release_error(/symbolic link/) do
+          stage.publish_file!(source: source, destination: destination)
+        end
+      end
+    end
+  end
+
+  def test_task12d_existing_release_package_is_copied_into_one_private_root_before_validation
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-existing-package") do |root|
+      source = File.join(root, "dist")
+      private_root = File.join(root, "private")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "symbols")
+      File.write(File.join(source, "Waves.dmg"), "dmg")
+      FileUtils.mkdir_p(private_root)
+      FileUtils.chmod(0o700, private_root)
+
+      stage.stage_release_artifacts!(source_root: source, destination_root: private_root)
+      File.write(File.join(source, "Waves.dmg"), "attacker")
+      assert_equal "dmg", File.read(File.join(private_root, "Waves.dmg"))
+
+      FileUtils.rm_rf(private_root)
+      FileUtils.mkdir_p(private_root)
+      FileUtils.chmod(0o700, private_root)
+      FileUtils.rm_rf(File.join(source, "Waves.app"))
+      File.symlink(File.join(root, "attacker.app"), File.join(source, "Waves.app"))
+      assert_release_error(/symbolic link/) do
+        stage.stage_release_artifacts!(source_root: source, destination_root: private_root)
       end
     end
   end
@@ -534,7 +728,7 @@ class ReleaseInfraTest < Minitest::Test
         details
       end
       command_result = lambda do |*arguments, **_options|
-        arguments.first == "spctl" ? "source=Notarized Developer ID\n" : ""
+        File.basename(arguments.first) == "spctl" ? "source=Notarized Developer ID\n" : ""
       end
 
       WavesRelease::ArtifactEvidence.stub(:signing_details!, signing_details) do
@@ -582,6 +776,58 @@ class ReleaseInfraTest < Minitest::Test
       assert_release_error(/mode 0700/) do
         resolver.verify!(scratch_root: root, candidate_path: expected)
       end
+    end
+  end
+
+  def test_task12d_sparkle_signing_binds_explicit_account_public_key_and_signature
+    binding = WavesRelease.const_defined?(:SparkleKeyBinding) ? WavesRelease::SparkleKeyBinding : nil
+    refute_nil binding, "Sparkle account and packaged-key binding must be implemented"
+    return unless binding
+
+    with_ephemeral_sparkle_tools do |scratch, artifact, public_key, signer_marker, tamper_marker|
+      metadata = security_metadata_hash
+      metadata.fetch("sparkle")["publicEDKey"] = public_key
+
+      wrong_account = Marshal.load(Marshal.dump(metadata))
+      wrong_account.fetch("sparkle")["keychainAccount"] = "wrong.account"
+      assert_release_error(/account/) do
+        binding.sign_and_verify!(
+          scratch_root: scratch,
+          artifact: artifact,
+          metadata: wrong_account,
+          packaged_public_key: public_key
+        )
+      end
+      refute File.exist?(signer_marker), "wrong account must fail before signing"
+
+      assert_release_error(/packaged public key/) do
+        binding.sign_and_verify!(
+          scratch_root: scratch,
+          artifact: artifact,
+          metadata: metadata,
+          packaged_public_key: Base64.strict_encode64("wrong" * 8)
+        )
+      end
+      refute File.exist?(signer_marker), "wrong packaged key must fail before signing"
+
+      File.write(tamper_marker, "tamper\n")
+      assert_release_error(/signature verification/) do
+        binding.sign_and_verify!(
+          scratch_root: scratch,
+          artifact: artifact,
+          metadata: metadata,
+          packaged_public_key: public_key
+        )
+      end
+      FileUtils.rm_f(tamper_marker)
+
+      signature = binding.sign_and_verify!(
+        scratch_root: scratch,
+        artifact: artifact,
+        metadata: metadata,
+        packaged_public_key: public_key
+      )
+      assert_match(/\A[A-Za-z0-9+\/]+={0,2}\z/, signature)
     end
   end
 
@@ -665,12 +911,10 @@ class ReleaseInfraTest < Minitest::Test
     with_release_script_repo do |root, helper_root|
       fake_bin = File.join(helper_root, "bin")
       log = File.join(helper_root, "swift-arguments.log")
-      working_directory_log = File.join(helper_root, "swift-working-directory.log")
       FileUtils.mkdir_p(fake_bin)
       fake_swift = File.join(fake_bin, "swift")
       File.write(fake_swift, <<~SH)
         #!/bin/sh
-        pwd > "$WAVES_TEST_SWIFT_WORKING_DIRECTORY_LOG"
         printf '%s\n' "$@" > "$WAVES_TEST_SWIFT_LOG"
         exit 23
       SH
@@ -680,23 +924,15 @@ class ReleaseInfraTest < Minitest::Test
         {
           "PATH" => "#{fake_bin}:#{ENV.fetch('PATH')}",
           "WAVES_TEST_SWIFT_LOG" => log,
-          "WAVES_TEST_SWIFT_WORKING_DIRECTORY_LOG" => working_directory_log,
         },
         File.join(root, "script/build_and_run.sh"),
         "--release-check",
         chdir: root
       )
 
-      refute status.success?, "the fake compiler must stop the package build"
-      arguments = File.read(log)
-      scratch = arguments.lines.each_cons(2).find { |first, _second| first.chomp == "--scratch-path" }&.last&.chomp
-      refute_nil scratch, "release SwiftPM invocation must specify a scratch path"
-      refute scratch.start_with?(root), "release scratch path must not reuse checkout build state"
-      assert_match(%r{/waves-release-build\.[^/]+/swiftpm/arm64\z}, scratch)
-      working_directory = File.read(working_directory_log).strip
-      refute working_directory.start_with?(root), "release compiler must not run in the submitted checkout"
-      assert_match(%r{/waves-release-build\.[^/]+/source\z}, working_directory)
-      refute Dir.exist?(scratch), "isolated release workspace must be removed after a failed build"
+      refute status.success?, "the fixture package must stop before producing a release"
+      refute File.exist?(log), "release build must never execute the PATH-selected compiler"
+      refute Dir.exist?(File.join(root, ".build")), "release build must not create checkout SwiftPM state"
     end
   end
 
@@ -745,6 +981,78 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_task12d_distribution_builder_never_executes_a_path_selected_compiler_or_canonical_override
+    with_release_script_repo do |root, helper_root|
+      fake_bin = File.join(helper_root, "poison-bin")
+      marker = File.join(helper_root, "poisoned-compiler-ran")
+      alternate_metadata = File.join(helper_root, "alternate-metadata.json")
+      FileUtils.mkdir_p(fake_bin)
+      File.write(File.join(fake_bin, "swift"), <<~SH)
+        #!/bin/sh
+        touch "$WAVES_TEST_POISON_MARKER"
+        exit 23
+      SH
+      FileUtils.chmod(0o700, File.join(fake_bin, "swift"))
+      write_json(alternate_metadata, metadata_hash)
+
+      [
+        {"PATH" => "#{fake_bin}:#{ENV.fetch('PATH')}"},
+        {"WAVES_RELEASE_METADATA" => alternate_metadata},
+        {"SWIFT_SDK" => helper_root},
+      ].each do |poison|
+        FileUtils.rm_f(marker)
+        _stdout, stderr, status = Open3.capture3(
+          poison.merge("WAVES_TEST_POISON_MARKER" => marker),
+          File.join(root, "script/build_and_run.sh"),
+          "--release-check",
+          chdir: root
+        )
+        refute status.success?
+        refute File.exist?(marker), "release poison must be rejected before the compiler executes"
+        if poison.key?("WAVES_RELEASE_METADATA") || poison.key?("SWIFT_SDK")
+          assert_match(/override|release environment/, stderr)
+        end
+      end
+    end
+  end
+
+  def test_task12d_realtime_audit_rejects_caller_selected_source
+    Dir.mktmpdir("waves-audit-override") do |root|
+      fake_source = File.join(root, "Fake.swift")
+      File.write(fake_source, <<~SWIFT)
+        // REALTIME_CALLBACK_AUDIT_BEGIN
+        let safeLookingOverride = true
+        // REALTIME_CALLBACK_AUDIT_END
+      SWIFT
+      _stdout, stderr, status = Open3.capture3(
+        {"WAVES_REALTIME_SOURCE" => fake_source},
+        File.expand_path("../audit-realtime-callback.sh", __dir__)
+      )
+      refute status.success?
+      assert_match(/override|canonical/, stderr)
+    end
+  end
+
+  def test_task12d_toolchain_rejects_non_root_owned_developer_and_sdk_roots
+    toolchain = WavesRelease.const_defined?(:TrustedToolchain) ? WavesRelease::TrustedToolchain : nil
+    refute_nil toolchain, "trusted Apple developer toolchain validation must be implemented"
+    return unless toolchain
+
+    Dir.mktmpdir("waves-untrusted-developer") do |root|
+      developer = File.join(root, "Developer")
+      sdk = File.join(developer, "SDKs/MacOSX.sdk")
+      swift = File.join(developer, "usr/bin/swift")
+      FileUtils.mkdir_p(sdk)
+      FileUtils.mkdir_p(File.dirname(swift))
+      File.write(swift, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o700, swift)
+
+      assert_release_error(/root-owned/) do
+        toolchain.validate!(developer_dir: developer, sdk_path: sdk, swift_path: swift)
+      end
+    end
+  end
+
   def test_source_history_blocks_product_skip_without_exact_local_equivalence
     with_git_repo do |root|
       base = git(root, "rev-parse", "HEAD").strip
@@ -774,34 +1082,115 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_task12d_source_history_detects_skip_markers_in_commit_bodies
+    with_git_repo do |root|
+      base = git(root, "rev-parse", "HEAD").strip
+      FileUtils.mkdir_p(File.join(root, "Sources"))
+      File.write(File.join(root, "Sources/body.swift"), "let bodySkip = true\n")
+      git(root, "add", ".")
+      git(root, "commit", "-m", "fix: body marker", "-m", "release policy [skip ci]")
+      skipped = git(root, "rev-parse", "HEAD").strip
+
+      assert_release_error(/equivalent local quality/) do
+        WavesRelease::History.validate!(repo: root, from_revision: base, to_revision: skipped, manifest: nil)
+      end
+    end
+  end
+
+  def test_task12d_source_history_derives_privacy_manifest_from_canonical_build_inputs
+    with_git_repo do |root|
+      base = git(root, "rev-parse", "HEAD").strip
+      File.write(File.join(root, "PrivacyInfo.xcprivacy"), "privacy\n")
+      git(root, "add", ".")
+      git(root, "commit", "-m", "fix: privacy manifest [skip actions]")
+      skipped = git(root, "rev-parse", "HEAD").strip
+
+      assert_includes WavesRelease::ReleaseSource::BUILD_INPUT_PATHS, "PrivacyInfo.xcprivacy"
+      assert_release_error(/equivalent local quality/) do
+        WavesRelease::History.validate!(repo: root, from_revision: base, to_revision: skipped, manifest: nil)
+      end
+    end
+  end
+
   def test_publication_tag_requires_annotated_exact_matching_tag_and_origin_main
     with_git_repo do |root|
-      revision = git(root, "rev-parse", "HEAD").strip
-      manifest = WavesRelease::Evidence.seal(
-        input: evidence_input(remote: "passed", revision: revision),
-        metadata: load_metadata,
-        profile: "publication"
-      )
-      json = WavesRelease::CanonicalJSON.generate(manifest)
-      envelope = WavesRelease::TagEnvelope.build(json: json, digest: WavesRelease::CanonicalJSON.sha256(json))
-      git(root, "update-ref", "refs/remotes/origin/main", revision)
-      git_with_input(root, envelope, "tag", "-a", "v1.5.0", "-F", "-")
+      with_ephemeral_ssh_keypair("waves-release-publication") do |private_key, public_key|
+        metadata = security_metadata_hash(
+          public_key: File.read(public_key).strip,
+          fingerprint: ssh_fingerprint(public_key)
+        )
+        revision = git(root, "rev-parse", "HEAD").strip
+        manifest = WavesRelease::Evidence.seal(
+          input: evidence_input(remote: "passed", revision: revision),
+          metadata: metadata,
+          profile: "publication"
+        )
+        json = WavesRelease::CanonicalJSON.generate(manifest)
+        envelope = WavesRelease::TagEnvelope.build(json: json, digest: WavesRelease::CanonicalJSON.sha256(json))
+        git(root, "update-ref", "refs/remotes/origin/main", revision)
+        create_signed_tag(root, "v1.5.0", envelope, private_key)
 
-      WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: load_metadata)
+        WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: metadata)
 
-      git(root, "tag", "-d", "v1.5.0")
-      git(root, "tag", "v1.5.0")
-      assert_release_error(/annotated/) do
-        WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: load_metadata)
+        git(root, "tag", "-d", "v1.5.0")
+        git(root, "tag", "v1.5.0")
+        assert_release_error(/annotated/) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: metadata)
+        end
+
+        git(root, "tag", "-d", "v1.5.0")
+        create_signed_tag(root, "v1.5.0", envelope, private_key)
+        File.write(File.join(root, "next.txt"), "next\n")
+        git(root, "add", ".")
+        git(root, "commit", "-m", "docs: next")
+        assert_release_error(/HEAD/) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: metadata)
+        end
       end
+    end
+  end
 
-      git(root, "tag", "-d", "v1.5.0")
-      git_with_input(root, envelope, "tag", "-a", "v1.5.0", revision, "-F", "-")
-      File.write(File.join(root, "next.txt"), "next\n")
-      git(root, "add", ".")
-      git(root, "commit", "-m", "docs: next")
-      assert_release_error(/HEAD/) do
-        WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: load_metadata)
+  def test_task12d_publication_tag_requires_the_pinned_ssh_key_and_principal
+    authority = WavesRelease.const_defined?(:TagAuthority) ? WavesRelease::TagAuthority : nil
+    refute_nil authority, "signed publication tag authority must be implemented"
+    return unless authority
+
+    with_git_repo do |root|
+      with_ephemeral_ssh_keypair("waves-release-correct") do |correct_private, correct_public|
+        with_ephemeral_ssh_keypair("waves-release-wrong") do |wrong_private, _wrong_public|
+          expected = {
+            "principal" => RELEASE_PRINCIPAL,
+            "publicKey" => File.read(correct_public).strip,
+            "fingerprint" => ssh_fingerprint(correct_public),
+          }
+
+          git_with_input(root, "unsigned evidence\n", "tag", "-a", "v1.5.0", "-F", "-")
+          assert_release_error(/signed/) do
+            authority.verify!(root: root, tag: "v1.5.0", authority: expected)
+          end
+          git(root, "tag", "-d", "v1.5.0")
+
+          create_signed_tag(root, "v1.5.0", "wrong key evidence\n", wrong_private)
+          assert_release_error(/pinned release key|signature/) do
+            authority.verify!(root: root, tag: "v1.5.0", authority: expected)
+          end
+          git(root, "tag", "-d", "v1.5.0")
+
+          create_signed_tag(root, "v1.5.0", "wrong principal evidence\n", correct_private)
+          assert_release_error(/principal/) do
+            authority.verify!(
+              root: root,
+              tag: "v1.5.0",
+              authority: expected.merge("principal" => "untrusted-release")
+            )
+          end
+          git(root, "tag", "-d", "v1.5.0")
+
+          create_signed_tag(root, "v1.5.0", "trusted evidence\n", correct_private)
+          result = authority.verify!(root: root, tag: "v1.5.0", authority: expected)
+          assert_equal RELEASE_PRINCIPAL, result.fetch("principal")
+          assert_equal expected.fetch("fingerprint"), result.fetch("fingerprint")
+        end
       end
     end
   end
@@ -985,6 +1374,55 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_task12d_release_scripts_keep_private_artifact_and_key_bound_order
+    root = File.expand_path("../..", __dir__)
+    WavesRelease::ReleaseScriptContract.validate!(root: root)
+
+    mutations = [
+      [
+        "script/build_and_run.sh",
+        'WAVES_RELEASE_OUTPUT_DIR="$ACTIVE_ISOLATION_ROOT/artifacts"',
+        'WAVES_RELEASE_OUTPUT_DIR="$checkout_root/dist"',
+        /private staging|checkout dist/,
+      ],
+      [
+        "script/build_and_run.sh",
+        '/usr/bin/codesign "${args[@]}" --sign',
+        'codesign "${args[@]}" --sign',
+        /trusted absolute codesign/,
+      ],
+      [
+        "script/make_appcast.sh",
+        'private-stage-file "$DMG_PATH"',
+        'printf "%s\\n" "$DMG_PATH"',
+        /stage, verify, sign/,
+      ],
+      [
+        "script/make_appcast.sh",
+        "sparkle-sign-and-verify",
+        "sparkle-signing-tool",
+        /stage, verify, sign|Sparkle account signature/,
+      ],
+      [
+        "script/audit-realtime-callback.sh",
+        'SOURCE_PATH="$ROOT_DIR/Sources/Waves/Services/Audio/PerAppTapController.swift"',
+        'SOURCE_PATH="${WAVES_REALTIME_SOURCE:-$ROOT_DIR/Sources/Waves/Services/Audio/PerAppTapController.swift}"',
+        /canonical tracked source/,
+      ],
+    ]
+    mutations.each do |relative, before, after, error|
+      Dir.mktmpdir("waves-script-security") do |fixture|
+        %w[script/build_and_run.sh script/make_appcast.sh script/audit-realtime-callback.sh].each do |path|
+          destination = File.join(fixture, path)
+          FileUtils.mkdir_p(File.dirname(destination))
+          FileUtils.cp(File.join(root, path), destination)
+        end
+        mutate(fixture, relative, before, after)
+        assert_release_error(error) { WavesRelease::ReleaseScriptContract.validate!(root: fixture) }
+      end
+    end
+  end
+
   private
 
   def write_repository_contract_fixture(root)
@@ -1112,6 +1550,181 @@ class ReleaseInfraTest < Minitest::Test
       git(root, "commit", "-q", "-m", "chore: fixture")
       yield root, container
     end
+  end
+
+  def with_ephemeral_ssh_keypair(name)
+    Dir.mktmpdir(name) do |root|
+      private_key = File.join(root, "key")
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ssh-keygen",
+        "-q",
+        "-t",
+        "ed25519",
+        "-N",
+        "",
+        "-C",
+        name,
+        "-f",
+        private_key
+      )
+      raise "ssh-keygen failed: #{stderr}" unless status.success?
+
+      yield private_key, "#{private_key}.pub"
+    end
+  end
+
+  def ssh_fingerprint(public_key)
+    stdout, stderr, status = Open3.capture3(
+      "/usr/bin/ssh-keygen",
+      "-lf",
+      public_key,
+      "-E",
+      "sha256"
+    )
+    raise "ssh-keygen fingerprint failed: #{stderr}" unless status.success?
+
+    stdout.split.fetch(1)
+  end
+
+  def create_signed_tag(root, tag, message, private_key)
+    git_with_input(
+      root,
+      message,
+      "-c",
+      "gpg.format=ssh",
+      "-c",
+      "user.signingkey=#{private_key}",
+      "tag",
+      "-s",
+      tag,
+      "-F",
+      "-"
+    )
+  end
+
+  def with_ephemeral_sparkle_tools
+    openssl = [
+      "/opt/homebrew/bin/openssl",
+      "/usr/local/bin/openssl",
+      "/usr/bin/openssl",
+    ].find { |candidate| File.executable?(candidate) }
+    raise "OpenSSL is required for the ephemeral Sparkle fixture" unless openssl
+
+    Dir.mktmpdir("waves-sparkle-binding") do |scratch|
+      FileUtils.chmod(0o700, scratch)
+      bin = File.join(scratch, "artifacts/sparkle/Sparkle/bin")
+      keys = File.join(scratch, "fixture-keys")
+      FileUtils.mkdir_p(bin)
+      FileUtils.mkdir_p(keys)
+      private_key = File.join(keys, "private.pem")
+      public_key = File.join(keys, "public.pem")
+      public_der = File.join(keys, "public.der")
+      run_fixture_command!(openssl, "genpkey", "-algorithm", "Ed25519", "-out", private_key)
+      run_fixture_command!(openssl, "pkey", "-in", private_key, "-pubout", "-out", public_key)
+      run_fixture_command!(
+        openssl,
+        "pkey",
+        "-in",
+        private_key,
+        "-pubout",
+        "-outform",
+        "DER",
+        "-out",
+        public_der
+      )
+      encoded_public_key = Base64.strict_encode64(File.binread(public_der).bytes.last(32).pack("C*"))
+      artifact = File.join(scratch, "Waves.dmg")
+      signer_marker = File.join(scratch, "signer-ran")
+      tamper_marker = File.join(scratch, "tamper-signature")
+      File.binwrite(artifact, "published Waves artifact bytes\n")
+
+      generate_keys = File.join(bin, "generate_keys")
+      File.write(generate_keys, <<~RUBY)
+        #!/usr/bin/ruby
+        expected = ["--account", #{SPARKLE_ACCOUNT.inspect}, "-p"]
+        unless ARGV == expected
+          warn "explicit Waves account required"
+          exit 2
+        end
+        puts #{encoded_public_key.inspect}
+      RUBY
+      FileUtils.chmod(0o700, generate_keys)
+
+      sign_update = File.join(bin, "sign_update")
+      File.write(sign_update, <<~RUBY)
+        #!/usr/bin/ruby
+        require "base64"
+        require "open3"
+        require "tempfile"
+
+        account = #{SPARKLE_ACCOUNT.inspect}
+        openssl = #{openssl.inspect}
+        private_key = #{private_key.inspect}
+        public_key = #{public_key.inspect}
+        signer_marker = #{signer_marker.inspect}
+        tamper_marker = #{tamper_marker.inspect}
+
+        if ARGV.length == 4 && ARGV[0, 3] == ["--account", account, "-p"]
+          artifact = ARGV.fetch(3)
+          File.write(signer_marker, "ran\n")
+          Tempfile.create("waves-signature") do |signature|
+            _stdout, stderr, status = Open3.capture3(
+              openssl,
+              "pkeyutl",
+              "-sign",
+              "-rawin",
+              "-inkey",
+              private_key,
+              "-in",
+              artifact,
+              "-out",
+              signature.path
+            )
+            abort(stderr) unless status.success?
+            bytes = File.binread(signature.path)
+            bytes.setbyte(0, bytes.getbyte(0) ^ 0xff) if File.exist?(tamper_marker)
+            puts Base64.strict_encode64(bytes)
+          end
+        elsif ARGV.length == 5 && ARGV[0, 3] == ["--account", account, "--verify"]
+          artifact = ARGV.fetch(3)
+          encoded_signature = ARGV.fetch(4)
+          Tempfile.create("waves-signature") do |signature|
+            begin
+              signature.binmode
+              signature.write(Base64.strict_decode64(encoded_signature))
+              signature.flush
+            rescue ArgumentError
+              abort("invalid signature encoding")
+            end
+            _stdout, stderr, status = Open3.capture3(
+              openssl,
+              "pkeyutl",
+              "-verify",
+              "-pubin",
+              "-inkey",
+              public_key,
+              "-rawin",
+              "-in",
+              artifact,
+              "-sigfile",
+              signature.path
+            )
+            abort(stderr) unless status.success?
+          end
+        else
+          warn "explicit Waves account required"
+          exit 2
+        end
+      RUBY
+      FileUtils.chmod(0o700, sign_update)
+
+      yield scratch, artifact, encoded_public_key, signer_marker, tamper_marker
+    end
+  end
+
+  def run_fixture_command!(*arguments)
+    _stdout, stderr, status = Open3.capture3(*arguments)
+    raise "fixture command failed: #{arguments.join(' ')}: #{stderr}" unless status.success?
   end
 
   def git(root, *arguments)

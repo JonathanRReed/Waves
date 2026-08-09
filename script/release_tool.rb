@@ -2,10 +2,12 @@
 # frozen_string_literal: true
 
 require "digest"
+require "base64"
 require "fileutils"
 require "json"
 require "open3"
 require "pathname"
+require "tempfile"
 require "yaml"
 
 module WavesRelease
@@ -47,7 +49,10 @@ module WavesRelease
     end
 
     def run(*command, chdir: nil, stdin_data: nil, allow_failure: false)
-      stdout, stderr, status = Open3.capture3(*command, chdir: chdir, stdin_data: stdin_data)
+      options = {}
+      options[:chdir] = chdir if chdir
+      options[:stdin_data] = stdin_data if stdin_data
+      stdout, stderr, status = Open3.capture3(*command, **options)
       return [stdout, stderr, status] if allow_failure
       raise Error, "#{command.join(' ')} failed: #{stderr.strip}" unless status.success?
 
@@ -55,7 +60,9 @@ module WavesRelease
     end
 
     def run_combined(*command, chdir: nil)
-      stdout, stderr, status = Open3.capture3(*command, chdir: chdir)
+      options = {}
+      options[:chdir] = chdir if chdir
+      stdout, stderr, status = Open3.capture3(*command, **options)
       combined = "#{stdout}#{stderr}"
       raise Error, "#{command.join(' ')} failed: #{combined.strip}" unless status.success?
 
@@ -90,8 +97,12 @@ module WavesRelease
   module Metadata
     KEYS = %w[
       schemaVersion version build minimumMacOSVersion bundleIdentifier developerID
+      releaseAuthority sparkle
     ].freeze
     DEVELOPER_ID_KEYS = %w[identity teamIdentifier designatedRequirement].freeze
+    RELEASE_AUTHORITY_KEYS = %w[principal publicKey fingerprint receiptIssuers].freeze
+    RECEIPT_ISSUER_KEYS = %w[securityScan remoteElgato].freeze
+    SPARKLE_KEYS = %w[keychainAccount publicEDKey].freeze
 
     module_function
 
@@ -134,6 +145,43 @@ module WavesRelease
         raise Error, "release metadata Developer ID designatedRequirement must bind the Waves identifier and team"
       end
 
+      authority = value["releaseAuthority"]
+      Validation.exact_keys!(authority, RELEASE_AUTHORITY_KEYS, "release metadata releaseAuthority")
+      %w[principal publicKey fingerprint].each do |field|
+        Validation.nonempty_string!(authority[field], "release metadata releaseAuthority.#{field}")
+      end
+      key_parts = authority["publicKey"].split
+      unless key_parts.length.between?(2, 3) && key_parts[0] == "ssh-ed25519"
+        raise Error, "release metadata releaseAuthority.publicKey must be an inline ssh-ed25519 public key"
+      end
+      begin
+        key_blob = Base64.strict_decode64(key_parts[1])
+      rescue ArgumentError
+        raise Error, "release metadata releaseAuthority.publicKey is malformed"
+      end
+      derived_fingerprint = "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(key_blob)).delete('=')}"
+      unless authority["fingerprint"] == derived_fingerprint
+        raise Error, "release metadata releaseAuthority fingerprint does not match the pinned public key"
+      end
+      issuers = authority["receiptIssuers"]
+      Validation.exact_keys!(issuers, RECEIPT_ISSUER_KEYS, "release metadata receipt issuers")
+      issuers.each do |name, issuer|
+        Validation.nonempty_string!(issuer, "release metadata receiptIssuers.#{name}")
+      end
+
+      sparkle = value["sparkle"]
+      Validation.exact_keys!(sparkle, SPARKLE_KEYS, "release metadata sparkle")
+      Validation.nonempty_string!(sparkle["keychainAccount"], "release metadata sparkle.keychainAccount")
+      raise Error, "release metadata Sparkle account must be Waves-specific" unless sparkle["keychainAccount"] == bundle_identifier
+      begin
+        public_key_bytes = Base64.strict_decode64(sparkle["publicEDKey"])
+      rescue ArgumentError
+        raise Error, "release metadata sparkle.publicEDKey must be canonical base64"
+      end
+      unless public_key_bytes.bytesize == 32 && Base64.strict_encode64(public_key_bytes) == sparkle["publicEDKey"]
+        raise Error, "release metadata sparkle.publicEDKey must encode exactly 32 bytes"
+      end
+
       value.freeze
     end
   end
@@ -174,11 +222,11 @@ module WavesRelease
     ].freeze
     INPUT_KEYS = %w[
       source toolchain tests performance platforms package gates skippedGates
-      skipCIEquivalentEvidence publicationEligible
+      skipCIEquivalentEvidence externalReceipts publicationEligible
     ].freeze
     MANIFEST_KEYS = %w[
       schemaVersion sealProfile release source toolchain tests performance platforms
-      package gates skippedGates skipCIEquivalentEvidence publicationEligible
+      package gates skippedGates skipCIEquivalentEvidence externalReceipts publicationEligible
     ].freeze
 
     module_function
@@ -221,6 +269,7 @@ module WavesRelease
       validate_package!(manifest["package"], metadata)
       validate_gates!(manifest["gates"], profile)
       validate_skip_data!(manifest)
+      validate_external_receipts!(manifest, metadata: metadata, profile: profile)
       manifest
     end
 
@@ -347,12 +396,21 @@ module WavesRelease
         Validation.passed_result!(package[name], "package.#{name}")
       end
       notarization = package["notarization"]
-      Validation.exact_keys!(notarization, %w[status submissionID detail], "package.notarization")
+      Validation.exact_keys!(
+        notarization,
+        %w[status submissionID detail artifactSHA256 logSHA256],
+        "package.notarization"
+      )
       raise Error, "package.notarization status must be passed" unless notarization["status"] == "passed"
       unless notarization["submissionID"].is_a?(String) && notarization["submissionID"].match?(/\A[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\z/)
         raise Error, "package.notarization.submissionID must be an Apple notarization UUID"
       end
       Validation.nonempty_string!(notarization["detail"], "package.notarization.detail")
+      Validation.sha256!(notarization["artifactSHA256"], "package.notarization artifact SHA-256")
+      Validation.sha256!(notarization["logSHA256"], "package.notarization log SHA-256")
+      unless notarization["artifactSHA256"] == package.fetch("hashes").fetch("dmg")
+        raise Error, "package notarization receipt is not bound to the sealed DMG"
+      end
     end
 
     def validate_gates!(gates, profile)
@@ -379,6 +437,42 @@ module WavesRelease
         Validation.revision!(entry["commit"], "skipCIEquivalentEvidence[#{index}].commit")
         raise Error, "skipCIEquivalentEvidence[#{index}] must record a passed full quality gate" unless entry["status"] == "passed" && entry["qualityGate"] == "full"
       end
+    end
+
+    def validate_external_receipts!(manifest, metadata:, profile:)
+      receipts = manifest["externalReceipts"]
+      required = ["securityScan"]
+      required << "remoteElgato" if profile == "publication"
+      allowed = %w[securityScan remoteElgato]
+      Validation.hash!(receipts, "external receipt evidence")
+      unknown = receipts.keys - allowed
+      missing = required - receipts.keys
+      raise Error, "external receipt evidence has unknown key(s): #{unknown.join(', ')}" unless unknown.empty?
+      raise Error, "external receipt evidence is missing receipt(s): #{missing.join(', ')}" unless missing.empty?
+
+      source_revision = manifest.fetch("source").fetch("revision")
+      dmg_hash = manifest.fetch("package").fetch("hashes").fetch("dmg")
+      issuers = metadata.fetch("releaseAuthority").fetch("receiptIssuers")
+      receipts.each do |name, receipt|
+        Validation.exact_keys!(
+          receipt,
+          %w[issuer sourceRevision artifactSHA256 receiptSHA256],
+          "external receipt #{name}"
+        )
+        unless receipt["issuer"] == issuers.fetch(name)
+          raise Error, "external receipt #{name} issuer does not match canonical release authority"
+        end
+        Validation.revision!(receipt["sourceRevision"], "external receipt #{name} source revision")
+        Validation.sha256!(receipt["artifactSHA256"], "external receipt #{name} artifact SHA-256")
+        Validation.sha256!(receipt["receiptSHA256"], "external receipt #{name} receipt SHA-256")
+        unless receipt["sourceRevision"] == source_revision
+          raise Error, "external receipt #{name} is not bound to the sealed source revision"
+        end
+        unless receipt["artifactSHA256"] == dmg_hash
+          raise Error, "external receipt #{name} is not bound to the sealed DMG"
+        end
+      end
+      true
     end
   end
 
@@ -529,14 +623,14 @@ module WavesRelease
         end
       end
 
-      Validation.run_combined("codesign", "--verify", "--deep", "--strict", app)
-      Validation.run_combined("codesign", "--verify", "--strict", dmg)
-      app_gatekeeper = Validation.run_combined("spctl", "--assess", "--type", "execute", "--verbose=4", app)
+      Validation.run_combined("/usr/bin/codesign", "--verify", "--deep", "--strict", app)
+      Validation.run_combined("/usr/bin/codesign", "--verify", "--strict", dmg)
+      app_gatekeeper = Validation.run_combined("/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", app)
       dmg_gatekeeper = Validation.run_combined(
-        "spctl", "--assess", "--type", "open", "--context", "context:primary-signature",
+        "/usr/sbin/spctl", "--assess", "--type", "open", "--context", "context:primary-signature",
         "--verbose=4", dmg
       )
-      Validation.run_combined("xcrun", "stapler", "validate", dmg)
+      Validation.run_combined("/usr/bin/xcrun", "stapler", "validate", dmg)
 
       facts = {
         "bundleIdentifier" => plist_value!(info_plist, "CFBundleIdentifier"),
@@ -563,7 +657,7 @@ module WavesRelease
     end
 
     def signing_details!(path, require_designated_requirement: true)
-      details = Validation.run_combined("codesign", "-dvvv", path)
+      details = Validation.run_combined("/usr/bin/codesign", "-dvvv", path)
       authority = details.lines.filter_map { |line| line.chomp[/\AAuthority=(.+)\z/, 1] }.first
       team = details.lines.filter_map { |line| line.chomp[/\ATeamIdentifier=(.+)\z/, 1] }.first
       identity = authority&.strip
@@ -577,7 +671,7 @@ module WavesRelease
         "hardenedRuntime" => details.match?(/^CodeDirectory .*flags=.*\(runtime\)/),
       }
       if require_designated_requirement
-        requirement_output = Validation.run_combined("codesign", "-dr", "-", path)
+        requirement_output = Validation.run_combined("/usr/bin/codesign", "-dr", "-", path)
         requirement = requirement_output.lines.filter_map do |line|
           line.chomp[/\Adesignated => (.+)\z/, 1]
         end.first
@@ -589,38 +683,329 @@ module WavesRelease
     end
 
     def plist_value!(path, key)
-      value = Validation.run("plutil", "-extract", key, "raw", "-o", "-", path).strip
+      value = Validation.run("/usr/bin/plutil", "-extract", key, "raw", "-o", "-", path).strip
       Validation.nonempty_string!(value, "#{path} #{key}")
       value
     end
   end
 
   module SparkleSigningTool
-    RELATIVE_PATH = "artifacts/sparkle/Sparkle/bin/sign_update"
+    RELATIVE_PATHS = {
+      "sign_update" => "artifacts/sparkle/Sparkle/bin/sign_update",
+      "generate_keys" => "artifacts/sparkle/Sparkle/bin/generate_keys",
+    }.freeze
+    RELATIVE_PATH = RELATIVE_PATHS.fetch("sign_update")
 
     module_function
 
-    def verify!(scratch_root:, candidate_path:)
+    def verify!(scratch_root:, candidate_path:, tool: "sign_update")
       root = File.expand_path(scratch_root)
-      expected = File.join(root, RELATIVE_PATH)
+      relative_path = RELATIVE_PATHS.fetch(tool) { raise Error, "unknown Sparkle tool #{tool.inspect}" }
+      expected = File.join(root, relative_path)
       unless File.expand_path(candidate_path) == expected
-        raise Error, "sign_update must come from the expected isolated Sparkle path #{expected}"
+        raise Error, "#{tool} must come from the expected isolated Sparkle path #{expected}"
       end
       stat = File.lstat(root)
       raise Error, "Sparkle scratch root must be owned by the current user" unless stat.uid == Process.uid
       raise Error, "Sparkle scratch root must have mode 0700" unless (stat.mode & 0o777) == 0o700
-      raise Error, "Sparkle sign_update must not be a symbolic link" if File.symlink?(expected)
-      raise Error, "Sparkle sign_update is missing or not executable at #{expected}" unless File.file?(expected) && File.executable?(expected)
+      raise Error, "Sparkle #{tool} must not be a symbolic link" if File.symlink?(expected)
+      unless File.file?(expected) && File.executable?(expected)
+        raise Error, "Sparkle #{tool} is missing or not executable at #{expected}"
+      end
       resolved_root = File.realpath(root)
-      resolved_expected = File.join(resolved_root, RELATIVE_PATH)
+      resolved_expected = File.join(resolved_root, relative_path)
       unless File.realpath(expected) == resolved_expected
-        raise Error, "Sparkle sign_update must resolve inside the exact isolated dependency root"
+        raise Error, "Sparkle #{tool} must resolve inside the exact isolated dependency root"
       end
 
       expected
     rescue Errno::ENOENT => error
       raise Error, "Sparkle signing tool validation failed: #{error.message}"
     end
+  end
+
+  module SparkleKeyBinding
+    module_function
+
+    def sign_and_verify!(scratch_root:, artifact:, metadata:, packaged_public_key:)
+      sparkle = metadata.fetch("sparkle")
+      account = sparkle.fetch("keychainAccount")
+      raise Error, "explicit Waves Sparkle account is required" unless account == "com.jonathanreed.Waves"
+
+      sign_update = SparkleSigningTool.verify!(
+        scratch_root: scratch_root,
+        candidate_path: File.join(scratch_root, SparkleSigningTool::RELATIVE_PATHS.fetch("sign_update")),
+        tool: "sign_update"
+      )
+      generate_keys = SparkleSigningTool.verify!(
+        scratch_root: scratch_root,
+        candidate_path: File.join(scratch_root, SparkleSigningTool::RELATIVE_PATHS.fetch("generate_keys")),
+        tool: "generate_keys"
+      )
+      derived_public = Validation.run(generate_keys, "--account", account, "-p").strip
+      canonical_public = sparkle.fetch("publicEDKey")
+      unless derived_public == canonical_public
+        raise Error, "Sparkle account public key does not match canonical release metadata"
+      end
+      unless packaged_public_key == canonical_public
+        raise Error, "packaged public key does not match the canonical Sparkle account"
+      end
+
+      signature = Validation.run(sign_update, "--account", account, "-p", artifact).strip
+      begin
+        decoded = Base64.strict_decode64(signature)
+      rescue ArgumentError
+        raise Error, "Sparkle signer returned an invalid signature encoding"
+      end
+      unless decoded.bytesize == 64 && Base64.strict_encode64(decoded) == signature
+        raise Error, "Sparkle signer returned an invalid signature encoding"
+      end
+      _stdout, stderr, status = Validation.run(
+        sign_update,
+        "--account",
+        account,
+        "--verify",
+        artifact,
+        signature,
+        allow_failure: true
+      )
+      raise Error, "Sparkle signature verification failed: #{stderr.strip}" unless status.success?
+
+      signature
+    end
+  end
+
+  module PrivateArtifacts
+    module_function
+
+    def capture_identity!(path:)
+      stat = File.lstat(path)
+      raise Error, "release artifact must not be a symbolic link: #{path}" if stat.symlink?
+      unless stat.file? || stat.directory?
+        raise Error, "release artifact must be a regular file or directory: #{path}"
+      end
+
+      {"path" => File.expand_path(path), "device" => stat.dev, "inode" => stat.ino, "type" => stat.ftype}
+    rescue Errno::ENOENT => error
+      raise Error, "release artifact identity failed: #{error.message}"
+    end
+
+    def with_stable_identity!(path:, identity: nil)
+      identity ||= capture_identity!(path: path)
+      verify_identity!(path: path, identity: identity)
+      result = yield
+      verify_identity!(path: path, identity: identity)
+      result
+    end
+
+    def publish_file!(source: nil, staged_path: nil, destination:)
+      staged_path = source || staged_path
+      root = File.dirname(destination)
+      FileUtils.mkdir_p(root)
+      raise Error, "release destination must not be a symbolic link" if File.symlink?(destination)
+      source_identity = capture_identity!(path: staged_path)
+      raise Error, "published release artifact must be a regular file" unless source_identity["type"] == "file"
+      expected = Digest::SHA256.file(staged_path).hexdigest
+      temporary = Tempfile.new([".waves-publish-", ".tmp"], root)
+      temporary.chmod(0o600)
+      begin
+        with_stable_identity!(path: staged_path, identity: source_identity) do
+          File.open(staged_path, File::RDONLY | File::NOFOLLOW) do |source|
+            IO.copy_stream(source, temporary)
+          end
+        end
+        temporary.flush
+        temporary.fsync
+        actual = Digest::SHA256.file(temporary.path).hexdigest
+        raise Error, "finalized release artifact changed during publication" unless actual == expected
+        temporary.close
+        File.rename(temporary.path, destination)
+        final = Digest::SHA256.file(destination).hexdigest
+        raise Error, "published release artifact does not match finalized bytes" unless final == expected
+      ensure
+        temporary.close! if temporary
+      end
+      expected
+    rescue Errno::ELOOP => error
+      raise Error, "release artifact must not traverse a symbolic link: #{error.message}"
+    end
+
+    def stage_file!(source:, root:, name: File.basename(source))
+      validate_private_root!(root)
+      identity = capture_identity!(path: source)
+      raise Error, "staged release artifact must be a regular file" unless identity["type"] == "file"
+      destination = File.join(root, name)
+      raise Error, "private staging destination escapes its root" unless File.dirname(destination) == File.expand_path(root)
+      raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
+      File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
+        File.open(destination, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |output|
+          with_stable_identity!(path: source, identity: identity) { IO.copy_stream(input, output) }
+          output.flush
+          output.fsync
+        end
+      end
+      unless Digest::SHA256.file(destination).hexdigest == Digest::SHA256.file(source).hexdigest
+        raise Error, "private staged artifact does not match its verified input"
+      end
+      destination
+    rescue Errno::ELOOP => error
+      raise Error, "release artifact must not traverse a symbolic link: #{error.message}"
+    end
+
+    def stage_directory!(source:, root:, name: File.basename(source))
+      validate_private_root!(root)
+      identity = capture_identity!(path: source)
+      raise Error, "staged release artifact must be a directory" unless identity["type"] == "directory"
+      destination = File.join(root, name)
+      raise Error, "private staging destination escapes its root" unless File.dirname(destination) == File.expand_path(root)
+      raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
+      expected = tree_digest(source)
+      with_stable_identity!(path: source, identity: identity) do
+        FileUtils.copy_entry(source, destination, true, false, true)
+      end
+      unless tree_digest(source) == expected && tree_digest(destination) == expected
+        raise Error, "private staged artifact changed during verified copy"
+      end
+      destination
+    end
+
+    def stage_release_artifacts!(source_root:, destination_root:)
+      validate_private_root!(destination_root)
+      raise Error, "release source dist must not be a symbolic link" if File.symlink?(source_root)
+      stage_directory!(
+        source: File.join(source_root, "Waves.app"),
+        root: destination_root,
+        name: "Waves.app"
+      )
+      stage_directory!(
+        source: File.join(source_root, "Waves.app.dSYM"),
+        root: destination_root,
+        name: "Waves.app.dSYM"
+      )
+      stage_file!(
+        source: File.join(source_root, "Waves.dmg"),
+        root: destination_root,
+        name: "Waves.dmg"
+      )
+      true
+    end
+
+    def publish_directory!(source:, destination:)
+      identity = capture_identity!(path: source)
+      raise Error, "published release artifact must be a directory" unless identity["type"] == "directory"
+      raise Error, "release destination must not be a symbolic link" if File.symlink?(destination)
+      parent = File.dirname(destination)
+      FileUtils.mkdir_p(parent)
+      temporary = Dir.mktmpdir(".waves-publish-", parent)
+      staged = File.join(temporary, File.basename(destination))
+      expected = tree_digest(source)
+      with_stable_identity!(path: source, identity: identity) do
+        FileUtils.copy_entry(source, staged, true, false, true)
+      end
+      raise Error, "finalized release directory changed during publication" unless tree_digest(staged) == expected
+      backup = nil
+      if File.exist?(destination)
+        backup = File.join(parent, ".#{File.basename(destination)}.previous-#{Process.pid}-#{rand(1_000_000)}")
+        File.rename(destination, backup)
+      end
+      File.rename(staged, destination)
+      raise Error, "published release directory does not match finalized bytes" unless tree_digest(destination) == expected
+      FileUtils.rm_rf(backup) if backup
+      expected
+    ensure
+      FileUtils.rm_rf(temporary) if defined?(temporary) && temporary && File.exist?(temporary)
+    end
+
+    def publish_release_artifacts!(source_root:, destination_root:)
+      validate_private_root!(source_root)
+      raise Error, "release destination must not be a symbolic link" if File.symlink?(destination_root)
+      FileUtils.mkdir_p(destination_root)
+      publish_directory!(
+        source: File.join(source_root, "Waves.app"),
+        destination: File.join(destination_root, "Waves.app")
+      )
+      publish_directory!(
+        source: File.join(source_root, "Waves.app.dSYM"),
+        destination: File.join(destination_root, "Waves.app.dSYM")
+      )
+      publish_file!(
+        source: File.join(source_root, "Waves.dmg"),
+        destination: File.join(destination_root, "Waves.dmg")
+      )
+      true
+    end
+
+    def validate_private_root!(root)
+      stat = File.lstat(root)
+      raise Error, "private release root must not be a symbolic link" if stat.symlink?
+      raise Error, "private release root must be owned by the current user" unless stat.uid == Process.uid
+      raise Error, "private release root must have mode 0700" unless (stat.mode & 0o777) == 0o700
+      true
+    rescue Errno::ENOENT => error
+      raise Error, "private release root is unavailable: #{error.message}"
+    end
+
+    def tree_digest(root)
+      digest = Digest::SHA256.new
+      paths = [root] + Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH).reject do |path|
+        %w[. ..].include?(File.basename(path))
+      end
+      paths.sort.each do |path|
+        relative = Pathname.new(path).relative_path_from(Pathname.new(root)).to_s
+        stat = File.lstat(path)
+        digest << relative << "\0" << stat.ftype << "\0" << (stat.mode & 0o7777).to_s(8) << "\0"
+        if stat.file?
+          digest << Digest::SHA256.file(path).digest
+        elsif stat.symlink?
+          digest << File.readlink(path)
+        end
+      end
+      digest.hexdigest
+    end
+
+    def verify_identity!(path:, identity:)
+      current = capture_identity!(path: path)
+      raise Error, "release artifact identity changed before sensitive action" unless current == identity
+
+      true
+    end
+    private_class_method :verify_identity!
+  end
+
+  module TrustedToolchain
+    module_function
+
+    def validate!(developer_dir:, sdk_path:, swift_path:)
+      developer = trusted_realpath!(developer_dir, "developer directory")
+      sdk = trusted_realpath!(sdk_path, "SDK")
+      swift = trusted_realpath!(swift_path, "Swift compiler")
+      accepted = developer == "/Library/Developer/CommandLineTools" ||
+        developer.match?(%r{\A/Applications/[^/]+\.app/Contents/Developer\z})
+      raise Error, "developer directory is not an accepted Apple toolchain root" unless accepted
+      [sdk, swift].each do |path|
+        unless path == developer || path.start_with?("#{developer}/")
+          raise Error, "toolchain component resolves outside the trusted developer directory"
+        end
+      end
+      {"developerDir" => developer, "sdkPath" => sdk, "swiftPath" => swift}
+    end
+
+    def trusted_realpath!(path, label)
+      resolved = File.realpath(path)
+      current = Pathname.new(resolved)
+      loop do
+        stat = File.lstat(current.to_s)
+        raise Error, "#{label} must be root-owned" unless stat.uid.zero?
+        raise Error, "#{label} must not be group or world writable" unless (stat.mode & 0o022).zero?
+        break if current.root?
+
+        current = current.parent
+      end
+      resolved
+    rescue Errno::ENOENT => error
+      raise Error, "#{label} is unavailable: #{error.message}"
+    end
+    private_class_method :trusted_realpath!
   end
 
   module GitContract
@@ -714,8 +1099,8 @@ module WavesRelease
 
   module History
     SKIP_PATTERN = /\[(?:skip ci|ci skip|skip actions|actions skip)\]/i
-    PRODUCT_PATH = %r{\A(?:
-      Sources/|Tests/|script/|\.github/|release/|Casks/|Package\.swift\z|Package\.resolved\z|
+    ADDITIONAL_PROTECTED_PATH = %r{\A(?:
+      Tests/|script/|\.github/|release/|Casks/|
       CHANGELOG\.md\z|1\.5-update-plan\.md\z|docs/(?:RELEASE|PRODUCT|DESIGN|STREAM-DECK)\.md\z
     )}x
 
@@ -725,11 +1110,11 @@ module WavesRelease
       commits = Validation.run("git", "rev-list", "--reverse", "#{from_revision}..#{to_revision}", chdir: repo).lines.map(&:strip)
       equivalents = Array(manifest && manifest["skipCIEquivalentEvidence"])
       commits.each do |commit|
-        subject = Validation.run("git", "log", "-1", "--format=%s", commit, chdir: repo).strip
-        next unless subject.match?(SKIP_PATTERN)
+        message = Validation.run("git", "log", "-1", "--format=%B", commit, chdir: repo).strip
+        next unless message.match?(SKIP_PATTERN)
 
         paths = Validation.run("git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit, chdir: repo).lines.map(&:strip)
-        next unless paths.any? { |path| path.match?(PRODUCT_PATH) }
+        next unless paths.any? { |path| protected_path?(path) }
 
         equivalent = equivalents.find do |entry|
           entry["commit"] == commit && entry["status"] == "passed" && entry["qualityGate"] == "full"
@@ -739,6 +1124,12 @@ module WavesRelease
         raise Error, "source-changing skip commit #{commit} lacks exact equivalent local quality-gate evidence"
       end
       true
+    end
+
+    def protected_path?(path)
+      ReleaseSource::BUILD_INPUT_PATHS.any? do |input|
+        path == input || path.start_with?("#{input}/")
+      end || path.match?(ADDITIONAL_PROTECTED_PATH)
     end
   end
 
@@ -786,6 +1177,79 @@ module WavesRelease
 
       File.read(path)
     end
+  end
+
+  module ReleaseScriptContract
+    module_function
+
+    def validate!(root:)
+      build = read(root, "script/build_and_run.sh")
+      appcast = read(root, "script/make_appcast.sh")
+      audit = read(root, "script/audit-realtime-callback.sh")
+
+      require_in_order!(
+        build,
+        [
+          'WAVES_RELEASE_OUTPUT_DIR="$ACTIVE_ISOLATION_ROOT/artifacts"',
+          'build_app_bundle',
+          'publish_finalized_distribution',
+        ],
+        "distribution artifacts must be finalized in private staging before publication"
+      )
+      require_in_order!(
+        build,
+        ["private-stage-release-artifacts", "publication_check()"],
+        "existing app, DMG, and dSYM must be staged privately before publication validation"
+      )
+      raise Error, "distribution build must not target checkout dist" if build.include?('WAVES_RELEASE_OUTPUT_DIR="$checkout_root/dist"')
+      %w[/usr/bin/codesign /usr/bin/xcrun /usr/sbin/spctl].each do |tool|
+        raise Error, "distribution security action must use trusted absolute tool #{tool}" unless build.include?(tool)
+      end
+      unless build.include?('/usr/bin/codesign "${args[@]}" --sign')
+        raise Error, "distribution signing must use the trusted absolute codesign tool"
+      end
+
+      require_in_order!(
+        appcast,
+        [
+          'private-stage-file "$DMG_PATH"',
+          '/usr/bin/hdiutil attach "$DMG_PATH"',
+          "sparkle-sign-and-verify",
+          "private-publish-file",
+        ],
+        "appcast must stage, verify, sign, and atomically publish in order"
+      )
+      if appcast.include?('"$SIGN_UPDATE" -p') || !appcast.include?('PACKAGED_SPARKLE_PUBLIC_KEY')
+        raise Error, "appcast must bind the exact Sparkle account signature to the packaged public key"
+      end
+      unless appcast.include?('PATH="/usr/bin:/bin:/usr/sbin:/sbin"') &&
+          build.include?('PATH="/usr/bin:/bin:/usr/sbin:/sbin"')
+        raise Error, "release scripts must use the minimal trusted system PATH"
+      end
+      if audit.include?('WAVES_REALTIME_SOURCE:-') || !audit.include?("override is prohibited")
+        raise Error, "realtime audit must use only its canonical tracked source"
+      end
+      true
+    end
+
+    def require_in_order!(source, fragments, message)
+      offset = 0
+      fragments.each do |fragment|
+        index = source.index(fragment, offset)
+        raise Error, message unless index
+
+        offset = index + fragment.length
+      end
+    end
+    private_class_method :require_in_order!
+
+    def read(root, relative)
+      path = File.join(root, relative)
+      raise Error, "release security script not found at #{path}" unless File.file?(path)
+
+      File.read(path)
+    end
+    private_class_method :read
   end
 
   module WorkflowContract
@@ -999,6 +1463,61 @@ module WavesRelease
     end
   end
 
+  module TagAuthority
+    PRINCIPAL = "waves-commit-signing"
+
+    module_function
+
+    def verify!(root:, tag:, authority:)
+      Validation.exact_keys!(
+        authority,
+        %w[principal publicKey fingerprint],
+        "release tag authority"
+      )
+      principal = authority.fetch("principal")
+      raise Error, "publication tag principal must be #{PRINCIPAL}" unless principal == PRINCIPAL
+      public_key = authority.fetch("publicKey")
+      parts = public_key.split
+      unless parts.length.between?(2, 3) && parts.first == "ssh-ed25519"
+        raise Error, "pinned release key is malformed"
+      end
+      begin
+        fingerprint = "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(Base64.strict_decode64(parts[1]))).delete('=')}"
+      rescue ArgumentError
+        raise Error, "pinned release key is malformed"
+      end
+      unless fingerprint == authority.fetch("fingerprint")
+        raise Error, "pinned release key fingerprint does not match canonical metadata"
+      end
+
+      Tempfile.create("waves-allowed-signers") do |file|
+        file.chmod(0o600)
+        file.write("#{principal} #{parts.first} #{parts[1]}\n")
+        file.flush
+        stdout, stderr, status = Validation.run(
+          "/usr/bin/git",
+          "-c",
+          "gpg.format=ssh",
+          "-c",
+          "gpg.ssh.allowedSignersFile=#{file.path}",
+          "verify-tag",
+          "--raw",
+          tag,
+          chdir: root,
+          allow_failure: true
+        )
+        combined = "#{stdout}#{stderr}"
+        unless status.success?
+          raise Error, "publication tag is not signed by the pinned release key: #{combined.strip}"
+        end
+        unless combined.include?(principal) && combined.include?(fingerprint)
+          raise Error, "publication tag signature did not authenticate the pinned principal and fingerprint"
+        end
+      end
+      {"principal" => principal, "fingerprint" => fingerprint}
+    end
+  end
+
   module PublicationTag
     module_function
 
@@ -1007,12 +1526,19 @@ module WavesRelease
       raise Error, "publication tag must be exactly #{expected_tag}" unless tag == expected_tag
       type = Validation.run("git", "cat-file", "-t", "refs/tags/#{tag}", chdir: root).strip
       raise Error, "publication tag #{tag} must be annotated, not lightweight" unless type == "tag"
+      authority = metadata.fetch("releaseAuthority")
+      TagAuthority.verify!(
+        root: root,
+        tag: tag,
+        authority: authority.slice("principal", "publicKey", "fingerprint")
+      )
       tag_revision = Validation.run("git", "rev-list", "-n", "1", tag, chdir: root).strip
       head_revision = Validation.run("git", "rev-parse", "HEAD", chdir: root).strip
       raise Error, "publication tag #{tag} does not name HEAD" unless tag_revision == head_revision
       origin_main = Validation.run("git", "rev-parse", "refs/remotes/origin/main", chdir: root).strip
       raise Error, "publication tag #{tag} does not name exact origin/main" unless tag_revision == origin_main
       annotation = Validation.run("git", "for-each-ref", "refs/tags/#{tag}", "--format=%(contents)", chdir: root)
+      annotation = annotation.sub(/\n-----BEGIN SSH SIGNATURE-----.*\z/m, "\n")
       annotation = annotation.sub(/\n+\z/, "\n")
       parsed = TagEnvelope.parse(annotation)
       Evidence.validate!(
@@ -1030,7 +1556,10 @@ module WavesRelease
 
     def run(arguments)
       root = File.expand_path("..", __dir__)
-      metadata_path = ENV.fetch("WAVES_RELEASE_METADATA", File.join(root, "release/metadata.json"))
+      if ENV.key?("WAVES_RELEASE_METADATA")
+        raise Error, "WAVES_RELEASE_METADATA override is prohibited; canonical release metadata is fixed"
+      end
+      metadata_path = File.join(root, "release/metadata.json")
       command = arguments.shift
       case command
       when "metadata"
@@ -1046,6 +1575,7 @@ module WavesRelease
       when "validate-repository"
         metadata = Metadata.load(metadata_path)
         RepositoryContract.validate!(root: root, metadata: metadata)
+        ReleaseScriptContract.validate!(root: root)
         puts "Release repository contract is valid."
       when "validate-workflows"
         WorkflowContract.validate!(root: root)
@@ -1117,6 +1647,60 @@ module WavesRelease
         scratch_root, candidate_path = arguments
         raise Error, "usage: release_tool.rb sparkle-signing-tool SCRATCH_ROOT CANDIDATE" unless candidate_path
         puts SparkleSigningTool.verify!(scratch_root: scratch_root, candidate_path: candidate_path)
+      when "sparkle-sign-and-verify"
+        scratch_root, artifact, packaged_public_key = arguments
+        unless packaged_public_key
+          raise Error, "usage: release_tool.rb sparkle-sign-and-verify SCRATCH_ROOT ARTIFACT PACKAGED_PUBLIC_KEY"
+        end
+        metadata = Metadata.load(metadata_path)
+        puts SparkleKeyBinding.sign_and_verify!(
+          scratch_root: scratch_root,
+          artifact: artifact,
+          metadata: metadata,
+          packaged_public_key: packaged_public_key
+        )
+      when "trusted-toolchain"
+        developer_dir, sdk_path, swift_path = arguments
+        unless swift_path
+          raise Error, "usage: release_tool.rb trusted-toolchain DEVELOPER_DIR SDK SWIFT"
+        end
+        puts CanonicalJSON.generate(
+          TrustedToolchain.validate!(
+            developer_dir: developer_dir,
+            sdk_path: sdk_path,
+            swift_path: swift_path
+          )
+        )
+      when "private-stage-file"
+        source, private_root, name = arguments
+        unless name
+          raise Error, "usage: release_tool.rb private-stage-file SOURCE PRIVATE_ROOT NAME"
+        end
+        puts PrivateArtifacts.stage_file!(source: source, root: private_root, name: name)
+      when "private-publish-file"
+        source, destination = arguments
+        raise Error, "usage: release_tool.rb private-publish-file SOURCE DESTINATION" unless destination
+        puts PrivateArtifacts.publish_file!(source: source, destination: destination)
+      when "private-stage-release-artifacts"
+        source_root, destination_root = arguments
+        unless destination_root
+          raise Error, "usage: release_tool.rb private-stage-release-artifacts SOURCE_ROOT DESTINATION_ROOT"
+        end
+        PrivateArtifacts.stage_release_artifacts!(
+          source_root: source_root,
+          destination_root: destination_root
+        )
+        puts "Staged existing release artifacts privately."
+      when "publish-release-artifacts"
+        source_root, destination_root = arguments
+        unless destination_root
+          raise Error, "usage: release_tool.rb publish-release-artifacts SOURCE_ROOT DESTINATION_ROOT"
+        end
+        PrivateArtifacts.publish_release_artifacts!(
+          source_root: source_root,
+          destination_root: destination_root
+        )
+        puts "Published finalized release artifacts atomically."
       when "verify-release-artifacts"
         manifest_path, app_path, dmg_path, dsym_path, source_identity_path = arguments
         unless source_identity_path
@@ -1147,15 +1731,25 @@ module WavesRelease
           root: root,
           expected_revision: manifest.fetch("source").fetch("revision")
         )
-        paths = ArtifactEvidence.default_paths(root)
-        ArtifactEvidence.verify_release_artifacts!(
-          manifest: manifest,
-          metadata: metadata,
-          app: File.join(root, "dist/Waves.app"),
-          dmg: paths.fetch("dmg"),
-          dsym: paths.fetch("dSYM"),
-          exact_source_identity: source_identity
-        )
+        Dir.mktmpdir("waves-release-artifact-verification") do |private_root|
+          FileUtils.chmod(0o700, private_root)
+          private_dist = File.join(private_root, "dist")
+          FileUtils.mkdir_p(private_dist)
+          FileUtils.chmod(0o700, private_dist)
+          PrivateArtifacts.stage_release_artifacts!(
+            source_root: File.join(root, "dist"),
+            destination_root: private_dist
+          )
+          paths = ArtifactEvidence.default_paths(private_root)
+          ArtifactEvidence.verify_release_artifacts!(
+            manifest: manifest,
+            metadata: metadata,
+            app: File.join(private_root, "dist/Waves.app"),
+            dmg: paths.fetch("dmg"),
+            dsym: paths.fetch("dSYM"),
+            exact_source_identity: source_identity
+          )
+        end
         puts "Signed candidate artifact identity, trust, and hashes match sealed evidence."
       else
         raise Error, "usage: release_tool.rb metadata|validate-repository|validate-workflows|source-identity|build-recipe-digest|evidence|tag-envelope|history|publication-tag|sparkle-signing-tool|verify-release-artifacts|verify-artifacts"

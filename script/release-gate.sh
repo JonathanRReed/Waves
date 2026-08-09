@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${WAVES_RELEASE_METADATA+x}" ] || [ -n "${SWIFT_SDK+x}" ]; then
+  echo "Error: Release environment overrides are prohibited." >&2
+  exit 2
+fi
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
 PHASE="${1:-preflight}"
@@ -83,6 +90,11 @@ verify_signed_candidate() {
   local profile="$2"
   local revision
   revision="$(git rev-parse HEAD)"
+
+  developer_dir="$(/usr/bin/xcode-select -p)"
+  swift_path="$(/usr/bin/xcrun --find swift)"
+  sdk_path="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+  ruby "$RELEASE_TOOL" trusted-toolchain "$developer_dir" "$sdk_path" "$swift_path" >/dev/null
 
   for command_name in codesign hdiutil lipo otool plutil shasum spctl xcrun; do
     require_command "$command_name" "to validate the signed candidate"
