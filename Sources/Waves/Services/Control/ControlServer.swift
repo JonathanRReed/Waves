@@ -47,6 +47,7 @@ final class ControlServer {
   private let url: URL
   private let handler: ControlCommandHandler
   private let timeouts: ControlConnectionTimeouts
+  private let onConnectionCountChange: @MainActor @Sendable (Int) -> Void
 
   /// Accept and read run on the main queue.
   ///
@@ -63,11 +64,13 @@ final class ControlServer {
   init(
     url: URL = ControlSocketLocation.defaultURL(),
     handler: ControlCommandHandler,
-    timeouts: ControlConnectionTimeouts = .production
+    timeouts: ControlConnectionTimeouts = .production,
+    onConnectionCountChange: @escaping @MainActor @Sendable (Int) -> Void = { _ in }
   ) {
     self.url = url
     self.handler = handler
     self.timeouts = timeouts
+    self.onConnectionCountChange = onConnectionCountChange
   }
 
   var isRunning: Bool { listenerFD >= 0 }
@@ -163,8 +166,10 @@ final class ControlServer {
   }
 
   func stop() {
+    let hadConnections = !connections.isEmpty
     for connection in connections.values { connection.close() }
     connections.removeAll()
+    if hadConnections { reportConnectionCount() }
 
     acceptSource?.cancel()
     acceptSource = nil
@@ -219,11 +224,19 @@ final class ControlServer {
       }
       let connection = ControlConnection(fd: clientFD, handler: handler, timeouts: timeouts)
       connection.onClose = { [weak self] closed in
-        _ = self?.connections.removeValue(forKey: ObjectIdentifier(closed))
+        guard let self,
+          self.connections.removeValue(forKey: ObjectIdentifier(closed)) != nil
+        else { return }
+        self.reportConnectionCount()
       }
       connections[ObjectIdentifier(connection)] = connection
+      reportConnectionCount()
       connection.resume()
     }
+  }
+
+  private func reportConnectionCount() {
+    onConnectionCountChange(connections.count)
   }
 
   /// True when the connecting process runs as the same user.

@@ -237,26 +237,36 @@ import WavesAudioCore
   #expect(ShortcutRecorderMotion.allowsAnimation(reduceMotion: true) == false)
 }
 
-@MainActor
 @Test func iconEncodingSuspendsBeforeBlockingWorkSoMainActorHeartbeatProgresses() async {
   let raster = AppIconRaster(width: 1, height: 1, bytesPerRow: 4, rgbaBytes: Data([0, 0, 0, 255]))
-  let encodingStarted = Task9Counter()
+  let encodingStarted = Task9Signal()
+  let heartbeatGate = Task9BlockingGate()
+  let order = Task9EventOrder()
   let encoder = AppIconEncoder { _ in
-    encodingStarted.increment()
-    Thread.sleep(forTimeInterval: 0.75)
+    encodingStarted.signal()
+    _ = heartbeatGate.wait(timeout: 20)
+    order.append(.encodingCompleted)
     return Data([1])
   }
-  let clock = ContinuousClock()
-  let start = clock.now
   let task = Task { @MainActor in await encoder.encode(raster) }
 
-  while encodingStarted.value == 0, start.duration(to: clock.now) < .seconds(2) {
-    await Task.yield()
+  await encodingStarted.wait()
+  let watchdog = Task.detached {
+    try? await Task.sleep(for: .seconds(5))
+    guard !Task.isCancelled else { return }
+    heartbeatGate.open()
   }
-  #expect(encodingStarted.value == 1)
-  let elapsed = start.duration(to: clock.now)
-  #expect(elapsed < .milliseconds(500))
+  let heartbeat = Task { @MainActor in
+    order.append(.heartbeat)
+    heartbeatGate.open()
+  }
   #expect(await task.value == Data([1]))
+  await heartbeat.value
+  watchdog.cancel()
+  #expect(
+    order.events == [.heartbeat, .encodingCompleted],
+    "the main-actor heartbeat must run before encoding can finish"
+  )
 }
 
 @MainActor
@@ -356,4 +366,66 @@ private final class Task9Counter: @unchecked Sendable {
   }
 
   var value: Int { lock.withLock { count } }
+}
+
+private final class Task9BlockingGate: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var isOpen = false
+
+  func wait(timeout: TimeInterval) -> Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    let deadline = Date().addingTimeInterval(timeout)
+    while !isOpen, condition.wait(until: deadline) {}
+    return isOpen
+  }
+
+  func open() {
+    condition.lock()
+    isOpen = true
+    condition.broadcast()
+    condition.unlock()
+  }
+}
+
+private final class Task9Signal: @unchecked Sendable {
+  private let lock = NSLock()
+  private var continuation: CheckedContinuation<Void, Never>?
+  private var isSignaled = false
+
+  func signal() {
+    let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+      isSignaled = true
+      defer { self.continuation = nil }
+      return self.continuation
+    }
+    continuation?.resume()
+  }
+
+  func wait() async {
+    await withCheckedContinuation { continuation in
+      let shouldResume = lock.withLock {
+        if isSignaled { return true }
+        self.continuation = continuation
+        return false
+      }
+      if shouldResume { continuation.resume() }
+    }
+  }
+}
+
+private final class Task9EventOrder: @unchecked Sendable {
+  enum Event: Equatable {
+    case heartbeat
+    case encodingCompleted
+  }
+
+  private let lock = NSLock()
+  private var recordedEvents: [Event] = []
+
+  func append(_ event: Event) {
+    lock.withLock { recordedEvents.append(event) }
+  }
+
+  var events: [Event] { lock.withLock { recordedEvents } }
 }

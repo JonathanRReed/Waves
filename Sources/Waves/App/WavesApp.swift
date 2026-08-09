@@ -247,6 +247,8 @@ enum AppTerminationTimeoutDecision {
 
 @MainActor
 final class AppTerminationCoordinator {
+  static let productionTimeout: Duration = .milliseconds(250)
+
   private enum State {
     case idle
     case running
@@ -257,7 +259,7 @@ final class AppTerminationCoordinator {
   private var state: State = .idle
   private var terminationTask: Task<Void, Never>?
 
-  init(timeout: Duration = .milliseconds(250)) {
+  init(timeout: Duration = productionTimeout) {
     self.timeout = timeout
   }
 

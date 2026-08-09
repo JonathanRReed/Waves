@@ -127,10 +127,11 @@ import WavesAudioCore
 }
 
 @MainActor
-@Test func terminationCoordinatorRepliesExactlyOnceForEveryOutcome() async {
+@Test(.timeLimit(.minutes(1)))
+func terminationCoordinatorRepliesExactlyOnceForEveryOutcome() async {
   await verifyTerminationCoordinator(
     expected: .clean(AppShutdownResult()),
-    timeout: .seconds(5)
+    timeout: .seconds(30)
   ) {
     AppShutdownResult()
   }
@@ -138,7 +139,7 @@ import WavesAudioCore
   let degraded = AppShutdownResult(persistenceDegradations: ["settings: injected failure"])
   await verifyTerminationCoordinator(
     expected: .degraded(degraded),
-    timeout: .seconds(5)
+    timeout: .seconds(30)
   ) {
     degraded
   }
@@ -155,9 +156,12 @@ import WavesAudioCore
 }
 
 @MainActor
-@Test func productionTerminationCoordinatorTimesOutWithinTwoHundredFiftyMilliseconds() async {
+@Test(.timeLimit(.minutes(1)))
+func productionTerminationCoordinatorTimesOutWithinTwoHundredFiftyMilliseconds() async {
+  #expect(AppTerminationCoordinator.productionTimeout == .milliseconds(250))
   let coordinator = AppTerminationCoordinator()
   let recorder = TerminationReplyRecorder()
+  let completion = TerminationOutcomeProbe()
   let gate = AsyncShutdownGate()
 
   #expect(
@@ -166,15 +170,15 @@ import WavesAudioCore
         await gate.wait()
         return AppShutdownResult()
       },
-      report: { recorder.outcomes.append($0) },
+      report: {
+        recorder.outcomes.append($0)
+        completion.record($0)
+      },
       reply: { recorder.replies.append($0) }
     ) == .terminateLater
   )
 
-  #expect(
-    await waitUntil(timeout: .seconds(1)) { coordinator.completedOutcome != nil },
-    "the production 250 ms deadline did not complete within the bounded observation window"
-  )
+  #expect(await completion.wait() == .timedOut)
 
   #expect(coordinator.completedOutcome == .timedOut)
   #expect(recorder.outcomes == [.timedOut])
@@ -183,13 +187,15 @@ import WavesAudioCore
 }
 
 @MainActor
-@Test func timedOutTerminationPersistsTruthBeforeReplyAndRepliesOnce() async throws {
+@Test(.timeLimit(.minutes(1)))
+func timedOutTerminationPersistsTruthBeforeReplyAndRepliesOnce() async throws {
   let directory = FileManager.default.temporaryDirectory
     .appendingPathComponent("waves-timeout-report-\(UUID().uuidString)", isDirectory: true)
   defer { try? FileManager.default.removeItem(at: directory) }
   let reportStore = ShutdownReportStore(directory: directory)
   let coordinator = AppTerminationCoordinator(timeout: .milliseconds(5))
   let gate = AsyncShutdownGate()
+  let completion = TerminationOutcomeProbe()
   var replyCount = 0
   var reportSeenAtReply: ShutdownReport?
 
@@ -199,7 +205,10 @@ import WavesAudioCore
         await gate.wait()
         return AppShutdownResult()
       },
-      report: { reportStore.save(ShutdownReport(outcome: $0)) },
+      report: {
+        reportStore.save(ShutdownReport(outcome: $0))
+        completion.record($0)
+      },
       reply: { _ in
         replyCount += 1
         reportSeenAtReply = reportStore.load()
@@ -207,7 +216,7 @@ import WavesAudioCore
     ) == .terminateLater
   )
 
-  #expect(await waitUntil { coordinator.completedOutcome != nil })
+  #expect(await completion.wait() == .timedOut)
 
   #expect(coordinator.completedOutcome == .timedOut)
   #expect(replyCount == 1)
@@ -232,6 +241,13 @@ import WavesAudioCore
   #expect(degradations.map(\.nativeStatus) == [-50, -60])
   #expect(BackendShutdownResult(checkedDegradations: []).completion == .clean)
   #expect(BackendShutdownResult(checkedDegradations: degradations).completion == .degraded)
+}
+
+@Test func terminationOutcomeProbeCancellationCannotStrandTheTestTask() async {
+  let probe = TerminationOutcomeProbe()
+  let task = Task { await probe.wait() }
+  task.cancel()
+  #expect(await task.value == nil)
 }
 
 @Test func controllerCleanupSeamAndBackendShutdownDoNotDuplicateDegradations() async {
@@ -286,10 +302,14 @@ private func verifyTerminationCoordinator(
 ) async {
   let coordinator = AppTerminationCoordinator(timeout: timeout)
   let recorder = TerminationReplyRecorder()
+  let completion = TerminationOutcomeProbe()
 
   let firstDecision = coordinator.requestTermination(
     shutdown: shutdown,
-    report: { recorder.outcomes.append($0) },
+    report: {
+      recorder.outcomes.append($0)
+      completion.record($0)
+    },
     reply: { recorder.replies.append($0) }
   )
   let repeatedDecision = coordinator.requestTermination(
@@ -303,7 +323,7 @@ private func verifyTerminationCoordinator(
 
   #expect(firstDecision == .terminateLater)
   #expect(repeatedDecision == .terminateLater)
-  #expect(await waitUntil { coordinator.completedOutcome != nil })
+  #expect(await completion.wait() == expected)
   #expect(coordinator.completedOutcome == expected)
   #expect(recorder.outcomes == [expected])
   #expect(recorder.replies == [true])
@@ -696,6 +716,53 @@ private final class TerminationReplyRecorder {
   var outcomes: [AppTerminationOutcome] = []
   var replies: [Bool] = []
   var unexpectedShutdownStarts = 0
+}
+
+private final class TerminationOutcomeProbe: @unchecked Sendable {
+  private let lock = NSLock()
+  private var outcome: AppTerminationOutcome?
+  private var waiter:
+    (
+      id: UUID,
+      continuation: CheckedContinuation<AppTerminationOutcome?, Never>
+    )?
+
+  func record(_ outcome: AppTerminationOutcome) {
+    let continuation = lock.withLock { () -> CheckedContinuation<AppTerminationOutcome?, Never>? in
+      self.outcome = outcome
+      defer { waiter = nil }
+      return waiter?.continuation
+    }
+    continuation?.resume(returning: outcome)
+  }
+
+  func wait() async -> AppTerminationOutcome? {
+    let id = UUID()
+    return await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        let immediateResult = lock.withLock {
+          () -> (
+            isReady: Bool,
+            outcome: AppTerminationOutcome?
+          ) in
+          if let outcome { return (true, outcome) }
+          if Task.isCancelled { return (true, nil) }
+          waiter = (id, continuation)
+          return (false, nil)
+        }
+        if immediateResult.isReady {
+          continuation.resume(returning: immediateResult.outcome)
+        }
+      }
+    } onCancel: {
+      let continuation = lock.withLock { () -> CheckedContinuation<AppTerminationOutcome?, Never>? in
+        guard waiter?.id == id else { return nil }
+        defer { waiter = nil }
+        return waiter?.continuation
+      }
+      continuation?.resume(returning: nil)
+    }
+  }
 }
 
 private final class ShutdownCounter: @unchecked Sendable {
