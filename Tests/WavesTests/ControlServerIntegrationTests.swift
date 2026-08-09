@@ -230,6 +230,87 @@ func controlServerHandlesMalformedOversizedEOFAndReconnect() async throws {
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
+func realConnectionClosesAfterThreeMalformedFramesAndCorrelatesRequestIDs() async throws {
+  let fixture = await ControlSocketFixture.make()
+  defer { fixture.stop() }
+  try fixture.server.start()
+
+  let client = try ControlSocketClient(path: fixture.url.path)
+  defer { client.close() }
+
+  try client.write("{\"id\":71,\"cmd\":\n")
+  let first = try await client.readLine()
+  #expect(first.contains(#""id":71"#))
+  #expect(first.contains(#""error":"malformed-request""#))
+
+  try client.write("{\"id\":72,\"cmd\":\n")
+  let second = try await client.readLine()
+  #expect(second.contains(#""id":72"#))
+  #expect(second.contains(#""error":"malformed-request""#))
+
+  try client.write("{\"id\":73,\"cmd\":\n")
+  #expect(await client.reachesEOF(timeout: .seconds(2)))
+  #expect(fixture.server.connectionCount == 0)
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func realConnectionClosesWhenSuspendedHandlerExceedsPendingCount() async throws {
+  let gate = SuspendedControlRequestHandler()
+  let fixture = await ControlSocketFixture.make(requestHandler: gate.handle)
+  defer {
+    gate.release()
+    fixture.stop()
+  }
+  try fixture.server.start()
+
+  let client = try ControlSocketClient(path: fixture.url.path)
+  defer { client.close() }
+  try client.write("{\"id\":1,\"cmd\":\"hello\",\"protocol\":1}\n")
+  await gate.waitUntilStarted()
+
+  let frames = (0..<ControlPendingRequestQueue.maximumCount)
+    .map { "{\"id\":\($0 + 2),\"cmd\":\"list-apps\"}\n" }
+    .joined()
+  try await client.writeAll(Data(frames.utf8))
+
+  #expect(await client.reachesEOF(timeout: .seconds(2)))
+  #expect(fixture.server.connectionCount == 0)
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func realConnectionClosesWhenSuspendedHandlerExceedsRetainedBytes() async throws {
+  let gate = SuspendedControlRequestHandler()
+  let fixture = await ControlSocketFixture.make(requestHandler: gate.handle)
+  defer {
+    gate.release()
+    fixture.stop()
+  }
+  try fixture.server.start()
+
+  let client = try ControlSocketClient(path: fixture.url.path)
+  defer { client.close() }
+  try client.write("{\"id\":1,\"cmd\":\"hello\",\"protocol\":1}\n")
+  await gate.waitUntilStarted()
+
+  let padding = String(repeating: "a", count: 60 * 1024)
+  for id in 2...5 {
+    let frame = "{\"id\":\(id),\"cmd\":\"hello\",\"client\":\"\(padding)\"}\n"
+    try await client.writeAll(Data(frame.utf8))
+  }
+  // Admission refills while the handler is suspended, but retained work does
+  // not. The fifth large frame therefore isolates the pending-byte bound.
+  try await Task.sleep(for: .milliseconds(500))
+  let overflow = "{\"id\":6,\"cmd\":\"hello\",\"client\":\"\(padding)\"}\n"
+  try await client.writeAll(Data(overflow.utf8))
+
+  #expect(await client.reachesEOF(timeout: .seconds(2)))
+  #expect(fixture.server.connectionCount == 0)
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
 func controlServerCapsOneProcessAndRemovesSocketOnShutdown() async throws {
   let fixture = await ControlSocketFixture.make(
     timeouts: ControlConnectionTimeouts(handshake: .seconds(30), idle: .seconds(30))
@@ -474,6 +555,76 @@ func oneProcessCannotHoldEverySubscriberSlotIndefinitely() async throws {
 }
 
 @MainActor
+@Test func controlServerFailsClosedWhenVerifiedParentIsReplaced() async throws {
+  let root = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("wvparent-\(UUID().uuidString.prefix(8))", isDirectory: true)
+  let parent = root.appendingPathComponent("parent", isDirectory: true)
+  let relocated = root.appendingPathComponent("relocated", isDirectory: true)
+  try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+  defer { try? FileManager.default.removeItem(at: root) }
+
+  let store = await makeControlStoreFixture()
+  let url = parent.appendingPathComponent("control.sock")
+  let server = ControlServer(
+    url: url,
+    handler: ControlCommandHandler(store: store),
+    filesystemHooks: ControlServerFilesystemHooks(
+      afterParentOpened: {
+        try FileManager.default.moveItem(at: parent, to: relocated)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes(
+          [.posixPermissions: 0o700],
+          ofItemAtPath: parent.path
+        )
+      }
+    )
+  )
+
+  #expect(throws: ControlServerError.unsafeParent) {
+    try server.start()
+  }
+  #expect(!FileManager.default.fileExists(atPath: url.path))
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: relocated.appendingPathComponent("control.sock").path
+    )
+  )
+}
+
+@MainActor
+@Test func controlServerStartFailureDoesNotUnlinkReplacementSocket() async throws {
+  let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("wvbind-\(UUID().uuidString.prefix(8))", isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+  let url = directory.appendingPathComponent("control.sock")
+  var replacement: UnixSocketLeaf?
+  defer {
+    replacement?.close()
+    try? FileManager.default.removeItem(at: directory)
+  }
+
+  let store = await makeControlStoreFixture()
+  let server = ControlServer(
+    url: url,
+    handler: ControlCommandHandler(store: store),
+    filesystemHooks: ControlServerFilesystemHooks(
+      beforeBind: { replacement = try UnixSocketLeaf(path: url.path) }
+    )
+  )
+
+  #expect(throws: ControlServerError.bindFailed(EADDRINUSE)) {
+    try server.start()
+  }
+  var status = stat()
+  #expect(lstat(url.path, &status) == 0)
+  #expect(status.st_mode & S_IFMT == S_IFSOCK)
+  let client = try ControlSocketClient(path: url.path)
+  client.close()
+}
+
+@MainActor
 @Test func controlServerStopDoesNotUnlinkAReplacementLeaf() async throws {
   let fixture = await ControlSocketFixture.make()
   defer { fixture.stop() }
@@ -488,6 +639,64 @@ func oneProcessCannotHoldEverySubscriberSlotIndefinitely() async throws {
 
   #expect(try Data(contentsOf: target) == Data("sentinel".utf8))
   #expect(try FileManager.default.destinationOfSymbolicLink(atPath: fixture.url.path) == target.path)
+}
+
+@MainActor
+@Test func controlServerStopDoesNotUnlinkAReplacementSocket() async throws {
+  let fixture = await ControlSocketFixture.make()
+  defer { fixture.stop() }
+  try fixture.server.start()
+
+  #expect(unlink(fixture.url.path) == 0)
+  let replacement = try UnixSocketLeaf(path: fixture.url.path)
+  defer { replacement.close() }
+
+  fixture.server.stop()
+
+  var status = stat()
+  #expect(lstat(fixture.url.path, &status) == 0)
+  #expect(status.st_mode & S_IFMT == S_IFSOCK)
+  let client = try ControlSocketClient(path: fixture.url.path)
+  client.close()
+}
+
+@MainActor
+@Test func controlServerStopUsesRetainedDescriptorAfterParentReplacement() async throws {
+  let fixture = await ControlSocketFixture.make()
+  let relocated = fixture.directory.deletingLastPathComponent()
+    .appendingPathComponent("wvrelocated-\(UUID().uuidString.prefix(8))", isDirectory: true)
+  var replacement: UnixSocketLeaf?
+  defer {
+    replacement?.close()
+    fixture.server.stop()
+    try? FileManager.default.removeItem(at: fixture.directory)
+    try? FileManager.default.removeItem(at: relocated)
+  }
+  try fixture.server.start()
+
+  try FileManager.default.moveItem(at: fixture.directory, to: relocated)
+  try FileManager.default.createDirectory(
+    at: fixture.directory,
+    withIntermediateDirectories: false
+  )
+  try FileManager.default.setAttributes(
+    [.posixPermissions: 0o700],
+    ofItemAtPath: fixture.directory.path
+  )
+  replacement = try UnixSocketLeaf(path: fixture.url.path)
+
+  fixture.server.stop()
+
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: relocated.appendingPathComponent("control.sock").path
+    )
+  )
+  var status = stat()
+  #expect(lstat(fixture.url.path, &status) == 0)
+  #expect(status.st_mode & S_IFMT == S_IFSOCK)
+  let client = try ControlSocketClient(path: fixture.url.path)
+  client.close()
 }
 
 @Test func socketParentPolicyRejectsForeignOwnershipAndNonPrivateMode() {
@@ -510,7 +719,9 @@ private struct ControlSocketFixture {
 
   @MainActor
   static func make(
-    timeouts: ControlConnectionTimeouts = .integrationTest
+    timeouts: ControlConnectionTimeouts = .integrationTest,
+    requestHandler: ControlRequestHandler? = nil,
+    filesystemHooks: ControlServerFilesystemHooks = .init()
   ) async -> ControlSocketFixture {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
       .appendingPathComponent("wvctl-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -524,6 +735,8 @@ private struct ControlSocketFixture {
       url: url,
       handler: ControlCommandHandler(store: store),
       timeouts: timeouts,
+      requestHandler: requestHandler,
+      filesystemHooks: filesystemHooks,
       onConnectionCountChange: { connectionCounts.record($0) })
     return ControlSocketFixture(
       directory: directory,
@@ -537,6 +750,70 @@ private struct ControlSocketFixture {
   func stop() {
     server.stop()
     try? FileManager.default.removeItem(at: directory)
+  }
+}
+
+@MainActor
+private final class SuspendedControlRequestHandler {
+  private var didStart = false
+  private var startWaiters: [CheckedContinuation<Void, Never>] = []
+  private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+  func handle(
+    _ request: ControlRequest,
+    session: ControlCommandHandler.Session
+  ) async -> ControlCommandHandler.HandlingResult {
+    if !didStart {
+      didStart = true
+      let waiters = startWaiters
+      startWaiters.removeAll()
+      waiters.forEach { $0.resume() }
+      await withCheckedContinuation { releaseContinuation = $0 }
+    }
+    return ControlCommandHandler.HandlingResult(
+      response: .success(id: request.id),
+      session: session
+    )
+  }
+
+  func waitUntilStarted() async {
+    guard !didStart else { return }
+    await withCheckedContinuation { startWaiters.append($0) }
+  }
+
+  func release() {
+    releaseContinuation?.resume()
+    releaseContinuation = nil
+  }
+}
+
+private final class UnixSocketLeaf {
+  private var fd: Int32
+
+  init(path: String) throws {
+    fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw POSIXError(.ENOTSOCK) }
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    _ = path.withCString { source in
+      strncpy(&address.sun_path.0, source, MemoryLayout.size(ofValue: address.sun_path) - 1)
+    }
+    let bindResult = withUnsafeBytes(of: &address) { raw in
+      bind(fd, raw.baseAddress!.assumingMemoryBound(to: sockaddr.self), socklen_t(raw.count))
+    }
+    guard bindResult == 0, listen(fd, 1) == 0 else {
+      let failure = errno
+      Darwin.close(fd)
+      fd = -1
+      throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
+    }
+  }
+
+  func close() {
+    guard fd >= 0 else { return }
+    Darwin.close(fd)
+    fd = -1
   }
 }
 

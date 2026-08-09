@@ -2,6 +2,12 @@ import Darwin
 import Foundation
 import OSLog
 
+typealias ControlRequestHandler =
+  @MainActor @Sendable (
+    ControlRequest,
+    ControlCommandHandler.Session
+  ) async -> ControlCommandHandler.HandlingResult
+
 struct ControlConnectionTimeouts: Sendable {
   let handshake: Duration
   let idle: Duration
@@ -103,7 +109,7 @@ struct ControlWritePump {
 final class ControlConnection {
   private nonisolated let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Control")
   private nonisolated let fd: Int32
-  private let handler: ControlCommandHandler
+  private let requestHandler: ControlRequestHandler
   private let timeouts: ControlConnectionTimeouts
   let peerProcessID: pid_t
   private let canSubscribe: () -> Bool
@@ -126,13 +132,13 @@ final class ControlConnection {
   init(
     fd: Int32,
     peerProcessID: pid_t,
-    handler: ControlCommandHandler,
+    requestHandler: @escaping ControlRequestHandler,
     timeouts: ControlConnectionTimeouts = .production,
     canSubscribe: @escaping () -> Bool
   ) {
     self.fd = fd
     self.peerProcessID = peerProcessID
-    self.handler = handler
+    self.requestHandler = requestHandler
     self.timeouts = timeouts
     self.canSubscribe = canSubscribe
 
@@ -250,7 +256,7 @@ final class ControlConnection {
     let priorSession = session
     Task { @MainActor [weak self] in
       guard let self else { return }
-      let result = await self.handler.handle(request, session: priorSession)
+      let result = await self.requestHandler(request, priorSession)
       guard !self.isClosed else { return }
       let startedSubscription = !priorSession.isSubscribed && result.session.isSubscribed
       if startedSubscription, !self.canSubscribe() {

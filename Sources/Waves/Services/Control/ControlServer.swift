@@ -28,6 +28,13 @@ enum ControlSocketLocation {
   static let maximumPathBytes = 104
 }
 
+/// Narrow lifecycle seams used to deterministically exercise filesystem races.
+/// Production uses the empty hooks.
+struct ControlServerFilesystemHooks {
+  var afterParentOpened: @MainActor () throws -> Void = {}
+  var beforeBind: @MainActor () throws -> Void = {}
+}
+
 /// Accepts control connections over a Unix domain socket.
 ///
 /// POSIX sockets rather than Network.framework: this needs `getpeereid` for the
@@ -47,8 +54,9 @@ final class ControlServer {
   // Sendable, so requiring main-actor isolation here would trap at runtime.
   private nonisolated let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Control")
   private let url: URL
-  private let handler: ControlCommandHandler
+  private let requestHandler: ControlRequestHandler
   private let timeouts: ControlConnectionTimeouts
+  private let filesystemHooks: ControlServerFilesystemHooks
   private let onConnectionCountChange: @MainActor @Sendable (Int) -> Void
 
   /// Accept and read run on the main queue.
@@ -60,6 +68,8 @@ final class ControlServer {
   /// main thread; the test client reads on a detached task for exactly that
   /// reason.
   private var listenerFD: Int32 = -1
+  private var parentDirectoryFD: Int32 = -1
+  private var boundLeafIdentity: ControlSocketIdentity?
   private var acceptSource: DispatchSourceRead?
   private var connections: [ObjectIdentifier: ControlConnection] = [:]
 
@@ -67,11 +77,17 @@ final class ControlServer {
     url: URL = ControlSocketLocation.defaultURL(),
     handler: ControlCommandHandler,
     timeouts: ControlConnectionTimeouts = .production,
+    requestHandler: ControlRequestHandler? = nil,
+    filesystemHooks: ControlServerFilesystemHooks = .init(),
     onConnectionCountChange: @escaping @MainActor @Sendable (Int) -> Void = { _ in }
   ) {
     self.url = url
-    self.handler = handler
+    self.requestHandler =
+      requestHandler ?? { request, session in
+        await handler.handle(request, session: session)
+      }
     self.timeouts = timeouts
+    self.filesystemHooks = filesystemHooks
     self.onConnectionCountChange = onConnectionCountChange
   }
 
@@ -83,34 +99,90 @@ final class ControlServer {
   func start() throws {
     guard !isRunning else { return }
 
-    let path = url.path
-    guard path.utf8.count < ControlSocketLocation.maximumPathBytes else {
+    let publicPath = url.path
+    guard publicPath.utf8.count < ControlSocketLocation.maximumPathBytes else {
       throw ControlServerError.pathTooLong
     }
+    let leafName = url.lastPathComponent
+    guard !leafName.isEmpty, leafName != ".", leafName != "..", !leafName.contains("/") else {
+      throw ControlServerError.unsafeExistingLeaf
+    }
 
+    let parent: OpenedControlSocketParent
     do {
-      try ControlSocketFilesystem.prepareParent(at: url.deletingLastPathComponent())
+      parent = try ControlSocketFilesystem.openVerifiedParent(
+        at: url.deletingLastPathComponent()
+      )
     } catch {
       throw ControlServerError.unsafeParent
     }
+    var retainParent = false
+    defer {
+      if !retainParent { _ = Darwin.close(parent.descriptor) }
+    }
+
+    try filesystemHooks.afterParentOpened()
+    guard
+      ControlSocketFilesystem.publicParentMatches(
+        at: url.deletingLastPathComponent(),
+        identity: parent.identity
+      )
+    else { throw ControlServerError.unsafeParent }
+
     do {
-      try ControlSocketFilesystem.removeStaleLeaf(at: url)
+      try ControlSocketFilesystem.removeStaleLeaf(
+        parentDescriptor: parent.descriptor,
+        leafName: leafName
+      )
     } catch {
       throw ControlServerError.unsafeExistingLeaf
+    }
+    try filesystemHooks.beforeBind()
+    guard
+      ControlSocketFilesystem.publicParentMatches(
+        at: url.deletingLastPathComponent(),
+        identity: parent.identity
+      )
+    else { throw ControlServerError.unsafeParent }
+
+    let bindingPath: String
+    do {
+      bindingPath = try ControlSocketFilesystem.bindingPath(
+        parentDescriptor: parent.descriptor,
+        leafName: leafName
+      )
+    } catch {
+      throw ControlServerError.unsafeParent
+    }
+    guard bindingPath.utf8.count < ControlSocketLocation.maximumPathBytes else {
+      throw ControlServerError.pathTooLong
     }
 
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { throw ControlServerError.socketFailed(errno) }
+    var retainListener = false
+    var createdIdentity: ControlSocketIdentity?
+    defer {
+      if !retainListener {
+        _ = Darwin.close(fd)
+        if let createdIdentity {
+          ControlSocketFilesystem.removeSocketLeafIfMatches(
+            parentDescriptor: parent.descriptor,
+            leafName: leafName,
+            identity: createdIdentity
+          )
+        }
+      }
+    }
     guard Self.setNonBlocking(fd) else {
       let configurationError = errno
-      close(fd)
       throw ControlServerError.socketFailed(configurationError)
     }
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
     _ = withUnsafeMutablePointer(to: &address.sun_path) { pointer in
-      path.withCString { source in
+      bindingPath.withCString { source in
         strncpy(
           UnsafeMutableRawPointer(pointer).assumingMemoryBound(to: CChar.self),
           source,
@@ -134,26 +206,42 @@ final class ControlServer {
     }
 
     guard bindResult == 0 else {
-      close(fd)
       throw ControlServerError.bindFailed(errno)
     }
+    guard
+      let socketIdentity = ControlSocketFilesystem.ownedSocketIdentity(
+        parentDescriptor: parent.descriptor,
+        leafName: leafName
+      )
+    else { throw ControlServerError.unsafeExistingLeaf }
+    createdIdentity = socketIdentity
+
     // The containing directory is already 0700, so the new node cannot be
     // reached by another user while its final mode is applied. Avoid changing
     // process-global umask here: concurrent file creation elsewhere in Waves
     // must never inherit the socket's restrictive creation mask.
-    guard chmod(path, 0o600) == 0 else {
-      let permissionsError = errno
-      close(fd)
-      unlink(path)
+    if let permissionsError = ControlSocketFilesystem.setPrivateMode(
+      parentDescriptor: parent.descriptor,
+      leafName: leafName,
+      identity: socketIdentity
+    ) {
       throw ControlServerError.permissionsFailed(permissionsError)
     }
+    guard
+      ControlSocketFilesystem.publicParentMatches(
+        at: url.deletingLastPathComponent(),
+        identity: parent.identity
+      )
+    else { throw ControlServerError.unsafeParent }
     guard listen(fd, Int32(Self.maximumConnections)) == 0 else {
-      close(fd)
-      unlink(path)
       throw ControlServerError.listenFailed(errno)
     }
 
     listenerFD = fd
+    parentDirectoryFD = parent.descriptor
+    boundLeafIdentity = socketIdentity
+    retainListener = true
+    retainParent = true
     let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
     // Captures nothing main-actor-isolated. Capturing `self` here makes Swift
     // infer the closure as isolated, and the runtime then asserts it is running
@@ -190,8 +278,20 @@ final class ControlServer {
       listenerFD = -1
     }
     // Leaving the file behind would make the next launch look like a stale
-    // socket it has to clean up; removing it keeps the filesystem honest.
-    ControlSocketFilesystem.removeOwnedSocketLeafIfPresent(at: url)
+    // socket it has to clean up. Remove only the exact socket created by this
+    // server, through the verified directory descriptor retained since start.
+    if parentDirectoryFD >= 0, let boundLeafIdentity {
+      ControlSocketFilesystem.removeSocketLeafIfMatches(
+        parentDescriptor: parentDirectoryFD,
+        leafName: url.lastPathComponent,
+        identity: boundLeafIdentity
+      )
+    }
+    boundLeafIdentity = nil
+    if parentDirectoryFD >= 0 {
+      _ = Darwin.close(parentDirectoryFD)
+      parentDirectoryFD = -1
+    }
     logger.info("Control socket stopped")
   }
 
@@ -274,7 +374,7 @@ final class ControlServer {
       let connection = ControlConnection(
         fd: clientFD,
         peerProcessID: peerProcessID,
-        handler: handler,
+        requestHandler: requestHandler,
         timeouts: timeouts,
         canSubscribe: { [weak self] in
           guard let self else { return false }
@@ -350,6 +450,23 @@ struct AcceptedControlDescriptor: Equatable {
   let identity: ControlPeerIdentity
 }
 
+struct ControlDirectoryIdentity: Equatable {
+  let device: dev_t
+  let inode: ino_t
+  let owner: uid_t
+}
+
+struct OpenedControlSocketParent {
+  let descriptor: Int32
+  let identity: ControlDirectoryIdentity
+}
+
+struct ControlSocketIdentity: Equatable {
+  let device: dev_t
+  let inode: ino_t
+  let owner: uid_t
+}
+
 enum ControlSocketFilesystem {
   static func parentStatusIsSafe(_ status: stat, currentUID: uid_t) -> Bool {
     status.st_mode & S_IFMT == S_IFDIR
@@ -357,11 +474,13 @@ enum ControlSocketFilesystem {
       && status.st_mode & 0o777 == 0o700
   }
 
-  static func prepareParent(
+  /// Opens the parent once and transfers descriptor ownership to the caller.
+  /// Every subsequent leaf operation is relative to this verified directory.
+  static func openVerifiedParent(
     at url: URL,
     fileManager: FileManager = .default,
     currentUID: uid_t = getuid()
-  ) throws {
+  ) throws -> OpenedControlSocketParent {
     var status = stat()
     if lstat(url.path, &status) != 0 {
       guard errno == ENOENT else { throw POSIXError(.EIO) }
@@ -372,28 +491,79 @@ enum ControlSocketFilesystem {
     guard status.st_mode & S_IFMT == S_IFDIR, status.st_uid == currentUID else {
       throw POSIXError(.EACCES)
     }
-    if status.st_mode & 0o777 != 0o700 {
-      guard chmod(url.path, 0o700) == 0 else { throw POSIXError(.EACCES) }
-      guard lstat(url.path, &status) == 0 else { throw POSIXError(.EIO) }
-    }
-    guard parentStatusIsSafe(status, currentUID: currentUID) else {
-      throw POSIXError(.EACCES)
-    }
 
     let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
     guard descriptor >= 0 else { throw POSIXError(.EACCES) }
-    defer { _ = Darwin.close(descriptor) }
+    var keepDescriptor = false
+    defer {
+      if !keepDescriptor { _ = Darwin.close(descriptor) }
+    }
     var opened = stat()
     guard fstat(descriptor, &opened) == 0,
-      parentStatusIsSafe(opened, currentUID: currentUID),
+      opened.st_mode & S_IFMT == S_IFDIR,
+      opened.st_uid == currentUID,
       opened.st_dev == status.st_dev,
       opened.st_ino == status.st_ino
     else { throw POSIXError(.EACCES) }
+    if opened.st_mode & 0o777 != 0o700 {
+      guard fchmod(descriptor, 0o700) == 0, fstat(descriptor, &opened) == 0 else {
+        throw POSIXError(.EACCES)
+      }
+    }
+    guard parentStatusIsSafe(opened, currentUID: currentUID) else {
+      throw POSIXError(.EACCES)
+    }
+
+    keepDescriptor = true
+    return OpenedControlSocketParent(
+      descriptor: descriptor,
+      identity: ControlDirectoryIdentity(
+        device: opened.st_dev,
+        inode: opened.st_ino,
+        owner: opened.st_uid
+      )
+    )
   }
 
-  static func removeStaleLeaf(at url: URL, currentUID: uid_t = getuid()) throws {
+  static func publicParentMatches(
+    at url: URL,
+    identity: ControlDirectoryIdentity,
+    currentUID: uid_t = getuid()
+  ) -> Bool {
     var status = stat()
-    guard lstat(url.path, &status) == 0 else {
+    return lstat(url.path, &status) == 0
+      && parentStatusIsSafe(status, currentUID: currentUID)
+      && status.st_dev == identity.device
+      && status.st_ino == identity.inode
+      && status.st_uid == identity.owner
+  }
+
+  /// Darwin has no `bindat`. Resolve the currently opened directory's path
+  /// from its descriptor immediately before bind, then revalidate the public
+  /// parent identity after bind. This avoids process-global `chdir` and fails
+  /// closed if the public parent was replaced.
+  static func bindingPath(parentDescriptor: Int32, leafName: String) throws -> String {
+    var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    let result = path.withUnsafeMutableBufferPointer { buffer in
+      fcntl(parentDescriptor, F_GETPATH, buffer.baseAddress!)
+    }
+    guard result == 0 else { throw POSIXError(.EIO) }
+    let directoryPath = String(
+      decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+      as: UTF8.self
+    )
+    return URL(fileURLWithPath: directoryPath, isDirectory: true)
+      .appendingPathComponent(leafName)
+      .path
+  }
+
+  static func removeStaleLeaf(
+    parentDescriptor: Int32,
+    leafName: String,
+    currentUID: uid_t = getuid()
+  ) throws {
+    var status = stat()
+    guard fstatat(parentDescriptor, leafName, &status, AT_SYMLINK_NOFOLLOW) == 0 else {
       guard errno == ENOENT else { throw POSIXError(.EIO) }
       return
     }
@@ -401,18 +571,88 @@ enum ControlSocketFilesystem {
     guard status.st_uid == currentUID, type == S_IFSOCK || type == S_IFREG else {
       throw POSIXError(.EACCES)
     }
-    guard unlink(url.path) == 0 else { throw POSIXError(.EACCES) }
+    guard unlinkat(parentDescriptor, leafName, 0) == 0 else { throw POSIXError(.EACCES) }
   }
 
-  static func removeOwnedSocketLeafIfPresent(
-    at url: URL,
+  static func ownedSocketIdentity(
+    parentDescriptor: Int32,
+    leafName: String,
     currentUID: uid_t = getuid()
-  ) {
+  ) -> ControlSocketIdentity? {
     var status = stat()
-    guard lstat(url.path, &status) == 0,
+    guard fstatat(parentDescriptor, leafName, &status, AT_SYMLINK_NOFOLLOW) == 0,
       status.st_uid == currentUID,
       status.st_mode & S_IFMT == S_IFSOCK
+    else { return nil }
+    return ControlSocketIdentity(
+      device: status.st_dev,
+      inode: status.st_ino,
+      owner: status.st_uid
+    )
+  }
+
+  static func setPrivateMode(
+    parentDescriptor: Int32,
+    leafName: String,
+    identity: ControlSocketIdentity,
+    currentUID: uid_t = getuid()
+  ) -> Int32? {
+    guard
+      socketStatusMatches(
+        parentDescriptor: parentDescriptor,
+        leafName: leafName,
+        identity: identity,
+        currentUID: currentUID
+      )
+    else { return EACCES }
+    guard fchmodat(parentDescriptor, leafName, 0o600, AT_SYMLINK_NOFOLLOW) == 0 else {
+      return errno
+    }
+    var status = stat()
+    guard fstatat(parentDescriptor, leafName, &status, AT_SYMLINK_NOFOLLOW) == 0,
+      socketStatusMatches(status, identity: identity, currentUID: currentUID),
+      status.st_mode & 0o777 == 0o600
+    else { return EACCES }
+    return nil
+  }
+
+  static func removeSocketLeafIfMatches(
+    parentDescriptor: Int32,
+    leafName: String,
+    identity: ControlSocketIdentity,
+    currentUID: uid_t = getuid()
+  ) {
+    guard
+      socketStatusMatches(
+        parentDescriptor: parentDescriptor,
+        leafName: leafName,
+        identity: identity,
+        currentUID: currentUID
+      )
     else { return }
-    _ = unlink(url.path)
+    _ = unlinkat(parentDescriptor, leafName, 0)
+  }
+
+  private static func socketStatusMatches(
+    parentDescriptor: Int32,
+    leafName: String,
+    identity: ControlSocketIdentity,
+    currentUID: uid_t
+  ) -> Bool {
+    var status = stat()
+    return fstatat(parentDescriptor, leafName, &status, AT_SYMLINK_NOFOLLOW) == 0
+      && socketStatusMatches(status, identity: identity, currentUID: currentUID)
+  }
+
+  private static func socketStatusMatches(
+    _ status: stat,
+    identity: ControlSocketIdentity,
+    currentUID: uid_t
+  ) -> Bool {
+    status.st_mode & S_IFMT == S_IFSOCK
+      && status.st_uid == currentUID
+      && status.st_uid == identity.owner
+      && status.st_dev == identity.device
+      && status.st_ino == identity.inode
   }
 }
