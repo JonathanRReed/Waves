@@ -172,6 +172,257 @@ import WavesAudioCore
   #expect(await receivesInjectedWriteFailure { try await store.flush() })
 }
 
+@Test func devicePresetStoreKeepsValidEntriesAcrossAdditiveFieldsAndMissingDefaults() throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let url = directory.appendingPathComponent("deviceVolumePresets.json")
+  try Data(
+    """
+    {
+      "schemaVersion": 1,
+      "payload": {
+        "deviceVolumes": {
+          "device.one": {
+            "complete.app": {
+              "desiredVolume": 0.25,
+              "isMuted": true,
+              "volumeBoost": 2.5,
+              "futureSetting": "ignored"
+            },
+            "defaulted.app": {
+              "isMuted": true
+            }
+          }
+        },
+        "futureDevicePolicy": true
+      }
+    }
+    """.utf8
+  ).write(to: url)
+
+  let store = DeviceVolumePresetsStore(directory: directory)
+  let loaded = store.load()
+
+  #expect(
+    loaded.getVolumeSettings(for: "complete.app", deviceID: "device.one")
+      == AppVolumeSettings(desiredVolume: 0.25, isMuted: true, volumeBoost: 2.5)
+  )
+  #expect(
+    loaded.getVolumeSettings(for: "defaulted.app", deviceID: "device.one")
+      == AppVolumeSettings(desiredVolume: 1, isMuted: true, volumeBoost: 1)
+  )
+  #expect(!store.consumeDidRecoverFromCorruptFile())
+
+  try Data("{\"schemaVersion\":1,\"payload\":{}}".utf8).write(to: url)
+  #expect(store.load().deviceVolumes.isEmpty)
+  #expect(!store.consumeDidRecoverFromCorruptFile())
+}
+
+@Test func profileStoreDefaultsAdditiveMetadataWithoutDiscardingProfile() throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let url = directory.appendingPathComponent("profiles.json")
+  try Data(
+    """
+    {
+      "schemaVersion": 1,
+      "payload": [
+        {
+          "id": "A5E588B4-BA92-4DA1-8020-A8A0B42B0488",
+          "name": "Legacy Focus",
+          "entries": [{"appID": "com.example.editor"}],
+          "futureProfileField": 42
+        }
+      ]
+    }
+    """.utf8
+  ).write(to: url)
+
+  let store = ProfileStore(directory: directory)
+  let loaded = store.load(defaults: [])
+
+  #expect(loaded.count == 1)
+  #expect(loaded.first?.name == "Legacy Focus")
+  #expect(loaded.first?.entries.map(\.appID) == ["com.example.editor"])
+  #expect(!store.consumeDidRecoverFromCorruptFile())
+}
+
+@Test func sessionStoreDefaultsMissingAdditiveRootFieldsAndNormalizesBackend() throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let url = directory.appendingPathComponent("session.json")
+  try Data(
+    """
+    {
+      "schemaVersion": 1,
+      "payload": {
+        "apps": [
+          {
+            "id": "runtime.player",
+            "logicalID": "com.example.player",
+            "displayName": "Player",
+            "futureAppField": true
+          }
+        ],
+        "futureSessionField": "ignored"
+      }
+    }
+    """.utf8
+  ).write(to: url)
+
+  let store = SessionStore(directory: directory)
+  let loaded = try #require(store.load())
+
+  #expect(loaded.apps.map(\.logicalID) == ["com.example.player"])
+  #expect(loaded.currentDevice == nil)
+  #expect(loaded.recentDeviceIDs.isEmpty)
+  #expect(loaded.supportMatrix.entries.isEmpty)
+  #expect(loaded.backendStatus == .unprobed)
+  #expect(!store.consumeDidRecoverFromCorruptFile())
+}
+
+@Test func knownInvalidDevicePresetFieldPreservesOriginalAsCorrupt() throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let url = directory.appendingPathComponent("deviceVolumePresets.json")
+  let invalid = Data(
+    """
+    {"schemaVersion":1,"payload":{"deviceVolumes":{"device":{"app":{"desiredVolume":"loud"}}}}}
+    """.utf8
+  )
+  try invalid.write(to: url)
+
+  let store = DeviceVolumePresetsStore(directory: directory)
+
+  #expect(store.load().deviceVolumes.isEmpty)
+  #expect(store.consumeDidRecoverFromCorruptFile())
+  #expect(!FileManager.default.fileExists(atPath: url.path))
+  let corruptURL = url.appendingPathExtension("corrupt")
+  #expect(try Data(contentsOf: corruptURL) == invalid)
+  #expect(try persistencePermissions(at: corruptURL) == 0o600)
+}
+
+@Test func everyPrimaryStoreRejectsOversizedTruncatedPartialAndFuturePayloads() throws {
+  for store in TaskSevenPersistenceStore.allCases {
+    let invalidPayloads = [
+      store.validOversizedPayload(),
+      Data("{\"schemaVersion\":1,\"payload\":".utf8),
+      Data("{\"schemaVersion\":1}".utf8),
+      Data("{\"schemaVersion\":2,\"payload\":{}}".utf8),
+    ]
+
+    for payload in invalidPayloads {
+      let directory = try makePersistenceStoreDirectory()
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let url = directory.appendingPathComponent(store.filename)
+      try payload.write(to: url)
+
+      let recovered = store.loadAndConsumeRecovery(in: directory)
+      let corruptURL = url.appendingPathExtension("corrupt")
+
+      #expect(recovered)
+      #expect(!FileManager.default.fileExists(atPath: url.path))
+      #expect(FileManager.default.fileExists(atPath: corruptURL.path))
+      #expect(try persistencePermissions(at: corruptURL) == 0o600)
+      #expect(try Data(contentsOf: corruptURL) == payload)
+    }
+  }
+}
+
+@Test func everyPrimaryStoreLoadsLegacyUnversionedPayloads() throws {
+  let directory = try makePersistenceStoreDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+
+  var preferences = UserPreferences()
+  preferences.showRecentApps = false
+  try JSONEncoder().encode(preferences)
+    .write(to: directory.appendingPathComponent("preferences.json"))
+
+  let profile = Profile(name: "Legacy", entries: [])
+  try JSONEncoder().encode([profile])
+    .write(to: directory.appendingPathComponent("profiles.json"))
+
+  var session = AudioSessionSnapshot.empty
+  session.recentDeviceIDs = ["legacy.device"]
+  try JSONEncoder().encode(session)
+    .write(to: directory.appendingPathComponent("session.json"))
+
+  var presets = DeviceVolumePresets()
+  presets.saveVolumeSettings(
+    for: "legacy.app",
+    deviceID: "legacy.device",
+    settings: AppVolumeSettings(desiredVolume: 0.3, isMuted: true, volumeBoost: 2)
+  )
+  try JSONEncoder().encode(presets)
+    .write(to: directory.appendingPathComponent("deviceVolumePresets.json"))
+
+  #expect(!PreferencesStore(directory: directory).load().showRecentApps)
+  #expect(ProfileStore(directory: directory).load(defaults: []) == [profile])
+  #expect(SessionStore(directory: directory).load()?.recentDeviceIDs == ["legacy.device"])
+  #expect(
+    DeviceVolumePresetsStore(directory: directory).load().getVolumeSettings(
+      for: "legacy.app",
+      deviceID: "legacy.device"
+    ) == AppVolumeSettings(desiredVolume: 0.3, isMuted: true, volumeBoost: 2)
+  )
+}
+
+private enum TaskSevenPersistenceStore: String, CaseIterable {
+  case preferences
+  case profiles
+  case session
+  case devicePresets
+
+  var filename: String {
+    switch self {
+    case .preferences: "preferences.json"
+    case .profiles: "profiles.json"
+    case .session: "session.json"
+    case .devicePresets: "deviceVolumePresets.json"
+    }
+  }
+
+  func loadAndConsumeRecovery(in directory: URL) -> Bool {
+    switch self {
+    case .preferences:
+      let store = PreferencesStore(directory: directory)
+      _ = store.load()
+      return store.consumeDidRecoverFromCorruptFile() && !store.consumeDidRecoverFromCorruptFile()
+    case .profiles:
+      let store = ProfileStore(directory: directory)
+      _ = store.load(defaults: [])
+      return store.consumeDidRecoverFromCorruptFile() && !store.consumeDidRecoverFromCorruptFile()
+    case .session:
+      let store = SessionStore(directory: directory)
+      _ = store.load()
+      return store.consumeDidRecoverFromCorruptFile() && !store.consumeDidRecoverFromCorruptFile()
+    case .devicePresets:
+      let store = DeviceVolumePresetsStore(directory: directory)
+      _ = store.load()
+      return store.consumeDidRecoverFromCorruptFile() && !store.consumeDidRecoverFromCorruptFile()
+    }
+  }
+
+  func validOversizedPayload() -> Data {
+    let padding = String(
+      repeating: "a",
+      count: Int(JSONPersistenceEngine<UserPreferences>.standardMaximumFileSize)
+    )
+    let json: String
+    switch self {
+    case .preferences:
+      json = "{\"futurePadding\":\"\(padding)\"}"
+    case .profiles:
+      json = "{\"schemaVersion\":1,\"payload\":[],\"futurePadding\":\"\(padding)\"}"
+    case .session:
+      json = "{\"schemaVersion\":1,\"payload\":{\"apps\":[],\"futurePadding\":\"\(padding)\"}}"
+    case .devicePresets:
+      json = "{\"schemaVersion\":1,\"payload\":{\"futurePadding\":\"\(padding)\"}}"
+    }
+    return Data(json.utf8)
+  }
+}
+
 private enum PersistenceStoreTestError: Error {
   case writeFailed
 }

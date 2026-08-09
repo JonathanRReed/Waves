@@ -52,6 +52,20 @@ struct ShutdownReport: Codable, Hashable, Sendable {
   var droppedCleanupRows: Int
   var droppedPersistenceIssues: Int
 
+  private enum CodingKeys: String, CodingKey {
+    case date
+    case appVersion
+    case appBuild
+    case sourceRevision
+    case osVersion
+    case completion
+    case backendCompletion
+    case persistenceIssues
+    case cleanupRows
+    case droppedCleanupRows
+    case droppedPersistenceIssues
+  }
+
   init(
     date: Date,
     appVersion: String,
@@ -78,6 +92,22 @@ struct ShutdownReport: Codable, Hashable, Sendable {
     let boundedRows = cleanupRows.prefix(Self.maxCleanupRows)
     self.cleanupRows = boundedRows.map(PersistedCleanupRow.init)
     self.droppedCleanupRows = max(0, cleanupRows.count - boundedRows.count)
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    date = try container.decodeIfPresent(Date.self, forKey: .date) ?? .distantPast
+    appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion) ?? "unknown"
+    appBuild = try container.decodeIfPresent(String.self, forKey: .appBuild) ?? "unknown"
+    sourceRevision = try container.decodeIfPresent(String.self, forKey: .sourceRevision)
+    osVersion = try container.decodeIfPresent(String.self, forKey: .osVersion) ?? "unknown"
+    completion = try container.decodeIfPresent(String.self, forKey: .completion) ?? "degraded"
+    backendCompletion = try container.decodeIfPresent(String.self, forKey: .backendCompletion)
+    persistenceIssues = try container.decodeIfPresent([String].self, forKey: .persistenceIssues) ?? []
+    cleanupRows = try container.decodeIfPresent([PersistedCleanupRow].self, forKey: .cleanupRows) ?? []
+    droppedCleanupRows = try container.decodeIfPresent(Int.self, forKey: .droppedCleanupRows) ?? 0
+    droppedPersistenceIssues =
+      try container.decodeIfPresent(Int.self, forKey: .droppedPersistenceIssues) ?? 0
   }
 
   var isClean: Bool { completion == "clean" }
@@ -157,27 +187,16 @@ enum BuildIdentity {
 /// queue would race the process teardown that is about to happen, which is the
 /// exact way the 1.3.0 detail was lost.
 final class ShutdownReportStore: @unchecked Sendable {
-  private let url: URL
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
-  private let writeData: PersistenceDataWrite
-  /// A report is small; anything larger is not one of ours.
-  private let maxFileSize: Int64 = 256 * 1024
+  private let engine: JSONPersistenceEngine<ShutdownReport>
 
   convenience init(fileManager: FileManager = .default) {
-    let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Persistence")
-    let directory: URL
-    if let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-      directory =
-        supportDirectory
-        .appendingPathComponent("Waves", isDirectory: true)
-        .appendingPathComponent("Diagnostics", isDirectory: true)
-    } else {
-      logger.error("Failed to get application support directory")
-      directory = fileManager.homeDirectoryForCurrentUser
-        .appendingPathComponent(".Waves", isDirectory: true)
-        .appendingPathComponent("Diagnostics", isDirectory: true)
-    }
-    self.init(directory: directory)
+    self.init(
+      directory: PersistenceLocation.applicationSupportDirectory(fileManager: fileManager)
+        .appendingPathComponent("Diagnostics", isDirectory: true),
+      fileManager: fileManager,
+      writeData: PrivateAtomicPersistenceFile.write
+    )
   }
 
   /// Test-only entry point: keeps the file inside `directory` instead of the
@@ -186,20 +205,30 @@ final class ShutdownReportStore: @unchecked Sendable {
     directory: URL,
     writeData: @escaping PersistenceDataWrite = PrivateAtomicPersistenceFile.write
   ) {
-    try? PersistenceSecurity.preparePrivateDirectory(directory)
-    self.url = directory.appendingPathComponent("last-shutdown.json")
-    self.writeData = writeData
+    self.engine = Self.makeEngine(
+      directory: directory,
+      fileManager: .default,
+      writeData: writeData
+    )
+  }
+
+  private init(
+    directory: URL,
+    fileManager: FileManager,
+    writeData: @escaping PersistenceDataWrite
+  ) {
+    self.engine = Self.makeEngine(
+      directory: directory,
+      fileManager: fileManager,
+      writeData: writeData
+    )
   }
 
   /// Writes the report, replacing any previous one. Never throws: a failure to
   /// record diagnostics must not block or delay a quit.
   func save(_ report: ShutdownReport) {
     do {
-      let encoder = JSONEncoder()
-      encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-      encoder.dateEncodingStrategy = .iso8601
-      let data = try PersistedSchema.encode(report, using: encoder)
-      try writeData(data, url)
+      try engine.writeSynchronously(report)
     } catch {
       logger.error("Failed to persist shutdown report: \(error.localizedDescription)")
     }
@@ -209,26 +238,45 @@ final class ShutdownReportStore: @unchecked Sendable {
   /// is missing, oversized, or unreadable. A damaged report is discarded rather
   /// than surfaced — it is diagnostics, and must never block startup.
   func load() -> ShutdownReport? {
-    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-    do {
-      let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-      if let size = attributes[.size] as? Int64, size > maxFileSize {
-        logger.error("Ignoring oversized shutdown report (\(size) bytes)")
-        return nil
-      }
-      let data = try Data(contentsOf: url)
-      let decoder = JSONDecoder()
-      decoder.dateDecodingStrategy = .iso8601
-      return try PersistedSchema.decode(ShutdownReport.self, from: data, using: decoder)
-    } catch {
-      logger.error("Failed to read shutdown report: \(error.localizedDescription)")
-      return nil
-    }
+    guard case .loaded(let report) = engine.load() else { return nil }
+    return report
   }
 
   /// Removes the stored report. Used once its contents have been surfaced, so a
   /// stale degraded shutdown does not keep reappearing after a clean one.
   func clear() {
-    try? FileManager.default.removeItem(at: url)
+    engine.clear()
+  }
+
+  private static func makeEngine(
+    directory: URL,
+    fileManager: FileManager,
+    writeData: @escaping PersistenceDataWrite
+  ) -> JSONPersistenceEngine<ShutdownReport> {
+    JSONPersistenceEngine(
+      url: directory.appendingPathComponent("last-shutdown.json"),
+      queueLabel: "com.waves.shutdown-report.store",
+      displayName: "shutdown report",
+      maximumFileSize: 256 * 1024,
+      fileManager: fileManager,
+      writeData: writeData,
+      codec: JSONPersistenceCodec(
+        encode: { report in
+          let encoder = JSONEncoder()
+          encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+          encoder.dateEncodingStrategy = .iso8601
+          return try PersistedSchema.encode(report, using: encoder)
+        },
+        decode: { data in
+          let decoder = JSONDecoder()
+          decoder.dateDecodingStrategy = .iso8601
+          return try PersistedSchema.decode(
+            ShutdownReport.self,
+            from: data,
+            using: decoder
+          )
+        }
+      )
+    )
   }
 }

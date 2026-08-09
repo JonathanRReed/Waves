@@ -67,6 +67,28 @@ import WavesAudioCore
   #expect(UserPreferences().appAudioIntentMigrationVersion == 1)
 }
 
+@Test func newUserPreferencesStartWithPinMigrationComplete() {
+  #expect(UserPreferences().pinMigrationVersion == 1)
+}
+
+@Test func legacyUserPreferencesMissingPinMigrationMarkerDecodeAsVersionZero() throws {
+  let data = Data("{\"pinnedAppIDs\":[]}".utf8)
+  let prefs = try JSONDecoder().decode(UserPreferences.self, from: data)
+
+  #expect(prefs.pinnedAppIDs.isEmpty)
+  #expect(prefs.pinMigrationVersion == 0)
+}
+
+@Test func pinMigrationMarkerRoundTrips() throws {
+  var prefs = UserPreferences()
+  prefs.pinMigrationVersion = 1
+
+  let data = try JSONEncoder().encode(prefs)
+  let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
+
+  #expect(decoded.pinMigrationVersion == 1)
+}
+
 @Test func oldUserPreferencesMissingMigrationMarkerDecodeAsVersionZero() throws {
   let data = Data("{\"showRecentApps\":false}".utf8)
   let prefs = try JSONDecoder().decode(UserPreferences.self, from: data)

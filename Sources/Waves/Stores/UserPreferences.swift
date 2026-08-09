@@ -47,6 +47,11 @@ struct UserPreferences: Codable, Sendable {
   /// here (rather than only on the per-app session row) so a pin survives the
   /// app quitting and relaunching, and a full relaunch of Waves.
   var pinnedAppIDs: [String] = []
+  /// One-time migration version for pins that older builds stored only in the
+  /// session cache. New installs start complete. A legacy preferences file
+  /// missing this key decodes as version 0 and advances even when there are no
+  /// cached pins, so a user-cleared empty list can never be resurrected later.
+  var pinMigrationVersion = 1
   /// Legacy EQ-only map retained for one release during the additive schema-1
   /// app-intent rollout.
   var appEqualizerSettings: [String: EqualizerSettings] = [:]
@@ -100,6 +105,7 @@ struct UserPreferences: Codable, Sendable {
     case enableExternalControl
     case excludedAppIDs
     case pinnedAppIDs
+    case pinMigrationVersion
     case appEqualizerSettings
     case appAudioIntents
     case appAudioIntentMigrationVersion
@@ -145,6 +151,7 @@ struct UserPreferences: Codable, Sendable {
     enableExternalControl = try value(.enableExternalControl, defaults.enableExternalControl)
     excludedAppIDs = try value(.excludedAppIDs, defaults.excludedAppIDs)
     pinnedAppIDs = try value(.pinnedAppIDs, defaults.pinnedAppIDs)
+    pinMigrationVersion = try value(.pinMigrationVersion, 0)
     appEqualizerSettings = try value(.appEqualizerSettings, defaults.appEqualizerSettings)
     appAudioIntents = try value(.appAudioIntents, defaults.appAudioIntents)
     // Preference files predating durable app intents must run the migration once.
@@ -228,6 +235,26 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
 
 struct DeviceVolumePresets: Codable, Sendable {
   var deviceVolumes: [String: [String: AppVolumeSettings]] = [:]
+
+  private enum CodingKeys: String, CodingKey {
+    case deviceVolumes
+  }
+
+  init() {}
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    deviceVolumes =
+      try container.decodeIfPresent(
+        [String: [String: AppVolumeSettings]].self,
+        forKey: .deviceVolumes
+      ) ?? [:]
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(deviceVolumes, forKey: .deviceVolumes)
+  }
 
   mutating func saveVolumeSettings(for appID: String, deviceID: String, settings: AppVolumeSettings) {
     if deviceVolumes[deviceID] == nil {
