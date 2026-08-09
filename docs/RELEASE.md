@@ -2,8 +2,9 @@
 
 Use this checklist before publishing a Waves build. None of the local commands
 below create or push a tag, publish a release, change repository visibility, or
-upload an artifact. The hosted release-candidate workflow is manual and accepts
-an exact revision only. It does not accept tags or publish releases.
+upload a release artifact. The hosted verification workflow is manual and
+accepts an exact revision only. It does not access signing credentials, accept
+tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
@@ -23,14 +24,16 @@ and automatic recovery. This remote result is a hard publication gate and is
 not yet complete.
 
 The sealed 1.5 evidence manifest must identify the exact revision and clean-tree
-state, toolchain, test counts, performance comparison, package identities,
+state, absence of untracked build inputs, source-archive and build-recipe hashes,
+toolchain, test counts, performance comparison, package identities,
 architectures, hashes, signatures, notarization, Gatekeeper result, local QA,
 and remote Elgato result. A source build or local package check cannot substitute
 for any missing field.
 
 `release/metadata.json` is the only release value authority. Its strict reader
 rejects malformed JSON, duplicate or unknown keys, noncanonical versions and
-deployment floors, and nonpositive build numbers. The build, appcast, package,
+deployment floors, nonpositive build numbers, and any bundle or Developer ID
+identity other than the pinned Waves values. The build, appcast, package,
 workflow, changelog, cask, and evidence checks all read that file rather than
 carrying their own defaults.
 
@@ -38,7 +41,8 @@ carrying their own defaults.
 
 Before creating a tag:
 
-- Set the version, positive integer build, and minimum macOS version once in
+- Set the version, positive integer build, minimum macOS version, bundle
+  identifier, Developer ID identity, team, and designated requirement once in
   `release/metadata.json`.
 - Move the release notes out of `Unreleased` into exactly one matching
   `## [X.Y.Z]` or `## [X.Y.Z] - YYYY-MM-DD` heading in `CHANGELOG.md`.
@@ -61,9 +65,9 @@ profile. The signing key never leaves that Mac and is not stored in GitHub
 Actions secrets.
 
 That is deliberate. With a single maintainer, putting a Developer ID private key
-in CI adds a large blast radius — anything that can read repository secrets can
+in CI adds a large blast radius. Anything that can read repository secrets can
 sign software as you, and revoking a leaked identity invalidates everything
-already shipped — in exchange for convenience this project does not need.
+already shipped. The convenience is not worth that exposure for this project.
 
 One-time setup, which prompts for an app-specific password from appleid.apple.com:
 
@@ -78,11 +82,11 @@ SIGN_IDENTITY="Developer ID Application: Jonathan Reed (AJ9VWBRNZN)" NOTARY_PROF
 ```
 
 `.github/workflows/release.yml` is manual-only and accepts an exact lowercase
-40-character revision. Pushing a tag does not start a build. The workflow
-remains runnable if hosted candidate signing is ever wanted: add the documented
-secrets and dispatch it against that revision. Every job stays read-only. The
-workflow uploads a 14-day candidate artifact for maintainer testing, never a
-GitHub release.
+40-character revision. Pushing a tag does not start a build. The workflow has
+one read-only verification job, contains no credentialed signer, and uploads
+only 14-day verification logs. Hosted signing must be designed as a separate,
+approved trusted-signer system before it can return. It cannot be enabled by
+adding secrets to the current workflow.
 
 ## Unsigned or Ad Hoc Local Validation
 
@@ -99,11 +103,15 @@ isolated test suite, focused Thread Sanitizer tests, universal package
 construction, package verification, packaged GUI smoke, the realtime callback
 audit, and release-infrastructure self-tests.
 
-`--release-check` is the fresh distribution build path. It builds arm64 and
-x86_64 release slices, creates `dist/Waves.app`, creates a matching universal
-`dist/Waves.app.dSYM` when `dsymutil` is available, stages a clean installer
-layout, creates `dist/Waves.dmg`, and runs the common package checks. Without
-`SIGN_IDENTITY`, the app is ad hoc signed for local validation.
+`--release-check` is the fresh distribution build path. It rejects tracked
+changes and ordinary or ignored untracked build inputs, creates an exact Git
+archive in a private temporary source tree, and uses new private SwiftPM scratch
+directories for both slices. It builds arm64 and x86_64, stamps the full source
+revision plus source-archive and build-recipe hashes into `Info.plist`, creates
+`dist/Waves.app`, creates a matching universal `dist/Waves.app.dSYM` when
+`dsymutil` is available, stages a clean installer layout, creates
+`dist/Waves.dmg`, and runs the common package checks. Without `SIGN_IDENTITY`,
+the app is ad hoc signed for local validation.
 
 `--verify` only validates the existing app, dSYM, and DMG. It does not build,
 recreate, or overwrite them. `--package-smoke` mounts the existing DMG, launches
@@ -149,9 +157,17 @@ xcrun notarytool store-credentials waves-notary --apple-id <apple-id> --team-id 
 Build, sign, submit, and staple using canonical release metadata:
 
 ```bash
-SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+SIGN_IDENTITY="Developer ID Application: Jonathan Reed (AJ9VWBRNZN)" \
 NOTARY_PROFILE="waves-notary" \
 ./script/build_and_run.sh --notarize
+```
+
+Capture the exact source identity for the evidence input from the same clean
+revision. This command does not build or sign:
+
+```bash
+ruby script/release_tool.rb source-identity "$(git rev-parse HEAD)" \
+  > dist/release-source-identity.json
 ```
 
 Task 12 must then assemble the complete evidence input and seal the exact local
@@ -169,8 +185,10 @@ WAVES_RELEASE_EVIDENCE=dist/release-evidence.candidate.json \
 The generator writes canonical key-ordered JSON plus a SHA-256 sidecar. The
 candidate gate never signs, notarizes, tags, uploads, or publishes. It validates
 the clean exact revision, source history, app, DMG, dSYM, universal
-architectures, deployment floor, Developer ID signature, hardened runtime,
-notarization UUID, stapling, Gatekeeper, and artifact hashes.
+architectures, deployment floor, exact Developer ID identity, team, designated
+requirement, hardened runtime, notarized Developer ID status, stapling,
+Gatekeeper, source stamps, and artifact hashes. Trust values are derived from
+the app and DMG instead of being accepted from the evidence input.
 
 After remote Wave Link and Stream Deck hardware evidence passes, seal the
 publication profile and create the annotated-tag envelope for review. These
@@ -193,29 +211,18 @@ gate, pending remote result, or changed artifact hash fails.
 Publication validation reuses all unsigned package checks and additionally
 requires:
 
-- A Developer ID Application signature, not an ad hoc signature.
-- A signing team identifier and a valid sealed app bundle.
+- The exact Waves Developer ID Application identity and Team ID `AJ9VWBRNZN`.
+- The exact designated requirement pinned in canonical metadata.
+- Hardened runtime and a valid sealed app bundle.
 - Gatekeeper acceptance of the app.
 - A valid stapled notarization ticket and Gatekeeper acceptance of the DMG.
 
-The manual hosted workflow remains configured for future candidate signing.
-Every job has read-only contents permission. It uses the same quality and
-release-preflight scripts, pinned actions, bounded jobs, serialized noncanceling
-concurrency, and 14-day artifact retention. It accepts an exact revision rather
-than a tag and cannot create a release. The maintainer Mac remains authoritative
-for 1.5, so a hosted run is not required evidence and has not been claimed.
-
-After notarization the dormant hosted path produces these workflow artifacts:
-
-- `Waves.dmg`
-- `Waves.dmg.sha256`
-- `Waves.app.dSYM.zip`
-- `waves.rb`, generated from `Casks/waves.rb` with the final checksum
-- package and smoke logs
-
-If this dormant path is ever used, the maintainer must download and retain those
-exact bytes, complete performance and hardware verification against them, seal
-their hashes in publication evidence, and create the annotated tag locally.
+The manual hosted workflow is verification-only. Its single job uses the same
+quality and release-preflight scripts, pinned actions, bounded execution,
+serialized noncanceling concurrency, and 14-day log retention. It accepts an
+exact revision rather than a tag and cannot access signing credentials, sign,
+notarize, upload a candidate, or create a release. The maintainer Mac remains
+the only Waves 1.5 signing authority.
 
 The generated cask is a release artifact; the workflow does not replace the
 checksum placeholder in the repository. Audit the generated file before
@@ -234,25 +241,38 @@ policy.
 
 ## Publish the Appcast
 
-After the GitHub release is public, sign **the published disk image** — not a
-local rebuild — and copy the appcast to the site repository.
+After the GitHub release is public, sign **the published disk image**, not a
+local rebuild, and copy the appcast to the site repository.
 
 This matters: DMGs are not reproducible. `codesign` embeds a fresh RFC3161
 timestamp on every run, so a locally rebuilt `Waves.dmg` is never byte-identical
 to the one CI attached to the release. Signing the local copy produces an
 appcast whose EdDSA signature does not match the bytes users download, and
-Sparkle rejects the update. `make_appcast.sh` now requires `EXPECTED_SHA256` and
-refuses to sign anything else.
+Sparkle rejects the update. `make_appcast.sh` treats `EXPECTED_SHA256` only as a
+transport check. Before it can access the Sparkle key, it also requires the
+exact annotated publication tag, embedded sealed evidence, recomputed app, DMG,
+and dSYM hashes, the pinned Waves signer and designated requirement, hardened
+runtime, notarized Gatekeeper acceptance, and a valid stapled ticket.
 
-Download both assets from the GitHub release, then:
+Download the DMG and checksum from the GitHub release. Retain the exact dSYM
+binary sealed in publication evidence, then run:
 
 ```bash
 gh release download "vX.Y.Z" --pattern "Waves.dmg" --pattern "Waves.dmg.sha256" --dir /tmp/waves-release
 ```
 
 ```bash
-EXPECTED_SHA256="$(cut -d ' ' -f 1 /tmp/waves-release/Waves.dmg.sha256)" ./script/make_appcast.sh X.Y.Z /tmp/waves-release/Waves.dmg
+WAVES_RELEASE_TAG="vX.Y.Z" \
+WAVES_DSYM_BINARY="$PWD/dist/Waves.app.dSYM/Contents/Resources/DWARF/Waves" \
+EXPECTED_SHA256="$(cut -d ' ' -f 1 /tmp/waves-release/Waves.dmg.sha256)" \
+  ./script/make_appcast.sh X.Y.Z /tmp/waves-release/Waves.dmg
 ```
+
+The script ignores every persistent `.build` cache and rejects `SIGN_UPDATE`
+overrides. It creates a fresh private source archive and SwiftPM scratch root,
+uses the exact checked-in `Package.resolved`, and executes only
+`artifacts/sparkle/Sparkle/bin/sign_update` after SwiftPM verifies the Sparkle
+artifact.
 
 ```bash
 cp dist/appcast.xml ../Waves-site/public/appcast.xml

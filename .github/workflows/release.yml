@@ -1,19 +1,9 @@
 name: Release Candidate
 
-# Manual, read-only candidate builder for possible future hosted signing.
+# Manual, read-only verification workflow.
 # Waves 1.5 is signed and notarized locally on the maintainer Mac. This workflow
-# does not accept a tag, create a release, or publish anything. If it is used in
-# the future, the maintainer must test the exact downloaded bytes, complete the
-# remaining evidence, and use the strict local annotated-tag publication path.
-#
-# Dormant hosted signing secret names are intentionally preserved:
-#   DEVELOPER_ID_CERT_P12
-#   DEVELOPER_ID_CERT_PASSWORD
-#   SIGN_IDENTITY
-#   KEYCHAIN_PASSWORD
-#   NOTARY_APPLE_ID
-#   NOTARY_TEAM_ID
-#   NOTARY_PASSWORD
+# does not accept a tag, access signing credentials, sign, notarize, upload a
+# release candidate, create a release, or publish anything.
 on:
   workflow_dispatch:
     inputs:
@@ -65,110 +55,20 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE"
           swift --version
 
-      - name: Run shared source and unsigned-package gate
-        run: ./script/quality-gate.sh full
-
-  sign:
-    name: Sign and notarize exact candidate
-    needs: verify
-    runs-on: macos-26
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    steps:
-      - name: Check out exact revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.revision }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Validate shared release preflight before credentials
+      - name: Validate shared release preflight
         env:
           WAVES_EXPECTED_REVISION: ${{ inputs.revision }}
         run: ./script/release-gate.sh preflight
 
-      - name: Import Developer ID certificate
-        env:
-          CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
-          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [ -z "$CERT_P12" ] || [ -z "$CERT_PASSWORD" ] || [ -z "$KEYCHAIN_PASSWORD" ]; then
-            echo "::error::Hosted signing secrets are not configured."
-            exit 1
-          fi
-          KEYCHAIN="$RUNNER_TEMP/waves-signing.keychain-db"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          rm -f "$RUNNER_TEMP/cert.p12"
+      - name: Run shared source and unsigned-package gate
+        run: ./script/quality-gate.sh full
 
-      - name: Store notarytool credentials
-        env:
-          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
-          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
-          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [ -z "$NOTARY_APPLE_ID" ] || [ -z "$NOTARY_TEAM_ID" ] || [ -z "$NOTARY_PASSWORD" ]; then
-            echo "::error::Hosted notarization secrets are not configured."
-            exit 1
-          fi
-          xcrun notarytool store-credentials waves-notary \
-            --apple-id "$NOTARY_APPLE_ID" \
-            --team-id "$NOTARY_TEAM_ID" \
-            --password "$NOTARY_PASSWORD"
-
-      - name: Build, sign, notarize, and staple exact revision
-        env:
-          SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
-          NOTARY_PROFILE: waves-notary
-        run: ./script/build_and_run.sh --notarize
-
-      - name: Validate trust and packaged GUI
-        run: |
-          ./script/build_and_run.sh --publication-check
-          SMOKE_LOG_PATH="$GITHUB_WORKSPACE/dist/signed-package-smoke-process.log" \
-            ./script/build_and_run.sh --package-smoke
-
-      - name: Produce checksum, dSYM archive, and cask candidate
-        run: |
-          set -euo pipefail
-          VERSION=$(ruby script/release_tool.rb metadata version)
-          test -d dist/Waves.app.dSYM
-          (cd dist && shasum -a 256 Waves.dmg > Waves.dmg.sha256)
-          ditto -c -k --sequesterRsrc --keepParent dist/Waves.app.dSYM dist/Waves.app.dSYM.zip
-          RELEASE_SHA256=$(shasum -a 256 dist/Waves.dmg | cut -d ' ' -f 1)
-          export VERSION RELEASE_SHA256
-          ruby -e '
-            version = ENV.fetch("VERSION")
-            digest = ENV.fetch("RELEASE_SHA256")
-            abort "invalid SHA-256" unless digest.match?(/\A[0-9a-f]{64}\z/)
-            template = File.read("Casks/waves.rb")
-            abort "cask version drift" unless template.scan(/^\s*version\s+"([^"]+)"/).flatten == [version]
-            placeholder = "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
-            abort "cask placeholder drift" unless template.scan(placeholder).length == 1
-            File.write("dist/waves.rb", template.sub(%(sha256 "#{placeholder}"), %(sha256 "#{digest}")))
-          '
-          ruby -c dist/waves.rb
-
-      - name: Upload exact signed candidate for maintainer testing
+      - name: Upload unsigned verification evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: waves-signed-candidate-${{ github.run_number }}
+          name: waves-verification-${{ github.run_number }}
           path: |
-            dist/Waves.app
-            dist/Waves.dmg
-            dist/Waves.dmg.sha256
-            dist/Waves.app.dSYM
-            dist/Waves.app.dSYM.zip
-            dist/waves.rb
             dist/*package*.log
+            dist/*smoke*.log
           if-no-files-found: error
           retention-days: 14

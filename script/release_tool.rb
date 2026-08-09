@@ -53,6 +53,14 @@ module WavesRelease
 
       stdout
     end
+
+    def run_combined(*command, chdir: nil)
+      stdout, stderr, status = Open3.capture3(*command, chdir: chdir)
+      combined = "#{stdout}#{stderr}"
+      raise Error, "#{command.join(' ')} failed: #{combined.strip}" unless status.success?
+
+      combined
+    end
   end
 
   class DuplicateCheckingHash < Hash
@@ -80,7 +88,10 @@ module WavesRelease
   end
 
   module Metadata
-    KEYS = %w[schemaVersion version build minimumMacOSVersion].freeze
+    KEYS = %w[
+      schemaVersion version build minimumMacOSVersion bundleIdentifier developerID
+    ].freeze
+    DEVELOPER_ID_KEYS = %w[identity teamIdentifier designatedRequirement].freeze
 
     module_function
 
@@ -99,6 +110,29 @@ module WavesRelease
 
       floor = value["minimumMacOSVersion"]
       raise Error, "release metadata minimum macOS version must be canonical major.minor without leading zeroes" unless floor.is_a?(String) && floor.match?(/\A(0|[1-9]\d*)\.(0|[1-9]\d*)\z/)
+
+      bundle_identifier = value["bundleIdentifier"]
+      unless bundle_identifier == "com.jonathanreed.Waves"
+        raise Error, "release metadata bundleIdentifier must be com.jonathanreed.Waves"
+      end
+
+      developer_id = value["developerID"]
+      Validation.exact_keys!(developer_id, DEVELOPER_ID_KEYS, "release metadata developerID")
+      developer_id.each do |key, field|
+        Validation.nonempty_string!(field, "release metadata developerID.#{key}")
+      end
+      identity = developer_id["identity"]
+      team = developer_id["teamIdentifier"]
+      unless identity == "Developer ID Application: Jonathan Reed (AJ9VWBRNZN)"
+        raise Error, "release metadata Developer ID identity is not the expected Waves identity"
+      end
+      unless team == "AJ9VWBRNZN"
+        raise Error, "release metadata Developer ID teamIdentifier must be AJ9VWBRNZN"
+      end
+      unless developer_id["designatedRequirement"].include?(%Q(identifier "#{bundle_identifier}")) &&
+          developer_id["designatedRequirement"].include?("certificate leaf[subject.OU] = #{team}")
+        raise Error, "release metadata Developer ID designatedRequirement must bind the Waves identifier and team"
+      end
 
       value.freeze
     end
@@ -222,9 +256,18 @@ module WavesRelease
     end
 
     def validate_source!(source, expected_revision)
-      Validation.exact_keys!(source, %w[revision trackedDirty], "source evidence")
+      Validation.exact_keys!(
+        source,
+        %w[revision trackedDirty untrackedBuildInputs sourceArchiveSHA256 buildRecipeSHA256],
+        "source evidence"
+      )
       Validation.revision!(source["revision"])
       raise Error, "source evidence trackedDirty must be false" unless source["trackedDirty"] == false
+      unless source["untrackedBuildInputs"] == false
+        raise Error, "source evidence untrackedBuildInputs must be false"
+      end
+      Validation.sha256!(source["sourceArchiveSHA256"], "source archive SHA-256")
+      Validation.sha256!(source["buildRecipeSHA256"], "build recipe SHA-256")
       if expected_revision && source["revision"] != expected_revision
         raise Error, "evidence source revision #{source['revision']} does not match expected revision #{expected_revision}"
       end
@@ -280,7 +323,7 @@ module WavesRelease
         developerID hardenedRuntime notarization stapling gatekeeper
       ]
       Validation.exact_keys!(package, keys, "package evidence")
-      raise Error, "package bundle identifier must be com.jonathanreed.Waves" unless package["bundleIdentifier"] == "com.jonathanreed.Waves"
+      raise Error, "package bundle identifier does not match release metadata" unless package["bundleIdentifier"] == metadata["bundleIdentifier"]
       %w[version build minimumMacOSVersion].each do |key|
         metadata_key = key == "minimumMacOSVersion" ? key : key
         raise Error, "package #{key} does not match release metadata" unless package[key] == metadata[metadata_key]
@@ -288,9 +331,18 @@ module WavesRelease
       raise Error, "package architectures must be exactly arm64 and x86_64" unless package["architectures"].is_a?(Array) && package["architectures"].sort == %w[arm64 x86_64]
       Validation.exact_keys!(package["hashes"], %w[appExecutable dmg dSYM], "package hashes")
       package["hashes"].each { |name, digest| Validation.sha256!(digest, "package hash #{name}") }
-      Validation.exact_keys!(package["developerID"], %w[status identity], "package developerID")
+      Validation.exact_keys!(
+        package["developerID"],
+        %w[status identity teamIdentifier designatedRequirement],
+        "package developerID"
+      )
       raise Error, "package Developer ID signature must have passed" unless package["developerID"]["status"] == "passed"
-      Validation.nonempty_string!(package["developerID"]["identity"], "package developerID.identity")
+      expected_developer_id = metadata.fetch("developerID")
+      %w[identity teamIdentifier designatedRequirement].each do |field|
+        unless package["developerID"][field] == expected_developer_id[field]
+          raise Error, "package Developer ID #{field} does not match the expected Waves release identity"
+        end
+      end
       %w[hardenedRuntime stapling gatekeeper].each do |name|
         Validation.passed_result!(package[name], "package.#{name}")
       end
@@ -384,6 +436,159 @@ module WavesRelease
       end
       true
     end
+
+    def verify_identity_facts!(manifest:, metadata:, facts:)
+      keys = %w[
+        bundleIdentifier version build minimumMacOSVersion sourceRevision
+        sourceArchiveSHA256 buildRecipeSHA256 developerID hardenedRuntime
+        notarizedDeveloperID stapling gatekeeper
+      ]
+      Validation.exact_keys!(facts, keys, "derived artifact facts")
+      package = manifest.fetch("package")
+      source = manifest.fetch("source")
+
+      {
+        "bundleIdentifier" => metadata.fetch("bundleIdentifier"),
+        "version" => metadata.fetch("version"),
+        "build" => metadata.fetch("build"),
+        "minimumMacOSVersion" => metadata.fetch("minimumMacOSVersion"),
+      }.each do |field, expected|
+        unless facts[field].to_s == expected.to_s && package[field].to_s == expected.to_s
+          raise Error, "derived artifact #{field} does not match metadata and sealed evidence"
+        end
+      end
+
+      {
+        "sourceRevision" => ["revision", "source revision"],
+        "sourceArchiveSHA256" => ["sourceArchiveSHA256", "source archive"],
+        "buildRecipeSHA256" => ["buildRecipeSHA256", "build recipe"],
+      }.each do |fact_field, (source_field, label)|
+        unless facts[fact_field] == source.fetch(source_field)
+          raise Error, "derived artifact #{label} does not match sealed evidence"
+        end
+      end
+
+      Validation.exact_keys!(facts["developerID"], Metadata::DEVELOPER_ID_KEYS, "derived Developer ID")
+      expected_developer_id = metadata.fetch("developerID")
+      Metadata::DEVELOPER_ID_KEYS.each do |field|
+        unless facts["developerID"][field] == expected_developer_id[field] &&
+            package.fetch("developerID")[field] == expected_developer_id[field]
+          raise Error, "derived Developer ID #{field} does not match metadata and sealed evidence"
+        end
+      end
+
+      %w[hardenedRuntime notarizedDeveloperID stapling gatekeeper].each do |field|
+        raise Error, "derived artifact #{field} must be true" unless facts[field] == true
+      end
+      true
+    end
+
+    def verify_release_artifacts!(manifest:, metadata:, app:, dmg:, dsym:)
+      executable = File.join(app, "Contents/MacOS/Waves")
+      verify_hashes!(
+        manifest: manifest,
+        paths: {"appExecutable" => executable, "dmg" => dmg, "dSYM" => dsym}
+      )
+
+      info_plist = File.join(app, "Contents/Info.plist")
+      raise Error, "release app Info.plist not found at #{info_plist}" unless File.file?(info_plist)
+
+      app_signature = signing_details!(app)
+      dmg_signature = signing_details!(dmg, require_designated_requirement: false)
+      expected_developer_id = metadata.fetch("developerID")
+      %w[identity teamIdentifier].each do |field|
+        unless dmg_signature[field] == expected_developer_id[field]
+          raise Error, "DMG Developer ID #{field} does not match the expected Waves release identity"
+        end
+      end
+
+      Validation.run_combined("codesign", "--verify", "--deep", "--strict", app)
+      Validation.run_combined("codesign", "--verify", "--strict", dmg)
+      app_gatekeeper = Validation.run_combined("spctl", "--assess", "--type", "execute", "--verbose=4", app)
+      dmg_gatekeeper = Validation.run_combined(
+        "spctl", "--assess", "--type", "open", "--context", "context:primary-signature",
+        "--verbose=4", dmg
+      )
+      Validation.run_combined("xcrun", "stapler", "validate", dmg)
+
+      facts = {
+        "bundleIdentifier" => plist_value!(info_plist, "CFBundleIdentifier"),
+        "version" => plist_value!(info_plist, "CFBundleShortVersionString"),
+        "build" => plist_value!(info_plist, "CFBundleVersion"),
+        "minimumMacOSVersion" => plist_value!(info_plist, "LSMinimumSystemVersion"),
+        "sourceRevision" => plist_value!(info_plist, "WavesSourceRevision"),
+        "sourceArchiveSHA256" => plist_value!(info_plist, "WavesSourceArchiveSHA256"),
+        "buildRecipeSHA256" => plist_value!(info_plist, "WavesBuildRecipeSHA256"),
+        "developerID" => app_signature.slice(*Metadata::DEVELOPER_ID_KEYS),
+        "hardenedRuntime" => app_signature.fetch("hardenedRuntime"),
+        "notarizedDeveloperID" =>
+          app_gatekeeper.include?("source=Notarized Developer ID") &&
+            dmg_gatekeeper.include?("source=Notarized Developer ID"),
+        "stapling" => true,
+        "gatekeeper" => true,
+      }
+      verify_identity_facts!(manifest: manifest, metadata: metadata, facts: facts)
+    end
+
+    def signing_details!(path, require_designated_requirement: true)
+      details = Validation.run_combined("codesign", "-dvvv", path)
+      authority = details.lines.filter_map { |line| line.chomp[/\AAuthority=(.+)\z/, 1] }.first
+      team = details.lines.filter_map { |line| line.chomp[/\ATeamIdentifier=(.+)\z/, 1] }.first
+      identity = authority&.strip
+      unless identity && team
+        raise Error, "could not derive Developer ID identity and teamIdentifier from #{path}"
+      end
+
+      result = {
+        "identity" => identity,
+        "teamIdentifier" => team,
+        "hardenedRuntime" => details.match?(/^CodeDirectory .*flags=.*\(runtime\)/),
+      }
+      if require_designated_requirement
+        requirement_output = Validation.run_combined("codesign", "-dr", "-", path)
+        requirement = requirement_output.lines.filter_map do |line|
+          line.chomp[/\Adesignated => (.+)\z/, 1]
+        end.first
+        raise Error, "could not derive designated requirement from #{path}" unless requirement
+
+        result["designatedRequirement"] = requirement.strip
+      end
+      result
+    end
+
+    def plist_value!(path, key)
+      value = Validation.run("plutil", "-extract", key, "raw", "-o", "-", path).strip
+      Validation.nonempty_string!(value, "#{path} #{key}")
+      value
+    end
+  end
+
+  module SparkleSigningTool
+    RELATIVE_PATH = "artifacts/sparkle/Sparkle/bin/sign_update"
+
+    module_function
+
+    def verify!(scratch_root:, candidate_path:)
+      root = File.expand_path(scratch_root)
+      expected = File.join(root, RELATIVE_PATH)
+      unless File.expand_path(candidate_path) == expected
+        raise Error, "sign_update must come from the expected isolated Sparkle path #{expected}"
+      end
+      stat = File.lstat(root)
+      raise Error, "Sparkle scratch root must be owned by the current user" unless stat.uid == Process.uid
+      raise Error, "Sparkle scratch root must have mode 0700" unless (stat.mode & 0o777) == 0o700
+      raise Error, "Sparkle sign_update must not be a symbolic link" if File.symlink?(expected)
+      raise Error, "Sparkle sign_update is missing or not executable at #{expected}" unless File.file?(expected) && File.executable?(expected)
+      resolved_root = File.realpath(root)
+      resolved_expected = File.join(resolved_root, RELATIVE_PATH)
+      unless File.realpath(expected) == resolved_expected
+        raise Error, "Sparkle sign_update must resolve inside the exact isolated dependency root"
+      end
+
+      expected
+    rescue Errno::ENOENT => error
+      raise Error, "Sparkle signing tool validation failed: #{error.message}"
+    end
   end
 
   module GitContract
@@ -397,6 +602,81 @@ module WavesRelease
       raise Error, "release gate requires a clean tracked tree" unless dirty.empty?
 
       actual
+    end
+  end
+
+  module ReleaseSource
+    BUILD_INPUT_PATHS = %w[
+      Package.swift Package.resolved PrivacyInfo.xcprivacy Sources
+      script/build_and_run.sh script/release_tool.rb release/metadata.json
+    ].freeze
+    RECIPE_PATHS = %w[
+      Package.swift Package.resolved PrivacyInfo.xcprivacy
+      script/build_and_run.sh script/release_tool.rb release/metadata.json
+    ].freeze
+
+    module_function
+
+    def identity!(root:, expected_revision:, archive_path: nil)
+      GitContract.clean_exact_revision!(root: root, expected_revision: expected_revision)
+      reject_untracked_build_inputs!(root)
+
+      archive = if archive_path
+                  FileUtils.mkdir_p(File.dirname(archive_path))
+                  Validation.run(
+                    "git", "archive", "--format=tar", "--output=#{archive_path}", expected_revision,
+                    chdir: root
+                  )
+                  File.binread(archive_path)
+                else
+                  Validation.run("git", "archive", "--format=tar", expected_revision, chdir: root)
+                end
+      {
+        "revision" => expected_revision,
+        "trackedDirty" => false,
+        "untrackedBuildInputs" => false,
+        "sourceArchiveSHA256" => Digest::SHA256.hexdigest(archive),
+        "buildRecipeSHA256" => recipe_digest_from_git(root: root, revision: expected_revision),
+      }
+    end
+
+    def recipe_digest_from_git(root:, revision:)
+      digest = Digest::SHA256.new
+      RECIPE_PATHS.each do |path|
+        contents = Validation.run("git", "show", "#{revision}:#{path}", chdir: root)
+        append_recipe_entry(digest, path, contents)
+      end
+      digest.hexdigest
+    end
+
+    def recipe_digest_from_files(root:)
+      digest = Digest::SHA256.new
+      RECIPE_PATHS.each do |path|
+        full_path = File.join(root, path)
+        raise Error, "build recipe file not found at #{full_path}" unless File.file?(full_path)
+
+        append_recipe_entry(digest, path, File.binread(full_path))
+      end
+      digest.hexdigest
+    end
+
+    def reject_untracked_build_inputs!(root)
+      untracked = Validation.run(
+        "git", "ls-files", "--others", "--exclude-standard", "--", *BUILD_INPUT_PATHS,
+        chdir: root
+      ).lines.map(&:strip)
+      ignored = Validation.run(
+        "git", "ls-files", "--others", "--ignored", "--exclude-standard", "--", *BUILD_INPUT_PATHS,
+        chdir: root
+      ).lines.map(&:strip)
+      inputs = (untracked + ignored).reject(&:empty?).uniq.sort
+      return if inputs.empty?
+
+      raise Error, "release source contains untracked build input(s): #{inputs.join(', ')}"
+    end
+
+    def append_recipe_entry(digest, path, contents)
+      digest << path << "\0" << contents.bytesize.to_s << "\0" << contents
     end
   end
 
@@ -525,12 +805,19 @@ module WavesRelease
       concurrency!(release, cancel: false, context: "release workflow")
       jobs_with_timeouts!(release, "release workflow")
       validate_release_job_permissions!(release)
+      unless release.fetch("jobs").keys == ["verify"]
+        raise Error, "hosted release workflow must remain verification-only with no credentialed signing job"
+      end
       validate_release_checkouts!(release)
       validate_release_revision_steps!(release)
       require_run_step!(release, "./script/quality-gate.sh full", "release workflow must call the shared quality-gate")
       require_upload_retention!(release, "release artifact retention must be 14 days")
       if release_source.include?("contents: write") || release_source.include?("action-gh-release") || release_source.include?("download-artifact") || release_source.include?("release-gate.sh publication")
         raise Error, "hosted release workflow must remain a read-only candidate builder, not a publication path"
+      end
+      if release_source.include?("${{ secrets.") ||
+          release_source.match?(/\b(?:security import|notarytool store-credentials|--notarize)\b/)
+        raise Error, "hosted release workflow must remain verification-only and must not consume signing credentials"
       end
 
       validate_action_pins!(ci_source, "CI workflow")
@@ -654,8 +941,7 @@ module WavesRelease
         raise Error, "release revision validation must execute against the exact revision input"
       end
 
-      sign_steps = release_job_steps!(jobs, "sign")
-      preflight = sign_steps.find do |step|
+      preflight = verify_steps.find do |step|
         step["run"].is_a?(String) && step["run"].strip == "./script/release-gate.sh preflight"
       end
       preflight_env = preflight.is_a?(Hash) ? preflight["env"] : nil
@@ -732,6 +1018,18 @@ module WavesRelease
       when "validate-workflows"
         WorkflowContract.validate!(root: root)
         puts "Repository workflow contracts are valid."
+      when "source-identity"
+        expected_revision, archive_path = arguments
+        raise Error, "usage: release_tool.rb source-identity REVISION [ARCHIVE]" unless expected_revision
+        identity = ReleaseSource.identity!(
+          root: root,
+          expected_revision: expected_revision,
+          archive_path: archive_path
+        )
+        puts CanonicalJSON.generate(identity)
+      when "build-recipe-digest"
+        source_root = arguments.shift || root
+        puts ReleaseSource.recipe_digest_from_files(root: source_root)
       when "evidence"
         evidence_command = arguments.shift
         metadata = Metadata.load(metadata_path)
@@ -783,14 +1081,43 @@ module WavesRelease
           File.write("#{output}.sha256", "#{parsed.fetch('digest')}  #{File.basename(output)}\n")
         end
         puts "Annotated publication tag #{tag} carries valid exact-revision evidence."
+      when "sparkle-signing-tool"
+        scratch_root, candidate_path = arguments
+        raise Error, "usage: release_tool.rb sparkle-signing-tool SCRATCH_ROOT CANDIDATE" unless candidate_path
+        puts SparkleSigningTool.verify!(scratch_root: scratch_root, candidate_path: candidate_path)
+      when "verify-release-artifacts"
+        manifest_path, app_path, dmg_path, dsym_path = arguments
+        raise Error, "usage: release_tool.rb verify-release-artifacts MANIFEST APP DMG DSYM" unless dsym_path
+        metadata = Metadata.load(metadata_path)
+        manifest = StrictJSON.load(manifest_path)
+        profile = manifest["sealProfile"]
+        Evidence.validate!(manifest, metadata: metadata, profile: profile)
+        ArtifactEvidence.verify_release_artifacts!(
+          manifest: manifest,
+          metadata: metadata,
+          app: app_path,
+          dmg: dmg_path,
+          dsym: dsym_path
+        )
+        puts "Release artifact identity and trust facts match sealed evidence."
       when "verify-artifacts"
         manifest_path = arguments.shift
         raise Error, "usage: release_tool.rb verify-artifacts MANIFEST" unless manifest_path
+        metadata = Metadata.load(metadata_path)
         manifest = StrictJSON.load(manifest_path)
-        ArtifactEvidence.verify_hashes!(manifest: manifest, paths: ArtifactEvidence.default_paths(root))
-        puts "Signed candidate artifact hashes match sealed evidence."
+        profile = manifest["sealProfile"]
+        Evidence.validate!(manifest, metadata: metadata, profile: profile)
+        paths = ArtifactEvidence.default_paths(root)
+        ArtifactEvidence.verify_release_artifacts!(
+          manifest: manifest,
+          metadata: metadata,
+          app: File.join(root, "dist/Waves.app"),
+          dmg: paths.fetch("dmg"),
+          dsym: paths.fetch("dSYM")
+        )
+        puts "Signed candidate artifact identity, trust, and hashes match sealed evidence."
       else
-        raise Error, "usage: release_tool.rb metadata|validate-repository|validate-workflows|evidence|tag-envelope|history|publication-tag|verify-artifacts"
+        raise Error, "usage: release_tool.rb metadata|validate-repository|validate-workflows|source-identity|build-recipe-digest|evidence|tag-envelope|history|publication-tag|sparkle-signing-tool|verify-release-artifacts|verify-artifacts"
       end
     rescue Error => error
       warn "Error: #{error.message}"

@@ -13,6 +13,12 @@ class ReleaseInfraTest < Minitest::Test
   BUILD = 13
   FLOOR = "14.2"
   REVISION = "a" * 40
+  BUNDLE_IDENTIFIER = "com.jonathanreed.Waves"
+  DEVELOPER_IDENTITY = "Developer ID Application: Jonathan Reed (AJ9VWBRNZN)"
+  TEAM_IDENTIFIER = "AJ9VWBRNZN"
+  DESIGNATED_REQUIREMENT = <<~REQUIREMENT.strip
+    identifier "com.jonathanreed.Waves" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = AJ9VWBRNZN
+  REQUIREMENT
 
   def metadata_hash
     {
@@ -20,6 +26,12 @@ class ReleaseInfraTest < Minitest::Test
       "version" => VERSION,
       "build" => BUILD,
       "minimumMacOSVersion" => FLOOR,
+      "bundleIdentifier" => BUNDLE_IDENTIFIER,
+      "developerID" => {
+        "identity" => DEVELOPER_IDENTITY,
+        "teamIdentifier" => TEAM_IDENTIFIER,
+        "designatedRequirement" => DESIGNATED_REQUIREMENT,
+      },
     }
   end
 
@@ -39,7 +51,13 @@ class ReleaseInfraTest < Minitest::Test
   def evidence_input(remote: "pending", revision: REVISION)
     passed_gate = ->(detail) { {"status" => "passed", "detail" => detail} }
     {
-      "source" => {"revision" => revision, "trackedDirty" => false},
+      "source" => {
+        "revision" => revision,
+        "trackedDirty" => false,
+        "untrackedBuildInputs" => false,
+        "sourceArchiveSHA256" => "4" * 64,
+        "buildRecipeSHA256" => "5" * 64,
+      },
       "toolchain" => {
         "swift" => "Swift 6.2.1",
         "xcode" => "Xcode 26.1",
@@ -67,7 +85,7 @@ class ReleaseInfraTest < Minitest::Test
         },
       },
       "package" => {
-        "bundleIdentifier" => "com.jonathanreed.Waves",
+        "bundleIdentifier" => BUNDLE_IDENTIFIER,
         "version" => VERSION,
         "build" => BUILD,
         "minimumMacOSVersion" => FLOOR,
@@ -77,7 +95,12 @@ class ReleaseInfraTest < Minitest::Test
           "dmg" => "2" * 64,
           "dSYM" => "3" * 64,
         },
-        "developerID" => {"status" => "passed", "identity" => "Developer ID Application: Test (TEAMID1234)"},
+        "developerID" => {
+          "status" => "passed",
+          "identity" => DEVELOPER_IDENTITY,
+          "teamIdentifier" => TEAM_IDENTIFIER,
+          "designatedRequirement" => DESIGNATED_REQUIREMENT,
+        },
         "hardenedRuntime" => passed_gate.call("runtime flag"),
         "notarization" => {
           "status" => "passed",
@@ -140,6 +163,15 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal VERSION, metadata.fetch("version")
     assert_equal BUILD, metadata.fetch("build")
     assert_equal FLOOR, metadata.fetch("minimumMacOSVersion")
+  end
+
+  def test_tracked_metadata_pins_the_waves_release_identity
+    metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
+
+    assert_equal BUNDLE_IDENTIFIER, metadata["bundleIdentifier"]
+    assert_equal DEVELOPER_IDENTITY, metadata.dig("developerID", "identity")
+    assert_equal TEAM_IDENTIFIER, metadata.dig("developerID", "teamIdentifier")
+    assert_equal DESIGNATED_REQUIREMENT, metadata.dig("developerID", "designatedRequirement")
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
@@ -211,6 +243,29 @@ class ReleaseInfraTest < Minitest::Test
     input.fetch("package").fetch("notarization").delete("submissionID")
     assert_release_error(/submissionID/) do
       WavesRelease::Evidence.seal(input: input, metadata: load_metadata, profile: "candidate")
+    end
+  end
+
+  def test_evidence_rejects_unbound_source_recipe_and_a_different_developer_id
+    missing_source_recipe = evidence_input
+    missing_source_recipe.fetch("source").delete("sourceArchiveSHA256")
+    assert_release_error(/sourceArchiveSHA256/) do
+      WavesRelease::Evidence.seal(
+        input: missing_source_recipe,
+        metadata: load_metadata,
+        profile: "candidate"
+      )
+    end
+
+    wrong_signer = evidence_input
+    wrong_signer.fetch("package").fetch("developerID")["identity"] =
+      "Developer ID Application: Attacker (EVILTEAM01)"
+    assert_release_error(/Developer ID identity/) do
+      WavesRelease::Evidence.seal(
+        input: wrong_signer,
+        metadata: load_metadata,
+        profile: "candidate"
+      )
     end
   end
 
@@ -343,6 +398,79 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_derived_artifact_identity_must_match_metadata_and_sealed_evidence
+    verifier = WavesRelease::ArtifactEvidence
+    assert_respond_to verifier, :verify_identity_facts!
+    return unless verifier.respond_to?(:verify_identity_facts!)
+
+    manifest = WavesRelease::Evidence.seal(
+      input: evidence_input(remote: "passed"),
+      metadata: load_metadata,
+      profile: "publication"
+    )
+    facts = {
+      "bundleIdentifier" => BUNDLE_IDENTIFIER,
+      "version" => VERSION,
+      "build" => BUILD,
+      "minimumMacOSVersion" => FLOOR,
+      "sourceRevision" => REVISION,
+      "sourceArchiveSHA256" => "4" * 64,
+      "buildRecipeSHA256" => "5" * 64,
+      "developerID" => {
+        "identity" => DEVELOPER_IDENTITY,
+        "teamIdentifier" => TEAM_IDENTIFIER,
+        "designatedRequirement" => DESIGNATED_REQUIREMENT,
+      },
+      "hardenedRuntime" => true,
+      "notarizedDeveloperID" => true,
+      "stapling" => true,
+      "gatekeeper" => true,
+    }
+
+    verifier.verify_identity_facts!(manifest: manifest, metadata: load_metadata, facts: facts)
+
+    wrong_team = Marshal.load(Marshal.dump(facts))
+    wrong_team.fetch("developerID")["teamIdentifier"] = "EVILTEAM01"
+    assert_release_error(/teamIdentifier/) do
+      verifier.verify_identity_facts!(manifest: manifest, metadata: load_metadata, facts: wrong_team)
+    end
+
+    wrong_source = Marshal.load(Marshal.dump(facts))
+    wrong_source["buildRecipeSHA256"] = "f" * 64
+    assert_release_error(/build recipe/) do
+      verifier.verify_identity_facts!(manifest: manifest, metadata: load_metadata, facts: wrong_source)
+    end
+  end
+
+  def test_sparkle_signer_accepts_only_the_exact_tool_in_a_private_fresh_root
+    resolver = WavesRelease.const_defined?(:SparkleSigningTool) ? WavesRelease::SparkleSigningTool : nil
+    refute_nil resolver, "isolated Sparkle signing-tool validation must be implemented"
+    return unless resolver
+
+    Dir.mktmpdir("waves-sparkle-tool") do |root|
+      FileUtils.chmod(0o700, root)
+      expected = File.join(root, "artifacts/sparkle/Sparkle/bin/sign_update")
+      FileUtils.mkdir_p(File.dirname(expected))
+      File.write(expected, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o700, expected)
+
+      assert_equal expected, resolver.verify!(scratch_root: root, candidate_path: expected)
+
+      planted = File.join(root, "planted/sign_update")
+      FileUtils.mkdir_p(File.dirname(planted))
+      File.write(planted, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o700, planted)
+      assert_release_error(/expected isolated Sparkle path/) do
+        resolver.verify!(scratch_root: root, candidate_path: planted)
+      end
+
+      FileUtils.chmod(0o755, root)
+      assert_release_error(/mode 0700/) do
+        resolver.verify!(scratch_root: root, candidate_path: expected)
+      end
+    end
+  end
+
   def test_repository_contract_rejects_default_drift_and_changelog_or_cask_mismatch
     Dir.mktmpdir("waves-contract") do |root|
       write_repository_contract_fixture(root)
@@ -387,6 +515,68 @@ class ReleaseInfraTest < Minitest::Test
       assert_release_error(/clean tracked tree/) do
         WavesRelease::GitContract.clean_exact_revision!(root: root, expected_revision: revision)
       end
+    end
+  end
+
+  def test_release_source_identity_rejects_untracked_and_ignored_build_inputs
+    release_source = WavesRelease.const_defined?(:ReleaseSource) ? WavesRelease::ReleaseSource : nil
+    refute_nil release_source, "release source identity must be implemented"
+    return unless release_source
+
+    with_git_repo do |root|
+      revision = git(root, "rev-parse", "HEAD").strip
+      FileUtils.mkdir_p(File.join(root, "Sources"))
+      File.write(File.join(root, "Sources/injected.swift"), "let injected = true\n")
+
+      assert_release_error(/untracked build input/) do
+        release_source.identity!(root: root, expected_revision: revision)
+      end
+    end
+
+    with_git_repo do |root|
+      File.write(File.join(root, ".gitignore"), "Sources/*.swift\n")
+      git(root, "add", ".gitignore")
+      git(root, "commit", "-m", "chore: ignore fixture")
+      revision = git(root, "rev-parse", "HEAD").strip
+      FileUtils.mkdir_p(File.join(root, "Sources"))
+      File.write(File.join(root, "Sources/injected.swift"), "let injected = true\n")
+
+      assert_release_error(/untracked build input/) do
+        release_source.identity!(root: root, expected_revision: revision)
+      end
+    end
+  end
+
+  def test_distribution_builder_uses_a_fresh_private_scratch_root_outside_the_checkout
+    with_release_script_repo do |root, helper_root|
+      fake_bin = File.join(helper_root, "bin")
+      log = File.join(helper_root, "swift-arguments.log")
+      FileUtils.mkdir_p(fake_bin)
+      fake_swift = File.join(fake_bin, "swift")
+      File.write(fake_swift, <<~SH)
+        #!/bin/sh
+        printf '%s\n' "$@" > "$WAVES_TEST_SWIFT_LOG"
+        exit 23
+      SH
+      FileUtils.chmod(0o700, fake_swift)
+
+      _stdout, _stderr, status = Open3.capture3(
+        {
+          "PATH" => "#{fake_bin}:#{ENV.fetch('PATH')}",
+          "WAVES_TEST_SWIFT_LOG" => log,
+        },
+        File.join(root, "script/build_and_run.sh"),
+        "--release-check",
+        chdir: root
+      )
+
+      refute status.success?, "the fake compiler must stop the package build"
+      arguments = File.read(log)
+      scratch = arguments.lines.each_cons(2).find { |first, _second| first.chomp == "--scratch-path" }&.last&.chomp
+      refute_nil scratch, "release SwiftPM invocation must specify a scratch path"
+      refute scratch.start_with?(root), "release scratch path must not reuse checkout build state"
+      assert_match(%r{/waves-release-build\.[^/]+/swiftpm/arm64\z}, scratch)
+      refute Dir.exist?(scratch), "isolated release workspace must be removed after a failed build"
     end
   end
 
@@ -535,12 +725,7 @@ class ReleaseInfraTest < Minitest::Test
       assert_release_error(/checkout.*ref/) { WavesRelease::WorkflowContract.validate!(root: root) }
 
       write_workflow_fixtures(root)
-      mutate(
-        root,
-        ".github/workflows/release.yml",
-        "      - name: Sign checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: ${{ inputs.revision }}\n          fetch-depth: 0\n          persist-credentials: false\n",
-        "      - name: Sign checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: refs/heads/main\n          fetch-depth: 0\n          persist-credentials: false\n"
-      )
+      mutate(root, ".github/workflows/release.yml", "ref: ${{ inputs.revision }}", "ref: refs/heads/main")
       assert_release_error(/checkout.*ref/) { WavesRelease::WorkflowContract.validate!(root: root) }
 
       write_workflow_fixtures(root)
@@ -548,12 +733,7 @@ class ReleaseInfraTest < Minitest::Test
       assert_release_error(/persist-credentials/) { WavesRelease::WorkflowContract.validate!(root: root) }
 
       write_workflow_fixtures(root)
-      mutate(
-        root,
-        ".github/workflows/release.yml",
-        "      - name: Sign checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: ${{ inputs.revision }}\n          fetch-depth: 0\n          persist-credentials: false\n",
-        "      - name: Sign checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: ${{ inputs.revision }}\n          fetch-depth: 0\n"
-      )
+      mutate(root, ".github/workflows/release.yml", "          persist-credentials: false\n", "")
       assert_release_error(/persist-credentials/) { WavesRelease::WorkflowContract.validate!(root: root) }
     end
   end
@@ -588,6 +768,52 @@ class ReleaseInfraTest < Minitest::Test
         "WAVES_EXPECTED_REVISION: ${{ github.sha }}"
       )
       assert_release_error(/preflight.*revision/) { WavesRelease::WorkflowContract.validate!(root: root) }
+    end
+  end
+
+  def test_release_workflow_is_verification_only_and_contains_no_credentialed_job
+    Dir.mktmpdir("waves-workflows") do |root|
+      write_workflow_fixtures(root)
+      WavesRelease::WorkflowContract.validate!(root: root)
+      File.open(File.join(root, ".github/workflows/release.yml"), "a") do |file|
+        file.write(<<~YAML)
+            sign:
+              timeout-minutes: 30
+              permissions:
+                contents: read
+              steps:
+                - run: security import certificate.p12
+        YAML
+      end
+      assert_release_error(/verification-only/) do
+        WavesRelease::WorkflowContract.validate!(root: root)
+      end
+    end
+  end
+
+  def test_appcast_refuses_to_reach_update_signing_without_publication_authorization
+    Dir.mktmpdir("waves-appcast-auth") do |root|
+      dmg = File.join(root, "Waves.dmg")
+      signer = File.join(root, "sign_update")
+      marker = File.join(root, "signer-ran")
+      File.write(dmg, "untrusted bytes")
+      File.write(signer, "#!/bin/sh\ntouch \"#{marker}\"\nprintf 'ZmFrZQ=='\n")
+      FileUtils.chmod(0o700, signer)
+
+      _stdout, stderr, status = Open3.capture3(
+        {
+          "EXPECTED_SHA256" => Digest::SHA256.file(dmg).hexdigest,
+          "SIGN_UPDATE" => signer,
+        },
+        File.expand_path("../make_appcast.sh", __dir__),
+        VERSION,
+        dmg,
+        File.join(root, "appcast.xml")
+      )
+
+      refute status.success?
+      assert_match(/WAVES_RELEASE_TAG/, stderr)
+      refute File.exist?(marker), "sign_update must not run before publication authorization"
     end
   end
 
@@ -668,17 +894,6 @@ class ReleaseInfraTest < Minitest::Test
                 fi
                 test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"
             - run: ./script/quality-gate.sh full
-        sign:
-          timeout-minutes: 120
-          permissions:
-            contents: read
-          steps:
-            - name: Sign checkout
-              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-              with:
-                ref: ${{ inputs.revision }}
-                fetch-depth: 0
-                persist-credentials: false
             - name: Validate release preflight
               env:
                 WAVES_EXPECTED_REVISION: ${{ inputs.revision }}
@@ -706,6 +921,28 @@ class ReleaseInfraTest < Minitest::Test
       git(root, "add", ".")
       git(root, "commit", "-q", "-m", "chore: fixture")
       yield root
+    end
+  end
+
+  def with_release_script_repo
+    Dir.mktmpdir("waves-release-script") do |container|
+      root = File.join(container, "repo")
+      FileUtils.mkdir_p(File.join(root, "script"))
+      FileUtils.mkdir_p(File.join(root, "release"))
+      FileUtils.mkdir_p(File.join(root, "Sources"))
+      FileUtils.cp(File.expand_path("../build_and_run.sh", __dir__), File.join(root, "script/build_and_run.sh"))
+      FileUtils.cp(File.expand_path("../release_tool.rb", __dir__), File.join(root, "script/release_tool.rb"))
+      write_json(File.join(root, "release/metadata.json"), metadata_hash)
+      File.write(File.join(root, "Package.swift"), "// fixture\n")
+      File.write(File.join(root, "Package.resolved"), "{}\n")
+      File.write(File.join(root, "PrivacyInfo.xcprivacy"), "fixture\n")
+      File.write(File.join(root, "Sources/Fixture.swift"), "let fixture = true\n")
+      git(root, "init", "-q")
+      git(root, "config", "user.name", "Waves Test")
+      git(root, "config", "user.email", "waves-test@example.com")
+      git(root, "add", ".")
+      git(root, "commit", "-q", "-m", "chore: fixture")
+      yield root, container
     end
   end
 

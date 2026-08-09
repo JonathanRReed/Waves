@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   echo "usage: $0 VERSION [DMG_PATH] [OUTPUT_PATH]" >&2
@@ -50,38 +51,22 @@ fi
 DMG_PATH="${2:-$ROOT_DIR/dist/Waves.dmg}"
 OUTPUT_PATH="${3:-$ROOT_DIR/dist/appcast.xml}"
 CHANGELOG_PATH="$ROOT_DIR/CHANGELOG.md"
-SIGN_UPDATE="${SIGN_UPDATE:-}"
 EXPECTED_SHA256="${EXPECTED_SHA256:-}"
+RELEASE_TAG="${WAVES_RELEASE_TAG:-}"
+DSYM_BINARY="${WAVES_DSYM_BINARY:-$ROOT_DIR/dist/Waves.app.dSYM/Contents/Resources/DWARF/Waves}"
 DOWNLOAD_URL="https://github.com/JonathanRReed/Waves/releases/download/v$VERSION/Waves.dmg"
 
-require_command awk "to extract and format release notes"
-require_command sed "to format release notes"
-require_command hdiutil "to inspect the release disk image"
-require_command plutil "to read release metadata"
-require_command stat "to measure the release disk image"
-
-if [ ! -f "$CHANGELOG_PATH" ]; then
-  echo "Error: Changelog not found at $CHANGELOG_PATH." >&2
-  exit 1
+if [ -z "$RELEASE_TAG" ]; then
+  echo "Error: WAVES_RELEASE_TAG must name the exact annotated publication tag." >&2
+  exit 2
 fi
-if [ ! -f "$DMG_PATH" ]; then
-  echo "Error: DMG not found at $DMG_PATH." >&2
-  exit 1
-fi
-
-if [ -z "$SIGN_UPDATE" ]; then
-  while IFS= read -r candidate; do
-    SIGN_UPDATE="$candidate"
-    break
-  done < <(find "$ROOT_DIR/.build/artifacts" -type f -path '*/bin/sign_update' -perm -111 -print 2>/dev/null | LC_ALL=C sort)
-fi
-if [ -z "$SIGN_UPDATE" ] || [ ! -x "$SIGN_UPDATE" ]; then
-  echo "Error: Sparkle sign_update was not found under $ROOT_DIR/.build/artifacts." >&2
-  echo "Set SIGN_UPDATE to the executable path if Sparkle is built elsewhere." >&2
-  exit 1
+if [ -n "${SIGN_UPDATE:-}" ]; then
+  echo "Error: SIGN_UPDATE overrides are forbidden; the tool is resolved from a fresh verified Sparkle artifact." >&2
+  exit 2
 fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/waves-appcast.XXXXXX")"
+chmod 700 "$TMP_DIR"
 MOUNT_POINT="$TMP_DIR/mount"
 MOUNTED=0
 
@@ -92,6 +77,27 @@ cleanup() {
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+
+PUBLICATION_MANIFEST="$TMP_DIR/release-evidence.publication.json"
+ruby "$RELEASE_TOOL" publication-tag "$RELEASE_TAG" "$PUBLICATION_MANIFEST"
+REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+
+require_command awk "to extract and format release notes"
+require_command sed "to format release notes"
+require_command hdiutil "to inspect the release disk image"
+require_command plutil "to read release metadata"
+require_command stat "to measure the release disk image"
+require_command swift "to resolve the verified Sparkle signing tool"
+require_command tar "to extract exact revision source"
+
+if [ ! -f "$CHANGELOG_PATH" ]; then
+  echo "Error: Changelog not found at $CHANGELOG_PATH." >&2
+  exit 1
+fi
+if [ ! -f "$DMG_PATH" ]; then
+  echo "Error: DMG not found at $DMG_PATH." >&2
+  exit 1
+fi
 
 RELEASE_NOTES_MD="$TMP_DIR/release-notes.md"
 RELEASE_NOTES_HTML="$TMP_DIR/release-notes.html"
@@ -234,6 +240,8 @@ if [ "$BUILD_NUMBER" != "$CANONICAL_BUILD" ]; then
   echo "Error: $DMG_PATH contains build $BUILD_NUMBER; canonical release build is $CANONICAL_BUILD." >&2
   exit 1
 fi
+ruby "$RELEASE_TOOL" verify-release-artifacts \
+  "$PUBLICATION_MANIFEST" "$MOUNT_POINT/Waves.app" "$DMG_PATH" "$DSYM_BINARY"
 hdiutil detach "$MOUNT_POINT" -quiet
 MOUNTED=0
 
@@ -250,11 +258,18 @@ if [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
   exit 2
 fi
 ACTUAL_SHA256="$(shasum -a 256 "$DMG_PATH" | cut -d ' ' -f 1)"
+SEALED_SHA256="$(ruby -rjson -e '
+  puts JSON.parse(File.read(ARGV.fetch(0))).fetch("package").fetch("hashes").fetch("dmg")
+' "$PUBLICATION_MANIFEST")"
 if [ "$(printf '%s' "$ACTUAL_SHA256" | tr 'A-F' 'a-f')" \
      != "$(printf '%s' "$EXPECTED_SHA256" | tr 'A-F' 'a-f')" ]; then
   echo "Error: $DMG_PATH has sha256 $ACTUAL_SHA256; expected $EXPECTED_SHA256." >&2
   echo "       This is not the published disk image. Signing it would produce an" >&2
   echo "       appcast whose signature does not match what users download." >&2
+  exit 1
+fi
+if [ "$ACTUAL_SHA256" != "$SEALED_SHA256" ]; then
+  echo "Error: $DMG_PATH does not match the DMG hash in sealed publication evidence." >&2
   exit 1
 fi
 
@@ -270,6 +285,28 @@ if [ -f "$OUTPUT_PATH" ]; then
     exit 1
   fi
 fi
+
+SIGNER_ARCHIVE="$TMP_DIR/source.tar"
+SIGNER_SOURCE="$TMP_DIR/source"
+SIGNER_SCRATCH="$TMP_DIR/swiftpm"
+SIGNER_IDENTITY="$TMP_DIR/source-identity.json"
+mkdir -p "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
+chmod 700 "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
+ruby "$RELEASE_TOOL" source-identity "$REVISION" "$SIGNER_ARCHIVE" >"$SIGNER_IDENTITY"
+tar -xf "$SIGNER_ARCHIVE" -C "$SIGNER_SOURCE"
+RESOLVED_BEFORE="$(shasum -a 256 "$SIGNER_SOURCE/Package.resolved" | cut -d ' ' -f 1)"
+swift package \
+  --package-path "$SIGNER_SOURCE" \
+  --scratch-path "$SIGNER_SCRATCH" \
+  --only-use-versions-from-resolved-file \
+  resolve
+RESOLVED_AFTER="$(shasum -a 256 "$SIGNER_SOURCE/Package.resolved" | cut -d ' ' -f 1)"
+if [ "$RESOLVED_AFTER" != "$RESOLVED_BEFORE" ]; then
+  echo "Error: SwiftPM changed Package.resolved while preparing sign_update." >&2
+  exit 1
+fi
+SIGN_UPDATE="$SIGNER_SCRATCH/artifacts/sparkle/Sparkle/bin/sign_update"
+ruby "$RELEASE_TOOL" sparkle-signing-tool "$SIGNER_SCRATCH" "$SIGN_UPDATE" >/dev/null
 
 DMG_LENGTH="$(stat -f '%z' "$DMG_PATH")"
 ED_SIGNATURE="$("$SIGN_UPDATE" -p "$DMG_PATH")"

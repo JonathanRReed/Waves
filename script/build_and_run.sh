@@ -18,6 +18,19 @@ fi
 CANONICAL_APP_VERSION="$(ruby "$RELEASE_TOOL" metadata version)"
 CANONICAL_APP_BUILD="$(ruby "$RELEASE_TOOL" metadata build)"
 CANONICAL_MIN_SYSTEM_VERSION="$(ruby "$RELEASE_TOOL" metadata minimumMacOSVersion)"
+CANONICAL_BUNDLE_ID="$(ruby "$RELEASE_TOOL" metadata bundleIdentifier)"
+CANONICAL_SIGN_IDENTITY="$(ruby -I"$ROOT_DIR/script" -e '
+  require "release_tool"
+  puts WavesRelease::Metadata.load(ARGV.fetch(0)).fetch("developerID").fetch("identity")
+' "$ROOT_DIR/release/metadata.json")"
+CANONICAL_SIGN_TEAM="$(ruby -I"$ROOT_DIR/script" -e '
+  require "release_tool"
+  puts WavesRelease::Metadata.load(ARGV.fetch(0)).fetch("developerID").fetch("teamIdentifier")
+' "$ROOT_DIR/release/metadata.json")"
+CANONICAL_DESIGNATED_REQUIREMENT="$(ruby -I"$ROOT_DIR/script" -e '
+  require "release_tool"
+  puts WavesRelease::Metadata.load(ARGV.fetch(0)).fetch("developerID").fetch("designatedRequirement")
+' "$ROOT_DIR/release/metadata.json")"
 MIN_SYSTEM_VERSION="${MIN_SYSTEM_VERSION:-$CANONICAL_MIN_SYSTEM_VERSION}"
 APP_VERSION="${APP_VERSION:-$CANONICAL_APP_VERSION}"
 APP_BUILD="${APP_BUILD:-$CANONICAL_APP_BUILD}"
@@ -38,6 +51,8 @@ resolve_source_revision() {
   echo "$revision"
 }
 APP_SOURCE_REVISION="${APP_SOURCE_REVISION:-$(resolve_source_revision)}"
+APP_SOURCE_ARCHIVE_SHA256="${WAVES_SOURCE_ARCHIVE_SHA256:-}"
+APP_BUILD_RECIPE_SHA256="${WAVES_BUILD_RECIPE_SHA256:-}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 SWIFT_SDK="${SWIFT_SDK:-}"
@@ -109,6 +124,14 @@ if requires_canonical_release_metadata; then
     echo "Error: Release deployment floor $MIN_SYSTEM_VERSION does not match canonical floor $CANONICAL_MIN_SYSTEM_VERSION." >&2
     exit 2
   fi
+  if [ "$BUNDLE_ID" != "$CANONICAL_BUNDLE_ID" ]; then
+    echo "Error: Release bundle identifier $BUNDLE_ID does not match canonical identifier $CANONICAL_BUNDLE_ID." >&2
+    exit 2
+  fi
+  if [ -n "$SIGN_IDENTITY" ] && [ "$SIGN_IDENTITY" != "$CANONICAL_SIGN_IDENTITY" ]; then
+    echo "Error: SIGN_IDENTITY does not match the canonical Waves Developer ID identity." >&2
+    exit 2
+  fi
 fi
 
 require_command() {
@@ -120,6 +143,98 @@ require_command() {
     exit 1
   fi
 }
+
+run_isolated_distribution_build() {
+  local revision
+  local isolation_root
+  local archive_path
+  local source_root
+  local scratch_root
+  local identity_path
+  local source_archive_sha256
+  local build_recipe_sha256
+  local status
+
+  for command_name in git tar mktemp chmod shasum; do
+    require_command "$command_name" "for an isolated release build"
+  done
+
+  revision="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/waves-release-build.XXXXXX")"
+  chmod 700 "$isolation_root"
+  archive_path="$isolation_root/source.tar"
+  source_root="$isolation_root/source"
+  scratch_root="$isolation_root/swiftpm"
+  identity_path="$isolation_root/source-identity.json"
+  mkdir -p "$source_root" "$scratch_root"
+  chmod 700 "$source_root" "$scratch_root"
+
+  if ! ruby "$RELEASE_TOOL" source-identity "$revision" "$archive_path" >"$identity_path"; then
+    rm -rf "$isolation_root"
+    return 1
+  fi
+  tar -xf "$archive_path" -C "$source_root"
+  source_archive_sha256="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("sourceArchiveSHA256")' "$identity_path")"
+  build_recipe_sha256="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("buildRecipeSHA256")' "$identity_path")"
+
+  set +e
+  env \
+    APP_SOURCE_REVISION="$revision" \
+    WAVES_BUILD_RECIPE_SHA256="$build_recipe_sha256" \
+    WAVES_ISOLATED_RELEASE_BUILD=1 \
+    WAVES_RELEASE_OUTPUT_DIR="$ROOT_DIR/dist" \
+    WAVES_RELEASE_SCRATCH_ROOT="$scratch_root" \
+    WAVES_RELEASE_SOURCE_ARCHIVE="$archive_path" \
+    WAVES_SOURCE_ARCHIVE_SHA256="$source_archive_sha256" \
+    "$source_root/script/build_and_run.sh" "$MODE"
+  status=$?
+  set -e
+  rm -rf "$isolation_root"
+  return "$status"
+}
+
+if is_distribution_build_mode && [ "${WAVES_ISOLATED_RELEASE_BUILD:-0}" != "1" ]; then
+  if [ -L "$ROOT_DIR/dist" ]; then
+    echo "Error: Release artifact destination dist must not be a symbolic link." >&2
+    exit 1
+  fi
+  if [ -e "$ROOT_DIR/dist" ] && [ ! -d "$ROOT_DIR/dist" ]; then
+    echo "Error: Release artifact destination dist exists but is not a directory." >&2
+    exit 1
+  fi
+  run_isolated_distribution_build
+  exit $?
+fi
+
+if is_distribution_build_mode; then
+  if [[ ! "$APP_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Error: Isolated release source revision must be a lowercase 40-character Git revision." >&2
+    exit 1
+  fi
+  if [[ ! "$APP_SOURCE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || [[ ! "$APP_BUILD_RECIPE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Error: Isolated release build requires valid source archive and build recipe SHA-256 stamps." >&2
+    exit 1
+  fi
+  if [ -z "${WAVES_RELEASE_SOURCE_ARCHIVE:-}" ] || [ ! -f "$WAVES_RELEASE_SOURCE_ARCHIVE" ]; then
+    echo "Error: Isolated release source archive is missing." >&2
+    exit 1
+  fi
+  actual_archive_sha256="$(shasum -a 256 "$WAVES_RELEASE_SOURCE_ARCHIVE" | cut -d ' ' -f 1)"
+  if [ "$actual_archive_sha256" != "$APP_SOURCE_ARCHIVE_SHA256" ]; then
+    echo "Error: Isolated release source archive does not match its provenance stamp." >&2
+    exit 1
+  fi
+  actual_recipe_sha256="$(ruby "$RELEASE_TOOL" build-recipe-digest "$ROOT_DIR")"
+  if [ "$actual_recipe_sha256" != "$APP_BUILD_RECIPE_SHA256" ]; then
+    echo "Error: Isolated release build recipe does not match its provenance stamp." >&2
+    exit 1
+  fi
+  if [ -z "${WAVES_RELEASE_SCRATCH_ROOT:-}" ] || [ ! -d "$WAVES_RELEASE_SCRATCH_ROOT" ]; then
+    echo "Error: Isolated release SwiftPM scratch root is missing." >&2
+    exit 1
+  fi
+fi
 
 sign_runtime_item() {
   local target="$1"
@@ -157,7 +272,7 @@ if ! is_existing_package_mode; then
   require_command swift "to build Waves"
 fi
 
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="${WAVES_RELEASE_OUTPUT_DIR:-$ROOT_DIR/dist}"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
@@ -245,6 +360,23 @@ require_plist_value() {
 
   if [ "$actual" != "$expected" ]; then
     echo "Error: $label has $key=$actual; expected $expected." >&2
+    exit 1
+  fi
+}
+
+require_plist_pattern() {
+  local plist_path="$1"
+  local key="$2"
+  local pattern="$3"
+  local label="$4"
+  local actual
+
+  if ! actual="$(plist_value "$plist_path" "$key" 2>/dev/null)"; then
+    echo "Error: $label is missing $key." >&2
+    exit 1
+  fi
+  if [[ ! "$actual" =~ $pattern ]]; then
+    echo "Error: $label has invalid $key=$actual." >&2
     exit 1
   fi
 }
@@ -442,17 +574,17 @@ build_app_bundle() {
   fi
 
   if is_distribution_build_mode; then
-    local arm64_scratch="$ROOT_DIR/.build/arm64"
-    local x86_64_scratch="$ROOT_DIR/.build/x86_64"
+    local arm64_scratch="$WAVES_RELEASE_SCRATCH_ROOT/arm64"
+    local x86_64_scratch="$WAVES_RELEASE_SCRATCH_ROOT/x86_64"
     local arm64_bin_dir
     local x86_64_bin_dir
 
     require_command lipo "for universal distribution builds"
-    "${SWIFT_BUILD[@]}" --scratch-path "$arm64_scratch" -c release --triple arm64-apple-macosx -Xswiftc -g
-    "${SWIFT_BUILD[@]}" --scratch-path "$x86_64_scratch" -c release --triple x86_64-apple-macosx -Xswiftc -g
-    arm64_bin_dir="$("${SWIFT_BUILD[@]}" --scratch-path "$arm64_scratch" -c release --triple arm64-apple-macosx --show-bin-path)"
-    x86_64_bin_dir="$("${SWIFT_BUILD[@]}" --scratch-path "$x86_64_scratch" -c release --triple x86_64-apple-macosx --show-bin-path)"
-    build_output_dir="$ROOT_DIR/.build/universal/release"
+    "${SWIFT_BUILD[@]}" --disable-automatic-resolution --scratch-path "$arm64_scratch" -c release --triple arm64-apple-macosx -Xswiftc -g
+    "${SWIFT_BUILD[@]}" --disable-automatic-resolution --scratch-path "$x86_64_scratch" -c release --triple x86_64-apple-macosx -Xswiftc -g
+    arm64_bin_dir="$("${SWIFT_BUILD[@]}" --disable-automatic-resolution --scratch-path "$arm64_scratch" -c release --triple arm64-apple-macosx --show-bin-path)"
+    x86_64_bin_dir="$("${SWIFT_BUILD[@]}" --disable-automatic-resolution --scratch-path "$x86_64_scratch" -c release --triple x86_64-apple-macosx --show-bin-path)"
+    build_output_dir="$WAVES_RELEASE_SCRATCH_ROOT/universal/release"
     mkdir -p "$build_output_dir"
     lipo -create "$arm64_bin_dir/$APP_NAME" "$x86_64_bin_dir/$APP_NAME" -output "$build_output_dir/$APP_NAME"
 
@@ -564,6 +696,10 @@ build_app_bundle() {
   <string>$APP_BUILD</string>
   <key>WavesSourceRevision</key>
   <string>$APP_SOURCE_REVISION</string>
+  <key>WavesSourceArchiveSHA256</key>
+  <string>$APP_SOURCE_ARCHIVE_SHA256</string>
+  <key>WavesBuildRecipeSHA256</key>
+  <string>$APP_BUILD_RECIPE_SHA256</string>
   <key>SUFeedURL</key>
   <string>https://waves.jonathanrreed.com/appcast.xml</string>
   <key>SUPublicEDKey</key>
@@ -723,6 +859,15 @@ validate_app_bundle() {
   require_plist_value "$info_plist" CFBundleName "$APP_NAME" "$label"
   require_plist_value "$info_plist" CFBundleShortVersionString "$APP_VERSION" "$label"
   require_plist_value "$info_plist" CFBundleVersion "$APP_BUILD" "$label"
+  if is_distribution_build_mode; then
+    require_plist_value "$info_plist" WavesSourceRevision "$APP_SOURCE_REVISION" "$label"
+    require_plist_value "$info_plist" WavesSourceArchiveSHA256 "$APP_SOURCE_ARCHIVE_SHA256" "$label"
+    require_plist_value "$info_plist" WavesBuildRecipeSHA256 "$APP_BUILD_RECIPE_SHA256" "$label"
+  else
+    require_plist_pattern "$info_plist" WavesSourceRevision '^[0-9a-f]{40}$' "$label"
+    require_plist_pattern "$info_plist" WavesSourceArchiveSHA256 '^[0-9a-f]{64}$' "$label"
+    require_plist_pattern "$info_plist" WavesBuildRecipeSHA256 '^[0-9a-f]{64}$' "$label"
+  fi
   require_plist_value "$info_plist" LSMinimumSystemVersion "$MIN_SYSTEM_VERSION" "$label"
   require_plist_value "$info_plist" CFBundleIconFile "$APP_ICON_NAME" "$label"
   require_plist_value "$info_plist" SUFeedURL "https://waves.jonathanrreed.com/appcast.xml" "$label"
@@ -1030,6 +1175,9 @@ notarize_release() {
 
 publication_check() {
   local signature_info
+  local dmg_signature_info
+  local requirement_info
+  local designated_requirement
 
   validate_unsigned_package
   require_command codesign "for publication checks"
@@ -1041,17 +1189,34 @@ publication_check() {
     echo "Error: $APP_BUNDLE is ad hoc signed. Public builds require a Developer ID Application signature." >&2
     exit 1
   fi
-  if ! printf '%s\n' "$signature_info" | grep -Fq "Authority=Developer ID Application:"; then
-    echo "Error: $APP_BUNDLE is not signed by a Developer ID Application identity." >&2
+  if ! printf '%s\n' "$signature_info" | grep -Fxq "Authority=$CANONICAL_SIGN_IDENTITY"; then
+    echo "Error: $APP_BUNDLE is not signed by the canonical Waves Developer ID identity." >&2
     exit 1
   fi
-  if printf '%s\n' "$signature_info" | grep -Fq "TeamIdentifier=not set" \
-    || ! printf '%s\n' "$signature_info" | grep -Fq "TeamIdentifier="; then
-    echo "Error: $APP_BUNDLE has no TeamIdentifier. Public builds require a Developer ID Application signature." >&2
+  if ! printf '%s\n' "$signature_info" | grep -Fxq "TeamIdentifier=$CANONICAL_SIGN_TEAM"; then
+    echo "Error: $APP_BUNDLE is not signed by the canonical Waves Developer ID team." >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$signature_info" | grep -Eq '^CodeDirectory .*flags=.*\(runtime\)'; then
+    echo "Error: $APP_BUNDLE is not signed with the hardened runtime." >&2
+    exit 1
+  fi
+  requirement_info="$(codesign -dr - "$APP_BUNDLE" 2>&1 || true)"
+  designated_requirement="$(printf '%s\n' "$requirement_info" | sed -n 's/^designated => //p')"
+  if [ "$designated_requirement" != "$CANONICAL_DESIGNATED_REQUIREMENT" ]; then
+    echo "Error: $APP_BUNDLE designated requirement does not match canonical release metadata." >&2
+    exit 1
+  fi
+
+  dmg_signature_info="$(codesign -dvvv "$DMG_PATH" 2>&1 || true)"
+  if ! printf '%s\n' "$dmg_signature_info" | grep -Fxq "Authority=$CANONICAL_SIGN_IDENTITY" \
+    || ! printf '%s\n' "$dmg_signature_info" | grep -Fxq "TeamIdentifier=$CANONICAL_SIGN_TEAM"; then
+    echo "Error: $DMG_PATH is not signed by the canonical Waves Developer ID identity and team." >&2
     exit 1
   fi
 
   codesign --verify --deep --strict "$APP_BUNDLE"
+  codesign --verify --strict "$DMG_PATH"
   spctl --assess --type execute --verbose "$APP_BUNDLE"
   xcrun stapler validate "$DMG_PATH"
   spctl --assess --type open --context context:primary-signature --verbose "$DMG_PATH"
