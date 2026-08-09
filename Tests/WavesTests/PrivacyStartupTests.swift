@@ -280,6 +280,44 @@ import WavesAudioCore
   #expect(secondLaunch.store.preferences.pinMigrationVersion == 1)
 }
 
+@MainActor
+@Test func aggregateAppStoreLifecycleShutdownDrainsEveryOwnerRepeatedly() async {
+  for iteration in 0..<10 {
+    var preferences = freshPrivacyPreferences()
+    preferences.hasCompletedPrivacySetup = true
+    preferences.adaptiveMixMode = .both
+    let app = privacyTestApp()
+    let fixture = makePrivacyFixture(
+      preferences: preferences,
+      cachedSession: privacyTestSnapshot(apps: [app])
+    )
+
+    fixture.store.start()
+    await fixture.store.waitForAudioStartup()
+    fixture.store.beginLiveLevels()
+    fixture.store.setEqualizerEnabled(true, for: app)
+    fixture.store.selectOutputDevice(
+      AudioDevice(
+        id: "device.pending.\(iteration)",
+        name: "Pending \(iteration)",
+        kind: .virtual
+      ))
+    await Task.yield()
+
+    let active = fixture.store.lifecycleSnapshot
+    #expect(active.intent.equalizerDebounces == 1)
+    #expect(active.adaptive.hasLoop)
+    #expect(active.deviceSuppression.trackedTaskCount == 1)
+    #expect(active.hasLevelPoll)
+    #expect(active.hasSessionMaintenance)
+    #expect(active.observerCount == 3)
+    #expect(active.backendStarted)
+
+    _ = await fixture.store.shutdown()
+    #expect(fixture.store.lifecycleSnapshot.isIdle)
+  }
+}
+
 private struct PrivacyFixture {
   let store: AppStore
   let backend: PrivacyRecordingBackend

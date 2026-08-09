@@ -1082,6 +1082,91 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func supersededAutomaticMuteCannotClaimOwnershipOrResumeUserMute() async {
+  let app = transactionTestApp(id: "automation.superseded")
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: app.desiredVolume,
+      isMuted: false,
+      volumeBoost: app.volumeBoost
+    ),
+    suspendFirstIntent: true
+  )
+
+  let automatic = Task { @MainActor in
+    await fixture.store.applyAutomaticConferencingTransition(
+      isConferencingActive: true
+    )
+  }
+  await fixture.backend.waitUntilFirstIntentIsSuspended()
+  fixture.store.setMuted(true, for: app)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.backend.resumeFirstIntent()
+  await automatic.value
+
+  await fixture.store.applyAutomaticConferencingTransition(
+    isConferencingActive: false
+  )
+  #expect(await fixture.backend.recordedIntents().map(\.reason) == [.automation, .userEdit])
+  #expect(fixture.store.session.apps.first?.isMuted == true)
+  #expect(fixture.store.session.apps.first?.muteSource == .user)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func relaunchDoesNotResurrectAutomaticMuteOwnershipOrDurableMute() async {
+  let appID = "automation.relaunch"
+  var cachedApp = transactionTestApp(id: appID, isMuted: true)
+  cachedApp.muteSource = .autoConferencing
+  let durable = PersistedAppAudioIntent(
+    appID: appID,
+    desiredVolume: cachedApp.desiredVolume,
+    isMuted: false,
+    volumeBoost: cachedApp.volumeBoost
+  )
+  let fixture = makeTransactionFixture(
+    apps: [cachedApp],
+    device: transactionTestDevice(),
+    intent: durable
+  )
+
+  await fixture.store.applyAutomaticConferencingTransition(
+    isConferencingActive: false
+  )
+
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(fixture.store.preferences.appAudioIntents[appID]?.isMuted == false)
+  #expect(fixture.store.session.apps.first?.muteSource == .autoConferencing)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func disabledURLAutomationNeverInvokesTheAppStoreParser() async {
+  let fixture = makeTransactionFixture(
+    apps: [transactionTestApp(id: "automation.disabled")],
+    device: transactionTestDevice()
+  )
+  fixture.store.preferences.enableURLScheme = false
+  let initialToastCount = fixture.store.toasts.count
+
+  fixture.store.handleURLScheme(URL(string: "waves://refresh")!)
+
+  #expect(fixture.store.automationParserInvocationCount == 0)
+  #expect(fixture.store.toasts.count == initialToastCount)
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
 private func assertBaselineState(
   _ store: AppStore,
   app: AudioApp,
@@ -1184,6 +1269,66 @@ private func waitForRefresh(_ store: AppStore) async {
 }
 
 @MainActor
+@Test func matchingManualDeviceEventConsumesDuplicateToastSuppression() async {
+  let clock = CoordinatorTestClock()
+  let fixture = makeTransactionFixture(
+    apps: [transactionTestApp()],
+    device: transactionTestDevice(),
+    deviceChangeSuppressionSleep: clock.sleep
+  )
+  let selected = AudioDevice(id: "device.selected", name: "Selected", kind: .virtual)
+
+  fixture.store.selectOutputDevice(selected)
+  await waitUntil { await fixture.backend.currentDeviceID() == selected.id }
+  await clock.waitForSleeper()
+  fixture.store.handleDeviceChange()
+  await waitUntil {
+    fixture.store.currentDeviceID == selected.id
+      && fixture.store.lifecycleSnapshot.ownedOperationCount == 0
+  }
+  clock.resumeAll()
+  await waitUntil { fixture.store.lifecycleSnapshot.deviceSuppression == .idle }
+
+  #expect(fixture.store.toasts.count { $0.title == "Output switched" } == 1)
+  #expect(fixture.store.toasts.count { $0.title == "Output device changed" } == 0)
+  #expect(fixture.store.lifecycleSnapshot.deviceSuppression == .idle)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func missingManualDeviceEventExpiresBeforeLaterLegitimateChange() async {
+  let clock = CoordinatorTestClock()
+  let fixture = makeTransactionFixture(
+    apps: [transactionTestApp()],
+    device: transactionTestDevice(),
+    deviceChangeSuppressionSleep: clock.sleep
+  )
+  let selected = AudioDevice(id: "device.selected", name: "Selected", kind: .virtual)
+  let external = AudioDevice(id: "device.external", name: "External", kind: .bluetooth)
+
+  fixture.store.selectOutputDevice(selected)
+  await waitUntil { await fixture.backend.currentDeviceID() == selected.id }
+  await clock.waitForSleeper()
+  clock.resumeAll()
+  await waitUntil { fixture.store.lifecycleSnapshot.deviceSuppression == .idle }
+
+  await fixture.backend.replaceCurrentDevice(external)
+  fixture.store.handleDeviceChange()
+  await waitUntil {
+    fixture.store.currentDeviceID == external.id
+      && fixture.store.lifecycleSnapshot.ownedOperationCount == 0
+  }
+
+  #expect(fixture.store.toasts.count { $0.title == "Output device changed" } == 1)
+  #expect(fixture.store.toasts.first { $0.title == "Output device changed" }?.detail == external.name)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
 private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async {
   for _ in 0..<10_000 {
     if await predicate() { return }
@@ -1237,7 +1382,10 @@ private func makeTransactionFixture(
   suspendFirstProfile: Bool = false,
   resultGenerationOffset: UInt64 = 0,
   refreshApps: [AudioApp]? = nil,
-  initialStartupState: AppStartupState = .running
+  initialStartupState: AppStartupState = .running,
+  deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
+    duration in try await Task.sleep(for: duration)
+  }
 ) -> TransactionFixture {
   let snapshot = transactionSnapshot(apps: apps, device: device)
   let refreshSnapshot = refreshApps.map { transactionSnapshot(apps: $0, device: device) }
@@ -1284,7 +1432,8 @@ private func makeTransactionFixture(
     sessionStore: sessionStore,
     loginItemService: TransactionLoginItemService(),
     deviceVolumePresetsStore: presetsStore,
-    initialStartupState: initialStartupState
+    initialStartupState: initialStartupState,
+    deviceChangeSuppressionSleep: deviceChangeSuppressionSleep
   )
   return TransactionFixture(
     store: store,
@@ -1368,6 +1517,10 @@ private actor TransactionBackend: AudioControlBackend {
   func recordedProfileCalls() -> [(profile: Profile, generation: UInt64)] { profileCalls }
   func completedIntentCount() -> Int { completedIntents }
   func diagnosticsCallCount() -> Int { diagnosticsCalls }
+  func currentDeviceID() -> String? { snapshot.currentDevice?.id }
+  func replaceCurrentDevice(_ device: AudioDevice) {
+    snapshot.currentDevice = device
+  }
 
   func waitUntilFirstIntentIsSuspended() async {
     if firstIntentIsSuspended { return }
@@ -1626,7 +1779,9 @@ private actor TransactionBackend: AudioControlBackend {
   func availableOutputDevices() async -> [AudioDevice] {
     snapshot.currentDevice.map { [$0] } ?? []
   }
-  func setDefaultOutputDevice(uid: String) async throws {}
+  func setDefaultOutputDevice(uid: String) async throws {
+    snapshot.currentDevice = AudioDevice(id: uid, name: "Selected", kind: .virtual)
+  }
   func setOutputDevice(uid: String?, forAppID appID: String) async throws {}
   func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
   func audioLevels() async -> [String: AudioLevels] { [:] }

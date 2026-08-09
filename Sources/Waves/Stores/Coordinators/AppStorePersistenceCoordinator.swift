@@ -4,6 +4,7 @@ import WavesAudioCore
 struct AppStorePersistenceFailure: Equatable, Sendable {
   let store: PersistenceStoreIdentifier
   let message: String
+  let errorDescription: String
   let shouldWarn: Bool
 }
 
@@ -224,6 +225,7 @@ final class AppStorePersistenceCoordinator {
       AppStorePersistenceFailure(
         store: store,
         message: message,
+        errorDescription: error.localizedDescription,
         shouldWarn: shouldWarn
       ))
   }

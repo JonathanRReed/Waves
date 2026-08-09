@@ -19,8 +19,8 @@ final class DeviceChangeSuppressionCoordinator {
 
   private let interval: Duration
   private let sleep: Sleep
-  private var expiryTask: Task<Void, Never>?
-  private var token: UUID?
+  private var tasks: [UUID: Task<Void, Never>] = [:]
+  private var activeToken: UUID?
   private(set) var pendingDeviceID: String?
   private var isShutDown = false
 
@@ -32,7 +32,7 @@ final class DeviceChangeSuppressionCoordinator {
     self.sleep = sleep
   }
 
-  var trackedTaskCount: Int { expiryTask == nil ? 0 : 1 }
+  var trackedTaskCount: Int { tasks.count }
 
   var lifecycleSnapshot: DeviceChangeSuppressionLifecycleSnapshot {
     DeviceChangeSuppressionLifecycleSnapshot(
@@ -43,24 +43,33 @@ final class DeviceChangeSuppressionCoordinator {
 
   func begin(deviceID: String) {
     guard !isShutDown else { return }
-    expiryTask?.cancel()
+    cancelActive()
     let nextToken = UUID()
-    token = nextToken
+    activeToken = nextToken
     pendingDeviceID = deviceID
     let sleep = sleep
     let interval = interval
-    expiryTask = Task { @MainActor [weak self] in
-      guard !Task.isCancelled else { return }
+    let task = Task { @MainActor [weak self] in
+      guard let self else { return }
+      guard !Task.isCancelled else {
+        self.finishTask(token: nextToken)
+        return
+      }
       do {
         try await sleep(interval)
       } catch {
+        self.finishTask(token: nextToken)
         return
       }
-      guard let self, !Task.isCancelled, self.token == nextToken else { return }
+      guard !Task.isCancelled, self.activeToken == nextToken else {
+        self.finishTask(token: nextToken)
+        return
+      }
       self.pendingDeviceID = nil
-      self.token = nil
-      self.expiryTask = nil
+      self.activeToken = nil
+      self.finishTask(token: nextToken)
     }
+    tasks[nextToken] = task
   }
 
   @discardableResult
@@ -72,10 +81,7 @@ final class DeviceChangeSuppressionCoordinator {
   }
 
   func clear() {
-    expiryTask?.cancel()
-    expiryTask = nil
-    token = nil
-    pendingDeviceID = nil
+    cancelActive()
   }
 
   func clear(ifMatching deviceID: String) {
@@ -84,18 +90,33 @@ final class DeviceChangeSuppressionCoordinator {
   }
 
   func drain() async {
-    await expiryTask?.value
+    while !tasks.isEmpty {
+      for task in tasks.values { await task.value }
+    }
   }
 
-  func beginShutdown() -> Task<Void, Never>? {
+  func beginShutdown() -> [Task<Void, Never>] {
     isShutDown = true
-    let task = expiryTask
     clear()
-    return task
+    return Array(tasks.values)
   }
 
   func shutdown() async {
-    let task = beginShutdown()
-    await task?.value
+    let tasks = beginShutdown()
+    for task in tasks { await task.value }
+  }
+
+  private func cancelActive() {
+    guard let activeToken else {
+      pendingDeviceID = nil
+      return
+    }
+    tasks[activeToken]?.cancel()
+    self.activeToken = nil
+    pendingDeviceID = nil
+  }
+
+  private func finishTask(token: UUID) {
+    tasks.removeValue(forKey: token)
   }
 }

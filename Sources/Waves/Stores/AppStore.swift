@@ -3215,7 +3215,7 @@ final class AppStore {
     let persistenceTasks = persistenceCoordinator.beginShutdown()
     let intentTasks = appIntentCoordinator.shutdown()
     let adaptiveTask = adaptiveMixCoordinator.shutdown()
-    let suppressionTask = deviceChangeSuppression.beginShutdown()
+    let suppressionTasks = deviceChangeSuppression.beginShutdown()
     automationParser.shutdown()
     let appTransactions = intentTasks.appTransactions
     var mutationTasks = [
@@ -3226,7 +3226,7 @@ final class AppStore {
       levelPollTask,
     ].compactMap { $0 }
     if let adaptiveTask { mutationTasks.append(adaptiveTask) }
-    if let suppressionTask { mutationTasks.append(suppressionTask) }
+    mutationTasks.append(contentsOf: suppressionTasks)
     mutationTasks.append(contentsOf: intentTasks.mutations)
     mutationTasks.append(contentsOf: ownedOperationTasks.values)
     mutationTasks.append(contentsOf: toastDismissals.values)
@@ -5058,7 +5058,7 @@ final class AppStore {
     guard failure.shouldWarn else { return }
     showToast(
       title: "Changes may not be saved",
-      detail: "Waves couldn't save \(failure.store.displayName). \(failure.message)",
+      detail: "Waves couldn't save \(failure.store.displayName). \(failure.errorDescription)",
       kind: .warning
     )
   }

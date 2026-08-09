@@ -333,11 +333,17 @@ import WavesAudioCore
   #expect(store.persistenceFailureCount == 1)
   #expect(store.lastPersistenceError?.contains("settings") == true)
   #expect(store.trackedPersistenceTaskCount == 0)
-  #expect(store.toasts.contains { $0.title == "Changes may not be saved" })
+  #expect(
+    store.toasts.contains {
+      $0.title == "Changes may not be saved"
+        && $0.detail == "Waves couldn't save settings. Injected write failure"
+    })
 }
 
-private enum AppStorePersistenceTestError: Error {
+private enum AppStorePersistenceTestError: LocalizedError {
   case writeFailed
+
+  var errorDescription: String? { "Injected write failure" }
 }
 
 private actor LegacyRecordingBackend: AudioControlBackend {
