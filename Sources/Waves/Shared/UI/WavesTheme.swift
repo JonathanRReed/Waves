@@ -140,6 +140,13 @@ struct WavesTheme {
     increasedContrast ? strongStroke : stroke
   }
 
+  func fieldFill(reduceTransparency: Bool, increasedContrast: Bool) -> Color {
+    if reduceTransparency || increasedContrast {
+      return Color(nsColor: .textBackgroundColor)
+    }
+    return contentFill
+  }
+
   private struct Colors {
     let background: [Color]
     let opaqueBackground: Color

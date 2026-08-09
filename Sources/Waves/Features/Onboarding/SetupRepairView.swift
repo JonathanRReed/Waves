@@ -12,40 +12,40 @@ struct SetupRepairView: View {
         header
 
         VStack(spacing: 12) {
-          repairRow(
+          ReadinessChecklistRow(
             title: "Managed audio support",
             detail: audioSupportDetail,
-            state: audioSupportState,
+            status: audioSupportState,
             actionTitle: audioSupportState == .ready ? "Re-check" : nil,
             action: { store.refresh(announce: false) }
           )
-          repairRow(
+          ReadinessChecklistRow(
             title: "Audio capture permission",
             detail: captureDetail,
-            state: captureState,
+            status: captureState,
             actionTitle: captureActionTitle,
             action: repairCapturePermission
           )
-          repairRow(
+          ReadinessChecklistRow(
             title: "Output device",
             detail: outputDetail,
-            state: store.onboarding.outputDeviceVisible ? .ready : .attention,
+            status: store.onboarding.outputDeviceVisible ? .ready : .attention,
             actionTitle: store.onboarding.outputDeviceVisible ? nil : "Open Sound Settings",
             action: { SystemSettingsService().open(.soundOutput) }
           )
-          repairRow(
+          ReadinessChecklistRow(
             title: "Managed routes",
             detail: routeDetail,
-            state: store.onboarding.routeHealthReady ? .ready : .attention,
+            status: store.onboarding.routeHealthReady ? .ready : .attention,
             actionTitle: store.onboarding.routeHealthReady ? "Re-test" : "Recover Routes",
             action: { store.recoverRoutes() }
           )
 
           if store.onboarding.launchAtLoginRequiresApproval {
-            repairRow(
+            ReadinessChecklistRow(
               title: "Launch at login",
               detail: "macOS is waiting for your approval in General > Login Items.",
-              state: .attention,
+              status: .attention,
               actionTitle: "Open Login Items",
               action: { store.openLoginItemsSettings() }
             )
@@ -105,52 +105,13 @@ struct SetupRepairView: View {
     }
   }
 
-  @ViewBuilder
-  private func repairRow(
-    title: String,
-    detail: String,
-    state: RepairState,
-    actionTitle: String?,
-    action: @escaping () -> Void
-  ) -> some View {
-    HStack(alignment: .top, spacing: 12) {
-      Image(systemName: state.symbol)
-        .font(.title3)
-        .foregroundStyle(state.color)
-        .frame(width: 24)
-        .accessibilityHidden(true)
-
-      VStack(alignment: .leading, spacing: 4) {
-        Text(title)
-          .font(.headline)
-        Text(detail)
-          .font(.callout)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-      }
-
-      Spacer(minLength: 12)
-
-      if let actionTitle {
-        Button(actionTitle, action: action)
-          .buttonStyle(.bordered)
-          .controlSize(.small)
-      }
-    }
-    .padding(14)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .wavesCard(cornerRadius: 12)
-    .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(state.accessibilityLabel): \(title). \(detail)")
-  }
-
   private var isUnsupportedOS: Bool {
     if #available(macOS 14.2, *) { return false }
     return true
   }
 
-  private var audioSupportState: RepairState {
-    if isUnsupportedOS { return .blocked }
+  private var audioSupportState: ReadinessStatus {
+    if isUnsupportedOS { return .unavailable }
     return store.onboarding.audioComponentInstalled ? .ready : .attention
   }
 
@@ -163,10 +124,10 @@ struct SetupRepairView: View {
       : "Managed audio support has not been confirmed. Refresh after Waves finishes starting."
   }
 
-  private var captureState: RepairState {
+  private var captureState: ReadinessStatus {
     switch store.onboarding.captureAuthorization {
     case .authorized: .ready
-    case .unsupported: .blocked
+    case .unsupported: .unavailable
     case .notGranted, .undetermined, .probeFailed, nil: .attention
     }
   }
@@ -220,35 +181,5 @@ struct SetupRepairView: View {
   private func refreshIfPossible() {
     guard store.preferences.hasCompletedPrivacySetup, store.isAudioRunning else { return }
     store.refresh(announce: false)
-  }
-}
-
-private enum RepairState {
-  case ready
-  case attention
-  case blocked
-
-  var symbol: String {
-    switch self {
-    case .ready: "checkmark.circle.fill"
-    case .attention: "exclamationmark.triangle.fill"
-    case .blocked: "xmark.octagon.fill"
-    }
-  }
-
-  var color: Color {
-    switch self {
-    case .ready: WavesDesign.success
-    case .attention: WavesDesign.warning
-    case .blocked: WavesDesign.error
-    }
-  }
-
-  var accessibilityLabel: String {
-    switch self {
-    case .ready: "Ready"
-    case .attention: "Needs attention"
-    case .blocked: "Unavailable"
-    }
   }
 }

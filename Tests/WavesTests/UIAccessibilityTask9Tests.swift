@@ -7,6 +7,40 @@ import WavesAudioCore
 @testable import Waves
 
 @MainActor
+@Test func settingsPanesConstructFromFocusedFilesAndUseStableOrder() {
+  #expect(
+    SettingsPane.allCases
+      == [.general, .mixer, .profiles, .control, .setup, .diagnostics, .help]
+  )
+  _ = GeneralSettingsView()
+  _ = MixerSettingsView()
+  _ = ProfileSettingsView()
+  _ = ControlSettingsView(draft: ControlSettingsDraft())
+  _ = DiagnosticsSettingsView(onOpenSetup: {})
+}
+
+@MainActor
+@Test func sharedPreferenceBindingPersistsExactlyOncePerAcceptedMutation() {
+  var value = false
+  var persistenceCount = 0
+  let binding = PreferenceBinding.make(
+    get: { value },
+    set: { value = $0 },
+    persist: { persistenceCount += 1 }
+  )
+
+  binding.wrappedValue = true
+  #expect(value)
+  #expect(persistenceCount == 1)
+}
+
+@Test func readinessStatusVocabularyIncludesReadyAttentionAndUnavailable() {
+  #expect(ReadinessStatus.allCases == [.ready, .attention, .unavailable])
+  #expect(Set(ReadinessStatus.allCases.map(\.statusWord)).count == 3)
+  #expect(Set(ReadinessStatus.allCases.map(\.symbolName)).count == 3)
+}
+
+@MainActor
 @Test func profileSaveReturnsEveryValidationResultWithoutMutatingOnFailure() async throws {
   let store = await makeControlStoreFixture()
   let appID = try #require(store.session.apps.first?.logicalID)
@@ -113,6 +147,19 @@ import WavesAudioCore
   #expect(draft.recordingAction == second)
   #expect(draft.finishRecording(second))
   #expect(draft.finishRecording(second) == false)
+}
+
+@MainActor
+@Test func staleRecorderLeaseCannotFinishARecreatedRecorderForTheSameAction() {
+  let draft = ControlSettingsDraft()
+  let first = draft.acquireRecording(.frontmostMute)
+  let second = draft.acquireRecording(.frontmostMute)
+
+  #expect(first.shouldSuspend)
+  #expect(second.shouldSuspend == false)
+  #expect(draft.finishRecording(first.lease) == false)
+  #expect(draft.recordingAction == .frontmostMute)
+  #expect(draft.finishRecording(second.lease))
 }
 
 @Test func shortcutRecorderMotionContractDisablesChangedMotionUnderReduceMotion() {

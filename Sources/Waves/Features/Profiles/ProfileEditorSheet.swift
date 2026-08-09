@@ -18,6 +18,7 @@ struct ProfileEditorSheet: View {
   @Environment(\.wavesTheme) private var theme
   @Environment(\.dismiss) private var dismiss
   @Environment(\.colorSchemeContrast) private var contrast
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
   let context: ProfileEditorContext
 
@@ -107,7 +108,13 @@ struct ProfileEditorSheet: View {
       TextField("e.g. Work, Gaming, Focus", text: $name)
         .textFieldStyle(.plain)
         .padding(8)
-        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(
+          theme.fieldFill(
+            reduceTransparency: reduceTransparency,
+            increasedContrast: contrast == .increased
+          ),
+          in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
         .overlay(
           RoundedRectangle(cornerRadius: 8, style: .continuous)
             .strokeBorder(nameFieldStroke)

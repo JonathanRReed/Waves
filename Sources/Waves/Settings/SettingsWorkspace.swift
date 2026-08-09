@@ -1,6 +1,16 @@
 import AppKit
 import Observation
 
+struct ControlRecordingLease: Equatable, Sendable {
+  fileprivate let id: UUID
+  let action: HotkeyAction
+}
+
+struct ControlRecordingAcquisition: Equatable, Sendable {
+  let lease: ControlRecordingLease
+  let shouldSuspend: Bool
+}
+
 @Observable
 @MainActor
 final class SettingsWorkspace {
@@ -17,6 +27,7 @@ final class SettingsWorkspace {
 final class ControlSettingsDraft {
   private(set) var pendingAppIDs: [String] = []
   private(set) var recordingAction: HotkeyAction?
+  private var recordingLease: ControlRecordingLease?
   var liveModifiers: NSEvent.ModifierFlags = []
   private var preservesRecordingDuringPaneReplacement = false
 
@@ -31,10 +42,18 @@ final class ControlSettingsDraft {
 
   @discardableResult
   func beginRecording(_ action: HotkeyAction) -> Bool {
-    let wasInactive = recordingAction == nil
+    acquireRecording(action).shouldSuspend
+  }
+
+  func acquireRecording(_ action: HotkeyAction) -> ControlRecordingAcquisition {
+    let acquisition = ControlRecordingAcquisition(
+      lease: ControlRecordingLease(id: UUID(), action: action),
+      shouldSuspend: recordingLease == nil
+    )
+    recordingLease = acquisition.lease
     recordingAction = action
     liveModifiers = []
-    return wasInactive
+    return acquisition
   }
 
   func beginPaneReplacement() {
@@ -49,9 +68,25 @@ final class ControlSettingsDraft {
     preservesRecordingDuringPaneReplacement && recordingAction == action
   }
 
+  func activeLease(for action: HotkeyAction) -> ControlRecordingLease? {
+    guard recordingAction == action else { return nil }
+    return recordingLease
+  }
+
   @discardableResult
   func finishRecording(_ action: HotkeyAction) -> Bool {
     guard recordingAction == action else { return false }
+    recordingLease = nil
+    recordingAction = nil
+    liveModifiers = []
+    preservesRecordingDuringPaneReplacement = false
+    return true
+  }
+
+  @discardableResult
+  func finishRecording(_ lease: ControlRecordingLease) -> Bool {
+    guard recordingLease == lease else { return false }
+    recordingLease = nil
     recordingAction = nil
     liveModifiers = []
     preservesRecordingDuringPaneReplacement = false
@@ -61,6 +96,7 @@ final class ControlSettingsDraft {
   @discardableResult
   func cancelRecording() -> Bool {
     guard recordingAction != nil else { return false }
+    recordingLease = nil
     recordingAction = nil
     liveModifiers = []
     preservesRecordingDuringPaneReplacement = false

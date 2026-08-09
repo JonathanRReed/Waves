@@ -136,31 +136,31 @@ struct OnboardingView: View {
       )
 
       VStack(spacing: 12) {
-        readinessRow(
-          "Managed audio support",
+        ReadinessChecklistRow(
+          title: "Managed audio support",
           detail: audioSupportDetail,
-          isReady: store.onboarding.audioComponentInstalled,
+          status: audioSupportReadiness,
           actionTitle: store.onboarding.audioComponentInstalled ? nil : "Re-check",
           action: { store.refresh(announce: false) }
         )
-        readinessRow(
-          "Audio capture permission",
+        ReadinessChecklistRow(
+          title: "Audio capture permission",
           detail: captureDetail,
-          isReady: captureIsAuthorized,
+          status: captureReadiness,
           actionTitle: captureActionTitle,
           action: repairCapturePermission
         )
-        readinessRow(
-          "Output device",
+        ReadinessChecklistRow(
+          title: "Output device",
           detail: outputDetail,
-          isReady: store.onboarding.outputDeviceVisible,
+          status: store.onboarding.outputDeviceVisible ? .ready : .attention,
           actionTitle: store.onboarding.outputDeviceVisible ? nil : "Open Sound Settings",
           action: { SystemSettingsService().open(.soundOutput) }
         )
-        readinessRow(
-          "Managed routes",
+        ReadinessChecklistRow(
+          title: "Managed routes",
           detail: routeDetail,
-          isReady: store.onboarding.routeHealthReady,
+          status: store.onboarding.routeHealthReady ? .ready : .attention,
           actionTitle: store.onboarding.routeHealthReady ? nil : "Recover Routes",
           action: { store.recoverRoutes() }
         )
@@ -197,7 +197,7 @@ struct OnboardingView: View {
           Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
             GridRow {
               Text("Appearance")
-              Picker("Appearance", selection: preferenceBinding(\.appearance)) {
+              Picker("Appearance", selection: PreferenceBinding.durable(store: store, \.appearance)) {
                 ForEach(WavesAppearance.allCases) { value in
                   Text(value.displayName).tag(value)
                 }
@@ -206,7 +206,7 @@ struct OnboardingView: View {
             }
             GridRow {
               Text("Palette")
-              Picker("Palette", selection: preferenceBinding(\.palette)) {
+              Picker("Palette", selection: PreferenceBinding.durable(store: store, \.palette)) {
                 ForEach(WavesPalette.allCases) { value in
                   Text(value.displayName).tag(value)
                 }
@@ -226,7 +226,10 @@ struct OnboardingView: View {
                 get: { store.launchAtLoginEnabled },
                 set: { store.launchAtLoginEnabled = $0 }
               ))
-            Toggle("Show recent apps", isOn: preferenceBinding(\.showRecentApps))
+            Toggle(
+              "Show recent apps",
+              isOn: PreferenceBinding.durable(store: store, \.showRecentApps)
+            )
             Toggle(
               "Enable global keyboard shortcuts",
               isOn: Binding(
@@ -378,42 +381,6 @@ struct OnboardingView: View {
     .accessibilityElement(children: .combine)
   }
 
-  private func readinessRow(
-    _ title: String,
-    detail: String,
-    isReady: Bool,
-    actionTitle: String?,
-    action: @escaping () -> Void
-  ) -> some View {
-    HStack(alignment: .top, spacing: 12) {
-      Image(systemName: isReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-        .foregroundStyle(isReady ? theme.success : theme.warning)
-        .font(.title3)
-        .frame(width: 24)
-        .accessibilityHidden(true)
-
-      VStack(alignment: .leading, spacing: 3) {
-        Text(title).font(.headline)
-        Text(detail)
-          .font(.callout)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-      }
-
-      Spacer(minLength: 12)
-
-      if let actionTitle {
-        Button(actionTitle, action: action)
-          .buttonStyle(.bordered)
-          .controlSize(.small)
-      }
-    }
-    .padding(14)
-    .wavesCard(cornerRadius: 12)
-    .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(isReady ? "Ready" : "Needs action"): \(title). \(detail)")
-  }
-
   private func summaryRow(_ title: String, value: String) -> some View {
     HStack {
       Text(title).foregroundStyle(.secondary)
@@ -426,6 +393,21 @@ struct OnboardingView: View {
 
   private var captureIsAuthorized: Bool {
     store.onboarding.captureAuthorization == .authorized
+  }
+
+  private var audioSupportReadiness: ReadinessStatus {
+    if #available(macOS 14.2, *) {
+      return store.onboarding.audioComponentInstalled ? .ready : .attention
+    }
+    return .unavailable
+  }
+
+  private var captureReadiness: ReadinessStatus {
+    switch store.onboarding.captureAuthorization {
+    case .authorized: .ready
+    case .unsupported: .unavailable
+    case .notGranted, .undetermined, .probeFailed, nil: .attention
+    }
   }
 
   private var readinessIsComplete: Bool {
@@ -518,18 +500,6 @@ struct OnboardingView: View {
     case .smartHybrid:
       "Recommended. The front app gets a gentle boost in priority without overriding your guardrails."
     }
-  }
-
-  private func preferenceBinding<Value>(_ keyPath: WritableKeyPath<UserPreferences, Value>)
-    -> Binding<Value>
-  {
-    Binding(
-      get: { store.preferences[keyPath: keyPath] },
-      set: {
-        store.preferences[keyPath: keyPath] = $0
-        store.persistPreferences()
-      }
-    )
   }
 
   private func refreshLiveStatus() {

@@ -38,6 +38,7 @@ struct ShortcutRecorder: View {
   @State private var localIsRecording = false
   @State private var localLiveModifiers: NSEvent.ModifierFlags = []
   @State private var message: String?
+  @State private var recordingLease: ControlRecordingLease?
 
   init(
     action: HotkeyAction? = nil,
@@ -157,7 +158,9 @@ struct ShortcutRecorder: View {
     message = nil
     let shouldSuspend: Bool
     if let draft, let action {
-      shouldSuspend = draft.beginRecording(action)
+      let acquisition = draft.acquireRecording(action)
+      recordingLease = acquisition.lease
+      shouldSuspend = acquisition.shouldSuspend
     } else {
       localLiveModifiers = []
       localIsRecording = true
@@ -176,8 +179,11 @@ struct ShortcutRecorder: View {
   /// and nothing on screen to explain it.
   private func stop() {
     let wasRecording: Bool
-    if let draft, let action {
-      wasRecording = draft.finishRecording(action)
+    if let draft, let action,
+      let lease = recordingLease ?? draft.activeLease(for: action)
+    {
+      wasRecording = draft.finishRecording(lease)
+      if wasRecording { self.recordingLease = nil }
     } else {
       wasRecording = localIsRecording
       localIsRecording = false
