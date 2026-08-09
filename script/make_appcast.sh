@@ -34,12 +34,24 @@ if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; th
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
+if [ ! -f "$RELEASE_TOOL" ]; then
+  echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
+  exit 1
+fi
+require_command ruby "to read canonical release metadata"
+CANONICAL_VERSION="$(ruby "$RELEASE_TOOL" metadata version)"
+CANONICAL_BUILD="$(ruby "$RELEASE_TOOL" metadata build)"
+MIN_SYSTEM_VERSION="$(ruby "$RELEASE_TOOL" metadata minimumMacOSVersion)"
+if [ "$VERSION" != "$CANONICAL_VERSION" ]; then
+  echo "Error: VERSION $VERSION does not match canonical release version $CANONICAL_VERSION." >&2
+  exit 2
+fi
 DMG_PATH="${2:-$ROOT_DIR/dist/Waves.dmg}"
 OUTPUT_PATH="${3:-$ROOT_DIR/dist/appcast.xml}"
 CHANGELOG_PATH="$ROOT_DIR/CHANGELOG.md"
 SIGN_UPDATE="${SIGN_UPDATE:-}"
 EXPECTED_SHA256="${EXPECTED_SHA256:-}"
-MIN_SYSTEM_VERSION="14.2"
 DOWNLOAD_URL="https://github.com/JonathanRReed/Waves/releases/download/v$VERSION/Waves.dmg"
 
 require_command awk "to extract and format release notes"
@@ -216,6 +228,10 @@ if [ "$SHORT_VERSION" != "$VERSION" ]; then
 fi
 if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
   echo "Error: $DMG_PATH contains invalid build number $BUILD_NUMBER." >&2
+  exit 1
+fi
+if [ "$BUILD_NUMBER" != "$CANONICAL_BUILD" ]; then
+  echo "Error: $DMG_PATH contains build $BUILD_NUMBER; canonical release build is $CANONICAL_BUILD." >&2
   exit 1
 fi
 hdiutil detach "$MOUNT_POINT" -quiet

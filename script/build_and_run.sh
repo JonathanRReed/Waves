@@ -5,9 +5,22 @@ MODE="${1:-run}"
 APP_NAME="Waves"
 BUNDLE_ID="${BUNDLE_ID:-com.jonathanreed.Waves}"
 LOG_SUBSYSTEM="com.jonathanreed.Waves"
-MIN_SYSTEM_VERSION="14.2"
-APP_VERSION="${APP_VERSION:-1.4.4}"
-APP_BUILD="${APP_BUILD:-12}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
+if [ ! -f "$RELEASE_TOOL" ]; then
+  echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
+  exit 1
+fi
+if ! command -v ruby >/dev/null 2>&1; then
+  echo "Error: ruby is required to read canonical release metadata." >&2
+  exit 1
+fi
+CANONICAL_APP_VERSION="$(ruby "$RELEASE_TOOL" metadata version)"
+CANONICAL_APP_BUILD="$(ruby "$RELEASE_TOOL" metadata build)"
+CANONICAL_MIN_SYSTEM_VERSION="$(ruby "$RELEASE_TOOL" metadata minimumMacOSVersion)"
+MIN_SYSTEM_VERSION="${MIN_SYSTEM_VERSION:-$CANONICAL_MIN_SYSTEM_VERSION}"
+APP_VERSION="${APP_VERSION:-$CANONICAL_APP_VERSION}"
+APP_BUILD="${APP_BUILD:-$CANONICAL_APP_BUILD}"
 # Baked into Info.plist so a diagnostic or crash report can name the exact
 # commit a binary came from. WAV-004's lesson: version and build alone could not
 # distinguish two different binaries once a rebuild reused 1.3.0 (6).
@@ -79,6 +92,25 @@ is_distribution_build_mode() {
     || [ "$MODE" = "notarize" ]
 }
 
+requires_canonical_release_metadata() {
+  is_distribution_build_mode || is_existing_package_mode
+}
+
+if requires_canonical_release_metadata; then
+  if [ "$APP_VERSION" != "$CANONICAL_APP_VERSION" ]; then
+    echo "Error: Release package version $APP_VERSION does not match canonical version $CANONICAL_APP_VERSION." >&2
+    exit 2
+  fi
+  if [ "$APP_BUILD" != "$CANONICAL_APP_BUILD" ]; then
+    echo "Error: Release package build $APP_BUILD does not match canonical build $CANONICAL_APP_BUILD." >&2
+    exit 2
+  fi
+  if [ "$MIN_SYSTEM_VERSION" != "$CANONICAL_MIN_SYSTEM_VERSION" ]; then
+    echo "Error: Release deployment floor $MIN_SYSTEM_VERSION does not match canonical floor $CANONICAL_MIN_SYSTEM_VERSION." >&2
+    exit 2
+  fi
+fi
+
 require_command() {
   local command_name="$1"
   local purpose="$2"
@@ -125,7 +157,6 @@ if ! is_existing_package_mode; then
   require_command swift "to build Waves"
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
