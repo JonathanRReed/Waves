@@ -42,11 +42,12 @@ file.
 
 ## Protected command environment
 
-Execute `script/release-gate.sh`, `script/build_and_run.sh`, and
-`script/make_appcast.sh` directly as shown in this checklist. Do not invoke or
-source them through another shell. Their `/bin/bash -p` shebang must run so Bash
-suppresses `BASH_ENV`, imported shell functions, and inherited shell-option
-startup behavior before the first command.
+Execute `script/release-gate.sh`, `script/build_and_run.sh`,
+`script/make_appcast.sh`, `script/generate-release-evidence.sh`, and
+`script/generate-release-tag-envelope.sh` directly as shown in this checklist.
+Do not invoke or source them through another shell. Their `/bin/bash -p`
+shebang must run so Bash suppresses `BASH_ENV`, imported shell functions, and
+inherited shell-option startup behavior before the first command.
 
 Each entry point then removes every inherited exported variable with Bash
 builtins before it launches Ruby, Git, Swift, or an Apple signing tool. It
@@ -251,7 +252,7 @@ commands still do not create the tag:
 ./script/generate-release-evidence.sh publication \
   dist/release-evidence-input.json \
   dist/release-evidence.publication.json
-ruby script/release_tool.rb tag-envelope \
+./script/generate-release-tag-envelope.sh \
   dist/release-evidence.publication.json \
   dist/release-tag-annotation.txt
 ```

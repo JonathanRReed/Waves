@@ -5,7 +5,7 @@ unset CDPATH WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
 case "${BASH_SOURCE[0]}" in
   */*) ;;
   *)
-    printf 'Error: generate-release-evidence.sh must be executed through a direct path.\n' >&2
+    printf 'Error: generate-release-tag-envelope.sh must be executed through a direct path.\n' >&2
     exit 2
     ;;
 esac
@@ -31,22 +31,10 @@ PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 set -euo pipefail
 
-if [ "$#" -ne 3 ]; then
-  printf 'usage: %s candidate|publication INPUT_JSON OUTPUT_JSON\n' "$0" >&2
+if [ "$#" -ne 2 ]; then
+  printf 'usage: %s MANIFEST_JSON OUTPUT_TEXT\n' "$0" >&2
   exit 2
 fi
 
-PROFILE="$1"
-INPUT_PATH="$2"
-OUTPUT_PATH="$3"
-
-case "$PROFILE" in
-  candidate|publication) ;;
-  *)
-    printf 'Error: Evidence profile must be candidate or publication.\n' >&2
-    exit 2
-    ;;
-esac
-
 /usr/bin/ruby --disable-gems "$ROOT_DIR/script/release_tool.rb" \
-  evidence seal "$PROFILE" "$INPUT_PATH" "$OUTPUT_PATH"
+  tag-envelope "$1" "$2"

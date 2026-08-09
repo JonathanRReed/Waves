@@ -460,6 +460,113 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_task12d_evidence_authoring_entrypoints_suppress_bash_env_before_the_first_command
+    with_startup_attack_fixture do |_directory, marker, bash_hook, _ruby_hook|
+      failures = evidence_authoring_entrypoints.each_with_object([]) do |(entrypoint, _arguments), result|
+        unless File.executable?(entrypoint)
+          result << "missing protected entrypoint #{File.basename(entrypoint)}"
+          next
+        end
+
+        FileUtils.rm_f(marker)
+        _stdout, _stderr, status = Open3.capture3(
+          {
+            "BASH_ENV" => bash_hook,
+            "WAVES_ATTACK_MARKER" => marker,
+          },
+          entrypoint
+        )
+        result << "#{File.basename(entrypoint)} accepted invalid arguments" if status.success?
+        result << "#{File.basename(entrypoint)} executed BASH_ENV" if File.exist?(marker)
+      end
+
+      assert_empty failures, failures.join(", ")
+    end
+  end
+
+  def test_task12d_evidence_authoring_entrypoints_clear_ruby_startup_injection
+    with_startup_attack_fixture do |directory, marker, _bash_hook, ruby_hook|
+      failures = evidence_authoring_entrypoints(directory).each_with_object([]) do |(entrypoint, arguments), result|
+        unless File.executable?(entrypoint)
+          result << "missing protected entrypoint #{File.basename(entrypoint)}"
+          next
+        end
+
+        FileUtils.rm_f(marker)
+        _stdout, _stderr, _status = Open3.capture3(
+          {
+            "RUBYOPT" => "-rwaves_startup_attack",
+            "RUBYLIB" => directory,
+            "WAVES_ATTACK_MARKER" => marker,
+          },
+          entrypoint,
+          *arguments
+        )
+        result << "#{File.basename(entrypoint)} executed RUBYOPT/RUBYLIB" if File.exist?(marker)
+      end
+
+      assert_empty failures, failures.join(", ")
+    end
+  end
+
+  def test_task12d_evidence_authoring_entrypoints_do_not_select_bash_or_ruby_from_caller_path
+    Dir.mktmpdir("waves-authoring-path") do |directory|
+      marker = File.join(directory, "path-command-ran")
+      %w[bash ruby].each do |name|
+        write_executable(File.join(directory, name), <<~SHELL)
+          #!/bin/sh
+          printf '#{name} ran\n' >> #{Shellwords.escape(marker)}
+          exit 93
+        SHELL
+      end
+      failures = evidence_authoring_entrypoints(directory).each_with_object([]) do |(entrypoint, arguments), result|
+        unless File.executable?(entrypoint)
+          result << "missing protected entrypoint #{File.basename(entrypoint)}"
+          next
+        end
+
+        FileUtils.rm_f(marker)
+        _stdout, _stderr, _status = Open3.capture3(
+          {"PATH" => "#{directory}:/usr/bin:/bin"},
+          entrypoint,
+          *arguments
+        )
+        result << "#{File.basename(entrypoint)} selected a caller PATH command" if File.exist?(marker)
+      end
+
+      assert_empty failures, failures.join(", ")
+    end
+  end
+
+  def test_task12d_protected_evidence_authoring_round_trips_seal_and_tag_envelope
+    Dir.mktmpdir("waves-authoring-round-trip") do |directory|
+      input = File.join(directory, "input.json")
+      manifest = File.join(directory, "manifest.json")
+      envelope = File.join(directory, "tag-envelope.txt")
+      write_json(input, evidence_input)
+
+      seal = File.expand_path("../generate-release-evidence.sh", __dir__)
+      tag_envelope = File.expand_path("../generate-release-tag-envelope.sh", __dir__)
+      assert File.executable?(seal), "expected protected evidence-sealing entrypoint"
+      assert File.executable?(tag_envelope), "expected protected tag-envelope entrypoint"
+      [seal, tag_envelope].each do |entrypoint|
+        source = File.read(entrypoint)
+        assert_equal "#!/bin/bash -p", source.lines.first.chomp
+        assert_includes source, 'source "$WAVES_RELEASE_ENVIRONMENT_HELPER"'
+        assert_includes source, "waves_release_environment_bootstrap"
+        assert_includes source, "/usr/bin/ruby --disable-gems"
+      end
+      _stdout, stderr, status = Open3.capture3(seal, "candidate", input, manifest)
+      assert status.success?, stderr
+      _stdout, stderr, status = Open3.capture3(tag_envelope, manifest, envelope)
+      assert status.success?, stderr
+
+      parsed = WavesRelease::TagEnvelope.parse(File.read(envelope))
+      assert_equal "candidate", parsed.fetch("manifest").fetch("sealProfile")
+      assert_equal Digest::SHA256.hexdigest(File.read(manifest)), parsed.fetch("digest")
+    end
+  end
+
   def test_task12d_release_bootstrap_clears_adjacent_authority_and_restores_only_validated_inputs
     helper = File.expand_path("../release_environment.sh", __dir__)
     assert File.file?(helper), "expected the shared release environment bootstrap"
@@ -614,12 +721,15 @@ class ReleaseInfraTest < Minitest::Test
       contents = File.binread(path)
       next unless contents.valid_encoding?
       interpreted = contents.match?(
-        %r{(?:^|[[:space:]])(?:/bin/)?bash[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast)\.sh}
+        %r{(?:^|[[:space:]])(?:/bin/)?bash[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast|generate-release-evidence|generate-release-tag-envelope)\.sh}
       )
       sourced = contents.match?(
-        %r{(?:^|[[:space:]])(?:source|\.)[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast)\.sh}
+        %r{(?:^|[[:space:]])(?:source|\.)[[:space:]]+(?:\./)?script/(?:release-gate|build_and_run|make_appcast|generate-release-evidence|generate-release-tag-envelope)\.sh}
       )
-      result << relative if interpreted || sourced
+      bare_tag_envelope = contents.match?(
+        %r{(?:^|[[:space:]])(?:/usr/bin/)?ruby(?:[[:space:]]+--disable-gems)?[[:space:]]+script/release_tool\.rb[[:space:]]+tag-envelope}
+      )
+      result << relative if interpreted || sourced || bare_tag_envelope
     end
 
     assert_empty offenders, "release entrypoint shebangs must be honored by every tracked caller: #{offenders.join(', ')}"
@@ -1773,6 +1883,20 @@ class ReleaseInfraTest < Minitest::Test
   end
 
   private
+
+  def evidence_authoring_entrypoints(directory = nil)
+    scratch = directory || Dir.tmpdir
+    [
+      [
+        File.expand_path("../generate-release-evidence.sh", __dir__),
+        ["candidate", File.join(scratch, "missing-input.json"), File.join(scratch, "unused-manifest.json")],
+      ],
+      [
+        File.expand_path("../generate-release-tag-envelope.sh", __dir__),
+        [File.join(scratch, "missing-manifest.json"), File.join(scratch, "unused-envelope.txt")],
+      ],
+    ]
+  end
 
   def assert_release_preflight_disables_fsmonitor(configuration)
     with_production_release_repo do |root, scratch|
