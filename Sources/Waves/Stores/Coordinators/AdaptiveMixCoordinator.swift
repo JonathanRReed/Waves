@@ -36,12 +36,14 @@ struct AdaptiveMixCoordinatorLifecycleSnapshot: Equatable, Sendable {
 @MainActor
 final class AdaptiveMixCoordinator {
   typealias MonotonicClock = @MainActor @Sendable () -> TimeInterval
+  typealias Sleep = @MainActor @Sendable (Duration) async throws -> Void
 
   private var policyEngine = AdaptivePolicyEngine()
   private var lastPublishedGains: [String: Float] = [:]
   private var republishCountdown = 0
   private let republishPasses: Int
   private let now: MonotonicClock
+  private let sleep: Sleep
   private var initialElapsed: TimeInterval
   private var lastAnalysisTime: TimeInterval?
   private var loopTask: Task<Void, Never>?
@@ -51,11 +53,13 @@ final class AdaptiveMixCoordinator {
   init(
     republishPasses: Int = 20,
     initialElapsed: TimeInterval = 0.1,
-    now: @escaping MonotonicClock = { ProcessInfo.processInfo.systemUptime }
+    now: @escaping MonotonicClock = { ProcessInfo.processInfo.systemUptime },
+    sleep: @escaping Sleep = { duration in try await Task.sleep(for: duration) }
   ) {
     self.republishPasses = max(1, republishPasses)
     self.initialElapsed = max(0, initialElapsed)
     self.now = now
+    self.sleep = sleep
   }
 
   var lifecycleSnapshot: AdaptiveMixCoordinatorLifecycleSnapshot {
@@ -148,7 +152,7 @@ final class AdaptiveMixCoordinator {
       while !Task.isCancelled {
         let didWork = await performPass()
         guard !Task.isCancelled else { break }
-        try? await Task.sleep(for: didWork ? activeInterval : idleInterval)
+        try? await self.sleep(didWork ? activeInterval : idleInterval)
       }
       guard self.loopToken == token else { return }
       await reset()

@@ -2048,6 +2048,14 @@ class ReleaseInfraTest < Minitest::Test
       assert_release_error(/quality-gate/) { WavesRelease::WorkflowContract.validate!(root: root) }
 
       write_workflow_fixtures(root)
+      mutate(root, ".github/workflows/ci.yml", "          fetch-depth: 0\n", "")
+      assert_release_error(/CI job.*fetch-depth/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(root, ".github/workflows/ci.yml", "          persist-credentials: false\n", "")
+      assert_release_error(/CI job.*persist-credentials/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
       mutate(root, ".github/workflows/release.yml", "./script/release-gate.sh preflight", "./script/build_and_run.sh --publication-check")
       assert_release_error(/release-gate/) { WavesRelease::WorkflowContract.validate!(root: root) }
 
@@ -2359,6 +2367,7 @@ class ReleaseInfraTest < Minitest::Test
       git(root, "config", "user.name", "Waves Test")
       git(root, "config", "user.email", "waves-test@example.com")
       %w[
+        .github/workflows/ci.yml
         .github/workflows/release.yml
         script/release_tool.rb
         script/release_environment.sh
@@ -2378,6 +2387,7 @@ class ReleaseInfraTest < Minitest::Test
       git(
         root,
         "add",
+        ".github/workflows/ci.yml",
         ".github/workflows/release.yml",
         "script/release_tool.rb",
         "script/release_environment.sh",
@@ -2453,6 +2463,9 @@ class ReleaseInfraTest < Minitest::Test
           timeout-minutes: 90
           steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+              with:
+                fetch-depth: 0
+                persist-credentials: false
             - run: ./script/quality-gate.sh full
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
               with:

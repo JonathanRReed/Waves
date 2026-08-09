@@ -178,43 +178,21 @@ import WavesAudioCore
 
 @MainActor
 @Test func adaptiveMixRunsAtFullCadenceWithAManagedRoute() async {
-  // The idle path must not cost the feature its responsiveness when a route
-  // actually exists.
-  let fixture = await makeRenderActivityFixture(routingState: .managed)
-  fixture.store.setAdaptiveMixMode(.both)
-  await fixture.backend.resetAdaptiveAnalysisCount()
-
-  // Assert a RATE, not a total: a bare "count exceeded N" would eventually be
-  // satisfied by the 1 s idle heartbeat too, given enough wall clock, so it
-  // would not distinguish the two cadences at all.
-  //
-  // The discriminator is the idle path's hard floor of one pass per second.
-  // Observing more passes than seconds elapsed is therefore impossible at the
-  // idle cadence no matter how fast the machine is — and a loaded machine can
-  // only ever *reduce* the count, so this cannot pass spuriously. Accumulating
-  // until the margin is proved (rather than sampling one fixed window) keeps a
-  // starved scheduler from failing it spuriously either.
-  let start = ContinuousClock.now
-  var provedFullCadence = false
-  var observed = 0
-  var seconds = 0.0
-  while seconds < 20 {
-    observed = await fixture.backend.adaptiveAnalysisCount()
-    let interval = ContinuousClock.now - start
-    seconds =
-      Double(interval.components.seconds)
-      + Double(interval.components.attoseconds) / 1e18
-    if Double(observed) > seconds + 1.5 {
-      provedFullCadence = true
-      break
+  let sleepRecorder = AdaptiveMixSleepRecorder()
+  let fixture = await makeRenderActivityFixture(
+    routingState: .managed,
+    adaptiveMixSleep: { duration in
+      try await sleepRecorder.sleep(for: duration)
     }
-    await Task.yield()
-  }
+  )
+  fixture.store.setAdaptiveMixMode(.both)
 
-  let detail =
-    "managed routes must keep the full cadence: only \(observed) passes "
-    + "in \(seconds)s, which the 1 Hz idle heartbeat alone could account for"
-  #expect(provedFullCadence, "\(detail)")
+  #expect(
+    await waitUntil { await sleepRecorder.contains(.milliseconds(100)) },
+    "a managed route must request the 100 ms active interval"
+  )
+  #expect(await fixture.backend.adaptiveAnalysisCount() > 0)
+  _ = await fixture.store.shutdown()
 }
 
 @MainActor
@@ -301,7 +279,10 @@ private func makeRenderActivityFixture(
   routingState: RoutingState = .managed,
   startupState: AppStartupState = .running,
   includeApp: Bool = true,
-  iconTIFFData: Data? = nil
+  iconTIFFData: Data? = nil,
+  adaptiveMixSleep: @escaping @Sendable (Duration) async throws -> Void = {
+    duration in try await Task.sleep(for: duration)
+  }
 ) async -> RenderActivityFixture {
   let app = AudioApp(
     id: "runtime.render.app",
@@ -354,10 +335,24 @@ private func makeRenderActivityFixture(
     sessionStore: RenderActivitySessionStore(value: snapshot),
     loginItemService: RenderActivityLoginItemService(),
     deviceVolumePresetsStore: RenderActivityPresetsStore(),
-    initialStartupState: startupState
+    initialStartupState: startupState,
+    adaptiveMixSleep: adaptiveMixSleep
   )
   await store.drainPersistenceTasks()
   return RenderActivityFixture(store: store, backend: backend)
+}
+
+private actor AdaptiveMixSleepRecorder {
+  private var requestedDurations: [Duration] = []
+
+  func sleep(for duration: Duration) async throws {
+    requestedDurations.append(duration)
+    try await Task.sleep(for: .seconds(60))
+  }
+
+  func contains(_ duration: Duration) -> Bool {
+    requestedDurations.contains(duration)
+  }
 }
 
 private actor RenderActivityBackend: AudioControlBackend {

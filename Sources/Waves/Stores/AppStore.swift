@@ -350,7 +350,7 @@ final class AppStore {
   private let loginItemService: any LoginItemServicing
   private let runtimeProcessProbe: RuntimeProcessProbeProvider
   private let appIntentCoordinator = AppIntentCoordinator()
-  private let adaptiveMixCoordinator = AdaptiveMixCoordinator()
+  private let adaptiveMixCoordinator: AdaptiveMixCoordinator
   let guidedMixerTourCoordinator = GuidedMixerTourCoordinator()
   private let automationParser = AutomationCommandParser()
   private let urlInvocationLimiter = URLInvocationLimiter()
@@ -479,12 +479,16 @@ final class AppStore {
     deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
       duration in try await Task.sleep(for: duration)
     },
+    adaptiveMixSleep: @escaping AdaptiveMixCoordinator.Sleep = {
+      duration in try await Task.sleep(for: duration)
+    },
     accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster = .live,
     installLocation: InstallLocationClassification = .applications
   ) {
     self.backend = backend
     self.loginItemService = loginItemService
     self.runtimeProcessProbe = runtimeProcessProbe
+    self.adaptiveMixCoordinator = AdaptiveMixCoordinator(sleep: adaptiveMixSleep)
     self.startupState = initialStartupState
     self.hasStartedAudioBackend = initialStartupState == .running
     self.accessibilityAnnouncementPoster = accessibilityAnnouncementPoster

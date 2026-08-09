@@ -1318,6 +1318,7 @@ module WavesRelease
       permissions_read!(ci, "CI workflow")
       concurrency!(ci, cancel: true, context: "CI workflow")
       jobs_with_timeouts!(ci, "CI workflow")
+      validate_ci_checkouts!(ci)
       require_run_step!(ci, "./script/quality-gate.sh full", "CI workflow bypasses the shared quality-gate")
       require_upload_retention!(ci, "CI artifact retention must be 14 days")
 
@@ -1456,6 +1457,28 @@ module WavesRelease
         end
         unless inputs["persist-credentials"] == false
           raise Error, "release job #{name} checkout persist-credentials must be false"
+        end
+      end
+    end
+
+    def validate_ci_checkouts!(workflow)
+      expected_action = "actions/checkout@#{ACTIONS.fetch('actions/checkout')}"
+      workflow.fetch("jobs").each do |name, job|
+        steps = job.fetch("steps")
+        checkouts = steps.select do |step|
+          step.is_a?(Hash) && step["uses"].is_a?(String) && step["uses"].start_with?("actions/checkout@")
+        end
+        raise Error, "CI job #{name} must have exactly one checkout step" unless checkouts.length == 1
+
+        checkout = checkouts.fetch(0)
+        raise Error, "CI job #{name} checkout must use the pinned action" unless checkout["uses"] == expected_action
+
+        inputs = checkout["with"]
+        unless inputs.is_a?(Hash) && inputs["fetch-depth"] == 0
+          raise Error, "CI job #{name} checkout fetch-depth must be 0"
+        end
+        unless inputs["persist-credentials"] == false
+          raise Error, "CI job #{name} checkout persist-credentials must be false"
         end
       end
     end
