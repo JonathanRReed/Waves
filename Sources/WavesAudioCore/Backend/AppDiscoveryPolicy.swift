@@ -316,6 +316,54 @@ public enum AppDiscoveryPolicy {
     return Array(Set(roots)).sorted()
   }
 
+  /// Authorizes a candidate helper using immutable live process identity.
+  /// Bundle identifiers are never authority by themselves. Both processes must
+  /// live inside the same canonical outer app bundle and belong to the same
+  /// authenticated signer family.
+  public static func runtimeFamilyMatches(
+    target: AppRuntimeIdentity,
+    candidate: AppRuntimeIdentity
+  ) -> Bool {
+    guard !target.outerBundlePath.isEmpty,
+      target.outerBundlePath == candidate.outerBundlePath,
+      executablePath(
+        target.executablePath,
+        belongsToAppBundleAt: target.outerBundlePath
+      ),
+      executablePath(
+        candidate.executablePath,
+        belongsToAppBundleAt: candidate.outerBundlePath
+      )
+    else {
+      return false
+    }
+
+    let targetSigning = target.signingIdentity
+    let candidateSigning = candidate.signingIdentity
+    guard !targetSigning.identifier.isEmpty,
+      !candidateSigning.identifier.isEmpty,
+      !targetSigning.designatedRequirement.isEmpty,
+      !candidateSigning.designatedRequirement.isEmpty,
+      !targetSigning.codeDirectoryHash.isEmpty,
+      !candidateSigning.codeDirectoryHash.isEmpty
+    else {
+      return false
+    }
+    switch (targetSigning.teamIdentifier, candidateSigning.teamIdentifier) {
+    case let (targetTeam?, candidateTeam?):
+      return !targetTeam.isEmpty && targetTeam == candidateTeam
+    case (nil, nil):
+      // Ad hoc code has no Team ID. Its signed identifier remains authenticated
+      // by the validated designated requirement. Combined with the canonical
+      // outer-bundle boundary, an exact or child identifier preserves legitimate
+      // local helper families without admitting an unrelated app.
+      return targetSigning.identifier == candidateSigning.identifier
+        || candidateSigning.identifier.hasPrefix(targetSigning.identifier + ".")
+    default:
+      return false
+    }
+  }
+
   private static let excludedProcessMarkers = [
     "daemon",
     "updater",

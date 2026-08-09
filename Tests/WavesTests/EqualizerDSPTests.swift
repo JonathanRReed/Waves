@@ -143,6 +143,20 @@ import Testing
   #expect(allInRange)
 }
 
+@Test func extremeSmoothingFrameProductsNeverTrapDuringIntegerConversion() {
+  let processor = EqualizerDSP(
+    sampleRate: .greatestFiniteMagnitude,
+    channelCount: 1,
+    smoothingDuration: 0.5
+  )
+  var settings = EqualizerSettings(isEnabled: true)
+  settings.applyPreset(.warm)
+
+  processor.update(settings: settings)
+
+  #expect(processor.sampleRate == .greatestFiniteMagnitude)
+}
+
 @Test func equalizerSupportsIntegerTapFormats() {
   var int16Samples: [Int16] = [Int16.min, -10_000, 0, 10_000, Int16.max]
   var int32Samples: [Int32] = [Int32.min, -1_000_000, 0, 1_000_000, Int32.max]

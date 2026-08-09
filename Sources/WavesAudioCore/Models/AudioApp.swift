@@ -12,6 +12,9 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public let iconName: String?
   public let iconTIFFData: Data?
   public let category: AppCategory
+  /// Live-only process authority. It is intentionally omitted from Codable
+  /// state because a process lifetime can never survive relaunch.
+  public let runtimeIdentity: AppRuntimeIdentity?
 
   public var isActive: Bool
   public var peakLevel: Float
@@ -65,7 +68,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     volumeBoost: Float = 1.0,
     muteSource: MuteSource = .user,
     targetDeviceUID: String? = nil,
-    routeHealthContext: RouteHealthContext? = nil
+    routeHealthContext: RouteHealthContext? = nil,
+    runtimeIdentity: AppRuntimeIdentity? = nil
   ) {
     // Validate string lengths to prevent excessive memory usage
     self.id = String(id.prefix(256))
@@ -85,6 +89,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
 
     self.iconName = iconName
     self.category = category
+    self.runtimeIdentity = runtimeIdentity
     self.isActive = isActive
     self.peakLevel = peakLevel
     self.rmsLevel = rmsLevel

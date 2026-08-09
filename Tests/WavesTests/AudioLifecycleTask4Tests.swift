@@ -37,6 +37,32 @@ import WavesAudioCore
   #expect(!controllerTarget.covers(reusedObjectIDFromAnotherFamily))
 }
 
+@Test func targetProcessFamilyRejectsAReusedObjectIDFromANewProcessLifetime() {
+  let priorLifetime = AppProcessLifetimeIdentity(
+    pid: 42,
+    startTimeSeconds: 100,
+    startTimeMicroseconds: 0
+  )
+  let replacementLifetime = AppProcessLifetimeIdentity(
+    pid: 42,
+    startTimeSeconds: 200,
+    startTimeMicroseconds: 0
+  )
+  let controllerTarget = TargetProcessFamily(
+    logicalID: "com.example.browser",
+    processObjectIDs: [11],
+    processLifetimeIdentities: [priorLifetime]
+  )
+  let replacementTarget = TargetProcessFamily(
+    logicalID: "com.example.browser",
+    processObjectIDs: [11],
+    processLifetimeIdentities: [replacementLifetime]
+  )
+
+  #expect(!controllerTarget.matches(replacementTarget))
+  #expect(!controllerTarget.covers(replacementTarget))
+}
+
 @Test func callbackRenderStateUsesPreallocatedAtomicValuesAndCoalescesGeometryRecovery() {
   let state = TapRenderStateBox(
     initialState: TapRenderState(

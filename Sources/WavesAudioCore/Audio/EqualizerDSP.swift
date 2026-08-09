@@ -155,7 +155,15 @@ public final class EqualizerDSP {
   ) {
     self.sampleRate = sampleRate.isFinite && sampleRate > 0 ? sampleRate : 48_000
     self.channelCount = max(1, channelCount)
-    self.smoothingFrames = max(1, Int(self.sampleRate * max(0, smoothingDuration)))
+    let smoothingFrameCount = self.sampleRate * max(0, smoothingDuration)
+    if smoothingFrameCount.isFinite,
+      smoothingFrameCount >= 1,
+      smoothingFrameCount <= Double(Int.max)
+    {
+      self.smoothingFrames = Int(smoothingFrameCount)
+    } else {
+      self.smoothingFrames = 1
+    }
     self.targetCoefficients = Array(repeating: .identity, count: Self.maximumSections)
     self.channelCoefficients = Array(
       repeating: .identity,

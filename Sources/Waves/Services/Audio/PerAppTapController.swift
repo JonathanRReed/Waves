@@ -75,6 +75,7 @@ final class PerAppTapController: @unchecked Sendable {
     appName: String,
     logicalID: String,
     targetProcessObjectIDs: [AudioObjectID],
+    targetProcessLifetimeIdentities: [AppProcessLifetimeIdentity] = [],
     tapDescription: CATapDescription,
     tapID: AudioObjectID,
     aggregateDeviceID: AudioObjectID,
@@ -92,7 +93,8 @@ final class PerAppTapController: @unchecked Sendable {
     self.appName = appName
     self.targetProcessFamily = TargetProcessFamily(
       logicalID: logicalID,
-      processObjectIDs: targetProcessObjectIDs
+      processObjectIDs: targetProcessObjectIDs,
+      processLifetimeIdentities: targetProcessLifetimeIdentities
     )
     self.tapDescription = tapDescription
     self.tapID = tapID
@@ -405,9 +407,15 @@ final class PerAppTapController: @unchecked Sendable {
       mElement: kAudioObjectPropertyElementMain
     )
 
-    let usageSize =
-      MemoryLayout<AudioHardwareIOProcStreamUsage>.size
-      + (Int(streamCount) - 1) * MemoryLayout<UInt32>.stride
+    guard
+      let usageSize = NativeAudioStreamConfigurationPlan.usageAllocationSize(
+        streamCount: streamCount
+      )
+    else {
+      throw BackendError.managedRouteUnavailable(
+        "Aggregate stream usage for \(appName) reported an unsupported stream count."
+      )
+    }
     let usagePointer = UnsafeMutableRawPointer.allocate(
       byteCount: usageSize,
       alignment: MemoryLayout<AudioHardwareIOProcStreamUsage>.alignment
@@ -459,11 +467,21 @@ final class PerAppTapController: @unchecked Sendable {
       )
     }
 
+    guard dataSize >= UInt32(MemoryLayout<AudioBufferList>.size),
+      dataSize <= UInt32(NativeAudioStreamConfigurationPlan.maximumPropertyByteCount)
+    else {
+      throw BackendError.managedRouteUnavailable(
+        "Stream configuration for \(appName) returned an invalid property size."
+      )
+    }
+
+    let allocatedSize = Int(dataSize)
     let bufferListPointer = UnsafeMutableRawPointer.allocate(
-      byteCount: Int(dataSize),
+      byteCount: allocatedSize,
       alignment: MemoryLayout<AudioBufferList>.alignment
     )
     defer { bufferListPointer.deallocate() }
+    bufferListPointer.initializeMemory(as: UInt8.self, repeating: 0, count: allocatedSize)
 
     status = AudioObjectGetPropertyData(
       aggregateDeviceID,
@@ -478,9 +496,19 @@ final class PerAppTapController: @unchecked Sendable {
         "Failed to read stream configuration for \(appName) (OSStatus: \(status))."
       )
     }
+    guard dataSize <= UInt32(allocatedSize) else {
+      throw BackendError.managedRouteUnavailable(
+        "Stream configuration for \(appName) exceeded its reported capacity."
+      )
+    }
 
-    let audioBufferList = bufferListPointer.assumingMemoryBound(to: AudioBufferList.self)
-    return UInt32(UnsafeMutableAudioBufferListPointer(audioBufferList).count)
+    let bytes = UnsafeRawBufferPointer(start: bufferListPointer, count: Int(dataSize))
+    guard let count = NativeAudioStreamConfigurationPlan.streamCount(in: bytes) else {
+      throw BackendError.managedRouteUnavailable(
+        "Stream configuration for \(appName) returned inconsistent native data."
+      )
+    }
+    return count
   }
 
   @discardableResult

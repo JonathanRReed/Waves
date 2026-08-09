@@ -401,7 +401,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       Float
     ) throws -> PerAppTapController
   typealias ProcessObjectIDResolver = @Sendable (AudioApp) throws -> [AudioObjectID]
+  typealias ProcessTargetResolver = @Sendable (AudioApp) throws -> ResolvedProcessTarget
   typealias ProcessObjectLivenessProvider = @Sendable (AudioObjectID) -> Bool
+  typealias RuntimeIdentityProvider = @Sendable (pid_t) -> AppRuntimeIdentity?
+  typealias ProcessObjectTranslator = @Sendable (pid_t) throws -> AudioObjectID?
   typealias CaptureAuthorizationProbe = @Sendable () -> CaptureAuthorizationResult
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
@@ -410,7 +413,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let verifiedRouterActivityProvider: VerifiedRouterActivityProvider?
   private let controllerFactory: ControllerFactory?
   private let processObjectIDResolver: ProcessObjectIDResolver?
+  private let processTargetResolver: ProcessTargetResolver?
   private let processObjectLivenessProvider: ProcessObjectLivenessProvider?
+  private let runtimeIdentityProvider: RuntimeIdentityProvider
+  private let liveRuntimeIdentityProvider: RuntimeIdentityProvider
+  private let processObjectTranslator: ProcessObjectTranslator?
   private let captureAuthorizationProbe: CaptureAuthorizationProbe?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
@@ -430,7 +437,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
     self.controllerFactory = nil
     self.processObjectIDResolver = nil
+    self.processTargetResolver = nil
     self.processObjectLivenessProvider = nil
+    self.runtimeIdentityProvider = RuntimeProcessIdentityCache.shared.identity
+    self.liveRuntimeIdentityProvider = RuntimeProcessIdentity.captureLive
+    self.processObjectTranslator = nil
     self.captureAuthorizationProbe = nil
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
@@ -450,6 +461,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     controllerFactory: ControllerFactory? = nil,
     processObjectIDResolver: ProcessObjectIDResolver? = nil,
     processObjectLivenessProvider: ProcessObjectLivenessProvider? = nil,
+    processTargetResolver: ProcessTargetResolver? = nil,
+    runtimeIdentityProvider: @escaping RuntimeIdentityProvider = RuntimeProcessIdentityCache.shared.identity,
+    liveRuntimeIdentityProvider: @escaping RuntimeIdentityProvider = RuntimeProcessIdentity.captureLive,
+    processObjectTranslator: ProcessObjectTranslator? = nil,
     captureAuthorizationProbe: CaptureAuthorizationProbe? = nil
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
@@ -464,7 +479,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
     self.controllerFactory = controllerFactory
     self.processObjectIDResolver = processObjectIDResolver
+    self.processTargetResolver = processTargetResolver
     self.processObjectLivenessProvider = processObjectLivenessProvider
+    self.runtimeIdentityProvider = runtimeIdentityProvider
+    self.liveRuntimeIdentityProvider = liveRuntimeIdentityProvider
+    self.processObjectTranslator = processObjectTranslator
     self.captureAuthorizationProbe = captureAuthorizationProbe
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: routerObservationNativeCalls
@@ -1558,10 +1577,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if let generationContext {
       try ensureGenerationCurrent(generationContext)
     }
-    let processObjectIDs = try resolveProcessObjectIDs(for: app)
+    let processTarget = try resolveProcessTarget(for: app)
+    let processObjectIDs = processTarget.processObjectIDs
     let targetProcessFamily = TargetProcessFamily(
       logicalID: app.logicalID,
-      processObjectIDs: processObjectIDs
+      processObjectIDs: processObjectIDs,
+      processLifetimeIdentities: processTarget.processLifetimeIdentities
     )
     let stagedEqualizer =
       equalizerSettings
@@ -1591,7 +1612,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     let controller = try await createControllerWithRetry(
       for: app,
-      processObjectIDs: processObjectIDs,
+      processTarget: processTarget,
       equalizerSettings: stagedEqualizer,
       generationContext: generationContext
     )
@@ -1635,13 +1656,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func createControllerWithRetry(
     for app: AudioApp,
-    processObjectIDs: [AudioObjectID],
+    processTarget: ResolvedProcessTarget,
     equalizerSettings: EqualizerSettings,
     generationContext: IntentGenerationContext?
   ) async throws -> PerAppTapController {
     let maxRetries = 3
     var lastError: Error?
-    var currentProcessObjectIDs = processObjectIDs
+    var currentProcessTarget = processTarget
 
     for attempt in 1...maxRetries {
       try ensureAcceptingOperations()
@@ -1651,7 +1672,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         }
         let controller = try createController(
           for: app,
-          processObjectIDs: currentProcessObjectIDs,
+          processTarget: currentProcessTarget,
           equalizerSettings: equalizerSettings
         )
         if attempt > 1 {
@@ -1677,11 +1698,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
           // Re-resolve process object IDs after suspension. A transient resolution
           // failure is left for the next retry to report with the friendly error.
-          if let refreshedProcessObjectIDs = try? resolveProcessObjectIDs(for: app),
-            refreshedProcessObjectIDs != currentProcessObjectIDs
+          if let refreshedProcessTarget = try? resolveProcessTarget(for: app),
+            refreshedProcessTarget != currentProcessTarget
           {
             logger.info("Process object IDs changed for \(app.displayName) during retry")
-            currentProcessObjectIDs = refreshedProcessObjectIDs
+            currentProcessTarget = refreshedProcessTarget
           }
         }
       }
@@ -1698,15 +1719,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func createController(
     for app: AudioApp,
-    processObjectIDs: [AudioObjectID],
+    processTarget: ResolvedProcessTarget,
     equalizerSettings: EqualizerSettings
   ) throws -> PerAppTapController {
     try ensureAcceptingOperations()
 
     if let controllerFactory {
+      try revalidateProcessTarget(processTarget, for: app)
       return try controllerFactory(
         app,
-        processObjectIDs,
+        processTarget.processObjectIDs,
         equalizerSettings,
         managedAudioEqualizerSettings,
         adaptiveGainDBByAppID[app.logicalID] ?? 0
@@ -1729,7 +1751,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         outputDeviceUID = try currentDefaultOutputDeviceUID()
       }
 
-      let tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+      let tapDescription = CATapDescription(
+        stereoMixdownOfProcesses: processTarget.processObjectIDs
+      )
       tapDescription.name = "Waves-\(app.displayName)"
       tapDescription.uuid = UUID()
       tapDescription.muteBehavior = CATapMuteBehavior.mutedWhenTapped
@@ -1763,6 +1787,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         }
       }
 
+      // Keep the authority check adjacent to native tap creation. A PID can be
+      // recycled after discovery, and a Core Audio object can be rebound after
+      // translation. Both live identities and object ownership must still match.
+      try revalidateProcessTarget(processTarget, for: app)
       try withStatusCheck(
         AudioHardwareCreateProcessTap(tapDescription, &tapID),
         action: "create process tap"
@@ -1801,7 +1829,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         appID: app.id,
         appName: app.displayName,
         logicalID: app.logicalID,
-        targetProcessObjectIDs: processObjectIDs,
+        targetProcessObjectIDs: processTarget.processObjectIDs,
+        targetProcessLifetimeIdentities: processTarget.processLifetimeIdentities,
         tapDescription: tapDescription,
         tapID: tapID,
         aggregateDeviceID: aggregateID,
@@ -1834,66 +1863,77 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
   }
 
-  private func resolveProcessObjectIDs(for app: AudioApp) throws -> [AudioObjectID] {
+  private func resolveProcessTarget(for app: AudioApp) throws -> ResolvedProcessTarget {
+    if let processTargetResolver {
+      return try processTargetResolver(app)
+    }
     if let processObjectIDResolver {
-      return try processObjectIDResolver(app)
+      return .testing(processObjectIDs: try processObjectIDResolver(app))
     }
-    var candidatePIDs = Set<pid_t>()
-
-    if let bundleID = app.bundleID, !bundleID.isEmpty {
-      let runningFamilyPIDs = NSWorkspace.shared.runningApplications
-        .filter { runningApp in
-          AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: runningApp.bundleIdentifier)
-        }
-        .map(\.processIdentifier)
-      candidatePIDs.formUnion(runningFamilyPIDs)
-
-      // Include any currently-audible helper/utility process whose enclosing
-      // top-level app is this app — e.g. a Chromium/Electron "Audio Service" or
-      // renderer process that owns the real output stream. Without this the tap
-      // would capture only the main process, which for browsers and Electron
-      // apps emits no audio, so volume/mute/boost would silently do nothing.
-      let targetBundlePaths = Set(
-        NSWorkspace.shared.runningApplications.compactMap { runningApp -> String? in
-          guard let appPID = app.pid, runningApp.processIdentifier == appPID else { return nil }
-          return runningApp.bundleURL?.path
-        }
+    guard let targetIdentity = app.runtimeIdentity,
+      let targetPID = app.pid,
+      targetIdentity.lifetime.pid == targetPID,
+      runtimeIdentityProvider(targetPID) == targetIdentity
+    else {
+      throw BackendError.managedRouteUnavailable(
+        "The live process identity for \(app.displayName) could not be verified."
       )
-      for pid in cachedAudibleProcesses().pids {
-        guard
-          targetBundlePaths.contains(where: {
-            executableForPID(pid, belongsToAppBundleAt: $0)
-          })
-        else { continue }
-        candidatePIDs.insert(pid)
-      }
     }
 
-    if let pid = app.pid {
+    var candidatePIDs: Set<pid_t> = [targetPID]
+    candidatePIDs.formUnion(
+      NSWorkspace.shared.runningApplications.compactMap { runningApp -> pid_t? in
+        guard let bundlePath = runningApp.bundleURL?.path,
+          canonicalOuterBundlePath(forBundlePath: bundlePath) == targetIdentity.outerBundlePath
+        else {
+          return nil
+        }
+        return runningApp.processIdentifier
+      })
+
+    // Include audible helpers that do not appear in NSWorkspace, such as a
+    // Chromium Audio Service. Executable containment is only a prefilter. The
+    // signed runtime family check below remains the authority boundary.
+    for pid in cachedAudibleProcesses().pids
+    where
+      executableForPID(pid, belongsToAppBundleAt: targetIdentity.outerBundlePath)
+    {
       candidatePIDs.insert(pid)
     }
 
-    let processObjectIDs =
-      candidatePIDs
-      .compactMap { pid -> AudioObjectID? in
-        // A sibling PID may have no Core Audio process object yet (transient
-        // helper/renderer in a browser family), which makes translateProcessID
-        // throw. Skip that PID instead of aborting resolution for the whole
-        // family — the empty-set checks below still fail honestly when NO PID
-        // resolves.
-        guard let processObjectID = try? translateProcessID(forPID: pid), processObjectID != .unknown else {
-          return nil
-        }
-        return processObjectID
+    var processByObjectID: [AudioObjectID: ResolvedProcessObject] = [:]
+    for pid in candidatePIDs.sorted() {
+      guard let candidateIdentity = runtimeIdentityProvider(pid),
+        AppDiscoveryPolicy.runtimeFamilyMatches(
+          target: targetIdentity,
+          candidate: candidateIdentity
+        ),
+        let processObjectID = try? translateProcessObject(forPID: pid),
+        processObjectID != .unknown
+      else {
+        continue
       }
 
-    let uniqueProcessObjectIDs = Array(Set(processObjectIDs)).sorted { $0 < $1 }
-    if !uniqueProcessObjectIDs.isEmpty {
-      return uniqueProcessObjectIDs
+      if let existing = processByObjectID[processObjectID],
+        existing.runtimeIdentity != candidateIdentity
+      {
+        throw BackendError.managedRouteUnavailable(
+          "Core Audio returned ambiguous process ownership for \(app.displayName)."
+        )
+      }
+      processByObjectID[processObjectID] = ResolvedProcessObject(
+        id: processObjectID,
+        runtimeIdentity: candidateIdentity
+      )
     }
 
-    if let pid = app.pid, let processObjectID = try translateProcessID(forPID: pid), processObjectID != .unknown {
-      return [processObjectID]
+    let resolvedProcesses = processByObjectID.values.sorted { $0.id < $1.id }
+    if !resolvedProcesses.isEmpty {
+      return ResolvedProcessTarget(
+        targetRuntimeIdentity: targetIdentity,
+        processes: resolvedProcesses,
+        requiresLiveIdentityValidation: true
+      )
     }
 
     // macOS only assigns a Core Audio process object once a process engages the
@@ -1917,6 +1957,46 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       "No active audio stream was available for \(app.displayName), so Waves could not create a managed route yet. "
         + "Start playback in the app, then try again."
     )
+  }
+
+  private func revalidateProcessTarget(
+    _ processTarget: ResolvedProcessTarget,
+    for app: AudioApp
+  ) throws {
+    guard processTarget.requiresLiveIdentityValidation else { return }
+    guard let targetIdentity = app.runtimeIdentity,
+      liveRuntimeIdentityProvider(targetIdentity.lifetime.pid) == targetIdentity
+    else {
+      throw BackendError.managedRouteUnavailable(
+        "The live process identity for \(app.displayName) changed before route creation."
+      )
+    }
+
+    for process in processTarget.processes {
+      guard let storedIdentity = process.runtimeIdentity,
+        liveRuntimeIdentityProvider(storedIdentity.lifetime.pid) == storedIdentity,
+        AppDiscoveryPolicy.runtimeFamilyMatches(
+          target: targetIdentity,
+          candidate: storedIdentity
+        ),
+        let currentObjectID = try translateProcessObject(forPID: storedIdentity.lifetime.pid),
+        currentObjectID == process.id
+      else {
+        throw BackendError.managedRouteUnavailable(
+          "Core Audio process ownership for \(app.displayName) changed before route creation."
+        )
+      }
+    }
+  }
+
+  private func canonicalOuterBundlePath(forBundlePath path: String) -> String? {
+    guard let outerPath = AppDiscoveryPolicy.topLevelAppBundlePath(forExecutablePath: path) else {
+      return nil
+    }
+    return URL(fileURLWithPath: outerPath)
+      .standardizedFileURL
+      .resolvingSymlinksInPath()
+      .path
   }
 
   private func readTapUID(_ tapID: AudioObjectID) throws -> String {
@@ -2193,6 +2273,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     return processObjectID == .unknown ? nil : processObjectID
+  }
+
+  private func translateProcessObject(forPID pid: pid_t) throws -> AudioObjectID? {
+    if let processObjectTranslator {
+      return try processObjectTranslator(pid)
+    }
+    return try translateProcessID(forPID: pid)
   }
 
   /// The set of processes currently producing audio output, indexed both by raw
@@ -3192,12 +3279,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       let shouldForceRebuild = forceRebuildIDs.contains(app.logicalID) || forceRebuildIDs.contains(app.id)
 
       do {
-        let processObjectIDs = try resolveProcessObjectIDs(for: app)
+        let processTarget = try resolveProcessTarget(for: app)
+        let processObjectIDs = processTarget.processObjectIDs
         if !shouldForceRebuild,
           let controller = controllers[app.id],
           controller.isActive,
           controller.covers(
-            TargetProcessFamily(logicalID: app.logicalID, processObjectIDs: processObjectIDs)
+            TargetProcessFamily(
+              logicalID: app.logicalID,
+              processObjectIDs: processObjectIDs,
+              processLifetimeIdentities: processTarget.processLifetimeIdentities
+            )
           )
         {
           continue

@@ -102,6 +102,27 @@ enum AppRuntimeDiscovery {
     let activationPolicy: ActivationPolicy
     let isActive: Bool
     let iconTIFFData: Data?
+    let runtimeIdentity: AppRuntimeIdentity?
+
+    init(
+      pid: pid_t,
+      bundleID: String?,
+      localizedName: String,
+      bundlePath: String?,
+      activationPolicy: ActivationPolicy,
+      isActive: Bool,
+      iconTIFFData: Data?,
+      runtimeIdentity: AppRuntimeIdentity? = nil
+    ) {
+      self.pid = pid
+      self.bundleID = bundleID
+      self.localizedName = localizedName
+      self.bundlePath = bundlePath
+      self.activationPolicy = activationPolicy
+      self.isActive = isActive
+      self.iconTIFFData = iconTIFFData
+      self.runtimeIdentity = runtimeIdentity
+    }
   }
 
   struct Capture: Sendable {
@@ -141,7 +162,10 @@ enum AppRuntimeDiscovery {
           bundlePath: app.bundleURL?.path,
           activationPolicy: activationPolicy(for: app.activationPolicy),
           isActive: app.isActive,
-          iconTIFFData: iconData
+          iconTIFFData: iconData,
+          runtimeIdentity: RuntimeProcessIdentityCache.shared.identity(
+            pid: app.processIdentifier
+          )
         ))
     }
     return Capture(applications: applications)
@@ -248,7 +272,8 @@ enum AppRuntimeDiscovery {
           routingState: routeState,
           compatibility: .supported,
           notes: nil,
-          volumeBoost: 1.0
+          volumeBoost: 1.0,
+          runtimeIdentity: app.runtimeIdentity
         )
       }
   }
@@ -304,24 +329,17 @@ enum AppRuntimeDiscovery {
     for app: CapturedApplication,
     in runningApps: [CapturedApplication]
   ) -> [CapturedApplication] {
-    let appName = app.localizedName
-    let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: app.bundleID, displayName: appName)
-
     return runningApps.filter { candidate in
-      if candidate.pid == app.pid {
-        return true
-      }
-
-      if let bundleID = app.bundleID,
-        AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: candidate.bundleID)
+      if let targetIdentity = app.runtimeIdentity,
+        let candidateIdentity = candidate.runtimeIdentity
       {
-        return true
+        return AppDiscoveryPolicy.runtimeFamilyMatches(
+          target: targetIdentity,
+          candidate: candidateIdentity
+        )
       }
 
-      return AppDiscoveryPolicy.logicalAppID(
-        bundleID: candidate.bundleID,
-        displayName: candidate.localizedName
-      ) == logicalID
+      return candidate.pid == app.pid
     }
   }
 
@@ -329,20 +347,12 @@ enum AppRuntimeDiscovery {
     capture.applications.contains { candidate in
       guard candidate.bundleID != currentBundleID else { return false }
 
-      if let pid = app.pid, candidate.pid == pid {
-        return true
+      guard let storedIdentity = app.runtimeIdentity,
+        let currentIdentity = candidate.runtimeIdentity
+      else {
+        return false
       }
-
-      if let bundleID = app.bundleID,
-        AppDiscoveryPolicy.bundleFamilyMatches(appBundleID: bundleID, candidateBundleID: candidate.bundleID)
-      {
-        return true
-      }
-
-      return AppDiscoveryPolicy.logicalAppID(
-        bundleID: candidate.bundleID,
-        displayName: candidate.localizedName
-      ) == app.logicalID
+      return currentIdentity == storedIdentity
     }
   }
 

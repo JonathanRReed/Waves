@@ -283,6 +283,9 @@ import WavesAudioCore
 
   #expect(AudioFormatPlan(validating: linearPCMDescription(sampleRate: .nan)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(sampleRate: 0)) == nil)
+  #expect(AudioFormatPlan(validating: linearPCMDescription(sampleRate: 7_999)) == nil)
+  #expect(AudioFormatPlan(validating: linearPCMDescription(sampleRate: 384_001)) == nil)
+  #expect(AudioFormatPlan(validating: linearPCMDescription(sampleRate: .greatestFiniteMagnitude)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(isLinearPCM: false)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(isFloat: false)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(isSignedInteger: true)) == nil)
@@ -303,6 +306,88 @@ import WavesAudioCore
       )) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(framesPerPacket: 0, bytesPerPacket: 0)) == nil)
   #expect(AudioFormatPlan(validating: linearPCMDescription(bytesPerPacket: 16)) == nil)
+}
+
+@Test func nativeStreamConfigurationAcceptsACompleteBoundedBufferList() throws {
+  let bufferOffset = try #require(MemoryLayout<AudioBufferList>.offset(of: \.mBuffers))
+  let byteCount = bufferOffset + 2 * MemoryLayout<AudioBuffer>.stride
+  let bytes = nativeStreamConfigurationBytes(byteCount: byteCount, numberBuffers: 2)
+
+  let streamCount = bytes.withUnsafeBytes(NativeAudioStreamConfigurationPlan.streamCount)
+  #expect(streamCount == 2)
+}
+
+@Test func nativeStreamConfigurationRejectsTruncatedAndForgedBufferLists() throws {
+  let truncated = Data(repeating: 0, count: MemoryLayout<UInt32>.size - 1)
+  #expect(truncated.withUnsafeBytes(NativeAudioStreamConfigurationPlan.streamCount) == nil)
+
+  let fixedHeader = MemoryLayout<AudioBufferList>.size
+  let incompleteHeader = nativeStreamConfigurationBytes(
+    byteCount: fixedHeader - 1,
+    numberBuffers: 0
+  )
+  #expect(incompleteHeader.withUnsafeBytes(NativeAudioStreamConfigurationPlan.streamCount) == nil)
+
+  let forged = nativeStreamConfigurationBytes(byteCount: fixedHeader, numberBuffers: 10)
+  #expect(forged.withUnsafeBytes(NativeAudioStreamConfigurationPlan.streamCount) == nil)
+
+  let buffersOffset = try #require(MemoryLayout<AudioBufferList>.offset(of: \.mBuffers))
+  let excessiveCount = nativeStreamConfigurationBytes(
+    byteCount: buffersOffset + 257 * MemoryLayout<AudioBuffer>.stride,
+    numberBuffers: 257
+  )
+  #expect(excessiveCount.withUnsafeBytes(NativeAudioStreamConfigurationPlan.streamCount) == nil)
+}
+
+@Test func nativeStreamConfigurationRejectsOversizedProperties() {
+  let oversized = nativeStreamConfigurationBytes(byteCount: 65_537, numberBuffers: 1)
+  #expect(oversized.withUnsafeBytes(NativeAudioStreamConfigurationPlan.streamCount) == nil)
+}
+
+@Test func nativeStreamUsageAllocationUsesCheckedBoundedArithmetic() throws {
+  let streamsOffset = try #require(
+    MemoryLayout<AudioHardwareIOProcStreamUsage>.offset(of: \.mStreamIsOn)
+  )
+  #expect(
+    NativeAudioStreamConfigurationPlan.usageAllocationSize(streamCount: 2)
+      == streamsOffset + 2 * MemoryLayout<UInt32>.stride)
+  #expect(NativeAudioStreamConfigurationPlan.usageAllocationSize(streamCount: 257) == nil)
+  #expect(NativeAudioStreamConfigurationPlan.usageAllocationSize(streamCount: UInt32.max) == nil)
+}
+
+@Test func routeCreationRejectsAStaleResolvedProcessLifetime() async {
+  let expectedIdentity = audioSecurityRuntimeIdentity(startTimeSeconds: 100)
+  let replacementIdentity = audioSecurityRuntimeIdentity(startTimeSeconds: 200)
+  let factoryCalls = CaptureProbeCounter()
+  let backend = identityRevalidationBackend(
+    appIdentity: expectedIdentity,
+    runtimeIdentityProvider: { _ in replacementIdentity },
+    processObjectTranslator: { _ in 7 },
+    factoryCalls: factoryCalls
+  )
+
+  let result = await backend.applyAppIntent(audioSecurityRouteIntent())
+
+  #expect(result.outcome == .failed)
+  #expect(factoryCalls.value == 0)
+  _ = await backend.shutdownWithResult()
+}
+
+@Test func routeCreationRejectsChangedCoreAudioProcessOwnership() async {
+  let identity = audioSecurityRuntimeIdentity(startTimeSeconds: 100)
+  let factoryCalls = CaptureProbeCounter()
+  let backend = identityRevalidationBackend(
+    appIdentity: identity,
+    runtimeIdentityProvider: { _ in identity },
+    processObjectTranslator: { _ in 99 },
+    factoryCalls: factoryCalls
+  )
+
+  let result = await backend.applyAppIntent(audioSecurityRouteIntent())
+
+  #expect(result.outcome == .failed)
+  #expect(factoryCalls.value == 0)
+  _ = await backend.shutdownWithResult()
 }
 
 @Test func audioFormatPlanRejectsExcessiveDirectChannelCounts() {
@@ -505,6 +590,88 @@ import WavesAudioCore
   #expect(settledProtected.allSatisfy { abs($0) < 0.999_9 })
   #expect(protectedPeak > 0.7)
   #expect(protectedPeak < 0.98)
+}
+
+private func nativeStreamConfigurationBytes(byteCount: Int, numberBuffers: UInt32) -> Data {
+  var data = Data(repeating: 0, count: byteCount)
+  withUnsafeBytes(of: numberBuffers) { countBytes in
+    data.replaceSubrange(0..<min(data.count, countBytes.count), with: countBytes.prefix(data.count))
+  }
+  return data
+}
+
+private func audioSecurityRuntimeIdentity(startTimeSeconds: UInt64) -> AppRuntimeIdentity {
+  AppRuntimeIdentity(
+    lifetime: AppProcessLifetimeIdentity(
+      pid: 42,
+      startTimeSeconds: startTimeSeconds,
+      startTimeMicroseconds: 0
+    ),
+    executablePath: "/Applications/Player.app/Contents/MacOS/Player",
+    outerBundlePath: "/Applications/Player.app",
+    signingIdentity: AppCodeSigningIdentity(
+      identifier: "com.example.player",
+      teamIdentifier: "TEAM123",
+      designatedRequirement: "identifier \"com.example.player\"",
+      codeDirectoryHash: Data([1, 2, 3])
+    )
+  )
+}
+
+private func audioSecurityRouteIntent() -> AppRouteIntent {
+  AppRouteIntent(
+    appID: "com.example.player",
+    desiredVolume: 0.5,
+    isMuted: false,
+    volumeBoost: 1,
+    equalizerSettings: EqualizerSettings(),
+    targetDeviceUID: nil,
+    generation: 1,
+    reason: .automation
+  )
+}
+
+private func identityRevalidationBackend(
+  appIdentity: AppRuntimeIdentity,
+  runtimeIdentityProvider: @escaping WorkspaceAudioControlBackend.RuntimeIdentityProvider,
+  processObjectTranslator: @escaping WorkspaceAudioControlBackend.ProcessObjectTranslator,
+  factoryCalls: CaptureProbeCounter
+) -> WorkspaceAudioControlBackend {
+  let app = AudioApp(
+    id: "com.example.player",
+    logicalID: "com.example.player",
+    pid: 42,
+    bundleID: "com.example.player",
+    displayName: "Player",
+    category: .media,
+    isActive: true,
+    routingState: .live,
+    compatibility: .supported,
+    runtimeIdentity: appIdentity
+  )
+  var snapshot = hardeningSnapshot()
+  snapshot.apps = [app]
+  return WorkspaceAudioControlBackend(
+    testingSnapshot: snapshot,
+    captureAuthorization: .authorized,
+    controllerFactory: { app, processObjectIDs, _, _, _ in
+      factoryCalls.increment()
+      return try PerAppTapController.testingController(
+        appID: app.id,
+        logicalID: app.logicalID,
+        targetProcessObjectIDs: processObjectIDs
+      )
+    },
+    processTargetResolver: { _ in
+      ResolvedProcessTarget(
+        targetRuntimeIdentity: appIdentity,
+        processes: [ResolvedProcessObject(id: 7, runtimeIdentity: appIdentity)],
+        requiresLiveIdentityValidation: true
+      )
+    },
+    liveRuntimeIdentityProvider: runtimeIdentityProvider,
+    processObjectTranslator: processObjectTranslator
+  )
 }
 
 private func linearPCMDescription(

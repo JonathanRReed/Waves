@@ -76,6 +76,10 @@ public struct AudioFormatPlan: Hashable, Sendable {
   /// This covers common surround/aggregate layouts while preventing hostile
   /// stream metadata from driving unbounded per-channel allocations.
   public static let maximumChannelCount = 64
+  /// Native device rates Waves supports end to end. The upper bound covers
+  /// current professional macOS hardware while preventing hostile metadata
+  /// from overflowing frame-count conversions during DSP construction.
+  public static let supportedSampleRateRange = 8_000.0...384_000.0
 
   public let sampleFormat: TapSampleFormat
   public let sampleRate: Double
@@ -98,7 +102,7 @@ public struct AudioFormatPlan: Hashable, Sendable {
   ) {
     guard sampleFormat != .unknown,
       sampleRate.isFinite,
-      sampleRate > 0,
+      Self.supportedSampleRateRange.contains(sampleRate),
       channelCount > 0,
       channelCount <= Self.maximumChannelCount,
       bytesPerSample > 0,
