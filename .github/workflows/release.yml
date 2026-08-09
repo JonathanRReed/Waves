@@ -1,163 +1,73 @@
 name: Release
 
-# Build, notarize, and publish a DMG when a strict vX.Y.Z tag is pushed.
-# This workflow never creates or pushes the tag; a maintainer must do that.
-#
-# Requires these repository secrets (the signing assets only the maintainer can
-# provide). They are not read until tag, branch, metadata, test, build, package,
-# and unsigned smoke checks have passed.
-#   DEVELOPER_ID_CERT_P12       base64 of a Developer ID Application .p12
-#   DEVELOPER_ID_CERT_PASSWORD  password for that .p12
-#   SIGN_IDENTITY               e.g. "Developer ID Application: Name (TEAMID)"
-#   KEYCHAIN_PASSWORD           any throwaway password for the temp keychain
-#   NOTARY_APPLE_ID             Apple ID email for notarytool
-#   NOTARY_TEAM_ID              Apple Developer Team ID
-#   NOTARY_PASSWORD             app-specific password for notarytool
-
-# Manual only. Releases are notarized locally with the maintainer's Developer ID,
-# which never leaves that Mac — a signing key stored in Actions secrets is a
-# strictly larger blast radius for no gain when there is exactly one maintainer.
-#
-# Left runnable on demand so CI signing can be restored by adding the secrets
-# listed above and dispatching this workflow against a tag.
+# Manual only. Waves 1.5 is signed and notarized locally on the maintainer Mac.
+# This hosted path remains configured for future use, but it is not authoritative
+# for 1.5 and never creates or pushes a tag. The dispatched tag must already be
+# annotated with publication-sealed exact-revision evidence before the draft job
+# can pass the shared publication gate.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing vX.Y.Z tag to build and publish"
+        description: "Existing annotated release tag to validate"
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
-env:
-  # Bump per release; must match script/build_and_run.sh's APP_BUILD default.
-  RELEASE_BUILD: "12"
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build, notarize, publish
-    # See ci.yml: needs an Xcode whose SDK ships macOS 26 to resolve the
-    # Liquid Glass API symbols in GlassEffects.swift at compile time, which
-    # macos-14's Xcode lineup can't do. Package.swift's `platforms` (not the
-    # build-machine OS) is what enforces the macOS 14.2 minimum.
+  verify:
+    name: Verify source and unsigned package
     runs-on: macos-26
+    timeout-minutes: 180
+    permissions:
+      contents: read
     steps:
       - name: Check out tagged repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Explicit: a dispatched run checks out the default branch otherwise,
-          # and the ancestry guard below would then compare the wrong commit.
           ref: ${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate strict tag and origin/main ancestry
-        id: version
-        shell: bash
-        env:
-          TAG_NAME: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$TAG_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Release tags must exactly match vX.Y.Z with numeric components and no leading zeroes."
-            exit 1
-          fi
-
-          git fetch --no-tags origin main:refs/remotes/origin/main
-          TAG_COMMIT="$(git rev-list -n 1 "$TAG_NAME")"
-          CHECKED_OUT_COMMIT="$(git rev-parse HEAD)"
-          if [ "$TAG_COMMIT" != "$CHECKED_OUT_COMMIT" ]; then
-            echo "::error::The checked-out commit does not match the commit named by $TAG_NAME."
-            exit 1
-          fi
-          MAIN_COMMIT="$(git rev-parse refs/remotes/origin/main)"
-          if [ "$TAG_COMMIT" != "$MAIN_COMMIT" ]; then
-            echo "::error::$TAG_NAME points to $TAG_COMMIT, but origin/main is $MAIN_COMMIT. The release tag must exactly match origin/main."
-            exit 1
-          fi
-
-          echo "version=${TAG_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Validate changelog and cask template metadata
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          ruby -c Casks/waves.rb
-
-          # RELEASE_BUILD and script/build_and_run.sh's APP_BUILD are two copies
-          # of one number, previously tied together only by a comment. If they
-          # drift, the packaged app and every local build disagree about which
-          # build this is — and the plist check downstream cannot catch it,
-          # because it validates the plist against the same value that generated
-          # it.
-          SCRIPT_BUILD="$(sed -n 's/^APP_BUILD="\${APP_BUILD:-\([0-9][0-9]*\)}"$/\1/p' script/build_and_run.sh)"
-          if [ -z "$SCRIPT_BUILD" ]; then
-            echo "::error::Could not read APP_BUILD from script/build_and_run.sh."
-            exit 1
-          fi
-          if [ "$SCRIPT_BUILD" != "$RELEASE_BUILD" ]; then
-            echo "::error::RELEASE_BUILD is $RELEASE_BUILD but script/build_and_run.sh has APP_BUILD $SCRIPT_BUILD. Bump both to the same integer."
-            exit 1
-          fi
-
-          ruby <<'RUBY'
-          version = ENV.fetch("RELEASE_VERSION")
-          changelog = File.read("CHANGELOG.md")
-          heading = /^## \[#{Regexp.escape(version)}\](?: - \d{4}-\d{2}-\d{2})?$/
-          matches = changelog.lines.grep(heading)
-          abort "CHANGELOG.md must contain exactly one release heading for #{version}" unless matches.length == 1
-
-          cask = File.read("Casks/waves.rb")
-          versions = cask.scan(/^\s*version\s+"([^"]+)"\s*$/).flatten
-          abort "Casks/waves.rb must declare exactly version #{version}" unless versions == [version]
-
-          placeholder = "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
-          checksums = cask.scan(/^\s*sha256\s+"([^"]+)"\s*$/).flatten
-          abort "Casks/waves.rb must contain the release checksum placeholder exactly once" unless checksums == [placeholder]
-          abort "Casks/waves.rb must not use sha256 :no_check" if cask.include?("sha256 :no_check")
-          abort "Casks/waves.rb release URL must remain tag-templated" unless cask.include?('/releases/download/v#{version}/Waves.dmg')
-          RUBY
-
-      # Belt-and-suspenders: pick the newest Xcode actually on the runner
-      # rather than trusting the image's default selection. See ci.yml.
       - name: Select latest available Xcode
         run: |
+          set -euo pipefail
           LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           if [ -z "$LATEST_XCODE" ]; then
-            echo "::error::No versioned Xcode installation found on this runner; Package.swift requires a Swift 6 toolchain."
+            echo "::error::No versioned Xcode installation found on this runner."
             exit 1
           fi
-          echo "Selecting $LATEST_XCODE"
           sudo xcode-select -s "$LATEST_XCODE"
           swift --version
 
-      - name: Run tests before credentials
-        run: swift test
+      - name: Run shared source and package quality gate
+        run: ./script/quality-gate.sh full
 
-      - name: Build release before credentials
-        run: swift build -c release
+  sign:
+    name: Hosted signing and notarization
+    needs: verify
+    runs-on: macos-26
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Check out tagged repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Build and validate unsigned universal package before credentials
-        env:
-          APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ env.RELEASE_BUILD }}
-        run: |
-          set -o pipefail
-          mkdir -p dist
-          ./script/build_and_run.sh --release-check 2>&1 | tee dist/unsigned-package-build.log
-          ./script/build_and_run.sh --verify 2>&1 | tee dist/unsigned-package-validation.log
+      - name: Validate release preflight before credentials
+        run: ./script/release-gate.sh preflight
 
-      - name: Smoke-test unsigned packaged app before credentials
-        env:
-          APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ env.RELEASE_BUILD }}
-          SMOKE_LOG_PATH: ${{ github.workspace }}/dist/unsigned-package-smoke-process.log
-        run: |
-          set -o pipefail
-          ./script/build_and_run.sh --package-smoke 2>&1 | tee dist/unsigned-package-smoke.log
-
+      # These names are intentionally preserved for the dormant hosted path.
+      # They are not used by the authoritative local 1.5 release process.
       - name: Import Developer ID certificate
         env:
           CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
@@ -166,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$CERT_P12" ] || [ -z "$CERT_PASSWORD" ] || [ -z "$KEYCHAIN_PASSWORD" ]; then
-            echo "::error::Signing secrets are not configured. See .github/workflows/release.yml for the required secrets."
+            echo "::error::Hosted signing secrets are not configured."
             exit 1
           fi
           KEYCHAIN="$RUNNER_TEMP/waves-signing.keychain-db"
@@ -187,7 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$NOTARY_APPLE_ID" ] || [ -z "$NOTARY_TEAM_ID" ] || [ -z "$NOTARY_PASSWORD" ]; then
-            echo "::error::Notarization secrets are not configured. See .github/workflows/release.yml for the required secrets."
+            echo "::error::Hosted notarization secrets are not configured."
             exit 1
           fi
           xcrun notarytool store-credentials waves-notary \
@@ -199,118 +109,93 @@ jobs:
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
           NOTARY_PROFILE: waves-notary
-          APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ env.RELEASE_BUILD }}
-        run: |
-          set -o pipefail
-          ./script/build_and_run.sh --notarize 2>&1 | tee dist/signed-package-build.log
+        run: ./script/build_and_run.sh --notarize
 
-      - name: Run strict publication validation
-        env:
-          APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ env.RELEASE_BUILD }}
+      - name: Validate trust and packaged GUI before upload
         run: |
-          set -o pipefail
-          ./script/build_and_run.sh --publication-check 2>&1 | tee dist/publication-check.log
+          ./script/build_and_run.sh --publication-check
+          SMOKE_LOG_PATH="$GITHUB_WORKSPACE/dist/signed-package-smoke-process.log" \
+            ./script/build_and_run.sh --package-smoke
 
-      - name: Smoke-test signed packaged app
-        env:
-          APP_VERSION: ${{ steps.version.outputs.version }}
-          APP_BUILD: ${{ env.RELEASE_BUILD }}
-          SMOKE_LOG_PATH: ${{ github.workspace }}/dist/signed-package-smoke-process.log
-        run: |
-          set -o pipefail
-          ./script/build_and_run.sh --package-smoke 2>&1 | tee dist/signed-package-smoke.log
-
-      - name: Produce checksum, dSYM archive, and final cask
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+      - name: Produce checksum, dSYM archive, and cask artifact
         run: |
           set -euo pipefail
+          VERSION=$(ruby script/release_tool.rb metadata version)
           test -d dist/Waves.app.dSYM
-          (
-            cd dist
-            shasum -a 256 Waves.dmg > Waves.dmg.sha256
-          )
+          (cd dist && shasum -a 256 Waves.dmg > Waves.dmg.sha256)
           ditto -c -k --sequesterRsrc --keepParent dist/Waves.app.dSYM dist/Waves.app.dSYM.zip
-
-          RELEASE_SHA256="$(shasum -a 256 dist/Waves.dmg | cut -d ' ' -f 1)"
-          export RELEASE_SHA256
-          ruby <<'RUBY'
-          version = ENV.fetch("RELEASE_VERSION")
-          checksum = ENV.fetch("RELEASE_SHA256")
-          abort "Invalid SHA-256" unless checksum.match?(/\A[0-9a-f]{64}\z/)
-
-          placeholder = "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
-          template = File.read("Casks/waves.rb")
-          abort "Cask version changed after validation" unless template.scan(/^\s*version\s+"([^"]+)"\s*$/).flatten == [version]
-          abort "Cask checksum placeholder is missing or duplicated" unless template.scan(placeholder).length == 1
-
-          rendered = template.sub(%(sha256 "#{placeholder}"), %(sha256 "#{checksum}"))
-          abort "Generated cask still contains the checksum placeholder" if rendered.include?(placeholder)
-          File.write("dist/waves.rb", rendered)
-          RUBY
+          RELEASE_SHA256=$(shasum -a 256 dist/Waves.dmg | cut -d ' ' -f 1)
+          export VERSION RELEASE_SHA256
+          ruby -e '
+            version = ENV.fetch("VERSION")
+            digest = ENV.fetch("RELEASE_SHA256")
+            abort "invalid SHA-256" unless digest.match?(/\A[0-9a-f]{64}\z/)
+            template = File.read("Casks/waves.rb")
+            abort "cask version drift" unless template.scan(/^\s*version\s+"([^"]+)"/).flatten == [version]
+            placeholder = "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
+            abort "cask placeholder drift" unless template.scan(placeholder).length == 1
+            File.write("dist/waves.rb", template.sub(%(sha256 "#{placeholder}"), %(sha256 "#{digest}")))
+          '
           ruby -c dist/waves.rb
 
-      - name: Upload final release artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - name: Upload signed artifacts for the least-privilege draft job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: waves-${{ steps.version.outputs.version }}-release
+          name: waves-signed-candidate-${{ github.run_number }}
           path: |
+            dist/Waves.app
             dist/Waves.dmg
             dist/Waves.dmg.sha256
+            dist/Waves.app.dSYM
             dist/Waves.app.dSYM.zip
             dist/waves.rb
             dist/*package*.log
-            dist/publication-check.log
           if-no-files-found: error
+          retention-days: 14
 
-      - name: Extract curated release notes
+  draft-publication:
+    name: Validate and create draft release
+    needs: sign
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Check out exact annotated tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download signed artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: waves-signed-candidate-${{ github.run_number }}
+          path: dist
+
+      - name: Run exact-revision publication gate
         env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          WAVES_RELEASE_TAG: ${{ inputs.tag }}
+        run: ./script/release-gate.sh publication
+
+      - name: Extract canonical release notes
         run: |
           set -euo pipefail
-          mkdir -p dist
-          awk -v version="$RELEASE_VERSION" '
+          VERSION=$(ruby script/release_tool.rb metadata version)
+          awk -v version="$VERSION" '
             BEGIN { heading = "## [" version "]" }
-            $0 == heading || index($0, heading " - ") == 1 {
-              in_section = 1
-              found = 1
-              next
-            }
-            in_section && /^## \[/ { exit }
-            in_section {
-              lines[++count] = $0
-              if ($0 !~ /^[[:space:]]*$/) {
-                last_nonempty = count
-              }
-            }
-            END {
-              if (!found || last_nonempty == 0) {
-                exit 1
-              }
-              first_nonempty = 1
-              while (first_nonempty <= last_nonempty && lines[first_nonempty] ~ /^[[:space:]]*$/) {
-                first_nonempty++
-              }
-              for (i = first_nonempty; i <= last_nonempty; i++) {
-                print lines[i]
-              }
-            }
-          ' CHANGELOG.md > dist/release-notes.md || {
-            echo "::error::CHANGELOG.md has no non-empty release notes section for $RELEASE_VERSION."
-            exit 1
-          }
-          if [ ! -s dist/release-notes.md ]; then
-            echo "::error::Extracted release notes are empty for $RELEASE_VERSION."
-            exit 1
-          fi
+            $0 == heading || index($0, heading " - ") == 1 { found = 1; inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+            END { if (!found) exit 2 }
+          ' CHANGELOG.md > dist/release-notes.md
+          test -s dist/release-notes.md
 
       - name: Create draft GitHub Release
-        # Pinned to the v2 commit SHA: this step runs with contents:write and
-        # attaches release binaries, so a moving tag must not choose the code.
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          tag_name: ${{ inputs.tag }}
           files: |
             dist/Waves.dmg
             dist/Waves.dmg.sha256

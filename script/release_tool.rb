@@ -504,7 +504,7 @@ module WavesRelease
       jobs_with_timeouts!(release, "release workflow")
       validate_release_job_permissions!(release)
       raise Error, "release workflow must call the shared quality-gate" unless release_source.include?("./script/quality-gate.sh full")
-      raise Error, "release workflow must call the candidate release-gate" unless release_source.include?("./script/release-gate.sh candidate")
+      raise Error, "release workflow must call the preflight release-gate" unless release_source.include?("./script/release-gate.sh preflight")
       raise Error, "release workflow must call the publication release-gate" unless release_source.include?("./script/release-gate.sh publication")
       raise Error, "release artifact retention must be 14 days" unless release_source.match?(/retention-days:\s*14\b/)
 

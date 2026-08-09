@@ -423,7 +423,7 @@ class ReleaseInfraTest < Minitest::Test
       assert_release_error(/quality-gate/) { WavesRelease::WorkflowContract.validate!(root: root) }
 
       write_workflow_fixtures(root)
-      mutate(root, ".github/workflows/release.yml", "./script/release-gate.sh candidate", "./script/build_and_run.sh --publication-check")
+      mutate(root, ".github/workflows/release.yml", "./script/release-gate.sh preflight", "./script/build_and_run.sh --publication-check")
       assert_release_error(/release-gate/) { WavesRelease::WorkflowContract.validate!(root: root) }
     end
   end
@@ -493,7 +493,7 @@ class ReleaseInfraTest < Minitest::Test
             contents: read
           steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-            - run: ./script/release-gate.sh candidate
+            - run: ./script/release-gate.sh preflight
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
               with:
                 retention-days: 14
