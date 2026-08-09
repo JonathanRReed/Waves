@@ -481,6 +481,116 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_workflow_contract_rejects_dead_string_gate_and_retention_bypasses
+    Dir.mktmpdir("waves-workflows") do |root|
+      write_workflow_fixtures(root)
+      mutate(
+        root,
+        ".github/workflows/ci.yml",
+        "- run: ./script/quality-gate.sh full",
+        "- run: echo './script/quality-gate.sh full'"
+      )
+      assert_release_error(/quality-gate/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        "run: ./script/release-gate.sh preflight",
+        "run: echo './script/release-gate.sh preflight'"
+      )
+      assert_release_error(/release-gate/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(
+        root,
+        ".github/workflows/ci.yml",
+        "retention-days: 14",
+        "retention-days: 7 # retention-days: 14"
+      )
+      assert_release_error(/retention/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        "retention-days: 14",
+        "retention-days: 7 # retention-days: 14"
+      )
+      assert_release_error(/retention/) { WavesRelease::WorkflowContract.validate!(root: root) }
+    end
+  end
+
+  def test_release_workflow_requires_exact_revision_checkout_for_every_job
+    Dir.mktmpdir("waves-workflows") do |root|
+      write_workflow_fixtures(root)
+      WavesRelease::WorkflowContract.validate!(root: root)
+
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        "      - name: Verify checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: ${{ inputs.revision }}\n          fetch-depth: 0\n          persist-credentials: false\n",
+        "      - name: Verify checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n"
+      )
+      assert_release_error(/checkout.*ref/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        "      - name: Sign checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: ${{ inputs.revision }}\n          fetch-depth: 0\n          persist-credentials: false\n",
+        "      - name: Sign checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: refs/heads/main\n          fetch-depth: 0\n          persist-credentials: false\n"
+      )
+      assert_release_error(/checkout.*ref/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(root, ".github/workflows/release.yml", "persist-credentials: false", "persist-credentials: true")
+      assert_release_error(/persist-credentials/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        "      - name: Sign checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: ${{ inputs.revision }}\n          fetch-depth: 0\n          persist-credentials: false\n",
+        "      - name: Sign checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: ${{ inputs.revision }}\n          fetch-depth: 0\n"
+      )
+      assert_release_error(/persist-credentials/) { WavesRelease::WorkflowContract.validate!(root: root) }
+    end
+  end
+
+  def test_release_workflow_binds_revision_validation_and_preflight_to_the_input
+    Dir.mktmpdir("waves-workflows") do |root|
+      write_workflow_fixtures(root)
+      WavesRelease::WorkflowContract.validate!(root: root)
+
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        "REQUESTED_REVISION: ${{ inputs.revision }}",
+        "REQUESTED_REVISION: ${{ github.sha }}"
+      )
+      assert_release_error(/revision validation/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        'test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"',
+        "true"
+      )
+      assert_release_error(/revision validation/) { WavesRelease::WorkflowContract.validate!(root: root) }
+
+      write_workflow_fixtures(root)
+      mutate(
+        root,
+        ".github/workflows/release.yml",
+        "WAVES_EXPECTED_REVISION: ${{ inputs.revision }}",
+        "WAVES_EXPECTED_REVISION: ${{ github.sha }}"
+      )
+      assert_release_error(/preflight.*revision/) { WavesRelease::WorkflowContract.validate!(root: root) }
+    end
+  end
+
   private
 
   def write_repository_contract_fixture(root)
@@ -541,15 +651,38 @@ class ReleaseInfraTest < Minitest::Test
           permissions:
             contents: read
           steps:
-            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+            - name: Verify checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+              with:
+                ref: ${{ inputs.revision }}
+                fetch-depth: 0
+                persist-credentials: false
+            - name: Validate revision input
+              env:
+                REQUESTED_REVISION: ${{ inputs.revision }}
+              run: |
+                set -euo pipefail
+                if [[ ! "$REQUESTED_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+                  echo "::error::revision must be a lowercase 40-character Git revision."
+                  exit 1
+                fi
+                test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"
             - run: ./script/quality-gate.sh full
         sign:
           timeout-minutes: 120
           permissions:
             contents: read
           steps:
-            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-            - run: ./script/release-gate.sh preflight
+            - name: Sign checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+              with:
+                ref: ${{ inputs.revision }}
+                fetch-depth: 0
+                persist-credentials: false
+            - name: Validate release preflight
+              env:
+                WAVES_EXPECTED_REVISION: ${{ inputs.revision }}
+              run: ./script/release-gate.sh preflight
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
               with:
                 retention-days: 14

@@ -477,6 +477,15 @@ module WavesRelease
   end
 
   module WorkflowContract
+    REVISION_INPUT_EXPRESSION = "${{ inputs.revision }}"
+    REVISION_VALIDATION_SCRIPT = <<~'SHELL'.strip.freeze
+      set -euo pipefail
+      if [[ ! "$REQUESTED_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "::error::revision must be a lowercase 40-character Git revision."
+        exit 1
+      fi
+      test "$(git rev-parse HEAD)" = "$REQUESTED_REVISION"
+    SHELL
     ACTIONS = {
       "actions/checkout" => "3d3c42e5aac5ba805825da76410c181273ba90b1",
       "actions/upload-artifact" => "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
@@ -499,8 +508,8 @@ module WavesRelease
       permissions_read!(ci, "CI workflow")
       concurrency!(ci, cancel: true, context: "CI workflow")
       jobs_with_timeouts!(ci, "CI workflow")
-      raise Error, "CI workflow bypasses the shared quality-gate" unless ci_source.include?("./script/quality-gate.sh full")
-      raise Error, "CI artifact retention must be 14 days" unless ci_source.match?(/retention-days:\s*14\b/)
+      require_run_step!(ci, "./script/quality-gate.sh full", "CI workflow bypasses the shared quality-gate")
+      require_upload_retention!(ci, "CI artifact retention must be 14 days")
 
       on_release = trigger(release)
       unless on_release.is_a?(Hash) && on_release.keys == ["workflow_dispatch"]
@@ -508,16 +517,18 @@ module WavesRelease
       end
       dispatch = on_release["workflow_dispatch"]
       revision_input = dispatch.is_a?(Hash) && dispatch["inputs"].is_a?(Hash) ? dispatch["inputs"]["revision"] : nil
-      unless revision_input.is_a?(Hash) && revision_input["required"] == true
+      unless revision_input.is_a?(Hash) && revision_input["required"] == true &&
+          !revision_input.key?("default") && [nil, "string"].include?(revision_input["type"])
         raise Error, "release workflow must require an exact revision input"
       end
       permissions_read!(release, "release workflow")
       concurrency!(release, cancel: false, context: "release workflow")
       jobs_with_timeouts!(release, "release workflow")
       validate_release_job_permissions!(release)
-      raise Error, "release workflow must call the shared quality-gate" unless release_source.include?("./script/quality-gate.sh full")
-      raise Error, "release workflow must call the preflight release-gate" unless release_source.include?("./script/release-gate.sh preflight")
-      raise Error, "release artifact retention must be 14 days" unless release_source.match?(/retention-days:\s*14\b/)
+      validate_release_checkouts!(release)
+      validate_release_revision_steps!(release)
+      require_run_step!(release, "./script/quality-gate.sh full", "release workflow must call the shared quality-gate")
+      require_upload_retention!(release, "release artifact retention must be 14 days")
       if release_source.include?("contents: write") || release_source.include?("action-gh-release") || release_source.include?("download-artifact") || release_source.include?("release-gate.sh publication")
         raise Error, "hosted release workflow must remain a read-only candidate builder, not a publication path"
       end
@@ -568,12 +579,97 @@ module WavesRelease
       raise Error, "#{context} job timeout is missing for #{missing.join(', ')}" unless missing.empty?
     end
 
+    def workflow_steps(workflow, context)
+      workflow.fetch("jobs").flat_map do |name, job|
+        steps = job.is_a?(Hash) ? job["steps"] : nil
+        raise Error, "#{context} job #{name} must define executable steps" unless steps.is_a?(Array) && !steps.empty?
+
+        steps.map.with_index do |step, index|
+          raise Error, "#{context} job #{name} step #{index + 1} must be a mapping" unless step.is_a?(Hash)
+
+          step
+        end
+      end
+    end
+
+    def require_run_step!(workflow, command, message)
+      matched = workflow_steps(workflow, message).any? do |step|
+        step["run"].is_a?(String) && step["run"].strip == command
+      end
+      raise Error, message unless matched
+    end
+
+    def require_upload_retention!(workflow, message)
+      uploads = workflow_steps(workflow, message).select do |step|
+        step["uses"].is_a?(String) && step["uses"].start_with?("actions/upload-artifact@")
+      end
+      valid = !uploads.empty? && uploads.all? do |step|
+        step["with"].is_a?(Hash) && step["with"]["retention-days"] == 14
+      end
+      raise Error, message unless valid
+    end
+
     def validate_release_job_permissions!(workflow)
       jobs = workflow.fetch("jobs")
       jobs.each do |name, job|
         contents = job.is_a?(Hash) && job["permissions"].is_a?(Hash) ? job["permissions"]["contents"] : nil
         raise Error, "release job #{name} must remain read-only with contents: read" unless contents == "read"
       end
+    end
+
+    def validate_release_checkouts!(workflow)
+      expected_action = "actions/checkout@#{ACTIONS.fetch('actions/checkout')}"
+      expected_ref = REVISION_INPUT_EXPRESSION
+      workflow.fetch("jobs").each do |name, job|
+        steps = job.fetch("steps")
+        checkouts = steps.select do |step|
+          step.is_a?(Hash) && step["uses"].is_a?(String) && step["uses"].start_with?("actions/checkout@")
+        end
+        raise Error, "release job #{name} must have exactly one checkout step" unless checkouts.length == 1
+
+        checkout = checkouts.fetch(0)
+        raise Error, "release job #{name} checkout must use the pinned action" unless checkout["uses"] == expected_action
+
+        inputs = checkout["with"]
+        unless inputs.is_a?(Hash) && inputs["ref"] == expected_ref
+          raise Error, "release job #{name} checkout ref must be exactly #{expected_ref}"
+        end
+        unless inputs["fetch-depth"] == 0
+          raise Error, "release job #{name} checkout fetch-depth must be 0"
+        end
+        unless inputs["persist-credentials"] == false
+          raise Error, "release job #{name} checkout persist-credentials must be false"
+        end
+      end
+    end
+
+    def validate_release_revision_steps!(workflow)
+      jobs = workflow.fetch("jobs")
+      verify_steps = release_job_steps!(jobs, "verify")
+      validation = verify_steps.find do |step|
+        step["run"].is_a?(String) && step["run"].strip == REVISION_VALIDATION_SCRIPT
+      end
+      validation_env = validation.is_a?(Hash) ? validation["env"] : nil
+      unless validation_env.is_a?(Hash) && validation_env["REQUESTED_REVISION"] == REVISION_INPUT_EXPRESSION
+        raise Error, "release revision validation must execute against the exact revision input"
+      end
+
+      sign_steps = release_job_steps!(jobs, "sign")
+      preflight = sign_steps.find do |step|
+        step["run"].is_a?(String) && step["run"].strip == "./script/release-gate.sh preflight"
+      end
+      preflight_env = preflight.is_a?(Hash) ? preflight["env"] : nil
+      unless preflight_env.is_a?(Hash) && preflight_env["WAVES_EXPECTED_REVISION"] == REVISION_INPUT_EXPRESSION
+        raise Error, "release workflow preflight release-gate must bind the exact revision input"
+      end
+    end
+
+    def release_job_steps!(jobs, name)
+      job = jobs[name]
+      steps = job.is_a?(Hash) ? job["steps"] : nil
+      raise Error, "release workflow must define the #{name} job steps" unless steps.is_a?(Array) && !steps.empty?
+
+      steps
     end
 
     def validate_action_pins!(source, context)
