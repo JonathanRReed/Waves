@@ -108,9 +108,6 @@ final class ControlServer {
       }
     }
 
-    // Create the socket file with 0600 from the outset rather than widening then
-    // narrowing, so there is no window where it is world-accessible.
-    let previousMask = umask(0o177)
     // `withMemoryRebound(to: sockaddr.self, capacity: 1)` is the classic idiom
     // here, but it traps on current runtimes: sockaddr_un is 106 bytes and
     // sockaddr is 16, and rebinding now requires the strides to match.
@@ -124,19 +121,26 @@ final class ControlServer {
         socklen_t(MemoryLayout<sockaddr_un>.size)
       )
     }
-    umask(previousMask)
 
     guard bindResult == 0 else {
       close(fd)
       throw ControlServerError.bindFailed(errno)
+    }
+    // The containing directory is already 0700, so the new node cannot be
+    // reached by another user while its final mode is applied. Avoid changing
+    // process-global umask here: concurrent file creation elsewhere in Waves
+    // must never inherit the socket's restrictive creation mask.
+    guard chmod(path, 0o600) == 0 else {
+      let permissionsError = errno
+      close(fd)
+      unlink(path)
+      throw ControlServerError.permissionsFailed(permissionsError)
     }
     guard listen(fd, Int32(Self.maximumConnections)) == 0 else {
       close(fd)
       unlink(path)
       throw ControlServerError.listenFailed(errno)
     }
-    // Belt and braces: bind() honours umask, but an inherited mask could differ.
-    chmod(path, 0o600)
 
     listenerFD = fd
     let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
@@ -249,5 +253,6 @@ enum ControlServerError: Error, Equatable {
   case pathTooLong
   case socketFailed(Int32)
   case bindFailed(Int32)
+  case permissionsFailed(Int32)
   case listenFailed(Int32)
 }
