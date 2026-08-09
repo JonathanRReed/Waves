@@ -48,6 +48,7 @@ import WavesAudioCore
 
   #expect(await fixture.backend.refreshCallCount() == 3)
   #expect(await fixture.backend.diagnosticsCallCount() == 3)
+  #expect(await fixture.backend.diagnosticsReprobeRequests() == [false, false, false])
   #expect(fixture.store.session.apps.first?.desiredVolume == 0.7)
   #expect(fixture.store.session.currentDevice == changedDevice)
   #expect(fixture.store.session.backendStatus == changedSnapshot.backendStatus)
@@ -1576,6 +1577,7 @@ private actor TransactionBackend: AudioControlBackend {
   private var completedIntents = 0
   private var refreshCalls = 0
   private var diagnosticsCalls = 0
+  private var diagnosticsReprobeValues: [Bool] = []
   private var firstIntentIsSuspended = false
   private var firstIntentResume: CheckedContinuation<Void, Never>?
   private var suspensionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1606,6 +1608,7 @@ private actor TransactionBackend: AudioControlBackend {
   func completedIntentCount() -> Int { completedIntents }
   func refreshCallCount() -> Int { refreshCalls }
   func diagnosticsCallCount() -> Int { diagnosticsCalls }
+  func diagnosticsReprobeRequests() -> [Bool] { diagnosticsReprobeValues }
   func currentDeviceID() -> String? { snapshot.currentDevice?.id }
   func setRefreshSnapshot(_ replacement: AudioSessionSnapshot) {
     refreshSnapshot = replacement
@@ -1872,6 +1875,10 @@ private actor TransactionBackend: AudioControlBackend {
   func diagnosticsReport() async -> DiagnosticsReport {
     diagnosticsCalls += 1
     return DiagnosticsReport(summary: "Transaction test", checks: [])
+  }
+  func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport {
+    diagnosticsReprobeValues.append(reprobeCaptureAuthorization)
+    return await diagnosticsReport()
   }
   func availableOutputDevices() async -> [AudioDevice] {
     snapshot.currentDevice.map { [$0] } ?? []

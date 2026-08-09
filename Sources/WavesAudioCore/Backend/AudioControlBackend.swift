@@ -19,6 +19,7 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func recoverRoutes() async throws -> AudioSessionSnapshot
   func autoRestoreDevice() async throws -> AudioSessionSnapshot
   func diagnosticsReport() async -> DiagnosticsReport
+  func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport
 
   /// All output-capable devices currently available, for output switching.
   func availableOutputDevices() async -> [AudioDevice]
@@ -67,6 +68,10 @@ public protocol AudioControlBackend: AnyObject, Sendable {
 }
 
 public extension AudioControlBackend {
+  func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport {
+    await diagnosticsReport()
+  }
+
   func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async {
     // Legacy and test backends remain source-compatible. Backends that own
     // managed routes override this to propagate the shared EQ to live streams.

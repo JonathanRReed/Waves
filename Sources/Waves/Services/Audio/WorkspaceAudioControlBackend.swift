@@ -402,6 +402,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     ) throws -> PerAppTapController
   typealias ProcessObjectIDResolver = @Sendable (AudioApp) throws -> [AudioObjectID]
   typealias ProcessObjectLivenessProvider = @Sendable (AudioObjectID) -> Bool
+  typealias CaptureAuthorizationProbe = @Sendable () -> CaptureAuthorizationResult
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
   private let routeMaintenanceOverride: RouteMaintenanceOverride?
@@ -410,6 +411,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let controllerFactory: ControllerFactory?
   private let processObjectIDResolver: ProcessObjectIDResolver?
   private let processObjectLivenessProvider: ProcessObjectLivenessProvider?
+  private let captureAuthorizationProbe: CaptureAuthorizationProbe?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   private nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
@@ -429,6 +431,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.controllerFactory = nil
     self.processObjectIDResolver = nil
     self.processObjectLivenessProvider = nil
+    self.captureAuthorizationProbe = nil
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
     )
@@ -446,7 +449,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     routeMaintenanceOverride: RouteMaintenanceOverride? = nil,
     controllerFactory: ControllerFactory? = nil,
     processObjectIDResolver: ProcessObjectIDResolver? = nil,
-    processObjectLivenessProvider: ProcessObjectLivenessProvider? = nil
+    processObjectLivenessProvider: ProcessObjectLivenessProvider? = nil,
+    captureAuthorizationProbe: CaptureAuthorizationProbe? = nil
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
@@ -461,6 +465,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.controllerFactory = controllerFactory
     self.processObjectIDResolver = processObjectIDResolver
     self.processObjectLivenessProvider = processObjectLivenessProvider
+    self.captureAuthorizationProbe = captureAuthorizationProbe
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: routerObservationNativeCalls
         ?? .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
@@ -1188,6 +1193,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func diagnosticsReport() async -> DiagnosticsReport {
+    await diagnosticsReport(reprobeCaptureAuthorization: true)
+  }
+
+  func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport {
     guard !isShuttingDown else {
       return DiagnosticsReport(
         summary: "The audio backend is shutting down.",
@@ -1198,7 +1207,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // current TCC state rather than the result cached at the last refresh.
     // The probe creates and immediately destroys a private tap with no IO
     // proc, so it is side-effect-free and cheap.
-    refreshCaptureAuthorization()
+    if reprobeCaptureAuthorization {
+      refreshCaptureAuthorization()
+    }
     refreshGlobalRouteHealth()
 
     // A hard route failure is one where the OS and capture permission are both
@@ -1309,6 +1320,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if captureAuthorization == .authorized,
       controllers.values.contains(where: \.isActive)
     {
+      return captureAuthorization
+    }
+
+    if let captureAuthorizationProbe {
+      captureAuthorization = captureAuthorizationProbe()
       return captureAuthorization
     }
 

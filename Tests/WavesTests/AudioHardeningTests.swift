@@ -169,6 +169,24 @@ import WavesAudioCore
   #expect(await authorizedBackend.audioCapabilityMode() == .full)
 }
 
+@Test func workspaceDiagnosticsReuseOnlyTheExplicitlyFreshAuthorizationProbe() async {
+  let counter = CaptureProbeCounter()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: hardeningSnapshot(),
+    captureAuthorizationProbe: {
+      counter.increment()
+      return .authorized
+    }
+  )
+
+  #expect(await backend.refreshCaptureAuthorization() == .authorized)
+  _ = await backend.diagnosticsReport(reprobeCaptureAuthorization: false)
+  #expect(counter.value == 1)
+
+  _ = await backend.diagnosticsReport()
+  #expect(counter.value == 2)
+}
+
 @Test func nativeASBDConversionAcceptsOnlySupportedLinearPCMLayouts() throws {
   let interleavedFloat = AudioStreamBasicDescription(
     mSampleRate: 48_000,
@@ -593,6 +611,17 @@ private func hardeningSnapshot() -> AudioSessionSnapshot {
       isRouteRecoveryHealthy: true
     )
   )
+}
+
+private final class CaptureProbeCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+
+  var value: Int { lock.withLock { count } }
+
+  func increment() {
+    lock.withLock { count += 1 }
+  }
 }
 
 // MARK: - Route liveness (the 1.3.0 rebuild loop)

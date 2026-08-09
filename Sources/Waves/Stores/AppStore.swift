@@ -1486,7 +1486,9 @@ final class AppStore {
         await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
         persistSessionSnapshot()
       }
-      let refreshedDiagnostics = await backend.diagnosticsReport()
+      let refreshedDiagnostics = await backend.diagnosticsReport(
+        reprobeCaptureAuthorization: false
+      )
       if !Self.diagnosticsContentMatches(refreshedDiagnostics, diagnostics) {
         diagnostics = refreshedDiagnostics
       }

@@ -340,6 +340,14 @@ import WavesAudioCore
     })
 }
 
+@Test func diagnosticsReprobeOptionDefaultsToExistingHonestBehavior() async {
+  let backend = LegacyRecordingBackend()
+
+  _ = await backend.diagnosticsReport(reprobeCaptureAuthorization: false)
+
+  #expect(await backend.recordedCalls() == ["diagnostics"])
+}
+
 private enum AppStorePersistenceTestError: LocalizedError {
   case writeFailed
 
@@ -410,7 +418,10 @@ private actor LegacyRecordingBackend: AudioControlBackend {
 
   func recoverRoutes() async throws -> AudioSessionSnapshot { snapshot }
   func autoRestoreDevice() async throws -> AudioSessionSnapshot { snapshot }
-  func diagnosticsReport() async -> DiagnosticsReport { DiagnosticsReport(summary: "Test", checks: []) }
+  func diagnosticsReport() async -> DiagnosticsReport {
+    calls.append("diagnostics")
+    return DiagnosticsReport(summary: "Test", checks: [])
+  }
   func availableOutputDevices() async -> [AudioDevice] { [] }
   func setDefaultOutputDevice(uid: String) async throws {}
 
