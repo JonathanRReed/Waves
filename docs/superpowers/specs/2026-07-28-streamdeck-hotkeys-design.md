@@ -1,8 +1,28 @@
 # Waves 1.4 — External Control, Per-App Mute Hotkeys, and a Stream Deck Plugin
 
 Date: 2026-07-28
-Status: approved design, not yet implemented
+Status: historical design with implemented Waves-side and companion work
 Baseline: `95a43d8` (Waves 1.3.1)
+
+> Historical design record. The body below preserves the original 1.4 proposal,
+> including its old version targets, implementation order, and tool assumptions.
+> Use the current-status section for 1.5 truth.
+
+## Current status on 2026-08-09
+
+- Waves 1.5.0 build 13 implements the same-user Unix socket, protocol version 1,
+  complete bounded replies, subscriptions, `wavesctl`, and app-specific hotkeys.
+- External control and URL automation remain separate opt-ins. Both default to
+  off. The socket is local to the current macOS user and is not a network API.
+- The Stream Deck companion is a separately versioned Bun project at
+  `/Users/jonathanreed/Downloads/waves-streamdeck`. It is not bundled in the
+  Waves app or DMG.
+- Wave Link audio coexistence belongs to Waves. The companion can act only on
+  routes Waves reports as managed, and it cannot override a Wave Link handoff.
+- Companion typecheck, unit, validator, package, and live packaged-socket tests
+  are required for the 1.5 candidate. Remote Wave Link and physical Stream Deck
+  hardware validation is still unverified and remains a hard publication gate.
+- Marketplace submission and App Intents are not part of Waves 1.5.
 
 ## Why
 
@@ -238,7 +258,7 @@ distinct cases, three distinct key treatments and Property Inspector messages:
 
 1. **Waves not running** — key dimmed, "Waves isn't running".
 2. **External control disabled** — key dimmed, "Turn on external control in
-   Waves ▸ Settings ▸ Advanced". This is the first-run case and must not look
+   Waves ▸ Settings ▸ Shortcuts & Automation". This is the first-run case and must not look
    like a bug.
 3. **Bound app not running** — key shows the app icon dimmed; a press shows an
    alert rather than silently doing nothing.

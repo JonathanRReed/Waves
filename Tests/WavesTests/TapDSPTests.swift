@@ -72,7 +72,7 @@ import Testing
   samples.withUnsafeMutableBytes { raw in
     TapDSP.scale(raw.baseAddress!, byteCount: raw.count, format: .int16, gain: 4.0)
   }
-  #expect(samples[0] == Int16.max) // 80000 saturates
+  #expect(samples[0] == Int16.max)  // 80000 saturates
   #expect(samples[1] == Int16.min)
   #expect(samples[2] == 400)
 }

@@ -76,6 +76,10 @@ public struct AudioFormatPlan: Hashable, Sendable {
   /// This covers common surround/aggregate layouts while preventing hostile
   /// stream metadata from driving unbounded per-channel allocations.
   public static let maximumChannelCount = 64
+  /// Native device rates Waves supports end to end. The upper bound covers
+  /// current professional macOS hardware while preventing hostile metadata
+  /// from overflowing frame-count conversions during DSP construction.
+  public static let supportedSampleRateRange = 8_000.0...384_000.0
 
   public let sampleFormat: TapSampleFormat
   public let sampleRate: Double
@@ -97,13 +101,14 @@ public struct AudioFormatPlan: Hashable, Sendable {
     bytesPerPacket: Int? = nil
   ) {
     guard sampleFormat != .unknown,
-          sampleRate.isFinite,
-          sampleRate > 0,
-          channelCount > 0,
-          channelCount <= Self.maximumChannelCount,
-          bytesPerSample > 0,
-          bytesPerFrame > 0,
-          framesPerPacket > 0 else {
+      sampleRate.isFinite,
+      Self.supportedSampleRateRange.contains(sampleRate),
+      channelCount > 0,
+      channelCount <= Self.maximumChannelCount,
+      bytesPerSample > 0,
+      bytesPerFrame > 0,
+      framesPerPacket > 0
+    else {
       return nil
     }
 
@@ -145,13 +150,14 @@ public struct AudioFormatPlan: Hashable, Sendable {
 
   public init?(validating description: LinearPCMFormatDescription) {
     guard description.isLinearPCM,
-          description.isPacked,
-          !description.isAlignedHigh,
-          description.isNativeEndian,
-          !description.hasUnsupportedFormatFlags,
-          description.hasValidReservedField,
-          description.bitsPerChannel > 0,
-          description.bitsPerChannel.isMultiple(of: 8) else {
+      description.isPacked,
+      !description.isAlignedHigh,
+      description.isNativeEndian,
+      !description.hasUnsupportedFormatFlags,
+      description.hasValidReservedField,
+      description.bitsPerChannel > 0,
+      description.bitsPerChannel.isMultiple(of: 8)
+    else {
       return nil
     }
 
@@ -189,9 +195,10 @@ public struct AudioFormatPlan: Hashable, Sendable {
 
     if isInterleaved {
       guard buffers.count == 1,
-            buffers[0].channelCount == channelCount,
-            buffers[0].byteCount >= 0,
-            buffers[0].byteCount.isMultiple(of: bytesPerFrame) else {
+        buffers[0].channelCount == channelCount,
+        buffers[0].byteCount >= 0,
+        buffers[0].byteCount.isMultiple(of: bytesPerFrame)
+      else {
         return false
       }
       return true
@@ -201,8 +208,9 @@ public struct AudioFormatPlan: Hashable, Sendable {
     var expectedByteCount: Int?
     for buffer in buffers {
       guard buffer.channelCount == 1,
-            buffer.byteCount >= 0,
-            buffer.byteCount.isMultiple(of: bytesPerFrame) else {
+        buffer.byteCount >= 0,
+        buffer.byteCount.isMultiple(of: bytesPerFrame)
+      else {
         return false
       }
       if let expectedByteCount {

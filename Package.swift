@@ -10,6 +10,7 @@ let package = Package(
     .executable(name: "Waves", targets: ["Waves"]),
     .executable(name: "wavesctl", targets: ["wavesctl"]),
     .library(name: "WavesAudioCore", targets: ["WavesAudioCore"]),
+    .library(name: "WavesControlClient", targets: ["WavesControlClient"]),
   ],
   dependencies: [
     // Pinned to the swift-6.0.3-RELEASE tag deliberately: that commit's own
@@ -21,15 +22,16 @@ let package = Package(
     // `#expect` API is used here, which this tag has supported for years.
     .package(
       url: "https://github.com/swiftlang/swift-testing.git",
-      revision: "18c42c19cac3fafd61cab1156d4088664b7424ae" // swift-6.0.3-RELEASE
+      revision: "18c42c19cac3fafd61cab1156d4088664b7424ae"  // swift-6.0.3-RELEASE
     ),
-    .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.8.0")
+    .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.8.0"),
   ],
   targets: [
     .executableTarget(
       name: "Waves",
       dependencies: [
         "WavesAudioCore",
+        "WavesRealtimeSupport",
         .product(name: "Sparkle", package: "Sparkle"),
       ],
       path: "Sources/Waves",
@@ -41,12 +43,22 @@ let package = Package(
       name: "WavesAudioCore",
       path: "Sources/WavesAudioCore"
     ),
+    .target(
+      name: "WavesRealtimeSupport",
+      path: "Sources/WavesRealtimeSupport",
+      publicHeadersPath: "include"
+    ),
+    .target(
+      name: "WavesControlClient",
+      path: "Sources/WavesControlClient"
+    ),
     // A terminal client for the control socket. Deliberately dependency-free
     // and separate from the app so the control surface can be exercised without
     // launching Waves's UI — and so a Stream Deck problem can be isolated to
     // either the app or the plugin.
     .executableTarget(
       name: "wavesctl",
+      dependencies: ["WavesControlClient"],
       path: "Sources/wavesctl"
     ),
     .testTarget(
@@ -54,6 +66,7 @@ let package = Package(
       dependencies: [
         "Waves",
         "WavesAudioCore",
+        "WavesControlClient",
         .product(name: "Testing", package: "swift-testing"),
       ],
       path: "Tests/WavesTests"

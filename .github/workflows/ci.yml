@@ -6,67 +6,42 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-test:
-    name: Build, test, and package
-    # Needs an Xcode whose SDK actually ships macOS 26 (the Liquid Glass APIs
-    # in GlassEffects.swift are gated behind `if #available(macOS 26, *)`, but
-    # that's a RUNTIME check — the compiler still must resolve those symbols
-    # against its SDK, which macos-14's Xcode lineup (topping out around
-    # Xcode 16 / macOS 15 SDK) can't do, regardless of build settings).
-    # macos-26 is GA and its Xcode 26.x line has that SDK. This does NOT relax
-    # the macOS 14.2 minimum: that's enforced by Package.swift's `platforms`
-    # declaration and checked by the compiler on every OS build machine, old
-    # or new — the build-machine OS was never what exercised that floor.
+  quality:
+    name: Shared quality gate
     runs-on: macos-26
+    timeout-minutes: 180
+    permissions:
+      contents: read
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Belt-and-suspenders: pick the newest Xcode actually on the runner
-      # rather than trusting the image's default selection, so a future image
-      # bump can't silently regress this to an older bundled Xcode again.
       - name: Select latest available Xcode
         run: |
+          set -euo pipefail
           LATEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           if [ -z "$LATEST_XCODE" ]; then
-            echo "::error::No versioned Xcode installation found on this runner; Package.swift requires a Swift 6 toolchain."
+            echo "::error::No versioned Xcode installation found on this runner."
             exit 1
           fi
-          echo "Selecting $LATEST_XCODE"
           sudo xcode-select -s "$LATEST_XCODE"
+          swift --version
 
-      - name: Show Swift version
-        run: swift --version
+      - name: Run the same bounded quality gate used by the maintainer Mac
+        run: ./script/quality-gate.sh full
 
-      - name: Run tests
-        run: swift test
-
-      - name: Build release
-        run: swift build -c release
-
-      - name: Build fresh universal app, dSYM, and DMG
-        run: |
-          set -o pipefail
-          mkdir -p dist
-          ./script/build_and_run.sh --release-check 2>&1 | tee dist/package-build.log
-
-      - name: Validate existing unsigned package without rebuilding
-        run: |
-          set -o pipefail
-          ./script/build_and_run.sh --verify 2>&1 | tee dist/package-validation.log
-
-      - name: Smoke-test app from packaged DMG
-        env:
-          SMOKE_LOG_PATH: ${{ github.workspace }}/dist/package-smoke-process.log
-        run: |
-          set -o pipefail
-          ./script/build_and_run.sh --package-smoke 2>&1 | tee dist/package-smoke.log
-
-      - name: Upload package artifacts and logs
+      - name: Upload unsigned package evidence and logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: waves-ci-package-${{ github.run_number }}
           path: |

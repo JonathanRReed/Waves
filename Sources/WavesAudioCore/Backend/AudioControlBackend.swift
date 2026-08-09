@@ -19,6 +19,7 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func recoverRoutes() async throws -> AudioSessionSnapshot
   func autoRestoreDevice() async throws -> AudioSessionSnapshot
   func diagnosticsReport() async -> DiagnosticsReport
+  func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport
 
   /// All output-capable devices currently available, for output switching.
   func availableOutputDevices() async -> [AudioDevice]
@@ -35,13 +36,14 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   /// per-device volume presets.
   nonisolated var deviceChangeEvents: AsyncStream<Void> { get }
 
-  /// Tears down managed routes for an application that has quit, so its process
-  /// tap and aggregate device are released promptly instead of lingering until
-  /// the next manual refresh. `clearMuteState` must be true ONLY for the
-  /// exclusion path (so a later whole-session rebuild does not resurrect a mute
-  /// the user cleared by excluding the app); plain app termination passes false
-  /// to preserve the user's saved mute.
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async
+  /// Tears down managed routes for one exact live process lifetime. Mutable
+  /// bundle identifiers and reusable PIDs are not teardown authority.
+  /// `clearMuteState` must be true only for an explicit exclusion; app
+  /// termination passes false to preserve the user's saved mute.
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async
 
   /// Current per-app output levels keyed by logical ID, for live meters. Cheap
   /// to call; intended to be polled only while a UI surface is visible.
@@ -67,6 +69,10 @@ public protocol AudioControlBackend: AnyObject, Sendable {
 }
 
 public extension AudioControlBackend {
+  func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport {
+    await diagnosticsReport()
+  }
+
   func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async {
     // Legacy and test backends remain source-compatible. Backends that own
     // managed routes override this to propagate the shared EQ to live streams.

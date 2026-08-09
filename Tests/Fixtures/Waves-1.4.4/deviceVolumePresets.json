@@ -1,0 +1,14 @@
+{
+  "payload": {
+    "deviceVolumes": {
+      "device.1-4-4": {
+        "com.example.waves-1-4-4.music": {
+          "desiredVolume": 0.31,
+          "isMuted": false,
+          "volumeBoost": 3
+        }
+      }
+    }
+  },
+  "schemaVersion": 1
+}

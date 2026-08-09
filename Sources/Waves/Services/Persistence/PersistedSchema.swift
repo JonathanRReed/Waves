@@ -27,7 +27,8 @@ enum PersistedSchema {
   ) throws -> Payload {
     let json = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
     if let object = json as? [String: Any],
-       object.keys.contains("schemaVersion") || object.keys.contains("payload") {
+      object.keys.contains("schemaVersion") || object.keys.contains("payload")
+    {
       // Once either envelope key appears, decode strictly as an envelope. Falling
       // back to a legacy payload here can turn a damaged wrapper into valid-looking
       // defaults and overwrite the only recoverable copy on the next save.
@@ -58,11 +59,6 @@ enum PersistenceSecurity {
   static func preparePrivateDirectory(_ directory: URL, fileManager: FileManager = .default) throws {
     try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
     try setPrivateDirectoryPermissions(directory, fileManager: fileManager)
-  }
-
-  static func secureExistingFile(at url: URL, fileManager: FileManager = .default) {
-    guard fileManager.fileExists(atPath: url.path) else { return }
-    try? setPrivateFilePermissions(url, fileManager: fileManager)
   }
 
   static func setPrivateFilePermissions(_ url: URL, fileManager: FileManager = .default) throws {

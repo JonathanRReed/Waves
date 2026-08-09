@@ -87,9 +87,9 @@ import WavesAudioCore
   // does not fire for a merely occluded window — so only the occlusion gate
   // sees this.
   fixture.store.setUISurfaceVisible(false)
-  await quietWindow()
+  await boundedObservationWindow()
   await fixture.backend.resetLevelCallCount()
-  let elapsed = await quietWindow()
+  let elapsed = await boundedObservationWindow()
 
   // Bounded on BOTH sides. An upper bound alone would be satisfied by the poll
   // stopping altogether — which is exactly the regression that made the
@@ -123,7 +123,10 @@ import WavesAudioCore
   )
 
   fixture.store.setUISurfaceVisible(false)
-  await quietWindow()
+  #expect(
+    await waitUntil { await fixture.backend.levelCallCount() > 0 },
+    "the hidden heartbeat must complete another level pass"
+  )
 
   #expect(fixture.store.hasLiveAudio, "a hidden window must not make playback invisible")
   #expect(fixture.store.liveLevels.isEmpty == false, "levels must survive going off screen")
@@ -136,9 +139,9 @@ import WavesAudioCore
   #expect(await waitUntil { await fixture.backend.levelCallCount() > 3 })
 
   fixture.store.endLiveLevels()
-  await quietWindow()
+  await boundedObservationWindow()
   await fixture.backend.resetLevelCallCount()
-  let elapsed = await quietWindow()
+  let elapsed = await boundedObservationWindow()
 
   let calls = await fixture.backend.levelCallCount()
   let allowed = Int(elapsed.rounded(.up)) + 1
@@ -158,9 +161,9 @@ import WavesAudioCore
   // enabled — for days, on a machine with nothing routed.
   let fixture = await makeRenderActivityFixture(routingState: .live)
   fixture.store.setAdaptiveMixMode(.both)
-  await quietWindow()
+  await boundedObservationWindow()
   await fixture.backend.resetAdaptiveAnalysisCount()
-  let elapsed = await quietWindow()
+  let elapsed = await boundedObservationWindow()
 
   let idleCalls = await fixture.backend.adaptiveAnalysisCount()
   // Bound scales with real elapsed time so a loaded machine cannot fail this:
@@ -198,16 +201,18 @@ import WavesAudioCore
   while seconds < 20 {
     observed = await fixture.backend.adaptiveAnalysisCount()
     let interval = ContinuousClock.now - start
-    seconds = Double(interval.components.seconds)
+    seconds =
+      Double(interval.components.seconds)
       + Double(interval.components.attoseconds) / 1e18
     if Double(observed) > seconds + 1.5 {
       provedFullCadence = true
       break
     }
-    try? await Task.sleep(for: .milliseconds(100))
+    await Task.yield()
   }
 
-  let detail = "managed routes must keep the full cadence: only \(observed) passes "
+  let detail =
+    "managed routes must keep the full cadence: only \(observed) passes "
     + "in \(seconds)s, which the 1 Hz idle heartbeat alone could account for"
   #expect(provedFullCadence, "\(detail)")
 }
@@ -248,7 +253,7 @@ private func waitUntil(
   let deadline = ContinuousClock.now.advanced(by: timeout)
   while ContinuousClock.now < deadline {
     if await condition() { return true }
-    try? await Task.sleep(for: .milliseconds(25))
+    await Task.yield()
   }
   return await condition()
 }
@@ -257,9 +262,12 @@ private func waitUntil(
 /// how long it actually lasted so the caller can scale its bound to real
 /// elapsed time instead of assuming the sleep was honoured promptly.
 @discardableResult
-private func quietWindow(_ duration: Duration = .milliseconds(900)) async -> Double {
+private func boundedObservationWindow(_ duration: Duration = .milliseconds(900)) async -> Double {
   let start = ContinuousClock.now
-  try? await Task.sleep(for: duration)
+  let deadline = start.advanced(by: duration)
+  while ContinuousClock.now < deadline {
+    await Task.yield()
+  }
   let elapsed = ContinuousClock.now - start
   return Double(elapsed.components.seconds)
     + Double(elapsed.components.attoseconds) / 1e18
@@ -274,20 +282,32 @@ private struct RenderActivityFixture {
 
 /// Shared with the control-surface tests: a running store with one managed app.
 @MainActor
-func makeControlStoreFixture() async -> AppStore {
-  await makeRenderActivityFixture().store
+func makeControlStoreFixture(
+  routingState: RoutingState = .managed,
+  startupState: AppStartupState = .running,
+  includeApp: Bool = true,
+  iconTIFFData: Data? = nil
+) async -> AppStore {
+  await makeRenderActivityFixture(
+    routingState: routingState,
+    startupState: startupState,
+    includeApp: includeApp,
+    iconTIFFData: iconTIFFData
+  ).store
 }
 
 @MainActor
 private func makeRenderActivityFixture(
   routingState: RoutingState = .managed,
   startupState: AppStartupState = .running,
-  includeApp: Bool = true
+  includeApp: Bool = true,
+  iconTIFFData: Data? = nil
 ) async -> RenderActivityFixture {
   let app = AudioApp(
     id: "runtime.render.app",
     logicalID: "com.example.render",
     displayName: "Render App",
+    iconTIFFData: iconTIFFData,
     category: .media,
     desiredVolume: 0.8,
     appliedVolume: 0.8,
@@ -398,7 +418,10 @@ private actor RenderActivityBackend: AudioControlBackend {
   }
   func setDefaultOutputDevice(uid: String) async throws {}
   func setOutputDevice(uid: String?, forAppID appID: String) async throws {}
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {}
   func audioCapabilityMode() async -> AudioCapabilityMode { .full }
   func captureAuthorizationResult() async -> CaptureAuthorizationResult { .authorized }
   func shutdownWithResult() async -> BackendShutdownResult {

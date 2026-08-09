@@ -129,14 +129,16 @@ public struct OutputDeviceReadiness: Hashable, Sendable {
     failureDetail: String? = nil
   ) {
     self.currentDevice = currentDevice
-    var confirmedIDs = Set(previousRecentDeviceIDs.filter {
-      !$0.isEmpty && $0 != "system-output"
-    })
+    var confirmedIDs = Set(
+      previousRecentDeviceIDs.filter {
+        !$0.isEmpty && $0 != "system-output"
+      })
     if let currentDevice {
       confirmedIDs.insert(currentDevice.id)
       self.errorDetail = nil
     } else {
-      self.errorDetail = failureDetail
+      self.errorDetail =
+        failureDetail
         ?? "Waves could not identify the current output device. Check the system Sound output and retry."
     }
     self.recentDeviceIDs = confirmedIDs.sorted()
@@ -147,6 +149,7 @@ public struct OutputDeviceReadiness: Hashable, Sendable {
 
 public enum CleanupStage: Hashable, Sendable {
   case authorizationProbe
+  case listenerInstallation
   case listenerRemoval
   case ioProcStop
   case ioProcDestroy
@@ -161,6 +164,7 @@ public enum CleanupStage: Hashable, Sendable {
   public var name: String {
     switch self {
     case .authorizationProbe: "authorizationProbe"
+    case .listenerInstallation: "listenerInstallation"
     case .listenerRemoval: "listenerRemoval"
     case .ioProcStop: "ioProcStop"
     case .ioProcDestroy: "ioProcDestroy"

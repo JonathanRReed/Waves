@@ -32,46 +32,51 @@ import WavesAudioCore
 }
 
 @Test func audioFormatPlanRejectsUnknownAndInvalidGeometry() {
-  #expect(AudioFormatPlan(
-    sampleFormat: .float32,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 4,
-    bytesPerFrame: 8
-  ) != nil)
-  #expect(AudioFormatPlan(
-    sampleFormat: .unknown,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 4,
-    bytesPerFrame: 8
-  ) == nil)
-  #expect(AudioFormatPlan(
-    sampleFormat: .int16,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 2,
-    bytesPerFrame: 2
-  ) == nil)
-  #expect(AudioFormatPlan(
-    sampleFormat: .float32,
-    sampleRate: 48_000,
-    channelCount: 2,
-    isInterleaved: true,
-    bytesPerSample: 2,
-    bytesPerFrame: 4
-  ) == nil)
-  #expect(AudioFormatPlan(
-    sampleFormat: .float32,
-    sampleRate: 48_000,
-    channelCount: .max,
-    isInterleaved: true,
-    bytesPerSample: 4,
-    bytesPerFrame: .max
-  ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .float32,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 4,
+      bytesPerFrame: 8
+    ) != nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .unknown,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 4,
+      bytesPerFrame: 8
+    ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .int16,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 2,
+      bytesPerFrame: 2
+    ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .float32,
+      sampleRate: 48_000,
+      channelCount: 2,
+      isInterleaved: true,
+      bytesPerSample: 2,
+      bytesPerFrame: 4
+    ) == nil)
+  #expect(
+    AudioFormatPlan(
+      sampleFormat: .float32,
+      sampleRate: 48_000,
+      channelCount: .max,
+      isInterleaved: true,
+      bytesPerSample: 4,
+      bytesPerFrame: .max
+    ) == nil)
 }
 
 @Test func legacyIntentAdapterFailsSafeWithoutMutating() async {
@@ -328,11 +333,25 @@ import WavesAudioCore
   #expect(store.persistenceFailureCount == 1)
   #expect(store.lastPersistenceError?.contains("settings") == true)
   #expect(store.trackedPersistenceTaskCount == 0)
-  #expect(store.toasts.contains { $0.title == "Changes may not be saved" })
+  #expect(
+    store.toasts.contains {
+      $0.title == "Changes may not be saved"
+        && $0.detail == "Waves couldn't save settings. Injected write failure"
+    })
 }
 
-private enum AppStorePersistenceTestError: Error {
+@Test func diagnosticsReprobeOptionDefaultsToExistingHonestBehavior() async {
+  let backend = LegacyRecordingBackend()
+
+  _ = await backend.diagnosticsReport(reprobeCaptureAuthorization: false)
+
+  #expect(await backend.recordedCalls() == ["diagnostics"])
+}
+
+private enum AppStorePersistenceTestError: LocalizedError {
   case writeFailed
+
+  var errorDescription: String? { "Injected write failure" }
 }
 
 private actor LegacyRecordingBackend: AudioControlBackend {
@@ -399,7 +418,10 @@ private actor LegacyRecordingBackend: AudioControlBackend {
 
   func recoverRoutes() async throws -> AudioSessionSnapshot { snapshot }
   func autoRestoreDevice() async throws -> AudioSessionSnapshot { snapshot }
-  func diagnosticsReport() async -> DiagnosticsReport { DiagnosticsReport(summary: "Test", checks: []) }
+  func diagnosticsReport() async -> DiagnosticsReport {
+    calls.append("diagnostics")
+    return DiagnosticsReport(summary: "Test", checks: [])
+  }
   func availableOutputDevices() async -> [AudioDevice] { [] }
   func setDefaultOutputDevice(uid: String) async throws {}
 
@@ -409,7 +431,10 @@ private actor LegacyRecordingBackend: AudioControlBackend {
     snapshot.apps[index].targetDeviceUID = uid
   }
 
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {}
   func audioLevels() async -> [String: AudioLevels] { [:] }
 
   private func appIndex(_ appID: String) -> Int? {
@@ -460,7 +485,15 @@ private actor OverrideDispatchBackend: AudioControlBackend {
   func availableOutputDevices() async -> [AudioDevice] { await legacy.availableOutputDevices() }
   func setDefaultOutputDevice(uid: String) async throws { try await legacy.setDefaultOutputDevice(uid: uid) }
   func setOutputDevice(uid: String?, forAppID appID: String) async throws { try await legacy.setOutputDevice(uid: uid, forAppID: appID) }
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async { await legacy.releaseControllers(forBundleID: bundleID, pid: pid, clearMuteState: clearMuteState) }
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {
+    await legacy.releaseControllers(
+      forRuntimeIdentity: runtimeIdentity,
+      clearMuteState: clearMuteState
+    )
+  }
   func audioLevels() async -> [String: AudioLevels] { await legacy.audioLevels() }
 }
 

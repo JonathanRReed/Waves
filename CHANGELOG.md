@@ -6,6 +6,38 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-09
+
+Waves 1.5.0 build 13 is a reliability release for audio routing, automation,
+state recovery, and the release pipeline. It remains a candidate until the
+required Wave Link and physical Stream Deck hardware gate passes.
+
+### Added
+- Verified Wave Link coexistence using trusted code identity and observable
+  Core Audio activity, with monitor-only explanations for routes Waves yields.
+- A separate protocol version 1 Stream Deck companion compatibility path.
+- Route-health diagnostics, geometry-recovery status, and focused Settings
+  panes for general, mixer, profiles, shortcuts and automation, and diagnostics.
+- Canonical release metadata plus shared quality, evidence, and release gates.
+
+### Changed
+- Route teardown, process matching, router observation, persistence, shutdown,
+  and AppStore coordination now use bounded, explicitly owned lifecycles.
+- Control socket writes retain partial output under backpressure and apply
+  handshake, idle, queue, and connection limits without breaking protocol 1.
+- Swift sources use the checked-in two-space formatting contract, and shipped
+  implementation plans are retained as archived historical evidence.
+
+### Fixed
+- Device-change conflicts no longer appear as false route failures, renderer
+  teardown cannot silently restore duplicate audio, and callback geometry
+  changes rebuild asynchronously instead of doing control work in realtime.
+- Disabled URL automation is inert before activation, hotkey recording is safe,
+  socket replies are complete, and wavesctl reports bounded transport failures.
+- Schema-1 state survives additive upgrades, empty migrations use explicit
+  markers, automatic conferencing mute stays session-only, and shutdown reports
+  use canonical identifiers with a bounded completion window.
+
 ## [1.4.4] - 2026-08-03
 
 A fail-open audio-routing patch for reliable coexistence with Elgato Wave Link.

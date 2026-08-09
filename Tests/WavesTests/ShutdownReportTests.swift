@@ -116,10 +116,12 @@ private func degradedOutcome(
     )
   }
   let manyIssues = (0..<100).map { "persistence failure \($0)" }
-  store.save(ShutdownReport(outcome: degradedOutcome(
-    cleanupRows: manyRows,
-    persistenceIssues: manyIssues
-  )))
+  store.save(
+    ShutdownReport(
+      outcome: degradedOutcome(
+        cleanupRows: manyRows,
+        persistenceIssues: manyIssues
+      )))
 
   let loaded = try #require(store.load())
   #expect(loaded.cleanupRows.count == ShutdownReport.maxCleanupRows)
@@ -136,9 +138,11 @@ private func degradedOutcome(
   defer { try? FileManager.default.removeItem(at: directory) }
   let store = ShutdownReportStore(directory: directory)
 
-  store.save(ShutdownReport(outcome: degradedOutcome(cleanupRows: [
-    CleanupDegradation(stage: .ioProcStop, nativeStatus: -1)
-  ])))
+  store.save(
+    ShutdownReport(
+      outcome: degradedOutcome(cleanupRows: [
+        CleanupDegradation(stage: .ioProcStop, nativeStatus: -1)
+      ])))
   store.save(ShutdownReport(outcome: degradedOutcome(cleanupRows: [])))
 
   // A clean quit after a degraded one must not leave the old failure on disk to
@@ -170,14 +174,16 @@ private func degradedOutcome(
   let directory = makeTemporaryDirectory()
   defer { try? FileManager.default.removeItem(at: directory) }
   let store = ShutdownReportStore(directory: directory)
-  store.save(ShutdownReport(outcome: degradedOutcome(cleanupRows: [
-    CleanupDegradation(
-      appID: "com.example.reported",
-      stage: .ioProcDestroy,
-      nativeStatus: -66_748,
-      detail: "IOProc destroy failed"
-    )
-  ])))
+  store.save(
+    ShutdownReport(
+      outcome: degradedOutcome(cleanupRows: [
+        CleanupDegradation(
+          appID: "com.example.reported",
+          stage: .ioProcDestroy,
+          nativeStatus: -66_748,
+          detail: "IOProc destroy failed"
+        )
+      ])))
   let report = try #require(store.load())
 
   let text = DiagnosticsExportFormatter.format(
@@ -228,6 +234,7 @@ private func degradedOutcome(
   // newer one, and bug reports quote them.
   let names = [
     CleanupStage.authorizationProbe,
+    .listenerInstallation,
     .listenerRemoval,
     .ioProcStop,
     .ioProcDestroy,
@@ -242,4 +249,63 @@ private func degradedOutcome(
   #expect(names.contains("processTapDestroy"))
   #expect(names.contains("processTapReleaseMute"))
   #expect(names.contains("aggregateDeviceDestroy"))
+}
+
+@Test func legacyShutdownReportDefaultsMissingAdditiveFields() throws {
+  let directory = makeTemporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let url = directory.appendingPathComponent("last-shutdown.json")
+  try Data(
+    """
+    {
+      "date": "2026-08-08T12:00:00Z",
+      "appVersion": "1.4.4",
+      "appBuild": "12",
+      "osVersion": "Version 15.6",
+      "completion": "degraded",
+      "backendCompletion": "clean",
+      "persistenceIssues": ["settings: write failed"],
+      "cleanupRows": [],
+      "futureReportField": true
+    }
+    """.utf8
+  ).write(to: url)
+
+  let report = try #require(ShutdownReportStore(directory: directory).load())
+
+  #expect(report.sourceRevision == nil)
+  #expect(report.persistenceIssues == ["settings: write failed"])
+  #expect(report.droppedCleanupRows == 0)
+  #expect(report.droppedPersistenceIssues == 0)
+}
+
+@Test func shutdownReportRejectsOversizedTruncatedPartialAndFuturePayloads() throws {
+  let invalidPayloads = [
+    Data(
+      """
+      {"date":"2026-08-08T12:00:00Z","appVersion":"1.4.4","appBuild":"12","osVersion":"15.6","completion":"clean","persistenceIssues":[],"cleanupRows":[],"futurePadding":"\(String(repeating: "a", count: 256 * 1024))"}
+      """.utf8
+    ),
+    Data("{\"schemaVersion\":1,\"payload\":".utf8),
+    Data("{\"schemaVersion\":1}".utf8),
+    Data("{\"schemaVersion\":2,\"payload\":{}}".utf8),
+  ]
+
+  for payload in invalidPayloads {
+    let directory = makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("last-shutdown.json")
+    try payload.write(to: url)
+
+    #expect(ShutdownReportStore(directory: directory).load() == nil)
+    let corruptURL = url.appendingPathExtension("corrupt")
+    #expect(!FileManager.default.fileExists(atPath: url.path))
+    #expect(try Data(contentsOf: corruptURL) == payload)
+    #expect(try shutdownReportPermissions(at: corruptURL) == 0o600)
+  }
+}
+
+private func shutdownReportPermissions(at url: URL) throws -> Int {
+  let raw = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+  return raw?.intValue ?? -1
 }

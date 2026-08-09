@@ -69,9 +69,11 @@ private func chord(_ keyCode: Int, _ modifiers: Int) -> HotkeyChord {
 
 @Test func rerecordingTheSameChordOntoItsOwnRowIsNotAConflict() {
   var set = HotkeyBindingSet()
-  guard case .success(let binding) = set.assign(
-    chord(kVK_ANSI_S, cmdKey | optionKey), to: .muteApp("com.spotify.client")
-  ) else {
+  guard
+    case .success(let binding) = set.assign(
+      chord(kVK_ANSI_S, cmdKey | optionKey), to: .muteApp("com.spotify.client")
+    )
+  else {
     Issue.record("setup failed")
     return
   }
@@ -150,9 +152,11 @@ private func chord(_ keyCode: Int, _ modifiers: Int) -> HotkeyChord {
 
 @Test func removingABindingLeavesTheRestAlone() {
   var set = HotkeyBindingSet()
-  guard case .success(let spotify) = set.assign(
-    chord(kVK_ANSI_S, cmdKey | optionKey), to: .muteApp("com.spotify.client")
-  ) else {
+  guard
+    case .success(let spotify) = set.assign(
+      chord(kVK_ANSI_S, cmdKey | optionKey), to: .muteApp("com.spotify.client")
+    )
+  else {
     Issue.record("setup failed")
     return
   }

@@ -2,36 +2,81 @@ import Foundation
 import Observation
 @preconcurrency import Sparkle
 
-@Observable
 @MainActor
-final class UpdaterService {
-  private let controller: SPUStandardUpdaterController
-  @ObservationIgnored private var canCheckObservation: NSKeyValueObservation?
-  @ObservationIgnored private var automaticChecksObservation: NSKeyValueObservation?
-  @ObservationIgnored private var isSynchronizingAutomaticChecks = false
+protocol UpdaterDriving: AnyObject {
+  var canCheckForUpdates: Bool { get }
+  var automaticallyChecksForUpdates: Bool { get set }
+  var onCanCheckForUpdatesChanged: ((Bool) -> Void)? { get set }
+  var onAutomaticallyChecksForUpdatesChanged: ((Bool) -> Void)? { get set }
+  func checkForUpdates() throws
+}
 
-  private(set) var canCheckForUpdates: Bool
+@MainActor
+private final class SparkleUpdaterDriver: UpdaterDriving {
+  private let controller: SPUStandardUpdaterController
+  private var canCheckObservation: NSKeyValueObservation?
+  private var automaticChecksObservation: NSKeyValueObservation?
+
+  var onCanCheckForUpdatesChanged: ((Bool) -> Void)?
+  var onAutomaticallyChecksForUpdatesChanged: ((Bool) -> Void)?
+
+  var canCheckForUpdates: Bool { controller.updater.canCheckForUpdates }
   var automaticallyChecksForUpdates: Bool {
-    didSet {
-      guard !isSynchronizingAutomaticChecks,
-            automaticallyChecksForUpdates != controller.updater.automaticallyChecksForUpdates else { return }
-      controller.updater.automaticallyChecksForUpdates = automaticallyChecksForUpdates
+    get { controller.updater.automaticallyChecksForUpdates }
+    set { controller.updater.automaticallyChecksForUpdates = newValue }
+  }
+
+  init(startingUpdater: Bool) {
+    controller = SPUStandardUpdaterController(
+      startingUpdater: startingUpdater,
+      updaterDelegate: nil,
+      userDriverDelegate: nil
+    )
+    canCheckObservation = controller.updater.observe(
+      \.canCheckForUpdates,
+      options: [.new]
+    ) { [weak self] _, change in
+      guard let value = change.newValue else { return }
+      Task { @MainActor [weak self] in self?.onCanCheckForUpdatesChanged?(value) }
+    }
+    automaticChecksObservation = controller.updater.observe(
+      \.automaticallyChecksForUpdates,
+      options: [.new]
+    ) { [weak self] _, change in
+      guard let value = change.newValue else { return }
+      Task { @MainActor [weak self] in self?.onAutomaticallyChecksForUpdatesChanged?(value) }
     }
   }
 
-  /// Whether there is anything for Sparkle to check.
-  ///
-  /// Keyed on the appcast URL rather than the bundle identifier: it is the exact
-  /// precondition for the updater doing useful work, and it cannot drift from
-  /// the packaging script the way a hardcoded bundle id could (`BUNDLE_ID` is
-  /// overridable in `script/build_and_run.sh`). A packaged Waves app has
-  /// `SUFeedURL`; a test binary or a bare `swift run` build does not.
-  ///
-  /// This matters because starting the updater without a feed still arms
-  /// Sparkle's scheduler, and when a check fires it puts up a modal `NSAlert` on
-  /// the main thread that a headless test host can never dismiss —
-  /// `PhaseOneContractTests` constructs `WavesApp`, which constructs this
-  /// service, so the entire suite could hang indefinitely.
+  func checkForUpdates() throws {
+    controller.checkForUpdates(nil)
+  }
+}
+
+@Observable
+@MainActor
+final class UpdaterService {
+  enum CheckStatus: Equatable {
+    case idle
+    case dispatched
+    case unavailable
+    case failed(String)
+  }
+
+  @ObservationIgnored private let driver: any UpdaterDriving
+  @ObservationIgnored private var isSynchronizingAutomaticChecks = false
+
+  private(set) var canCheckForUpdates: Bool
+  private(set) var lastCheckStatus: CheckStatus = .idle
+  var automaticallyChecksForUpdates: Bool {
+    didSet {
+      guard !isSynchronizingAutomaticChecks,
+        automaticallyChecksForUpdates != driver.automaticallyChecksForUpdates
+      else { return }
+      driver.automaticallyChecksForUpdates = automaticallyChecksForUpdates
+    }
+  }
+
   private static var hasUpdateFeed: Bool {
     guard let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String else {
       return false
@@ -39,41 +84,45 @@ final class UpdaterService {
     return !feed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
-  init() {
-    let controller = SPUStandardUpdaterController(
-      startingUpdater: Self.hasUpdateFeed,
-      updaterDelegate: nil,
-      userDriverDelegate: nil
-    )
-    self.controller = controller
-    canCheckForUpdates = controller.updater.canCheckForUpdates
-    automaticallyChecksForUpdates = controller.updater.automaticallyChecksForUpdates
+  convenience init() {
+    self.init(hasUpdateFeed: Self.hasUpdateFeed) { shouldStart in
+      SparkleUpdaterDriver(startingUpdater: shouldStart)
+    }
+  }
 
-    canCheckObservation = controller.updater.observe(
-      \.canCheckForUpdates,
-      options: [.initial, .new]
-    ) { [weak self] _, change in
-      guard let value = change.newValue else { return }
-      Task { @MainActor [weak self] in
-        self?.canCheckForUpdates = value
+  init(
+    hasUpdateFeed: Bool,
+    driverFactory: (Bool) -> any UpdaterDriving
+  ) {
+    let driver = driverFactory(hasUpdateFeed)
+    self.driver = driver
+    canCheckForUpdates = driver.canCheckForUpdates
+    automaticallyChecksForUpdates = driver.automaticallyChecksForUpdates
+
+    driver.onCanCheckForUpdatesChanged = { [weak self] value in
+      self?.canCheckForUpdates = value
+      if value, self?.lastCheckStatus == .unavailable {
+        self?.lastCheckStatus = .idle
       }
     }
-
-    automaticChecksObservation = controller.updater.observe(
-      \.automaticallyChecksForUpdates,
-      options: [.initial, .new]
-    ) { [weak self] _, change in
-      guard let value = change.newValue else { return }
-      Task { @MainActor [weak self] in
-        guard let self else { return }
-        isSynchronizingAutomaticChecks = true
-        automaticallyChecksForUpdates = value
-        isSynchronizingAutomaticChecks = false
-      }
+    driver.onAutomaticallyChecksForUpdatesChanged = { [weak self] value in
+      guard let self else { return }
+      isSynchronizingAutomaticChecks = true
+      automaticallyChecksForUpdates = value
+      isSynchronizingAutomaticChecks = false
     }
   }
 
   func checkForUpdates() {
-    controller.checkForUpdates(nil)
+    guard canCheckForUpdates else {
+      lastCheckStatus = .unavailable
+      return
+    }
+    do {
+      try driver.checkForUpdates()
+      lastCheckStatus = .dispatched
+    } catch {
+      lastCheckStatus = .failed(error.localizedDescription)
+    }
   }
 }

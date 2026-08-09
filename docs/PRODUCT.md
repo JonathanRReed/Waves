@@ -15,6 +15,34 @@ Waves gives macOS the per-app mixer it should already have: native menu-bar acce
 
 The product must be honest about macOS audio constraints. If Waves can see an app but cannot fully control it yet, the interface should say that clearly instead of pretending every row has identical capability.
 
+That honesty includes coexistence with other routers. Public Core Audio APIs do
+not expose a supported tap-creator association. When verified Wave Link has
+active Core Audio output, Waves conservatively yields affected ordinary routes
+and explains the unattributable handoff. An unrelated system tap is never
+attributed to Wave Link, and Waves unconditionally excludes Wave Link's own and
+mixed-output targets. Geometry recovery happens outside realtime callbacks,
+with bounded retries and a visible global recovery path when automatic repair
+is exhausted.
+
+Automation is local and opt-in. URL commands and the same-user protocol-v1 Unix
+socket are separate settings and both default to off. The `wavesctl` client is
+part of this repository. The Stream Deck companion is separately versioned and
+not bundled with Waves. It may control only routes Waves truthfully reports as
+managed. App Intents remain deferred until they can reuse the same AppStore
+intent boundary.
+
+Temporary call behavior remains temporary. An automatic conferencing mute is
+session-only and must never become durable user intent. Durable state stays
+schema 1 with additive decoding so existing profiles, preferences, sessions,
+pins, hotkeys, EQ, device presets, and automation settings survive an upgrade.
+
+## Release boundary
+
+Version 1.4.4 is the latest published release. Version 1.5.0 build 13 is an
+in-development candidate until package, signing, notarization, upgrade, local
+QA, and remote Wave Link plus physical Stream Deck gates all pass. Source-level
+completion alone is not publication approval.
+
 ## Brand Personality
 
 Native, quiet, precise.
@@ -34,7 +62,14 @@ The reference set is Background Music, FineTune, eqMac, and BetterAudio. Waves s
 3. Honest routing. Separate visible, monitored, and fully managed states so the app never overpromises per-app control.
 4. Stable identity. Preserve user preferences by logical app identity, while route control revalidates the current runtime process family.
 5. Quiet confidence. Keep copy terse, interactions calm, and visual emphasis reserved for status, risk, and the current control path.
+6. Capability before affordance. Do not show an enabled control for a route Waves has yielded or cannot safely manage.
 
 ## Accessibility & Inclusion
 
 Target a practical WCAG AA posture for contrast, focus visibility, keyboard operation, and reduced-motion comfort. All icon-only actions need accessible labels and help text. Sliders, toggles, menus, route-status indicators, and empty states must remain understandable without color alone.
+
+The focused mixer must remain keyboard-operable, including selection, mute,
+volume, boost, pin, EQ, output, and exhausted-route recovery. Full and compact
+rows share accessible labels, values, hints, order, and actions. VoiceOver
+rotors stay scoped to rendered rows, and profile validation plus route recovery
+changes produce announcements through the real product paths.

@@ -4,9 +4,10 @@ import Testing
 @testable import Waves
 
 @Test func systemSettingsDestinationsProduceExpectedDeepLinks() throws {
+  #expect(SystemSettingsDestination.allCases == [.audioCapture, .soundOutput])
+
   let expectedQueries: [SystemSettingsDestination: String] = [
     .audioCapture: "Privacy_AudioCapture",
-    .loginItems: "com.apple.LoginItems-Settings.extension",
     .soundOutput: "com.apple.Sound-Settings.extension",
   ]
 

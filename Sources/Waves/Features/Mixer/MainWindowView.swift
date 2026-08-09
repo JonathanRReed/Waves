@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 import WavesAudioCore
 
 struct MainWindowView: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.openSettings) private var openSettings
   @Environment(\.wavesTheme) private var theme
   @State private var searchText = ""
   // Restored across launches so the user returns to the scope they left.
@@ -33,7 +35,8 @@ struct MainWindowView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-          store.isWarmingUp ? "Starting audio, in progress" : "Refreshing, in progress")
+          store.isWarmingUp ? "Starting audio, in progress" : "Refreshing, in progress"
+        )
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
@@ -44,6 +47,14 @@ struct MainWindowView: View {
       }
     }
     .background(WavesBackground())
+    .overlayPreferenceValue(GuidedTourTargetBoundsPreferenceKey.self) { targetBounds in
+      GeometryReader { proxy in
+        onboardingEducationOverlay(
+          targetFrame: targetBounds.map { proxy[$0] },
+          containerSize: proxy.size
+        )
+      }
+    }
     .sheet(item: $editorContext) { context in
       ProfileEditorSheet(context: context)
         .environment(store)
@@ -112,19 +123,78 @@ struct MainWindowView: View {
 
   @ViewBuilder
   private var primarySurface: some View {
-    if store.showsWarmStartMixer {
-      // A returning user's session is already in memory — `sessionStore.load()`
-      // is synchronous in `AppStore.init` — so making them watch a full-window
-      // "Starting Waves" splash was showing a spinner for data we already had,
-      // and then reflowing the entire window when the real surface replaced it.
-      // Go straight to the mixer; audio startup catches up underneath.
+    switch store.onboardingLaunchDecision {
+    case let .installationAdvisory(classification):
+      InstallLocationAdvisoryView(
+        classification: classification,
+        openInFinder: {
+          NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+        },
+        continueForNow: store.continueFromInstallationAdvisory
+      )
+    case let .requiredSetup(initialPhase):
+      OnboardingView(
+        initialPhase: initialPhase,
+        onStartTour: store.startGuidedMixerTour,
+        onCancel: requiredSetupCancelAction
+      )
+    case .mixer:
       mixerNavigation
-    } else if store.privacySetupPresentationState != .hidden {
-      PrivacySetupSurface()
-    } else if !store.preferences.hasCompletedGuidedSetup {
-      OnboardingView()
-    } else {
-      mixerNavigation
+    }
+  }
+
+  private var requiredSetupCancelAction: (() -> Void)? {
+    guard store.requestedSetupReplay else { return nil }
+    return { store.cancelRequiredSetupReplay() }
+  }
+
+  @ViewBuilder
+  private func onboardingEducationOverlay(
+    targetFrame: CGRect?,
+    containerSize: CGSize
+  ) -> some View {
+    if case .mixer = store.onboardingLaunchDecision {
+      if let presentation = store.guidedMixerTourPresentation {
+        MixerTourOverlay(
+          moment: presentation.moment,
+          appName: presentation.appName,
+          isTargetAvailable: presentation.isTargetAvailable,
+          onBack: store.backGuidedMixerTour,
+          onNext: store.advanceGuidedMixerTour,
+          onOpenSettings: {
+            store.requestSettingsPane(.mixer)
+            openSettings()
+          },
+          onEnd: store.endGuidedMixerTour
+        )
+        .padding(24)
+        .frame(
+          maxWidth: .infinity,
+          maxHeight: .infinity,
+          alignment: GuidedTourOverlayPlacement.resolve(
+            targetFrame: targetFrame,
+            containerHeight: containerSize.height
+          ).alignment
+        )
+      } else if case let .mixer(showWhatsNew, showTourTip) =
+        store.onboardingLaunchDecision
+      {
+        if store.shouldShowWhatsNew || showWhatsNew {
+          WhatsNewCard(
+            onTakeTour: store.startGuidedMixerTour,
+            onDismiss: store.dismissWhatsNew
+          )
+          .padding(24)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        } else if showTourTip {
+          DeferredTourTip(
+            onStart: store.startGuidedMixerTour,
+            onDismiss: store.dismissGuidedTourTip
+          )
+          .padding(24)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        }
+      }
     }
   }
 
@@ -317,10 +387,12 @@ enum MixerScope: Hashable, RawRepresentable {
     if rawValue == "sound" {
       self = .sound
     } else if rawValue.hasPrefix("source:"),
-       let filter = SourceFilter(rawValue: String(rawValue.dropFirst("source:".count))) {
+      let filter = SourceFilter(rawValue: String(rawValue.dropFirst("source:".count)))
+    {
       self = .source(filter)
     } else if rawValue.hasPrefix("profile:"),
-              let id = UUID(uuidString: String(rawValue.dropFirst("profile:".count))) {
+      let id = UUID(uuidString: String(rawValue.dropFirst("profile:".count)))
+    {
       self = .profile(id)
     } else {
       return nil
@@ -598,9 +670,9 @@ private struct SourceListView: View {
   /// `store.liveApps` walks `visibleApps`, which reconciles pin state and sorts
   /// the whole roster. Reading it from inside a `filter` closure ran all of that
   /// once per app, on every level-poll tick, whether or not VoiceOver was on.
-  private var playingRotorApps: [AudioApp] {
+  private var rotorCatalog: MixerRotorCatalog {
     let liveIDs = Set(store.liveApps.map(\.logicalID))
-    return apps.filter { liveIDs.contains($0.logicalID) }
+    return MixerRotorCatalog(apps: apps, liveAppIDs: liveIDs)
   }
 
   var body: some View {
@@ -724,28 +796,22 @@ private struct SourceListView: View {
         // Keyboard operation: arrow keys move the selection (List), and these
         // keys act on the selected row so the mixer is fully drivable without a
         // mouse — including muting, which the borderless button can't reach.
-        .onKeyPress(.space) { handleKey { store.setMuted(!$0.isMuted, for: $0) } }
-        .onKeyPress("m") { handleKey { store.setMuted(!$0.isMuted, for: $0) } }
-        .onKeyPress("=") { handleKey { nudgeVolume($0, by: 0.05) } }
-        // Also accept the shifted "+" so a user reaching for the obvious "louder"
-        // key isn't met with silence (the hint still reads "equals or minus").
-        .onKeyPress("+") { handleKey { nudgeVolume($0, by: 0.05) } }
-        .onKeyPress("-") { handleKey { nudgeVolume($0, by: -0.05) } }
-        .onKeyPress("b") { handleKey { cycleBoost($0) } }
-        .onKeyPress("p") { handleKey { store.togglePinned($0) } }
+        .modifier(
+          MixerKeyboardCommandsModifier(
+            selectedAppID: $selectedAppID,
+            apps: apps
+          )
+        )
         // Surface the otherwise-undocumented in-row keys: without this hint a
         // user can only discover them by reading source. Mirrors the toolbar
         // controls, which advertise their shortcuts via help/accessibility text.
         .accessibilityHint(
-          "Use arrow keys to select an app. On the selected app, press Space or M to mute, "
-            + "equals or minus to adjust volume, B to cycle boost, and P to pin."
+          MixerKeyboardCommandsModifier.accessibilityHint
         )
-        .help(
-          "Select an app with the arrow keys, then: Space or M mute, = / - volume, B boost, P pin."
-        )
+        .help(MixerKeyboardCommandsModifier.help)
         // Jump straight to playing apps or apps needing attention.
         .accessibilityRotor("Playing apps") {
-          ForEach(playingRotorApps) { app in
+          ForEach(rotorCatalog.playing) { app in
             AccessibilityRotorEntry(app.displayName, id: app.id)
           }
         }
@@ -754,7 +820,7 @@ private struct SourceListView: View {
           // the sibling "Playing apps" rotor. Enumerating cross-scope apps would
           // yield entries whose ids have no rendered row, so selecting them would
           // move VoiceOver focus to a nonexistent element (a silent no-op).
-          ForEach(apps.filter { $0.routingState == .error }) { app in
+          ForEach(rotorCatalog.needsAttention) { app in
             AccessibilityRotorEntry(app.displayName, id: app.id)
           }
         }
@@ -828,31 +894,134 @@ private struct SourceListView: View {
       && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
-  /// Runs `action` on the currently selected row, if any.
-  ///
-  /// These are focused-window keys that work while the mixer window (this
-  /// list) is focused, like the Help copy's ⌘N/⌘R. They are intentionally NOT
-  /// gated on `preferences.enableKeyboardShortcuts` — that toggle governs the
-  /// user-assignable global hotkeys, not in-list keys. Gating here
-  /// would silently strip keyboard control of the mixer (including the only
-  /// keyboard mute path) whenever a user disables global hotkeys.
-  private func handleKey(_ action: (AudioApp) -> Void) -> KeyPress.Result {
-    guard let id = selectedAppID, let app = apps.first(where: { $0.id == id }) else {
+}
+
+struct MixerKeyboardCommandsModifier: ViewModifier {
+  @Environment(AppStore.self) private var store
+  @Binding var selectedAppID: AudioApp.ID?
+  let apps: [AudioApp]
+
+  static let accessibilityHint =
+    "Use arrow keys to select an app. On the selected app, press Space or M to mute, "
+    + "equals or minus to adjust volume, B to cycle boost, P to pin, E for equalizer, "
+    + "O to change output, or R to recover all managed routes when recovery has stopped."
+
+  static let help =
+    "Select an app with the arrow keys, then: Space or M mute, = / - volume, "
+    + "B boost, P pin, E equalizer, O output, R recover all managed routes."
+
+  func body(content: Content) -> some View {
+    content
+      .onKeyPress(phases: .down) { keyPress in
+        guard keyPress.modifiers.isEmpty else { return .ignored }
+        return switch keyPress.key {
+        case .space, "m": handleKey(.toggleMute)
+        case "=", "+": handleKey(.increaseVolume)
+        case "-": handleKey(.decreaseVolume)
+        case "b": handleKey(.cycleBoost)
+        case "p": handleKey(.togglePin)
+        case "e": openEqualizer()
+        case "o": cycleOutputDevice()
+        case "r": recoverRoutes()
+        default: .ignored
+        }
+      }
+  }
+
+  /// These are focused-window keys, intentionally independent of the global
+  /// hotkey preference. Disabling user-assigned system-wide shortcuts must not
+  /// remove keyboard control from the focused mixer list.
+  private func handleKey(_ command: MixerKeyboardCommand) -> KeyPress.Result {
+    guard let app = selectedApp else { return .ignored }
+    if command != .togglePin, !MixerRouteControlPolicy(app: app).allowsAudioControl {
       return .ignored
     }
-    action(app)
+    switch command {
+    case .toggleMute:
+      store.setMuted(command.updatedMute(for: app) ?? app.isMuted, for: app)
+    case .increaseVolume, .decreaseVolume:
+      guard let volume = command.updatedVolume(for: app) else { return .ignored }
+      store.setDesiredVolume(volume, for: app)
+      store.commitDesiredVolume(for: app)
+    case .cycleBoost:
+      store.setVolumeBoost(command.updatedBoost(for: app) ?? app.volumeBoost, for: app)
+    case .togglePin:
+      store.togglePinned(app)
+    }
     return .handled
   }
 
-  private func nudgeVolume(_ app: AudioApp, by delta: Float) {
-    let next = max(0, min(1, app.desiredVolume + delta))
-    store.setDesiredVolume(next, for: app)
-    store.commitDesiredVolume(for: app)
+  private func openEqualizer() -> KeyPress.Result {
+    guard let app = selectedApp, MixerRouteControlPolicy(app: app).allowsAudioControl else {
+      return .ignored
+    }
+    store.focusEqualizer(for: app)
+    return .handled
   }
 
-  private func cycleBoost(_ app: AudioApp) {
-    let next = app.volumeBoost >= 4 ? 1 : (app.volumeBoost + 1).rounded()
-    store.setVolumeBoost(next, for: app)
+  private func cycleOutputDevice() -> KeyPress.Result {
+    guard let app = selectedApp, MixerRouteControlPolicy(app: app).allowsAudioControl else {
+      return .ignored
+    }
+    let devices =
+      store.availableDevices.isEmpty
+      ? store.session.currentDevice.map { [$0] } ?? []
+      : store.availableDevices
+    guard !devices.isEmpty else { return .ignored }
+
+    let nextDevice: AudioDevice?
+    if let currentID = app.targetDeviceUID,
+      let currentIndex = devices.firstIndex(where: { $0.id == currentID })
+    {
+      let nextIndex = devices.index(after: currentIndex)
+      nextDevice = nextIndex == devices.endIndex ? nil : devices[nextIndex]
+    } else {
+      nextDevice = devices.first
+    }
+    store.setOutputDevice(nextDevice, for: app)
+    return .handled
+  }
+
+  private func recoverRoutes() -> KeyPress.Result {
+    guard let app = selectedApp, MixerRouteControlPolicy(app: app).offersRecovery else {
+      return .ignored
+    }
+    store.recoverRoutes()
+    return .handled
+  }
+
+  private var selectedApp: AudioApp? {
+    guard let selectedAppID else { return nil }
+    return apps.first { $0.id == selectedAppID }
+  }
+}
+
+enum MixerKeyboardCommand: Equatable, Sendable {
+  case toggleMute
+  case increaseVolume
+  case decreaseVolume
+  case cycleBoost
+  case togglePin
+
+  func updatedMute(for app: AudioApp) -> Bool? {
+    self == .toggleMute ? !app.isMuted : nil
+  }
+
+  func updatedVolume(for app: AudioApp) -> Float? {
+    switch self {
+    case .increaseVolume: min(1, app.desiredVolume + 0.05)
+    case .decreaseVolume: max(0, app.desiredVolume - 0.05)
+    case .toggleMute, .cycleBoost, .togglePin: nil
+    }
+  }
+
+  func updatedBoost(for app: AudioApp) -> Float? {
+    guard self == .cycleBoost else { return nil }
+    return app.volumeBoost >= 4 ? 1 : (app.volumeBoost + 1).rounded()
+  }
+
+  func updatedPin(for app: AudioApp) -> Bool? {
+    self == .togglePin ? !app.isPinned : nil
   }
 }
 
@@ -1048,33 +1217,169 @@ private struct OutputSummaryView: View {
   }
 }
 
+struct RouteHealthBadgeSemantics: Equatable, Sendable {
+  enum Interaction: Equatable, Sendable {
+    case statusOnly
+    case recoverAllRoutes
+  }
+
+  let interaction: Interaction
+  let visibleLabel: String
+  let accessibilityLabel: String
+  let accessibilityValue: String?
+  let help: String
+  let hint: String?
+
+  init(contextual presentation: RouteHealthPresentation) {
+    if presentation.tone == .error {
+      self.init(
+        recoveryStatus: presentation.title,
+        detail: presentation.accessibilityValue
+      )
+    } else {
+      self.init(
+        interaction: .statusOnly,
+        visibleLabel: presentation.title,
+        accessibilityLabel: presentation.accessibilityLabel,
+        accessibilityValue: presentation.accessibilityValue,
+        help: presentation.help,
+        hint: presentation.help
+      )
+    }
+  }
+
+  init(genericTitle: String, isHealthy: Bool) {
+    if isHealthy {
+      self.init(
+        interaction: .statusOnly,
+        visibleLabel: genericTitle,
+        accessibilityLabel: "Routing status: \(genericTitle)",
+        accessibilityValue: nil,
+        help: "Routing status: \(genericTitle)",
+        hint: nil
+      )
+    } else {
+      self.init(recoveryStatus: genericTitle, detail: nil)
+    }
+  }
+
+  private init(recoveryStatus: String, detail: String?) {
+    interaction = .recoverAllRoutes
+    visibleLabel = "Recover All Routes"
+    accessibilityLabel = "Recover all managed Waves routes"
+    accessibilityValue = [recoveryStatus, detail]
+      .compactMap { $0 }
+      .joined(separator: ". ")
+    help = "\(recoveryStatus). Rebuild all managed Waves routes."
+    hint = "Reattaches every active per-app audio route managed by Waves."
+  }
+
+  private init(
+    interaction: Interaction,
+    visibleLabel: String,
+    accessibilityLabel: String,
+    accessibilityValue: String?,
+    help: String,
+    hint: String?
+  ) {
+    self.interaction = interaction
+    self.visibleLabel = visibleLabel
+    self.accessibilityLabel = accessibilityLabel
+    self.accessibilityValue = accessibilityValue
+    self.help = help
+    self.hint = hint
+  }
+}
+
 private struct RouteHealthBadge: View {
   @Environment(AppStore.self) private var store
 
   var body: some View {
-    // Healthy: a quiet status chip. Degraded: a button that runs recovery right
-    // from where the problem is reported, instead of dead-ending in a tooltip and
-    // hiding the remedy behind an obscure toolbar glyph.
-    if isHealthy {
-      badge
-        .help(Text("Routing status: \(title)"))
-        .accessibilityLabel(Text("Routing status: \(title)"))
+    if let contextualPresentation {
+      let semantics = RouteHealthBadgeSemantics(contextual: contextualPresentation)
+      if semantics.interaction == .recoverAllRoutes {
+        Button {
+          store.recoverRoutes()
+        } label: {
+          contextualBadge(contextualPresentation, label: semantics.visibleLabel)
+        }
+        .buttonStyle(.plain)
+        .disabled(store.isRecovering)
+        .help(Text(semantics.help))
+        .accessibilityLabel(Text(semantics.accessibilityLabel))
+        .accessibilityValue(Text(semantics.accessibilityValue ?? ""))
+        .accessibilityHint(Text(semantics.hint ?? ""))
+      } else {
+        contextualBadge(contextualPresentation, label: semantics.visibleLabel)
+          .help(Text(semantics.help))
+          .accessibilityLabel(Text(semantics.accessibilityLabel))
+          .accessibilityValue(Text(semantics.accessibilityValue ?? ""))
+          .accessibilityHint(Text(semantics.hint ?? ""))
+      }
+      // Healthy: a quiet status chip. Degraded: a button that runs recovery right
+      // from where the problem is reported, instead of dead-ending in a tooltip and
+      // hiding the remedy behind an obscure toolbar glyph.
+    } else if isHealthy {
+      let semantics = RouteHealthBadgeSemantics(genericTitle: title, isHealthy: true)
+      badge(label: semantics.visibleLabel)
+        .help(Text(semantics.help))
+        .accessibilityLabel(Text(semantics.accessibilityLabel))
     } else {
+      let semantics = RouteHealthBadgeSemantics(genericTitle: title, isHealthy: false)
       Button {
         store.recoverRoutes()
       } label: {
-        badge
+        badge(label: semantics.visibleLabel)
       }
       .buttonStyle(.plain)
       .disabled(store.isRecovering)
-      .help(Text("\(title). Click to recover managed routes."))
-      .accessibilityLabel(Text("Routing status: \(title)"))
-      .accessibilityHint("Reattaches active per-app audio routes.")
+      .help(Text(semantics.help))
+      .accessibilityLabel(Text(semantics.accessibilityLabel))
+      .accessibilityValue(Text(semantics.accessibilityValue ?? ""))
+      .accessibilityHint(Text(semantics.hint ?? ""))
     }
   }
 
-  private var badge: some View {
-    Label(title, systemImage: systemImage)
+  private var contextualPresentation: RouteHealthPresentation? {
+    let priority: [RouteHealthContext] = [
+      .geometryRecoveryExhausted,
+      .geometryRecoveryInProgress,
+      .unattributableRouterFallback,
+      .verifiedRouterOwnership,
+      .routerMixedOutput,
+    ]
+    for context in priority {
+      if let app = store.session.apps.first(where: { $0.routeHealthContext == context }) {
+        return RouteHealthPresentation(app: app)
+      }
+    }
+    return nil
+  }
+
+  private func contextualBadge(
+    _ presentation: RouteHealthPresentation,
+    label: String
+  ) -> some View {
+    Label(label, systemImage: presentation.symbolName)
+      .font(.caption.weight(.medium))
+      .foregroundStyle(contextualColor(presentation.tone))
+      .padding(.horizontal, 8)
+      .padding(.vertical, 4)
+      .background(contextualColor(presentation.tone).opacity(0.12), in: Capsule())
+  }
+
+  private func contextualColor(_ tone: RouteHealthPresentation.Tone) -> Color {
+    switch tone {
+    case .active: WavesDesign.accent
+    case .success: WavesDesign.success
+    case .neutral: .secondary
+    case .warning: WavesDesign.warning
+    case .error: WavesDesign.error
+    }
+  }
+
+  private func badge(label: String) -> some View {
+    Label(label, systemImage: systemImage)
       .font(.caption.weight(.medium))
       .foregroundStyle(color)
       .padding(.horizontal, 8)

@@ -5,6 +5,172 @@ import WavesAudioCore
 @testable import Waves
 
 @MainActor
+@Test func guidedTourAdvancesOnlyAfterAcceptedAppStoreIntents() async {
+  var app = transactionTestApp(desiredVolume: 0.7)
+  app.peakLevel = 0.25
+  app.rmsLevel = 0.1
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
+
+  fixture.store.startGuidedMixerTour()
+  #expect(fixture.store.consumeSourceFocusRequest() == .running)
+  fixture.store.advanceGuidedMixerTour()
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .setLevel, appID: app.logicalID)
+  )
+  fixture.store.advanceGuidedMixerTour()
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .setLevel, appID: app.logicalID)
+  )
+
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(desiredVolume: 0.4),
+    reason: .userEdit
+  )
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .muteAndRestore, appID: app.logicalID)
+  )
+
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(isMuted: true),
+    reason: .userEdit
+  )
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .muteAndRestore, appID: app.logicalID)
+  )
+
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(isMuted: false),
+    reason: .userEdit
+  )
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .goFurther, appID: app.logicalID)
+  )
+}
+
+@MainActor
+@Test func failedAppStoreIntentDoesNotAdvanceGuidedTour() async {
+  var app = transactionTestApp(desiredVolume: 0.7)
+  app.peakLevel = 0.25
+  app.rmsLevel = 0.1
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    outcomes: [.failed]
+  )
+
+  fixture.store.startGuidedMixerTour()
+  fixture.store.advanceGuidedMixerTour()
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(desiredVolume: 0.4),
+    reason: .userEdit
+  )
+
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .setLevel, appID: app.logicalID)
+  )
+}
+
+@MainActor
+@Test func silentMaintenancePublishesOnlySemanticSessionAndDiagnosticsChanges() async throws {
+  let app = transactionTestApp()
+  let device = transactionTestDevice()
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: device,
+    refreshApps: [app]
+  )
+
+  await fixture.store.performSilentSessionRefresh()
+  await fixture.store.drainPersistenceTasks()
+  #expect(await fixture.backend.refreshCallCount() == 1)
+  #expect(await fixture.backend.diagnosticsCallCount() == 1)
+  let unchangedSession = fixture.store.session
+  let unchangedDiagnostics = fixture.store.diagnostics
+  let unchangedDiagnosticID = try #require(unchangedDiagnostics?.checks.first?.id)
+  let unchangedAuthorization = fixture.store.onboarding.captureAuthorization
+  let unchangedDevices = fixture.store.availableDevices
+  let unchangedSaveCount = fixture.sessionStore.saveCount
+
+  await fixture.store.performSilentSessionRefresh()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(await fixture.backend.refreshCallCount() == 2)
+  #expect(await fixture.backend.diagnosticsCallCount() == 2)
+  #expect(fixture.store.session == unchangedSession)
+  #expect(fixture.store.diagnostics == unchangedDiagnostics)
+  #expect(fixture.store.diagnostics?.checks.first?.id == unchangedDiagnosticID)
+  #expect(fixture.store.onboarding.captureAuthorization == unchangedAuthorization)
+  #expect(fixture.store.availableDevices == unchangedDevices)
+  #expect(fixture.sessionStore.saveCount == unchangedSaveCount)
+
+  var changedApp = app
+  changedApp.desiredVolume = 0.7
+  let changedDevice = AudioDevice(id: "device.changed", name: "Changed Device", kind: .bluetooth)
+  var changedSnapshot = transactionSnapshot(apps: [changedApp], device: changedDevice)
+  changedSnapshot.backendStatus.isRouteRecoveryHealthy = false
+  changedSnapshot.backendStatus.lastError = "Injected maintenance change"
+  await fixture.backend.setRefreshSnapshot(changedSnapshot)
+
+  await fixture.store.performSilentSessionRefresh()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(await fixture.backend.refreshCallCount() == 3)
+  #expect(await fixture.backend.diagnosticsCallCount() == 3)
+  #expect(await fixture.backend.diagnosticsReprobeRequests() == [false, false, false])
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.7)
+  #expect(fixture.store.session.currentDevice == changedDevice)
+  #expect(fixture.store.session.backendStatus == changedSnapshot.backendStatus)
+  #expect(fixture.sessionStore.saveCount == unchangedSaveCount + 1)
+}
+
+@MainActor
+@Test(arguments: ["title", "status", "detail"])
+func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async throws {
+  let app = transactionTestApp()
+  let device = transactionTestDevice()
+  let fixture = makeTransactionFixture(apps: [app], device: device, refreshApps: [app])
+
+  await fixture.store.performSilentSessionRefresh()
+  let initialDiagnostics = try #require(fixture.store.diagnostics)
+  let initialCheck = try #require(initialDiagnostics.checks.first)
+
+  var title = initialCheck.title
+  var status = initialCheck.status
+  var detail = initialCheck.detail
+  switch field {
+  case "title": title = "Changed audio component"
+  case "status": status = .warning
+  case "detail": detail = "Injected diagnostic content change."
+  default: Issue.record("Unexpected diagnostic field: \(field)")
+  }
+  await fixture.backend.setDiagnosticsTemplate(
+    DiagnosticsReport(
+      summary: initialDiagnostics.summary,
+      checks: [DiagnosticsCheck(title: title, status: status, detail: detail)]
+    )
+  )
+
+  await fixture.store.performSilentSessionRefresh()
+
+  let changedDiagnostics = try #require(fixture.store.diagnostics)
+  let changedCheck = try #require(changedDiagnostics.checks.first)
+  #expect(changedDiagnostics != initialDiagnostics)
+  #expect(changedCheck.title == title)
+  #expect(changedCheck.status == status)
+  #expect(changedCheck.detail == detail)
+}
+
+@MainActor
 @Test func failedDirectControlsPreserveDurableIntentAndDevicePreset() async {
   let app = transactionTestApp()
   let device = transactionTestDevice()
@@ -85,9 +251,11 @@ import WavesAudioCore
   fixture.store.setMuted(true, for: app)
   await fixture.backend.waitUntilFirstIntentIsSuspended()
   fixture.store.setVolumeBoost(3, for: app)
-  await fixture.store.drainAppIntentTransactions()
-
+  let drain = Task { @MainActor in await fixture.store.drainAppIntentTransactions() }
+  await Task.yield()
+  #expect(fixture.store.trackedAppIntentTaskCount == 2)
   await fixture.backend.resumeFirstIntent()
+  await drain.value
   await waitUntil { await fixture.backend.completedIntentCount() == 2 }
 
   let current = fixture.store.session.apps.first
@@ -107,6 +275,34 @@ import WavesAudioCore
   #expect(!fixture.store.toasts.contains { $0.title == "Mute toggle failed" })
   #expect(fixture.preferencesStore.saveCount == 1)
   #expect(fixture.presetsStore.saveCount == 1)
+}
+
+@MainActor
+@Test func shutdownWaitsForCancellationInsensitiveSupersededIntent() async {
+  let app = transactionTestApp(id: "shutdown.retained")
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    outcomes: [.failed, .applied],
+    suspendFirstIntent: true
+  )
+
+  fixture.store.setMuted(true, for: app)
+  await fixture.backend.waitUntilFirstIntentIsSuspended()
+  fixture.store.setVolumeBoost(2, for: app)
+  #expect(fixture.store.trackedAppIntentTaskCount == 2)
+
+  let shutdown = Task { @MainActor in await fixture.store.shutdown() }
+  await Task.yield()
+  await Task.yield()
+  #expect(fixture.store.startupState == .shuttingDown)
+  #expect(fixture.store.shutdownResult == nil)
+  #expect(fixture.store.trackedAppIntentTaskCount > 0)
+
+  await fixture.backend.resumeFirstIntent()
+  _ = await shutdown.value
+  #expect(fixture.store.trackedAppIntentTaskCount == 0)
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
 }
 
 @MainActor
@@ -134,8 +330,11 @@ import WavesAudioCore
   fixture.store.setMuted(true, for: app)
   await fixture.preferencesStore.waitUntilFirstSaveIsSuspended()
   fixture.store.setVolumeBoost(3, for: app)
-  await fixture.store.drainAppIntentTransactions()
+  let drain = Task { @MainActor in await fixture.store.drainAppIntentTransactions() }
+  await Task.yield()
+  #expect(fixture.store.trackedAppIntentTaskCount == 2)
   fixture.preferencesStore.resumeFirstSave()
+  await drain.value
   await waitUntil { fixture.store.persistenceFailureCount == 2 }
 
   #expect(fixture.store.preferences.appAudioIntents[app.logicalID] == baseline)
@@ -524,30 +723,34 @@ import WavesAudioCore
   let result = try? #require(fixture.store.lastProfileApplyResult)
   #expect(result?.rows.map(\.entryIndex) == [0, 1, 2, 3, 4])
   #expect(result?.rows.map(\.appID) == profile.entries.map(\.appID))
-  #expect(result?.rows.map(\.outcome) == [
-    .applied,
-    .unavailable,
-    .excluded,
-    .failed,
-    .membershipOnly,
-  ])
+  #expect(
+    result?.rows.map(\.outcome) == [
+      .applied,
+      .unavailable,
+      .excluded,
+      .failed,
+      .membershipOnly,
+    ])
   #expect(result?.rows.allSatisfy { $0.generation == calls.first?.generation } == true)
 
   #expect(fixture.store.session.apps.first { $0.logicalID == live.logicalID }?.desiredVolume == 0.21)
   #expect(fixture.store.preferences.appAudioIntents[live.logicalID]?.desiredVolume == 0.21)
   #expect(fixture.store.preferences.appAudioIntents[live.logicalID]?.volumeBoost == live.volumeBoost)
-  #expect(fixture.store.preferences.appAudioIntents["profile.offline"] == PersistedAppAudioIntent(
-    appID: "profile.offline",
-    desiredVolume: 0.33,
-    isMuted: true,
-    volumeBoost: 1
-  ))
+  #expect(
+    fixture.store.preferences.appAudioIntents["profile.offline"]
+      == PersistedAppAudioIntent(
+        appID: "profile.offline",
+        desiredVolume: 0.33,
+        isMuted: true,
+        volumeBoost: 1
+      ))
   #expect(fixture.store.preferences.appAudioIntents[excluded.logicalID] == excludedIntent)
   #expect(fixture.store.preferences.appAudioIntents[failed.logicalID] == failedIntent)
   #expect(fixture.store.preferences.appAudioIntents[membership.logicalID] == nil)
   #expect(
     fixture.store.deviceVolumePresets
-      .getVolumeSettings(for: "profile.offline", deviceID: device.id) == AppVolumeSettings(
+      .getVolumeSettings(for: "profile.offline", deviceID: device.id)
+      == AppVolumeSettings(
         desiredVolume: 0.33,
         isMuted: true,
         volumeBoost: 1
@@ -560,12 +763,13 @@ import WavesAudioCore
   #expect(fixture.preferencesStore.saveCount == 1)
   #expect(fixture.presetsStore.saveCount == 1)
   #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
-  #expect(fixture.store.toasts.contains {
-    $0.title == "Profile applied with errors"
-      && $0.detail?.contains("1 saved for later") == true
-      && $0.detail?.contains("1 excluded") == true
-      && $0.detail?.contains("1 failed") == true
-  })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile applied with errors"
+        && $0.detail?.contains("1 saved for later") == true
+        && $0.detail?.contains("1 excluded") == true
+        && $0.detail?.contains("1 failed") == true
+    })
 }
 
 @MainActor
@@ -579,22 +783,25 @@ import WavesAudioCore
   let profile = Profile(
     name: "Later",
     entries: [
-      ProfileEntry(appID: "offline.new", desiredVolume: 0.46, volumeBoost: 2.75),
+      ProfileEntry(appID: "offline.new", desiredVolume: 0.46, volumeBoost: 2.75)
     ]
   )
 
   fixture.store.applyProfile(profile)
   await fixture.store.drainAppIntentTransactions()
 
-  #expect(fixture.store.preferences.appAudioIntents["offline.new"] == PersistedAppAudioIntent(
-    appID: "offline.new",
-    desiredVolume: 0.46,
-    isMuted: false,
-    volumeBoost: 2.75
-  ))
+  #expect(
+    fixture.store.preferences.appAudioIntents["offline.new"]
+      == PersistedAppAudioIntent(
+        appID: "offline.new",
+        desiredVolume: 0.46,
+        isMuted: false,
+        volumeBoost: 2.75
+      ))
   #expect(
     fixture.store.deviceVolumePresets
-      .getVolumeSettings(for: "offline.new", deviceID: device.id) == AppVolumeSettings(
+      .getVolumeSettings(for: "offline.new", deviceID: device.id)
+      == AppVolumeSettings(
         desiredVolume: 0.46,
         isMuted: false,
         volumeBoost: 2.75
@@ -668,11 +875,12 @@ import WavesAudioCore
   fixture.store.applyProfile(profile)
   await fixture.store.drainAppIntentTransactions()
 
-  #expect(fixture.store.lastProfileApplyResult?.rows.map(\.outcome) == [
-    .failed,
-    .excluded,
-    .superseded,
-  ])
+  #expect(
+    fixture.store.lastProfileApplyResult?.rows.map(\.outcome) == [
+      .failed,
+      .excluded,
+      .superseded,
+    ])
   #expect(fixture.store.preferences.appAudioIntents == beforePreferences)
   #expect(fixture.store.deviceVolumePresets.deviceVolumes == beforePresets)
   #expect(fixture.preferencesStore.saveCount == 0)
@@ -700,11 +908,12 @@ import WavesAudioCore
   await fixture.store.drainAppIntentTransactions()
 
   #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
-  #expect(fixture.store.toasts.contains {
-    $0.title == "Profile partly applied"
-      && $0.detail?.contains("1 applied") == true
-      && $0.detail?.contains("1 saved for later") == true
-  })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied"
+        && $0.detail?.contains("1 applied") == true
+        && $0.detail?.contains("1 saved for later") == true
+    })
 }
 
 @MainActor
@@ -729,10 +938,11 @@ import WavesAudioCore
     profileOutcomes: [.applied]
   )
 
-  fixture.store.applyProfile(Profile(
-    name: "Confirmed",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2, isMuted: true)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Confirmed",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2, isMuted: true)]
+    ))
   await fixture.store.drainAppIntentTransactions()
 
   let durable = fixture.store.preferences.appAudioIntents[app.logicalID]
@@ -767,10 +977,11 @@ import WavesAudioCore
   )
 
   await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: true)
-  fixture.store.applyProfile(Profile(
-    name: "Volume only",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.24)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Volume only",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.24)]
+    ))
   await fixture.store.drainAppIntentTransactions()
 
   #expect(fixture.store.session.apps.first?.isMuted == true)
@@ -813,10 +1024,11 @@ import WavesAudioCore
   fixture.store.setDesiredVolume(0.1, for: app)
   fixture.store.commitDesiredVolume(for: app)
   await fixture.backend.waitUntilFirstIntentIsSuspended()
-  fixture.store.applyProfile(Profile(
-    name: "Newer profile",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.72)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Newer profile",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.72)]
+    ))
   await waitUntil { fixture.store.lastProfileApplyResult != nil }
   await fixture.backend.resumeFirstIntent()
   await fixture.store.drainAppIntentTransactions()
@@ -849,10 +1061,11 @@ import WavesAudioCore
     suspendFirstProfile: true
   )
 
-  fixture.store.applyProfile(Profile(
-    name: "Older profile",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Older profile",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)]
+    ))
   await fixture.backend.waitUntilFirstProfileIsSuspended()
   fixture.store.setVolumeBoost(3, for: app)
   await waitUntil {
@@ -888,10 +1101,11 @@ import WavesAudioCore
   )
   fixture.preferencesStore.configureFailingSaves(count: 0, suspendFirst: true)
 
-  fixture.store.applyProfile(Profile(
-    name: "Await save",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.27)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Await save",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.27)]
+    ))
   await fixture.preferencesStore.waitUntilFirstSaveIsSuspended()
 
   #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
@@ -925,10 +1139,11 @@ import WavesAudioCore
   fixture.preferencesStore.saveError = TransactionTestError.writeFailed
   fixture.presetsStore.saveError = TransactionTestError.writeFailed
 
-  fixture.store.applyProfile(Profile(
-    name: "Save failure",
-    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.19, isMuted: true)]
-  ))
+  fixture.store.applyProfile(
+    Profile(
+      name: "Save failure",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.19, isMuted: true)]
+    ))
   await fixture.store.drainAppIntentTransactions()
 
   #expect(fixture.store.session.apps.first?.desiredVolume == 0.19)
@@ -940,11 +1155,12 @@ import WavesAudioCore
   )
   #expect(fixture.store.persistenceFailureCount == 2)
   #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
-  #expect(fixture.store.toasts.contains {
-    $0.title == "Profile applied with errors"
-      && $0.detail?.contains("settings not saved") == true
-      && $0.detail?.contains("device preset not saved") == true
-  })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile applied with errors"
+        && $0.detail?.contains("settings not saved") == true
+        && $0.detail?.contains("device preset not saved") == true
+    })
 }
 
 @MainActor
@@ -1065,6 +1281,94 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func supersededAutomaticMuteCannotClaimOwnershipOrResumeUserMute() async {
+  let app = transactionTestApp(id: "automation.superseded")
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: app.desiredVolume,
+      isMuted: false,
+      volumeBoost: app.volumeBoost
+    ),
+    suspendFirstIntent: true
+  )
+
+  let automatic = Task { @MainActor in
+    await fixture.store.applyAutomaticConferencingTransition(
+      isConferencingActive: true
+    )
+  }
+  await fixture.backend.waitUntilFirstIntentIsSuspended()
+  fixture.store.setMuted(true, for: app)
+  let drain = Task { @MainActor in await fixture.store.drainAppIntentTransactions() }
+  await Task.yield()
+  #expect(fixture.store.trackedAppIntentTaskCount == 2)
+  await fixture.backend.resumeFirstIntent()
+  await drain.value
+  await automatic.value
+
+  await fixture.store.applyAutomaticConferencingTransition(
+    isConferencingActive: false
+  )
+  #expect(await fixture.backend.recordedIntents().map(\.reason) == [.automation, .userEdit])
+  #expect(fixture.store.session.apps.first?.isMuted == true)
+  #expect(fixture.store.session.apps.first?.muteSource == .user)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func relaunchDoesNotResurrectAutomaticMuteOwnershipOrDurableMute() async {
+  let appID = "automation.relaunch"
+  var cachedApp = transactionTestApp(id: appID, isMuted: true)
+  cachedApp.muteSource = .autoConferencing
+  let durable = PersistedAppAudioIntent(
+    appID: appID,
+    desiredVolume: cachedApp.desiredVolume,
+    isMuted: false,
+    volumeBoost: cachedApp.volumeBoost
+  )
+  let fixture = makeTransactionFixture(
+    apps: [cachedApp],
+    device: transactionTestDevice(),
+    intent: durable
+  )
+
+  await fixture.store.applyAutomaticConferencingTransition(
+    isConferencingActive: false
+  )
+
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(fixture.store.preferences.appAudioIntents[appID]?.isMuted == false)
+  #expect(fixture.store.session.apps.first?.muteSource == .autoConferencing)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func disabledURLAutomationNeverInvokesTheAppStoreParser() async {
+  let fixture = makeTransactionFixture(
+    apps: [transactionTestApp(id: "automation.disabled")],
+    device: transactionTestDevice()
+  )
+  fixture.store.preferences.enableURLScheme = false
+  let initialToastCount = fixture.store.toasts.count
+
+  fixture.store.handleURLScheme(URL(string: "waves://refresh")!)
+
+  #expect(fixture.store.automationParserInvocationCount == 0)
+  #expect(fixture.store.toasts.count == initialToastCount)
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
 private func assertBaselineState(
   _ store: AppStore,
   app: AudioApp,
@@ -1167,6 +1471,65 @@ private func waitForRefresh(_ store: AppStore) async {
 }
 
 @MainActor
+@Test func matchingManualDeviceEventConsumesDuplicateToastSuppression() async {
+  let clock = CoordinatorTestClock()
+  let fixture = makeTransactionFixture(
+    apps: [transactionTestApp()],
+    device: transactionTestDevice(),
+    deviceChangeSuppressionSleep: clock.sleep
+  )
+  let selected = AudioDevice(id: "device.selected", name: "Selected", kind: .virtual)
+
+  fixture.store.selectOutputDevice(selected)
+  await waitUntil { await fixture.backend.currentDeviceID() == selected.id }
+  await clock.waitForSleeper()
+  fixture.store.handleDeviceChange()
+  await waitUntil {
+    fixture.store.currentDeviceID == selected.id
+      && fixture.store.lifecycleSnapshot.ownedOperationCount == 0
+  }
+  clock.resumeAll()
+  await waitUntil { fixture.store.lifecycleSnapshot.deviceSuppression == .idle }
+
+  #expect(fixture.store.toasts.count { $0.title == "Output device changed" } == 0)
+  #expect(fixture.store.lifecycleSnapshot.deviceSuppression == .idle)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func missingManualDeviceEventExpiresBeforeLaterLegitimateChange() async {
+  let clock = CoordinatorTestClock()
+  let fixture = makeTransactionFixture(
+    apps: [transactionTestApp()],
+    device: transactionTestDevice(),
+    deviceChangeSuppressionSleep: clock.sleep
+  )
+  let selected = AudioDevice(id: "device.selected", name: "Selected", kind: .virtual)
+  let external = AudioDevice(id: "device.external", name: "External", kind: .bluetooth)
+
+  fixture.store.selectOutputDevice(selected)
+  await waitUntil { await fixture.backend.currentDeviceID() == selected.id }
+  await clock.waitForSleeper()
+  clock.resumeAll()
+  await waitUntil { fixture.store.lifecycleSnapshot.deviceSuppression == .idle }
+
+  await fixture.backend.replaceCurrentDevice(external)
+  fixture.store.handleDeviceChange()
+  await waitUntil {
+    fixture.store.currentDeviceID == external.id
+      && fixture.store.lifecycleSnapshot.ownedOperationCount == 0
+  }
+
+  #expect(fixture.store.toasts.count { $0.title == "Output device changed" } == 1)
+  #expect(fixture.store.toasts.first { $0.title == "Output device changed" }?.detail == external.name)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
 private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async {
   for _ in 0..<10_000 {
     if await predicate() { return }
@@ -1175,18 +1538,210 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
   Issue.record("Timed out waiting for asynchronous test condition")
 }
 
+@MainActor
+@Test func appTerminationReleasesAndDemotesOnlyTheExactStoredRuntimeIdentity() async throws {
+  let identity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  let app = transactionTestApp(runtimeIdentity: identity)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice()
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  #expect(await fixture.backend.releasedRuntimeIdentities() == [identity])
+  let released = try #require(fixture.store.session.apps.first)
+  #expect(!released.isActive)
+  #expect(released.routingState == .monitorOnly)
+  #expect(released.appliedVolume == nil)
+}
+
+@MainActor
+@Test func appTerminationDoesNotUseASharedOrSpoofedBundleIdentifierAsAuthority() async throws {
+  let terminatedIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  let unrelatedIdentity = transactionRuntimeIdentity(pid: 84, startTimeSeconds: 100)
+  let terminated = transactionTestApp(
+    id: "terminated",
+    pid: 42,
+    bundleID: "com.example.shared",
+    runtimeIdentity: terminatedIdentity
+  )
+  let unrelated = transactionTestApp(
+    id: "unrelated",
+    pid: 84,
+    bundleID: "com.example.shared",
+    runtimeIdentity: unrelatedIdentity
+  )
+  let fixture = makeTransactionFixture(
+    apps: [terminated, unrelated],
+    device: transactionTestDevice()
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  #expect(await fixture.backend.releasedRuntimeIdentities() == [terminatedIdentity])
+  #expect(fixture.store.session.apps.first { $0.id == terminated.id }?.routingState == .monitorOnly)
+  #expect(fixture.store.session.apps.first { $0.id == unrelated.id }?.routingState == .managed)
+  #expect(fixture.store.session.apps.first { $0.id == unrelated.id }?.isActive == true)
+}
+
+@MainActor
+@Test func delayedTerminationCannotReleaseAReplacementThatReusedThePID() async {
+  let terminatedIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  let replacementIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+  let app = transactionTestApp(runtimeIdentity: terminatedIdentity)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    runtimeProcessProbe: { pid in
+      pid == 42 ? transactionRuntimeProbe(identity: replacementIdentity) : nil
+    }
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await Task.yield()
+
+  #expect(await fixture.backend.releasedRuntimeIdentities().isEmpty)
+  #expect(fixture.store.session.apps.first?.routingState == .managed)
+  #expect(fixture.store.session.apps.first?.isActive == true)
+}
+
+@MainActor
+@Test func delayedTerminationAfterRefreshCannotReleaseTheLiveReplacementController() async throws {
+  let replacementIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+  let replacement = transactionTestApp(
+    id: "replacement",
+    runtimeIdentity: replacementIdentity
+  )
+  let device = transactionTestDevice()
+  let snapshot = transactionSnapshot(apps: [replacement], device: device)
+  let controller = try PerAppTapController.testingController(
+    appID: replacement.id,
+    logicalID: replacement.logicalID,
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: { noErr },
+      stopIOProc: { noErr },
+      restoreTapMuting: { noErr },
+      destroyIOProc: { _, _ in noErr },
+      destroyAggregateDevice: { _ in noErr },
+      destroyProcessTap: { _ in noErr }
+    )
+  )
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: snapshot,
+    captureAuthorization: .authorized,
+    testingControllers: [controller]
+  )
+  let preferencesStore = TransactionPreferencesStore()
+  preferencesStore.value.appAudioIntentMigrationVersion = 1
+  preferencesStore.value.hasCompletedPrivacySetup = true
+  let sessionStore = TransactionSessionStore()
+  sessionStore.value = snapshot
+  let store = AppStore(
+    backend: backend,
+    preferencesStore: preferencesStore,
+    profileStore: TransactionProfilesStore(),
+    sessionStore: sessionStore,
+    loginItemService: TransactionLoginItemService(),
+    deviceVolumePresetsStore: TransactionDevicePresetsStore(),
+    initialStartupState: .running,
+    runtimeProcessProbe: { pid in
+      pid == 42 ? transactionRuntimeProbe(identity: replacementIdentity) : nil
+    }
+  )
+
+  store.handleAppTermination(pid: 42)
+  await waitUntil { store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  let backendLifecycle = await backend.lifecycleDebugSnapshot()
+  let backendReplacement = await backend.currentSnapshot().apps.first
+  #expect(backendLifecycle.liveControllers == 1)
+  #expect(controller.isActive)
+  #expect(backendReplacement?.routingState == .managed)
+  #expect(backendReplacement?.isActive == true)
+  #expect(store.session.apps.first?.routingState == .managed)
+  #expect(store.session.apps.first?.isActive == true)
+
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func liveProcessWithoutAVerifiableIdentityDefersTerminationToMaintenance() async {
+  let storedIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  let replacementIdentity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+  let app = transactionTestApp(runtimeIdentity: storedIdentity)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    runtimeProcessProbe: { pid in
+      pid == 42 ? transactionRuntimeProbe(identity: replacementIdentity) : nil
+    }
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await Task.yield()
+
+  #expect(await fixture.backend.releasedRuntimeIdentities().isEmpty)
+  #expect(fixture.store.session.apps.first?.routingState == .managed)
+  #expect(fixture.store.session.apps.first?.isActive == true)
+}
+
+@MainActor
+@Test func terminationWithoutAnImmutableStoredIdentityDefersToMaintenance() async {
+  let legacy = transactionTestApp(runtimeIdentity: nil)
+  let fixture = makeTransactionFixture(
+    apps: [legacy],
+    device: transactionTestDevice()
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await Task.yield()
+
+  #expect(await fixture.backend.releasedRuntimeIdentities().isEmpty)
+  #expect(fixture.store.session.apps.first?.routingState == .managed)
+  #expect(fixture.store.session.apps.first?.isActive == true)
+}
+
+@MainActor
+@Test func ambiguousStoredTerminationIdentityDefersToMaintenance() async {
+  let first = transactionTestApp(
+    id: "first",
+    runtimeIdentity: transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  )
+  let second = transactionTestApp(
+    id: "second",
+    runtimeIdentity: transactionRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+  )
+  let fixture = makeTransactionFixture(
+    apps: [first, second],
+    device: transactionTestDevice()
+  )
+
+  fixture.store.handleAppTermination(pid: 42)
+  await Task.yield()
+
+  #expect(await fixture.backend.releasedRuntimeIdentities().isEmpty)
+  #expect(fixture.store.session.apps.allSatisfy { $0.routingState == .managed })
+  #expect(fixture.store.session.apps.allSatisfy { $0.isActive })
+}
+
 private func transactionTestApp(
   id: String = "test.app",
+  pid: Int32 = 42,
+  bundleID: String? = nil,
   desiredVolume: Float = 0.4,
   isMuted: Bool = false,
   volumeBoost: Float = 2,
-  targetDeviceUID: String? = "device.original"
+  targetDeviceUID: String? = "device.original",
+  runtimeIdentity: AppRuntimeIdentity? = nil
 ) -> AudioApp {
   AudioApp(
     id: "\(id).runtime",
     logicalID: id,
-    pid: 42,
-    bundleID: id,
+    pid: pid,
+    bundleID: bundleID ?? id,
     displayName: "Test App",
     category: .media,
     isActive: true,
@@ -1196,7 +1751,37 @@ private func transactionTestApp(
     routingState: .managed,
     compatibility: .supported,
     volumeBoost: volumeBoost,
-    targetDeviceUID: targetDeviceUID
+    targetDeviceUID: targetDeviceUID,
+    runtimeIdentity: runtimeIdentity
+  )
+}
+
+private func transactionRuntimeIdentity(
+  pid: Int32,
+  startTimeSeconds: UInt64
+) -> AppRuntimeIdentity {
+  AppRuntimeIdentity(
+    lifetime: AppProcessLifetimeIdentity(
+      pid: pid,
+      startTimeSeconds: startTimeSeconds,
+      startTimeMicroseconds: 0
+    ),
+    executablePath: "/Applications/Test App.app/Contents/MacOS/Test App",
+    outerBundlePath: "/Applications/Test App.app",
+    signingIdentity: AppCodeSigningIdentity(
+      identifier: "com.example.test-app",
+      teamIdentifier: "TEAM123",
+      designatedRequirement: "identifier \"com.example.test-app\"",
+      codeDirectoryHash: Data([1, 2, 3])
+    )
+  )
+}
+
+private func transactionRuntimeProbe(identity: AppRuntimeIdentity) -> RuntimeProcessProbe {
+  RuntimeProcessProbe(
+    lifetime: identity.lifetime,
+    executablePath: identity.executablePath,
+    outerBundlePath: identity.outerBundlePath
   )
 }
 
@@ -1220,7 +1805,11 @@ private func makeTransactionFixture(
   suspendFirstProfile: Bool = false,
   resultGenerationOffset: UInt64 = 0,
   refreshApps: [AudioApp]? = nil,
-  initialStartupState: AppStartupState = .running
+  initialStartupState: AppStartupState = .running,
+  runtimeProcessProbe: @escaping @Sendable (Int32) -> RuntimeProcessProbe? = { _ in nil },
+  deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
+    duration in try await Task.sleep(for: duration)
+  }
 ) -> TransactionFixture {
   let snapshot = transactionSnapshot(apps: apps, device: device)
   let refreshSnapshot = refreshApps.map { transactionSnapshot(apps: $0, device: device) }
@@ -1267,13 +1856,16 @@ private func makeTransactionFixture(
     sessionStore: sessionStore,
     loginItemService: TransactionLoginItemService(),
     deviceVolumePresetsStore: presetsStore,
-    initialStartupState: initialStartupState
+    initialStartupState: initialStartupState,
+    runtimeProcessProbe: runtimeProcessProbe,
+    deviceChangeSuppressionSleep: deviceChangeSuppressionSleep
   )
   return TransactionFixture(
     store: store,
     backend: backend,
     preferencesStore: preferencesStore,
-    presetsStore: presetsStore
+    presetsStore: presetsStore,
+    sessionStore: sessionStore
   )
 }
 
@@ -1282,6 +1874,7 @@ private struct TransactionFixture {
   let backend: TransactionBackend
   let preferencesStore: TransactionPreferencesStore
   let presetsStore: TransactionDevicePresetsStore
+  let sessionStore: TransactionSessionStore
 }
 
 private func transactionSnapshot(apps: [AudioApp], device: AudioDevice) -> AudioSessionSnapshot {
@@ -1311,7 +1904,7 @@ private actor TransactionBackend: AudioControlBackend {
   nonisolated let deviceChangeEvents: AsyncStream<Void> = AsyncStream { $0.finish() }
 
   private var snapshot: AudioSessionSnapshot
-  private let refreshSnapshot: AudioSessionSnapshot?
+  private var refreshSnapshot: AudioSessionSnapshot?
   private var outcomes: [AppIntentApplyOutcome]
   private var profileOutcomes: [ProfileRowApplyOutcome]
   private let suspendFirstIntent: Bool
@@ -1321,7 +1914,20 @@ private actor TransactionBackend: AudioControlBackend {
   private var profileCalls: [(profile: Profile, generation: UInt64)] = []
   private var latestGenerationByAppID: [String: UInt64] = [:]
   private var completedIntents = 0
+  private var refreshCalls = 0
   private var diagnosticsCalls = 0
+  private var diagnosticsReprobeValues: [Bool] = []
+  private var releasedIdentities: [AppRuntimeIdentity] = []
+  private var diagnosticsTemplate = DiagnosticsReport(
+    summary: "Transaction test",
+    checks: [
+      DiagnosticsCheck(
+        title: "Audio component",
+        status: .passed,
+        detail: "Process tap routing is supported on this system."
+      )
+    ]
+  )
   private var firstIntentIsSuspended = false
   private var firstIntentResume: CheckedContinuation<Void, Never>?
   private var suspensionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1350,7 +1956,20 @@ private actor TransactionBackend: AudioControlBackend {
   func recordedIntents() -> [AppRouteIntent] { intents }
   func recordedProfileCalls() -> [(profile: Profile, generation: UInt64)] { profileCalls }
   func completedIntentCount() -> Int { completedIntents }
+  func refreshCallCount() -> Int { refreshCalls }
   func diagnosticsCallCount() -> Int { diagnosticsCalls }
+  func diagnosticsReprobeRequests() -> [Bool] { diagnosticsReprobeValues }
+  func releasedRuntimeIdentities() -> [AppRuntimeIdentity] { releasedIdentities }
+  func setDiagnosticsTemplate(_ replacement: DiagnosticsReport) {
+    diagnosticsTemplate = replacement
+  }
+  func currentDeviceID() -> String? { snapshot.currentDevice?.id }
+  func setRefreshSnapshot(_ replacement: AudioSessionSnapshot) {
+    refreshSnapshot = replacement
+  }
+  func replaceCurrentDevice(_ device: AudioDevice) {
+    snapshot.currentDevice = device
+  }
 
   func waitUntilFirstIntentIsSuspended() async {
     if firstIntentIsSuspended { return }
@@ -1380,7 +1999,8 @@ private actor TransactionBackend: AudioControlBackend {
     intents.append(intent)
     let callNumber = intents.count
     let baseApp = snapshot.apps.first { $0.logicalID == intent.appID }
-    let outcome = outcomes.isEmpty
+    let outcome =
+      outcomes.isEmpty
       ? (intent.isExcluded ? AppIntentApplyOutcome.excluded : .applied)
       : outcomes.removeFirst()
     let latestGeneration = latestGenerationByAppID[intent.appID] ?? 0
@@ -1467,7 +2087,12 @@ private actor TransactionBackend: AudioControlBackend {
   func stop() async {}
   func currentSnapshot() async -> AudioSessionSnapshot { snapshot }
   func refresh() async throws -> AudioSessionSnapshot {
-    if let refreshSnapshot { snapshot = refreshSnapshot }
+    refreshCalls += 1
+    if var refreshSnapshot {
+      refreshSnapshot.updatedAt = .now
+      snapshot = refreshSnapshot
+      self.refreshSnapshot = refreshSnapshot
+    }
     return snapshot
   }
   func setDesiredVolume(_ volume: Float, forAppID appID: String) async throws {}
@@ -1505,31 +2130,34 @@ private actor TransactionBackend: AudioControlBackend {
     var rows: [ProfileRowApplyResult] = []
     for (entryIndex, entry) in profile.entries.enumerated() {
       guard entry.hasLevels else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .membershipOnly,
-          resultingApp: nil
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .membershipOnly,
+            resultingApp: nil
+          ))
         continue
       }
 
       if latestGenerationByAppID[entry.appID].map({ $0 > generation }) == true {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .superseded,
-          resultingApp: snapshot.apps.first { $0.logicalID == entry.appID },
-          detail: "A newer deterministic transaction superseded this profile row."
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .superseded,
+            resultingApp: snapshot.apps.first { $0.logicalID == entry.appID },
+            detail: "A newer deterministic transaction superseded this profile row."
+          ))
         continue
       }
 
       let outcome: ProfileRowApplyOutcome
       if profileOutcomes.isEmpty {
-        outcome = snapshot.apps.contains(where: { $0.logicalID == entry.appID })
+        outcome =
+          snapshot.apps.contains(where: { $0.logicalID == entry.appID })
           ? .applied
           : .unavailable
       } else {
@@ -1548,7 +2176,8 @@ private actor TransactionBackend: AudioControlBackend {
           if let volumeBoost = entry.volumeBoost {
             snapshot.apps[index].volumeBoost = volumeBoost
           }
-          snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted
+          snapshot.apps[index].appliedVolume =
+            snapshot.apps[index].isMuted
             ? 0
             : snapshot.apps[index].desiredVolume
           snapshot.apps[index].routingState = .managed
@@ -1576,14 +2205,15 @@ private actor TransactionBackend: AudioControlBackend {
       case .membershipOnly, .superseded, .unsupported:
         break
       }
-      rows.append(ProfileRowApplyResult(
-        entryIndex: entryIndex,
-        appID: entry.appID,
-        generation: generation,
-        outcome: outcome,
-        resultingApp: resultingApp,
-        detail: outcome == .failed ? "Deterministic profile failure" : nil
-      ))
+      rows.append(
+        ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: outcome,
+          resultingApp: resultingApp,
+          detail: outcome == .failed ? "Deterministic profile failure" : nil
+        ))
     }
     return ProfileApplyResult(rows: rows, backendStatus: snapshot.backendStatus)
   }
@@ -1598,14 +2228,30 @@ private actor TransactionBackend: AudioControlBackend {
   func autoRestoreDevice() async throws -> AudioSessionSnapshot { snapshot }
   func diagnosticsReport() async -> DiagnosticsReport {
     diagnosticsCalls += 1
-    return DiagnosticsReport(summary: "Transaction test", checks: [])
+    return DiagnosticsReport(
+      summary: diagnosticsTemplate.summary,
+      checks: diagnosticsTemplate.checks.map { check in
+        DiagnosticsCheck(title: check.title, status: check.status, detail: check.detail)
+      }
+    )
+  }
+  func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport {
+    diagnosticsReprobeValues.append(reprobeCaptureAuthorization)
+    return await diagnosticsReport()
   }
   func availableOutputDevices() async -> [AudioDevice] {
     snapshot.currentDevice.map { [$0] } ?? []
   }
-  func setDefaultOutputDevice(uid: String) async throws {}
+  func setDefaultOutputDevice(uid: String) async throws {
+    snapshot.currentDevice = AudioDevice(id: uid, name: "Selected", kind: .virtual)
+  }
   func setOutputDevice(uid: String?, forAppID appID: String) async throws {}
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {
+    releasedIdentities.append(runtimeIdentity)
+  }
   func audioLevels() async -> [String: AudioLevels] { [:] }
 }
 
@@ -1662,7 +2308,8 @@ private final class TransactionPreferencesStore: PreferencesPersisting, @uncheck
     let state = lock.withLock { () -> (attempt: Int, suspend: Bool, error: Error?) in
       saveAttempts += 1
       let attempt = saveAttempts
-      let error = saveErrors.indices.contains(attempt - 1)
+      let error =
+        saveErrors.indices.contains(attempt - 1)
         ? saveErrors[attempt - 1]
         : saveError
       return (attempt, shouldSuspendFirstSave && attempt == 1, error)
@@ -1699,8 +2346,16 @@ private final class TransactionProfilesStore: ProfilesPersisting, @unchecked Sen
 
 private final class TransactionSessionStore: SessionPersisting, @unchecked Sendable {
   var value: AudioSessionSnapshot?
+  private let lock = NSLock()
+  private var saves = 0
+  var saveCount: Int { lock.withLock { saves } }
   func load() -> AudioSessionSnapshot? { value }
-  func save(_ snapshot: AudioSessionSnapshot) async throws { value = snapshot }
+  func save(_ snapshot: AudioSessionSnapshot) async throws {
+    lock.withLock {
+      value = snapshot
+      saves += 1
+    }
+  }
   func flush() async throws {}
   func consumeDidRecoverFromCorruptFile() -> Bool { false }
 }

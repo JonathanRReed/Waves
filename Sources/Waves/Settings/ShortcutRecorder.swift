@@ -13,6 +13,13 @@ import SwiftUI
 struct ShortcutRecorder: View {
   @Environment(\.wavesTheme) private var theme
   @Environment(AppStore.self) private var store
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.wavesAccessibilityOverrides) private var accessibilityOverrides
+
+  /// A shared Settings owner keeps these two values alive while pane content is
+  /// replaced. Other recorder surfaces keep their existing view-local lifetime.
+  var action: HotkeyAction? = nil
+  var draft: ControlSettingsDraft? = nil
 
   /// The chord currently bound to this row, if any.
   let binding: HotkeyBinding?
@@ -29,9 +36,28 @@ struct ShortcutRecorder: View {
   let onRecord: (HotkeyChord) -> String?
   let onClear: () -> Void
 
-  @State private var isRecording = false
-  @State private var liveModifiers: NSEvent.ModifierFlags = []
+  @State private var localIsRecording = false
+  @State private var localLiveModifiers: NSEvent.ModifierFlags = []
   @State private var message: String?
+  @State private var recordingLease: ControlRecordingLease?
+
+  init(
+    action: HotkeyAction? = nil,
+    draft: ControlSettingsDraft? = nil,
+    binding: HotkeyBinding?,
+    canRemoveWhenUnset: Bool = false,
+    isUnavailable: Bool = false,
+    onRecord: @escaping (HotkeyChord) -> String?,
+    onClear: @escaping () -> Void
+  ) {
+    self.action = action
+    self.draft = draft
+    self.binding = binding
+    self.canRemoveWhenUnset = canRemoveWhenUnset
+    self.isUnavailable = isUnavailable
+    self.onRecord = onRecord
+    self.onClear = onClear
+  }
 
   var body: some View {
     VStack(alignment: .trailing, spacing: 4) {
@@ -53,14 +79,14 @@ struct ShortcutRecorder: View {
           // Zero-size and behind the button: this exists only to hold first
           // responder while recording.
           ShortcutCaptureView(
-            isRecording: $isRecording,
-            liveModifiers: $liveModifiers,
+            isRecording: recordingBinding,
+            liveModifiers: modifiersBinding,
             onChord: record,
             onClear: {
               onClear()
               stop()
             },
-            onCancel: stop
+            onCancel: responderCancelled
           )
           .frame(width: 0, height: 0)
         }
@@ -90,18 +116,27 @@ struct ShortcutRecorder: View {
           .foregroundStyle(.secondary)
           .multilineTextAlignment(.trailing)
           .frame(maxWidth: 260, alignment: .trailing)
-          .transition(.opacity)
+          .transition(
+            ShortcutRecorderMotion.allowsAnimation(reduceMotion: effectiveReduceMotion)
+              ? .opacity : .identity
+          )
       }
     }
-    .animation(.easeOut(duration: 0.15), value: message)
+    .animation(
+      ShortcutRecorderMotion.allowsAnimation(reduceMotion: effectiveReduceMotion)
+        ? .easeOut(duration: 0.15) : nil,
+      value: message
+    )
     .onChange(of: message) { _, new in
       // VoiceOver does not read a caption that simply appears, so a refusal
       // would be completely silent — the user hears nothing, the field stays
       // open, and nothing explains why their chord didn't take.
       guard let new else { return }
-      AccessibilityNotification.Announcement(new).post()
+      store.postAccessibilityAnnouncement(new)
     }
-    .onDisappear(perform: stop)
+    .onDisappear {
+      if draft == nil { stop() }
+    }
   }
 
   /// Shown when the row holds a chord the system refused. Not an error the user
@@ -110,7 +145,11 @@ struct ShortcutRecorder: View {
   /// working one forever.
   private var unavailableNote: String? {
     guard isUnavailable, !isRecording else { return nil }
-    return "macOS or another app already uses this. Pick another combination."
+    return "Registration was refused. This combination may be reserved by macOS or another app."
+  }
+
+  private var effectiveReduceMotion: Bool {
+    accessibilityOverrides?.reduceMotion ?? reduceMotion
   }
 
   private func record(_ chord: HotkeyChord) {
@@ -125,13 +164,21 @@ struct ShortcutRecorder: View {
 
   private func start() {
     message = nil
-    liveModifiers = []
-    isRecording = true
+    let shouldSuspend: Bool
+    if let draft, let action {
+      let acquisition = draft.acquireRecording(action)
+      recordingLease = acquisition.lease
+      shouldSuspend = acquisition.shouldSuspend
+    } else {
+      localLiveModifiers = []
+      localIsRecording = true
+      shouldSuspend = true
+    }
     // Release Waves's own registrations for the duration. Without this, every
     // chord Waves already holds is swallowed by the system and fires its action
     // instead of being recorded — so ⌘⌥M could never be moved or re-recorded,
     // and pressing an app's existing chord would mute that app mid-typing.
-    store.setHotkeysSuspended(true)
+    if shouldSuspend { store.setHotkeysSuspended(true) }
   }
 
   /// The single exit from recording. Every path — committing, cancelling,
@@ -139,12 +186,59 @@ struct ShortcutRecorder: View {
   /// because a missed resume leaves the user with no global shortcuts at all
   /// and nothing on screen to explain it.
   private func stop() {
-    let wasRecording = isRecording
-    isRecording = false
-    liveModifiers = []
+    let wasRecording: Bool
+    if let draft, let action,
+      let lease = recordingLease ?? draft.activeLease(for: action)
+    {
+      wasRecording = draft.finishRecording(lease)
+      if wasRecording { self.recordingLease = nil }
+    } else {
+      wasRecording = localIsRecording
+      localIsRecording = false
+      localLiveModifiers = []
+    }
     if wasRecording {
       store.setHotkeysSuspended(false)
     }
+  }
+
+  private func responderCancelled() {
+    if let draft, let action, draft.shouldPreserveResponderCancellation(for: action) {
+      return
+    }
+    stop()
+  }
+
+  private var isRecording: Bool {
+    if let draft, let action { return draft.recordingAction == action }
+    return localIsRecording
+  }
+
+  private var liveModifiers: NSEvent.ModifierFlags {
+    if let draft, let action, draft.recordingAction == action { return draft.liveModifiers }
+    return localLiveModifiers
+  }
+
+  private var recordingBinding: Binding<Bool> {
+    Binding(
+      get: { isRecording },
+      set: { recording in
+        if !recording, isRecording { stop() }
+      }
+    )
+  }
+
+  private var modifiersBinding: Binding<NSEvent.ModifierFlags> {
+    Binding(
+      get: { liveModifiers },
+      set: { modifiers in
+        if let draft, let action, draft.recordingAction == action {
+          draft.liveModifiers = modifiers
+        } else {
+          localLiveModifiers = modifiers
+        }
+      }
+    )
   }
 
   private var showsRemove: Bool {
@@ -188,6 +282,12 @@ struct ShortcutRecorder: View {
     guard let binding else { return "Shortcut, not set" }
     if isUnavailable { return "Shortcut, \(binding.displayString), unavailable" }
     return "Shortcut, \(binding.displayString)"
+  }
+}
+
+enum ShortcutRecorderMotion {
+  static func allowsAnimation(reduceMotion: Bool) -> Bool {
+    !reduceMotion
   }
 }
 

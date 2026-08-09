@@ -41,7 +41,7 @@ enum ProfilePayloadDecoder {
             .init(codingPath: decoder.codingPath, debugDescription: "Profile collection exceeds \(maxProfiles) profiles.")
           )
         }
-        profiles.append(try container.decode(Profile.self))
+        profiles.append(try container.decode(AdditiveProfilePayload.self).profile)
       }
       self.profiles = profiles
     }
@@ -51,6 +51,65 @@ enum ProfilePayloadDecoder {
       for profile in profiles {
         try container.encode(profile)
       }
+    }
+  }
+
+  /// Profiles predate the schema envelope. Their identity, name, and entries
+  /// are foundational, while timestamps were additive metadata and therefore
+  /// default to a stable historical value when an older file omits them.
+  private struct AdditiveProfilePayload: Decodable {
+    private enum CodingKeys: String, CodingKey {
+      case id
+      case name
+      case entries
+      case createdAt
+      case updatedAt
+    }
+
+    let profile: Profile
+
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      let name = try container.decode(String.self, forKey: .name)
+      guard name.count <= Profile.maxNameLength else {
+        throw DecodingError.dataCorruptedError(
+          forKey: .name,
+          in: container,
+          debugDescription: "Profile name exceeds \(Profile.maxNameLength) characters."
+        )
+      }
+
+      var entries: [ProfileEntry] = []
+      if container.contains(.entries) {
+        var entriesContainer = try container.nestedUnkeyedContainer(forKey: .entries)
+        if let count = entriesContainer.count, count > Profile.maxEntries {
+          throw DecodingError.dataCorruptedError(
+            forKey: .entries,
+            in: container,
+            debugDescription: "Profile exceeds \(Profile.maxEntries) entries."
+          )
+        }
+        entries.reserveCapacity(min(entriesContainer.count ?? 0, Profile.maxEntries))
+        while !entriesContainer.isAtEnd {
+          guard entries.count < Profile.maxEntries else {
+            throw DecodingError.dataCorruptedError(
+              forKey: .entries,
+              in: container,
+              debugDescription: "Profile exceeds \(Profile.maxEntries) entries."
+            )
+          }
+          entries.append(try entriesContainer.decode(ProfileEntry.self))
+        }
+      }
+
+      let createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .distantPast
+      profile = Profile(
+        id: try container.decode(UUID.self, forKey: .id),
+        name: name,
+        entries: entries,
+        createdAt: createdAt,
+        updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+      )
     }
   }
 

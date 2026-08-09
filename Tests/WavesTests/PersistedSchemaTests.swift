@@ -35,6 +35,9 @@ import WavesAudioCore
   )
   prefs.appAudioIntentMigrationVersion = 1
   prefs.hasCompletedPrivacySetup = true
+  prefs.hasCompletedGuidedSetup = true
+  prefs.requiredSetupVersion = OnboardingExperience.currentVersion
+  prefs.guidedTourDismissedVersion = OnboardingExperience.currentVersion
 
   let data = try JSONEncoder().encode(VersionedPayload(schemaVersion: 1, payload: prefs))
   let decoded = try PersistedSchema.decode(UserPreferences.self, from: data, using: JSONDecoder())
@@ -43,6 +46,8 @@ import WavesAudioCore
   #expect(decoded.appAudioIntents["com.example.player"]?.isMuted == true)
   #expect(decoded.appAudioIntentMigrationVersion == 1)
   #expect(decoded.hasCompletedPrivacySetup == true)
+  #expect(decoded.requiredSetupVersion == OnboardingExperience.currentVersion)
+  #expect(decoded.guidedTourDismissedVersion == OnboardingExperience.currentVersion)
 }
 
 @Test func decodeRejectsPartialEnvelopeKeys() {
@@ -62,9 +67,10 @@ import WavesAudioCore
 @Test func decodeAcceptsLegacyUnversionedFile() throws {
   // A file written before envelopes existed is a bare payload with no
   // schemaVersion wrapper; it must still decode.
-  let legacy = Data("""
-  { "showRecentApps": false, "sortMode": "activity" }
-  """.utf8)
+  let legacy = Data(
+    """
+    { "showRecentApps": false, "sortMode": "activity" }
+    """.utf8)
   let decoded = try PersistedSchema.decode(UserPreferences.self, from: legacy, using: JSONDecoder())
   #expect(decoded.showRecentApps == false)
   #expect(decoded.sortMode == .activity)
@@ -111,11 +117,11 @@ private func makeTemporaryStoreDirectory() throws -> URL {
   let store = PreferencesStore(directory: directory)
   let prefs = store.load()
 
-  #expect(prefs.showRecentApps == true) // defaults
+  #expect(prefs.showRecentApps == true)  // defaults
   #expect(!FileManager.default.fileExists(atPath: fileURL.path))
   #expect(FileManager.default.fileExists(atPath: fileURL.appendingPathExtension("corrupt").path))
   #expect(store.consumeDidRecoverFromCorruptFile() == true)
-  #expect(store.consumeDidRecoverFromCorruptFile() == false) // read-and-cleared
+  #expect(store.consumeDidRecoverFromCorruptFile() == false)  // read-and-cleared
 }
 
 @Test func sessionStoreTreatsMissingFileAsFirstLaunch() throws {

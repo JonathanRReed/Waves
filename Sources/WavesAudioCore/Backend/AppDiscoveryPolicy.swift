@@ -173,7 +173,8 @@ public enum AppDiscoveryPolicy {
   public static func isNestedAppBundlePath(_ bundlePath: String) -> Bool {
     let bundleURL = URL(fileURLWithPath: bundlePath).standardizedFileURL
     guard bundleURL.pathExtension == "app",
-          let outerPath = topLevelAppBundlePath(forExecutablePath: bundleURL.path) else {
+      let outerPath = topLevelAppBundlePath(forExecutablePath: bundleURL.path)
+    else {
       return false
     }
     return URL(fileURLWithPath: outerPath).standardizedFileURL.path != bundleURL.path
@@ -313,6 +314,53 @@ public enum AppDiscoveryPolicy {
     }
 
     return Array(Set(roots)).sorted()
+  }
+
+  /// Authorizes a candidate helper using immutable live process identity.
+  /// Bundle identifiers are never authority by themselves. Both processes must
+  /// live inside the same canonical outer app bundle and belong to the same
+  /// authenticated signer family.
+  public static func runtimeFamilyMatches(
+    target: AppRuntimeIdentity,
+    candidate: AppRuntimeIdentity
+  ) -> Bool {
+    guard !target.outerBundlePath.isEmpty,
+      target.outerBundlePath == candidate.outerBundlePath,
+      executablePath(
+        target.executablePath,
+        belongsToAppBundleAt: target.outerBundlePath
+      ),
+      executablePath(
+        candidate.executablePath,
+        belongsToAppBundleAt: candidate.outerBundlePath
+      )
+    else {
+      return false
+    }
+
+    let targetSigning = target.signingIdentity
+    let candidateSigning = candidate.signingIdentity
+    guard !targetSigning.identifier.isEmpty,
+      !candidateSigning.identifier.isEmpty,
+      !targetSigning.designatedRequirement.isEmpty,
+      !candidateSigning.designatedRequirement.isEmpty,
+      !targetSigning.codeDirectoryHash.isEmpty,
+      !candidateSigning.codeDirectoryHash.isEmpty
+    else {
+      return false
+    }
+    switch (targetSigning.teamIdentifier, candidateSigning.teamIdentifier) {
+    case let (targetTeam?, candidateTeam?):
+      return !targetTeam.isEmpty && targetTeam == candidateTeam
+    case (nil, nil):
+      // Ad hoc code has no authenticated developer family. Without separately
+      // verified sealed-bundle membership, only the exact securely bound signed
+      // identity is authoritative. A chosen child identifier is not proof that
+      // independently signed code belongs to the target.
+      return targetSigning == candidateSigning
+    default:
+      return false
+    }
   }
 
   private static let excludedProcessMarkers = [

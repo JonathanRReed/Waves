@@ -6,9 +6,15 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public let pid: Int32?
   public let bundleID: String?
   public let displayName: String
+  /// Case- and diacritic-folded once from the immutable display name so UI
+  /// sorts do not repeat ICU work during every render pass.
+  public let displayNameSortKey: String
   public let iconName: String?
   public let iconTIFFData: Data?
   public let category: AppCategory
+  /// Live-only process authority. It is intentionally omitted from Codable
+  /// state because a process lifetime can never survive relaunch.
+  public let runtimeIdentity: AppRuntimeIdentity?
 
   public var isActive: Bool
   public var peakLevel: Float
@@ -27,6 +33,9 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   public var hasNoAudioCapability: Bool
   public var compatibility: CompatibilityState
   public var notes: String?
+  /// Typed live routing context for truthful presentation. This is additive and
+  /// optional so schema-1 sessions written before Waves 1.5 continue to decode.
+  public var routeHealthContext: RouteHealthContext?
   public var volumeBoost: Float
   /// Whether the current mute was set by the user or applied automatically
   /// (e.g. auto-pause during a call). Lets auto-resume avoid overriding a mute
@@ -58,7 +67,9 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     notes: String? = nil,
     volumeBoost: Float = 1.0,
     muteSource: MuteSource = .user,
-    targetDeviceUID: String? = nil
+    targetDeviceUID: String? = nil,
+    routeHealthContext: RouteHealthContext? = nil,
+    runtimeIdentity: AppRuntimeIdentity? = nil
   ) {
     // Validate string lengths to prevent excessive memory usage
     self.id = String(id.prefix(256))
@@ -66,6 +77,10 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.pid = pid
     self.bundleID = bundleID.map { String($0.prefix(256)) }
     self.displayName = String(displayName.prefix(256))
+    self.displayNameSortKey = self.displayName.folding(
+      options: [.caseInsensitive, .diacriticInsensitive],
+      locale: .current
+    )
 
     // Validate iconTIFFData size (max 10MB to prevent excessive memory usage)
     self.iconTIFFData = iconTIFFData.map { data in
@@ -74,6 +89,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
 
     self.iconName = iconName
     self.category = category
+    self.runtimeIdentity = runtimeIdentity
     self.isActive = isActive
     self.peakLevel = peakLevel
     self.rmsLevel = rmsLevel
@@ -92,6 +108,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
 
     // Validate notes length
     self.notes = notes.map { String($0.prefix(1000)) }
+    self.routeHealthContext = routeHealthContext
 
     // Clamp volumeBoost to the supported range [1.0, 4.0], matching
     // ProfileEntry and AppVolumeSettings so a tampered/corrupted session
@@ -121,6 +138,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     case routingState
     case compatibility
     case notes
+    case routeHealthContext
     case volumeBoost
     case muteSource
     case targetDeviceUID
@@ -146,6 +164,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     let routingState = try container.decodeIfPresent(RoutingState.self, forKey: .routingState) ?? .recent
     let compatibility = try container.decodeIfPresent(CompatibilityState.self, forKey: .compatibility) ?? .planned
     let notes = try container.decodeIfPresent(String.self, forKey: .notes)
+    let routeHealthContext = try container.decodeIfPresent(RouteHealthContext.self, forKey: .routeHealthContext)
     let volumeBoost = try container.decodeIfPresent(Float.self, forKey: .volumeBoost) ?? 1.0
     let muteSource = try container.decodeIfPresent(MuteSource.self, forKey: .muteSource) ?? .user
     let targetDeviceUID = try container.decodeIfPresent(String.self, forKey: .targetDeviceUID)
@@ -171,7 +190,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
       notes: notes,
       volumeBoost: volumeBoost,
       muteSource: muteSource,
-      targetDeviceUID: targetDeviceUID
+      targetDeviceUID: targetDeviceUID,
+      routeHealthContext: routeHealthContext
     )
   }
 
@@ -183,7 +203,6 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     try container.encodeIfPresent(bundleID, forKey: .bundleID)
     try container.encode(displayName, forKey: .displayName)
     try container.encodeIfPresent(iconName, forKey: .iconName)
-    try container.encodeIfPresent(iconTIFFData, forKey: .iconTIFFData)
     try container.encode(category, forKey: .category)
     try container.encode(isActive, forKey: .isActive)
     try container.encode(peakLevel, forKey: .peakLevel)
@@ -195,10 +214,19 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     try container.encode(routingState, forKey: .routingState)
     try container.encode(compatibility, forKey: .compatibility)
     try container.encodeIfPresent(notes, forKey: .notes)
+    try container.encodeIfPresent(routeHealthContext, forKey: .routeHealthContext)
     try container.encode(volumeBoost, forKey: .volumeBoost)
     try container.encode(muteSource, forKey: .muteSource)
     try container.encodeIfPresent(targetDeviceUID, forKey: .targetDeviceUID)
   }
+}
+
+public enum RouteHealthContext: String, Codable, Hashable, Sendable {
+  case verifiedRouterOwnership = "verified_router_ownership"
+  case unattributableRouterFallback = "unattributable_router_fallback"
+  case routerMixedOutput = "router_mixed_output"
+  case geometryRecoveryInProgress = "geometry_recovery_in_progress"
+  case geometryRecoveryExhausted = "geometry_recovery_exhausted"
 }
 
 public enum MuteSource: String, Codable, Hashable, Sendable {
@@ -224,7 +252,7 @@ public enum RoutingState: String, Codable, CaseIterable, Hashable, Sendable {
     case .managed:
       "Managed"
     case .monitorOnly:
-      "Ready"
+      "Monitoring only"
     case .error:
       "Error"
     }

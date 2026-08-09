@@ -116,9 +116,10 @@ struct WavesApp: App {
         // Otherwise this opens Settings on whichever pane it last showed —
         // usually General — leaving the user to go find Help themselves, which
         // is exactly what this menu item promised to do for them.
-        .simultaneousGesture(TapGesture().onEnded {
-          store.requestSettingsPane(.help)
-        })
+        .simultaneousGesture(
+          TapGesture().onEnded {
+            store.requestSettingsPane(.help)
+          })
       }
     }
 
@@ -246,6 +247,8 @@ enum AppTerminationTimeoutDecision {
 
 @MainActor
 final class AppTerminationCoordinator {
+  static let productionTimeout: Duration = .milliseconds(250)
+
   private enum State {
     case idle
     case running
@@ -256,7 +259,7 @@ final class AppTerminationCoordinator {
   private var state: State = .idle
   private var terminationTask: Task<Void, Never>?
 
-  init(timeout: Duration = .seconds(5)) {
+  init(timeout: Duration = productionTimeout) {
     self.timeout = timeout
   }
 
@@ -495,14 +498,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   @objc private func handleGetURLEvent(
     _ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor
   ) {
-    guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
-      let url = WavesURLPolicy.parse(urlString)
-    else {
+    guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue else {
       logger.warning("URL scheme invocation rejected: Missing URL payload")
       return
     }
 
-    handleURLScheme(url)
+    handleURLScheme(urlString)
   }
 
   private func setupGlobalHotkeys() {
@@ -532,14 +533,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   // AppKit's default GetURL dispatch. A separate `application(_:open:)` entry
   // point would be unreachable for `waves://` invocations, so it is omitted.
 
-  private func handleURLScheme(_ url: URL) {
-    guard url.scheme == "waves", let store else { return }
-    guard store.isAudioRunning else {
-      store.promptToFinishSetup()
-      presentSetupWindowIfAvailable()
-      return
-    }
-    store.handleURLScheme(url)
+  private func handleURLScheme(_ rawURLString: String) {
+    guard let store else { return }
+    URLAutomationRouter(
+      isEnabled: { store.preferences.enableURLScheme },
+      admitInvocation: { store.admitURLAutomationInvocation() },
+      isAudioRunning: { store.isAudioRunning },
+      parse: WavesURLPolicy.parse,
+      promptForSetup: { store.promptToFinishSetup() },
+      presentSetup: { self.presentSetupWindowIfAvailable() },
+      perform: { store.handleURLScheme($0, invocationAlreadyAdmitted: true) }
+    ).handle(rawURLString: rawURLString)
   }
 
   private func presentSetupWindowIfAvailable() {

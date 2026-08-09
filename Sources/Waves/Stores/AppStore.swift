@@ -104,7 +104,7 @@ enum AppIntentFeedbackPolicy: Sendable {
   case reinclusion(appName: String, announce: Bool)
 }
 
-private struct AppIntentProjection: Sendable {
+struct AppIntentProjection: Sendable {
   let generation: UInt64
   let intent: AppRouteIntent
   let muteSource: MuteSource?
@@ -136,9 +136,58 @@ enum AppStartupState: Equatable {
   case shuttingDown
 }
 
+enum ProfileSaveResult: Equatable, Sendable {
+  case saved(UUID)
+  case unavailableDuringShutdown
+  case blankName
+  case nameTooLong(maximum: Int)
+  case duplicateName(String)
+  case noEligibleApps
+
+  var savedProfileID: UUID? {
+    guard case .saved(let id) = self else { return nil }
+    return id
+  }
+
+  var message: String? {
+    switch self {
+    case .saved:
+      nil
+    case .unavailableDuringShutdown:
+      "Waves is closing. Reopen it before saving this profile."
+    case .blankName:
+      "Enter a profile name."
+    case .nameTooLong(let maximum):
+      "Keep the profile name to \(maximum) characters or fewer."
+    case .duplicateName(let name):
+      "A profile named “\(name)” already exists."
+    case .noEligibleApps:
+      "Select at least one app that is not excluded from Waves."
+    }
+  }
+}
+
 enum AppShutdownCompletion: Hashable, Sendable {
   case clean
   case degraded
+}
+
+enum PersistenceStoreIdentifier: String, Hashable, Sendable {
+  case preferences
+  case profiles
+  case session
+  case deviceVolumePresets
+  case privacySetup
+
+  var displayName: String {
+    switch self {
+    case .preferences: "settings"
+    case .profiles: "profiles"
+    case .session: "session"
+    case .deviceVolumePresets: "device presets"
+    case .privacySetup: "privacy setup"
+    }
+  }
 }
 
 struct AppShutdownResult: Hashable, Sendable {
@@ -150,13 +199,53 @@ struct AppShutdownResult: Hashable, Sendable {
     persistenceDegradations: [String] = [],
     backendResult: BackendShutdownResult? = nil
   ) {
-    self.persistenceDegradations = persistenceDegradations
+    var seen = Set<String>()
+    self.persistenceDegradations = persistenceDegradations.filter {
+      seen.insert($0).inserted
+    }
     self.backendResult = backendResult
     let backendIsClean = backendResult.map { $0.completion == .clean } ?? true
-    self.completion = persistenceDegradations.isEmpty && backendIsClean
+    self.completion =
+      self.persistenceDegradations.isEmpty && backendIsClean
       ? .clean
       : .degraded
   }
+}
+
+struct AppStoreLifecycleSnapshot: Equatable, Sendable {
+  let intent: AppIntentCoordinatorLifecycleSnapshot
+  let persistence: AppStorePersistenceLifecycleSnapshot
+  let adaptive: AdaptiveMixCoordinatorLifecycleSnapshot
+  let deviceSuppression: DeviceChangeSuppressionLifecycleSnapshot
+  let startupTaskCount: Int
+  let ownedOperationCount: Int
+  let hasLevelPoll: Bool
+  let hasSessionMaintenance: Bool
+  let toastDismissalCount: Int
+  let lingerTaskCount: Int
+  let observerCount: Int
+  let backendStarted: Bool
+
+  var isIdle: Bool {
+    intent == .idle
+      && persistence == .idle
+      && adaptive == .idle
+      && deviceSuppression == .idle
+      && startupTaskCount == 0
+      && ownedOperationCount == 0
+      && !hasLevelPoll
+      && !hasSessionMaintenance
+      && toastDismissalCount == 0
+      && lingerTaskCount == 0
+      && observerCount == 0
+      && !backendStarted
+  }
+}
+
+struct GuidedMixerTourPresentation: Equatable, Sendable {
+  let moment: GuidedMixerTourMoment
+  let appName: String
+  let isTargetAvailable: Bool
 }
 
 enum PrivacySetupPresentationState: Equatable {
@@ -170,7 +259,17 @@ enum PrivacySetupPresentationState: Equatable {
 @Observable
 @MainActor
 final class AppStore {
-  var session: AudioSessionSnapshot
+  typealias RuntimeProcessProbeProvider = @Sendable (Int32) -> RuntimeProcessProbe?
+
+  var session: AudioSessionSnapshot {
+    didSet {
+      let previousRuntimeIDs = Set(oldValue.apps.map(\.id))
+      let currentRuntimeIDs = Set(session.apps.map(\.id))
+      if previousRuntimeIDs != currentRuntimeIDs {
+        AppIconCache.prune(from: oldValue, using: session)
+      }
+    }
+  }
   var profiles: [Profile]
   /// The most recent profile result after AppStore generation checks and row-level
   /// reconciliation. Retained so diagnostics/tests can inspect every source row in
@@ -209,6 +308,10 @@ final class AppStore {
   private(set) var muteShortcutRequest: String?
   private(set) var muteShortcutToken = 0
   var onboarding = OnboardingState()
+  private(set) var installLocationClassification: InstallLocationClassification
+  private(set) var installationAdvisoryAcknowledged = false
+  private(set) var requestedSetupReplay = false
+  private(set) var requestedWhatsNew = false
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
   var isRefreshing = false
@@ -244,11 +347,15 @@ final class AppStore {
   private(set) var recentlyLiveIDs: Set<String> = []
 
   private let backend: any AudioControlBackend
-  private let preferencesStore: any PreferencesPersisting
-  private let profileStore: any ProfilesPersisting
-  private let sessionStore: any SessionPersisting
   private let loginItemService: any LoginItemServicing
-  private let deviceVolumePresetsStore: any DeviceVolumePresetsPersisting
+  private let runtimeProcessProbe: RuntimeProcessProbeProvider
+  private let appIntentCoordinator = AppIntentCoordinator()
+  private let adaptiveMixCoordinator = AdaptiveMixCoordinator()
+  let guidedMixerTourCoordinator = GuidedMixerTourCoordinator()
+  private let automationParser = AutomationCommandParser()
+  private let urlInvocationLimiter = URLInvocationLimiter()
+  private let persistenceCoordinator: AppStorePersistenceCoordinator
+  private let deviceChangeSuppression: DeviceChangeSuppressionCoordinator
   private let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "AppStore")
   private(set) var startupState: AppStartupState
   private(set) var privacySetupError: String?
@@ -259,7 +366,6 @@ final class AppStore {
   private(set) var shutdownResult: AppShutdownResult?
   private var ownedOperationTasks: [UUID: Task<Void, Never>] = [:]
   private var hasStartedAudioBackend = false
-  private var isFinalizingShutdownPersistence = false
   // Captured once at init from DeviceVolumePresetsStore.load(); consumed (and
   // toasted) the first time start() runs so a corrupt-file recovery is
   // surfaced to the user instead of failing silently.
@@ -270,37 +376,18 @@ final class AppStore {
   private var didRecoverCorruptPreferences = false
   private var didRecoverCorruptProfiles = false
   private var didRecoverCorruptSession = false
-  /// Slider-only projections are deliberately not transactions and never persist.
-  private var pendingVolumeTargets: [String: Float] = [:]
-  private var pendingEqualizerSettings: [String: EqualizerSettings] = [:]
-  private var pendingEqualizerDebounceTasks: [String: Task<Void, Never>] = [:]
-  /// In-flight slider nudges, so the audio follows the handle during a drag
-  /// instead of jumping when it is released. See `scheduleVolumeTransaction`.
-  private var pendingVolumeDebounceTasks: [String: Task<Void, Never>] = [:]
   /// Trailing debounce for a drag. Short enough that the sound tracks the handle,
   /// long enough that a fast sweep does not submit a transaction per frame —
   /// matching the interval the equalizer already uses.
   private static let volumeDragInterval = Duration.milliseconds(80)
-  /// One current transaction task and generation per logical app. Cancelling a
-  /// task stops store-side reconciliation; backend generation checks remain the
-  /// authority for native route work already in flight.
-  private var appIntentTasks: [String: Task<AppIntentApplyResult, Never>] = [:]
-  private var currentAppIntentGeneration: [String: UInt64] = [:]
-  private var optimisticAppIntentProjections: [String: AppIntentProjection] = [:]
-  /// Profile batches share one generation across every source row. Tasks remain
-  /// tracked even after a newer profile supersedes them so test/shutdown drains do
-  /// not report idle while an older backend batch is still unwinding.
-  private var profileApplyTasks: [UInt64: Task<Void, Never>] = [:]
-  private var currentProfileGeneration: UInt64?
-  /// Last backend-confirmed controls, kept separate from visible optimistic state.
-  private var confirmedAppsByLogicalID: [String: AudioApp] = [:]
-  private var confirmedEqualizerByLogicalID: [String: EqualizerSettings] = [:]
-  private var durableIntentMutationGeneration: [String: UInt64] = [:]
-  private var devicePresetMutationGeneration: [String: UInt64] = [:]
   /// Last snapshots whose store writes actually completed. Rollback must use
   /// these, never another transaction's still-provisional in-memory values.
-  private var durablySavedPreferences = UserPreferences()
-  private var durablySavedDeviceVolumePresets = DeviceVolumePresets()
+  private var durablySavedPreferences: UserPreferences {
+    persistenceCoordinator.durablySavedPreferences
+  }
+  private var durablySavedDeviceVolumePresets: DeviceVolumePresets {
+    persistenceCoordinator.durablySavedDevicePresets
+  }
   private var toastDismissals: [UUID: Task<Void, Never>] = [:]
   private var deviceChangeObserver: Task<Void, Never>?
   // Reentrancy guard so rapid device flapping (dock/undock, BT connect) can't
@@ -316,33 +403,13 @@ final class AppStore {
   // ensuing handleDeviceChange suppresses its "Output device changed" info toast:
   // a manual switch already shows an "Output switched" success toast, so a second
   // toast for the same switch is just noise.
-  private var pendingSelfInitiatedDeviceID: String?
   private var frontmostAppObserver: NSObjectProtocol?
   private var appTerminationObserver: NSObjectProtocol?
   private var levelPollTask: Task<Void, Never>?
   private var sessionMaintenanceTask: Task<Void, Never>?
   private(set) var sessionMaintenanceStartCount = 0
-  private var adaptiveMixTask: Task<Void, Never>?
-  // At most one persistence runner exists per full-value store. Calls replace the
-  // pending immutable snapshot while that runner is active, keeping task tracking
-  // bounded to four tasks even during rapid UI edits.
-  private var pendingPreferencesPersistence: UserPreferences?
-  private var pendingProfilesPersistence: [Profile]?
-  private var pendingSessionPersistence: AudioSessionSnapshot?
-  private var pendingDevicePresetsPersistence: DeviceVolumePresets?
-  private var preferencesPersistenceTask: Task<Void, Never>?
-  private var profilesPersistenceTask: Task<Void, Never>?
-  private var sessionPersistenceTask: Task<Void, Never>?
-  private var devicePresetsPersistenceTask: Task<Void, Never>?
   private(set) var persistenceFailureCount = 0
   private(set) var lastPersistenceError: String?
-  private var persistenceFailureHistory: [String] = []
-  private var lastPersistenceWarningDate: Date?
-  private let persistenceWarningDebounceInterval: TimeInterval = 5
-  private var speechDetectionStates: [String: SpeechDetectionState] = [:]
-  private var speechDuckingStates: [String: SpeechDuckingState] = [:]
-  private var loudnessTrimStates: [String: LoudnessTrimState] = [:]
-  private var adaptivePolicyEngine = AdaptivePolicyEngine()
   private var liveLevelsRefcount = 0
   /// False while no Waves window is on screen (all closed, minimized, on an
   /// inactive Space, or fully occluded). The level poll feeds nothing but
@@ -375,14 +442,11 @@ final class AppStore {
   /// Gains identical to the last write are skipped. This bounds how long that
   /// can go on, so a route rebuilt underneath us cannot strand its controller at
   /// unity gain waiting for a value that never changes. 20 passes ≈ 2 s.
-  private let adaptiveGainRepublishPasses = 20
   /// The mode a boolean "Adaptive Mix" toggle restores when switched back on.
   /// Seeded from the persisted mode at launch so the choice survives a restart.
   private var lastActiveAdaptiveMixMode: AdaptiveMixMode = .both
   /// The last gain map actually handed to the backend, so unchanged values are
   /// not rewritten on every pass.
-  private var lastPublishedAdaptiveGains: [String: Float] = [:]
-  private var adaptiveGainRepublishCountdown = 0
   private let maxToasts = 3
   private let defaultToastDuration = Duration.seconds(2.0)
   // Failures need longer on screen than routine successes: 2.0s is too short to
@@ -390,7 +454,6 @@ final class AppStore {
   // explicit duration default to a longer lifetime.
   private let errorToastDuration = Duration.seconds(4.5)
   private var previousFrontmostApp: String?
-  private var pausedMusicApps: Set<String> = []
   // Reentrancy guard mirroring isHandlingDeviceChange: rapid frontmost-app
   // switches (activate Zoom, cmd-tab away within ~100ms) must not stack
   // overlapping pause/resume passes that each read mute state captured before
@@ -401,17 +464,7 @@ final class AppStore {
   // clears it and runs exactly one more pass, which re-reads the *current*
   // frontmost app — so the latest app switch always wins and none are dropped.
   private var pendingAutoPausePassRerun = false
-  /// Leave ample space between store generations and the backend's temporary
-  /// legacy-call allocator. Profile/automation migration will remove that bridge.
-  private static let appIntentGenerationStride: UInt64 = 1 << 32
-  private static var appIntentGenerationCounter: UInt64 = 0
-  private var urlSchemeRequestTimes: [Date] = []
-  private let maxURLSchemeRequests = 10
-  private let urlSchemeRequestWindow: TimeInterval = 60
-  // Debounce the "throttled" toast so a flood of dropped commands surfaces at
-  // most one toast per window instead of one per dropped command.
-  private var lastURLSchemeThrottleToast: Date?
-  private let urlSchemeThrottleToastInterval: TimeInterval = 5
+  private let accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster
 
   init(
     backend: any AudioControlBackend,
@@ -420,18 +473,36 @@ final class AppStore {
     sessionStore: any SessionPersisting,
     loginItemService: any LoginItemServicing,
     deviceVolumePresetsStore: any DeviceVolumePresetsPersisting,
-    initialStartupState: AppStartupState = .idle
+    initialStartupState: AppStartupState = .idle,
+    deviceChangeSuppressionInterval: Duration = .seconds(5),
+    runtimeProcessProbe: @escaping RuntimeProcessProbeProvider = RuntimeProcessIdentity.probe,
+    deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
+      duration in try await Task.sleep(for: duration)
+    },
+    accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster = .live,
+    installLocation: InstallLocationClassification = .applications
   ) {
     self.backend = backend
-    self.preferencesStore = preferencesStore
-    self.profileStore = profileStore
-    self.sessionStore = sessionStore
     self.loginItemService = loginItemService
-    self.deviceVolumePresetsStore = deviceVolumePresetsStore
+    self.runtimeProcessProbe = runtimeProcessProbe
     self.startupState = initialStartupState
     self.hasStartedAudioBackend = initialStartupState == .running
+    self.accessibilityAnnouncementPoster = accessibilityAnnouncementPoster
+    self.installLocationClassification = installLocation
     let loadedPreferences = preferencesStore.load()
     let loadedDeviceVolumePresets = deviceVolumePresetsStore.load()
+    self.persistenceCoordinator = AppStorePersistenceCoordinator(
+      preferencesStore: preferencesStore,
+      profileStore: profileStore,
+      sessionStore: sessionStore,
+      devicePresetsStore: deviceVolumePresetsStore,
+      initialPreferences: loadedPreferences,
+      initialDevicePresets: loadedDeviceVolumePresets
+    )
+    self.deviceChangeSuppression = DeviceChangeSuppressionCoordinator(
+      interval: deviceChangeSuppressionInterval,
+      sleep: deviceChangeSuppressionSleep
+    )
     self.preferences = loadedPreferences
     // So a boolean toggle restores the mode the user actually chose, even across
     // a relaunch. `.off` carries no choice, so keep the default in that case.
@@ -441,21 +512,25 @@ final class AppStore {
     self.profiles = profileStore.load(defaults: Profile.defaults)
     self.session = sessionStore.load() ?? Self.emptySession
     self.deviceVolumePresets = loadedDeviceVolumePresets
-    self.durablySavedPreferences = loadedPreferences
-    self.durablySavedDeviceVolumePresets = loadedDeviceVolumePresets
     self.didRecoverCorruptDeviceVolumePresets = deviceVolumePresetsStore.consumeDidRecoverFromCorruptFile()
     self.didRecoverCorruptPreferences = preferencesStore.consumeDidRecoverFromCorruptFile()
     self.didRecoverCorruptProfiles = profileStore.consumeDidRecoverFromCorruptFile()
     self.didRecoverCorruptSession = sessionStore.consumeDidRecoverFromCorruptFile()
     var shouldPersistPreferences = false
     // Migrate pins recorded only on the persisted session (builds before pin
-    // state moved into preferences) into the authoritative set, just once.
-    if preferences.pinnedAppIDs.isEmpty {
-      let sessionPins = session.apps.filter(\.isPinned).map(\.logicalID)
-      if !sessionPins.isEmpty {
-        preferences.pinnedAppIDs = Array(Set(sessionPins))
-        shouldPersistPreferences = true
+    // state moved into preferences) into the authoritative set exactly once.
+    // Advancing the explicit marker even for an empty legacy cache prevents a
+    // later stale session from resurrecting pins the user intentionally cleared.
+    if preferences.pinMigrationVersion == 0 {
+      if preferences.pinnedAppIDs.isEmpty {
+        var seen = Set<String>()
+        preferences.pinnedAppIDs = session.apps.compactMap { app in
+          guard app.isPinned, seen.insert(app.logicalID).inserted else { return nil }
+          return app.logicalID
+        }
       }
+      preferences.pinMigrationVersion = 1
+      shouldPersistPreferences = true
     }
     // Only manual sort depends on a saved order; fall back to name if it is
     // missing. Activity sort needs no stored order and must be preserved across
@@ -472,15 +547,15 @@ final class AppStore {
     if Self.migrateDurableAppIntents(in: &preferences, from: session) {
       shouldPersistPreferences = true
     }
-    confirmedAppsByLogicalID = Dictionary(
-      session.apps.map { ($0.logicalID, $0) },
-      uniquingKeysWith: { first, _ in first }
-    )
-    confirmedEqualizerByLogicalID = preferences.appAudioIntents.mapValues(\.equalizerSettings)
+    var confirmedEqualizers = preferences.appAudioIntents.mapValues(\.equalizerSettings)
     for (appID, equalizer) in preferences.appEqualizerSettings
-      where confirmedEqualizerByLogicalID[appID] == nil {
-      confirmedEqualizerByLogicalID[appID] = equalizer
+    where confirmedEqualizers[appID] == nil {
+      confirmedEqualizers[appID] = equalizer
     }
+    appIntentCoordinator.seedConfirmedState(
+      apps: session.apps,
+      equalizers: confirmedEqualizers
+    )
     loginItemStatus = loginItemService.status
     if preferences.launchAtLoginEnabled != loginItemStatus.isUserIntentEnabled {
       preferences.launchAtLoginEnabled = loginItemStatus.isUserIntentEnabled
@@ -490,6 +565,9 @@ final class AppStore {
       launchAtLoginEnabled: loginItemStatus.isEnabled,
       launchAtLoginRequiresApproval: loginItemStatus.requiresApproval
     )
+    self.persistenceCoordinator.onFailure = { [weak self] failure in
+      self?.publishPersistenceFailure(failure)
+    }
     if shouldPersistPreferences {
       enqueuePreferencesPersistence(preferences)
     }
@@ -583,7 +661,7 @@ final class AppStore {
     var energy = 0.0
     for app in visibleApps where !app.isMuted && isLive(app) {
       let measured = liveLevels[app.logicalID].map { Double(max($0.rms, $0.peak * 0.8)) } ?? 0
-      let contribution = measured > 0.001 ? measured : 0.12 // floor for unmetered live apps
+      let contribution = measured > 0.001 ? measured : 0.12  // floor for unmetered live apps
       energy += contribution * contribution
     }
     guard energy > 0 else { return 0 }
@@ -608,17 +686,20 @@ final class AppStore {
       // EQ shaping and adaptive gain only act on streams Waves actually
       // processes, so both indicators require a managed route.
       let isManaged = app.routingState == .managed
-      let isEqualized = isManaged
+      let isEqualized =
+        isManaged
         && (managedEQActive || equalizerSettings(for: app).isEnabled)
-      let adaptiveGainDB = isManaged
+      let adaptiveGainDB =
+        isManaged
         ? Double(adaptiveGainsDBByAppID[app.logicalID] ?? 0)
         : 0
-      components.append(WaveComponent(
-        id: app.logicalID,
-        level: min(1, pow(level, 0.5)),
-        isEqualized: isEqualized,
-        adaptiveGainDB: adaptiveGainDB
-      ))
+      components.append(
+        WaveComponent(
+          id: app.logicalID,
+          level: min(1, pow(level, 0.5)),
+          isEqualized: isEqualized,
+          adaptiveGainDB: adaptiveGainDB
+        ))
     }
     guard components.count > 6 else { return components }
     return Array(components.sorted { $0.level > $1.level }.prefix(6))
@@ -666,11 +747,6 @@ final class AppStore {
         ? visible.count { !$0.isPinned && !liveIDs.contains($0.logicalID) }
         : 0
     )
-  }
-
-  private func invalidateVisibleAppsCache() {
-    // No-op cache removed; keep explicit invalidation points intact for future
-    // callers without forcing a runtime write during view updates.
   }
 
   var currentDeviceName: String {
@@ -737,6 +813,168 @@ final class AppStore {
       return .hidden
     case let .failed(detail):
       return .startupFailed(detail)
+    }
+  }
+
+  var guidedSetupFacts: GuidedSetupFacts {
+    GuidedSetupFacts(
+      hasAcceptedPrivacy: preferences.hasCompletedPrivacySetup,
+      captureAuthorization: onboarding.captureAuthorization,
+      audioComponentInstalled: onboarding.audioComponentInstalled,
+      outputDeviceVisible: onboarding.outputDeviceVisible,
+      routeHealthReady: onboarding.routeHealthReady,
+      isAudioRunning: isAudioRunning
+    )
+  }
+
+  var onboardingLaunchDecision: OnboardingLaunchDecision {
+    OnboardingLaunchPolicy.decide(
+      OnboardingLaunchContext(
+        preferences: preferences,
+        installLocation: installLocationClassification,
+        installationAdvisoryAcknowledged: installationAdvisoryAcknowledged,
+        requestedSetupReplay: requestedSetupReplay,
+        hasEligibleTourApp: session.apps.contains { app in
+          app.routingState == .managed
+            && isLive(app)
+            && !preferences.excludedAppIDs.contains(app.logicalID)
+        }
+      )
+    )
+  }
+
+  var guidedMixerTourTargetApp: AudioApp? {
+    guard case let .active(_, appID) = guidedMixerTourCoordinator.state else { return nil }
+    return session.apps.first { $0.logicalID == appID }
+  }
+
+  var guidedMixerTourPresentation: GuidedMixerTourPresentation? {
+    guard case let .active(moment, _) = guidedMixerTourCoordinator.state else {
+      return nil
+    }
+    let target = guidedMixerTourTargetApp
+    return GuidedMixerTourPresentation(
+      moment: moment,
+      appName: target?.displayName ?? guidedMixerTourCoordinator.targetDisplayName ?? "This app",
+      isTargetAvailable: target != nil
+    )
+  }
+
+  var shouldShowWhatsNew: Bool {
+    if requestedWhatsNew { return true }
+    guard case let .mixer(showWhatsNew, _) = onboardingLaunchDecision else {
+      return false
+    }
+    return showWhatsNew
+  }
+
+  func continueFromInstallationAdvisory() {
+    installationAdvisoryAcknowledged = true
+  }
+
+  func runRequiredSetupReplay() {
+    requestedSetupReplay = true
+    onShowMixerRequested?()
+  }
+
+  func cancelRequiredSetupReplay() {
+    requestedSetupReplay = false
+  }
+
+  func showWhatsNew() {
+    requestedWhatsNew = true
+    onShowMixerRequested?()
+  }
+
+  func startGuidedMixerTour() {
+    requestedWhatsNew = false
+    focusSource(.running)
+    onShowMixerRequested?()
+    preferences.whatsNewDismissedVersion = max(
+      preferences.whatsNewDismissedVersion,
+      OnboardingExperience.currentVersion
+    )
+
+    guard let app = eligibleGuidedTourApp else {
+      preferences.deferredTourVersion = OnboardingExperience.currentVersion
+      persistPreferences()
+      showToast(
+        title: "Tour ready when an app is playing",
+        detail: "Start compatible audio and Waves will offer Show Me How in the mixer.",
+        kind: .info
+      )
+      return
+    }
+
+    preferences.deferredTourVersion = 0
+    persistPreferences()
+    guidedMixerTourCoordinator.start(
+      appID: app.logicalID,
+      displayName: app.displayName,
+      originalVolume: app.desiredVolume,
+      originalMuted: app.isMuted
+    )
+  }
+
+  func advanceGuidedMixerTour() {
+    if case let .active(moment, _) = guidedMixerTourCoordinator.state,
+      moment.requiresAcceptedMixerIntent,
+      guidedMixerTourTargetApp != nil
+    {
+      return
+    }
+    guard guidedMixerTourCoordinator.advance() == .completed else { return }
+    preferences.guidedTourCompletedVersion = max(
+      preferences.guidedTourCompletedVersion,
+      OnboardingExperience.currentVersion
+    )
+    preferences.deferredTourVersion = 0
+    persistPreferences()
+    showToast(
+      title: "Tour complete",
+      detail: "Replay it any time from Setup & Repair or Help.",
+      kind: .success
+    )
+  }
+
+  func backGuidedMixerTour() {
+    guidedMixerTourCoordinator.back()
+  }
+
+  func endGuidedMixerTour(reason: GuidedMixerTourEndReason) {
+    guard guidedMixerTourCoordinator.end(reason: reason) else { return }
+    preferences.guidedTourDismissedVersion = max(
+      preferences.guidedTourDismissedVersion,
+      OnboardingExperience.currentVersion
+    )
+    preferences.deferredTourVersion = 0
+    persistPreferences()
+  }
+
+  func dismissGuidedTourTip() {
+    preferences.guidedTourDismissedVersion = max(
+      preferences.guidedTourDismissedVersion,
+      OnboardingExperience.currentVersion
+    )
+    preferences.deferredTourVersion = 0
+    persistPreferences()
+  }
+
+  func dismissWhatsNew() {
+    requestedWhatsNew = false
+    preferences.whatsNewDismissedVersion = max(
+      preferences.whatsNewDismissedVersion,
+      OnboardingExperience.currentVersion
+    )
+    persistPreferences()
+  }
+
+  private var eligibleGuidedTourApp: AudioApp? {
+    visibleApps.first { app in
+      app.routingState == .managed
+        && isLive(app)
+        && !preferences.excludedAppIDs.contains(app.logicalID)
+        && MixerRouteControlPolicy(app: app).allowsAudioControl
     }
   }
 
@@ -1167,11 +1405,67 @@ final class AppStore {
     presentFinishSetupMessage()
   }
 
-  func completeGuidedSetup() {
-    guard startupState != .shuttingDown else { return }
-    guard !preferences.hasCompletedGuidedSetup else { return }
-    preferences.hasCompletedGuidedSetup = true
-    persistPreferences()
+  func completeRequiredSetup(version: Int) async -> Bool {
+    guard startupState != .shuttingDown,
+      version == OnboardingExperience.currentVersion,
+      guidedSetupFacts.isReadyForCoreMixing
+    else {
+      return false
+    }
+
+    let completesFirstRun = preferences.requiredSetupVersion < version
+    var completedPreferences = preferences
+    completedPreferences.requiredSetupVersion = max(
+      completedPreferences.requiredSetupVersion,
+      version
+    )
+    completedPreferences.hasCompletedGuidedSetup = true
+    if completesFirstRun {
+      completedPreferences.whatsNewDismissedVersion = max(
+        completedPreferences.whatsNewDismissedVersion,
+        version
+      )
+    }
+
+    do {
+      try await persistenceCoordinator.savePreferencesDurably(
+        completedPreferences,
+        mergePendingWith: { pending in
+          pending.requiredSetupVersion = max(pending.requiredSetupVersion, version)
+          pending.hasCompletedGuidedSetup = true
+          if completesFirstRun {
+            pending.whatsNewDismissedVersion = max(
+              pending.whatsNewDismissedVersion,
+              version
+            )
+          }
+        },
+        onDurable: { [weak self] in
+          guard let self else { return }
+          preferences.requiredSetupVersion = max(
+            preferences.requiredSetupVersion,
+            version
+          )
+          preferences.hasCompletedGuidedSetup = true
+          if completesFirstRun {
+            preferences.whatsNewDismissedVersion = max(
+              preferences.whatsNewDismissedVersion,
+              version
+            )
+          }
+          requestedSetupReplay = false
+        }
+      )
+      return true
+    } catch {
+      reportPersistenceFailure(store: .preferences, error: error, showWarning: false)
+      showToast(
+        title: "Setup may appear again",
+        detail: "Waves is ready to mix, but the completed setup state could not be saved. \(error.localizedDescription)",
+        kind: .warning
+      )
+      return false
+    }
   }
 
   private func performSafeBootstrapIfNeeded() {
@@ -1195,7 +1489,7 @@ final class AppStore {
       privacySetupError = "Waves couldn't save your setup choice. Check that your user Library is writable, then try again. \(error.localizedDescription)"
       startupState = .awaitingPrivacy
       privacySetupTask = nil
-      reportPersistenceFailure(storeName: "privacy setup", error: error, showWarning: false)
+      reportPersistenceFailure(store: .privacySetup, error: error, showWarning: false)
       showToast(
         title: "Setup wasn't saved",
         detail: privacySetupError,
@@ -1250,11 +1544,11 @@ final class AppStore {
       let built = await backend.currentSnapshot()
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       session = mergedSession(with: built, cached: warmSnapshot)
-      invalidateVisibleAppsCache()
       cleanupStaleEntries()
       await reapplyRestoredAudioState()
       if preferences.adaptiveMixMode.usesSpeechFocus,
-         preferences.autoPauseMusicForConferencing {
+        preferences.autoPauseMusicForConferencing
+      {
         preferences.autoPauseMusicForConferencing = false
         persistPreferences()
       }
@@ -1379,7 +1673,6 @@ final class AppStore {
       let refreshed = try await backend.refresh()
       guard !Task.isCancelled, startupState == .running else { return }
       session = mergedSession(with: refreshed, cached: session)
-      invalidateVisibleAppsCache()
       cleanupStaleEntries()
       await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
       guard !Task.isCancelled, startupState == .running else { return }
@@ -1414,13 +1707,14 @@ final class AppStore {
     }
   }
 
-  private func performSilentSessionRefresh() async {
+  func performSilentSessionRefresh() async {
     guard startupState == .running,
-          !isRefreshing,
-          !isRecovering,
-          !isLoading,
-          !isRunningSessionMaintenance,
-          pendingVolumeTargets.isEmpty else {
+      !isRefreshing,
+      !isRecovering,
+      !isLoading,
+      !isRunningSessionMaintenance,
+      !appIntentCoordinator.hasPendingVolumeTargets()
+    else {
       return
     }
 
@@ -1430,14 +1724,27 @@ final class AppStore {
     do {
       let knownAppIDs = Set(session.apps.map(\.logicalID))
       let rebuilt = try await backend.refresh()
-      session = mergedSession(with: rebuilt, cached: session)
-      invalidateVisibleAppsCache()
-      cleanupStaleEntries()
-      await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
-      persistSessionSnapshot()
-      diagnostics = await backend.diagnosticsReport()
-      onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-      availableDevices = await backend.availableOutputDevices()
+      let merged = mergedSession(with: rebuilt, cached: session)
+      if !Self.sessionContentMatches(merged, session) {
+        session = merged
+        cleanupStaleEntries()
+        await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
+        persistSessionSnapshot()
+      }
+      let refreshedDiagnostics = await backend.diagnosticsReport(
+        reprobeCaptureAuthorization: false
+      )
+      if !Self.diagnosticsContentMatches(refreshedDiagnostics, diagnostics) {
+        diagnostics = refreshedDiagnostics
+      }
+      let captureAuthorization = await backend.captureAuthorizationResult()
+      if onboarding.captureAuthorization != captureAuthorization {
+        onboarding.captureAuthorization = captureAuthorization
+      }
+      let devices = await backend.availableOutputDevices()
+      if availableDevices != devices {
+        availableDevices = devices
+      }
       syncOnboarding(using: session)
       checkAutoPauseMusic()
     } catch {
@@ -1445,144 +1752,143 @@ final class AppStore {
     }
   }
 
-  func handleURLScheme(_ url: URL) {
-    guard requireAudioRunning() else { return }
+  private static func sessionContentMatches(
+    _ lhs: AudioSessionSnapshot,
+    _ rhs: AudioSessionSnapshot
+  ) -> Bool {
+    var normalizedLHS = lhs
+    var normalizedRHS = rhs
+    normalizedLHS.updatedAt = .distantPast
+    normalizedRHS.updatedAt = .distantPast
+    return normalizedLHS == normalizedRHS
+  }
+
+  private static func diagnosticsContentMatches(
+    _ lhs: DiagnosticsReport,
+    _ rhs: DiagnosticsReport?
+  ) -> Bool {
+    guard var normalizedRHS = rhs else { return false }
+    var normalizedLHS = lhs
+    normalizedLHS.generatedAt = .distantPast
+    normalizedRHS.generatedAt = .distantPast
+    guard
+      normalizedLHS.generatedAt == normalizedRHS.generatedAt,
+      normalizedLHS.summary == normalizedRHS.summary,
+      normalizedLHS.checks.count == normalizedRHS.checks.count
+    else {
+      return false
+    }
+    return zip(normalizedLHS.checks, normalizedRHS.checks).allSatisfy { lhsCheck, rhsCheck in
+      lhsCheck.title == rhsCheck.title
+        && lhsCheck.status == rhsCheck.status
+        && lhsCheck.detail == rhsCheck.detail
+    }
+  }
+
+  func admitURLAutomationInvocation() -> Bool {
+    urlInvocationLimiter.allow()
+  }
+
+  func handleURLScheme(_ url: URL, invocationAlreadyAdmitted: Bool = false) {
     guard preferences.enableURLScheme else {
       logger.warning("URL scheme invocation rejected because URL schemes are disabled")
       return
     }
-
-    guard url.absoluteString.utf8.count <= WavesURLPolicy.maxPayloadBytes else {
-      logger.warning("URL scheme invocation rejected because the payload exceeded the size limit")
+    guard invocationAlreadyAdmitted || admitURLAutomationInvocation() else {
+      logger.warning("URL scheme invocation rejected because the invocation limit was exceeded")
       return
     }
+    guard requireAudioRunning() else { return }
 
-    guard url.scheme == "waves",
-          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          let host = components.host, !host.isEmpty else {
-      return
-    }
-
-    // Charge the rate limit only against well-formed waves:// commands so a
-    // flood of malformed URLs cannot exhaust the quota for legitimate ones.
-    guard checkURLSchemeRateLimit() else {
+    switch automationParser.parse(url) {
+    case let .accepted(command):
+      handleAutomationCommand(command)
+    case let .rejected(rejection):
+      logger.warning("URL scheme invocation rejected: \(rejection.message, privacy: .public)")
+      if rejection.shouldPresent {
+        showToast(
+          title: "URL command blocked",
+          detail: rejection.message,
+          kind: .warning
+        )
+      }
+    case let .throttled(shouldNotify):
       logger.warning("URL scheme invocation rejected because the rate limit was exceeded")
-      // Surface a debounced warning so throttled automation isn't silent in-app,
-      // while ensuring the throttle toast itself cannot be spammed.
-      let now = Date()
-      if lastURLSchemeThrottleToast.map({ now.timeIntervalSince($0) >= urlSchemeThrottleToastInterval }) ?? true {
-        lastURLSchemeThrottleToast = now
+      if shouldNotify {
         showToast(
           title: "URL command throttled",
           detail: "Too many commands. Try again shortly.",
           kind: .warning
         )
       }
-      return
     }
+  }
 
-    logger.info("URL scheme invoked: \(host, privacy: .public)")
+  private func handleAutomationCommand(_ command: AutomationCommand) {
+    switch command {
+    case let .setVolume(appID, volume):
+      guard let app = session.apps.first(matchingAppKey: appID) else {
+        showToast(
+          title: "URL command blocked",
+          detail: "App not found: \(String(appID.prefix(64)))",
+          kind: .warning
+        )
+        return
+      }
+      guard !isExcluded(app) else {
+        showToast(
+          title: "URL command blocked",
+          detail: "App is excluded from Waves.",
+          kind: .warning
+        )
+        return
+      }
+      setDesiredVolume(volume, for: app)
+      commitDesiredVolume(for: app)
 
-    switch host {
-    case "set-volume":
-      handleURLSetVolume(components)
-    case "mute":
-      handleURLMute(components)
-    case "apply-profile", "apply-preset":
-      // "apply-preset" kept as a deprecated alias from before the rename.
-      handleURLApplyProfile(components)
-    case "refresh":
+    case let .setMuted(appID, isMuted):
+      guard let app = session.apps.first(matchingAppKey: appID) else {
+        showToast(
+          title: "URL command blocked",
+          detail: "App not found: \(String(appID.prefix(64)))",
+          kind: .warning
+        )
+        return
+      }
+      guard !isExcluded(app) else {
+        showToast(
+          title: "URL command blocked",
+          detail: "App is excluded from Waves.",
+          kind: .warning
+        )
+        return
+      }
+      setMuted(isMuted, for: app)
+
+    case let .applyProfile(profileName):
+      guard
+        let profile = profiles.first(where: {
+          $0.name.localizedCaseInsensitiveCompare(profileName) == .orderedSame
+        })
+      else {
+        showToast(
+          title: "Profile not found",
+          detail: "No profile named: \(String(profileName.prefix(64)))",
+          kind: .warning
+        )
+        return
+      }
+      applyProfile(profile)
+
+    case .refresh:
       refresh()
-    default:
-      logger.warning("URL scheme invoked with unknown host: \(host, privacy: .public)")
-      showToast(
-        title: "URL command blocked",
-        detail: "Unknown command: \(String(host.prefix(64)))",
-        kind: .warning
-      )
     }
-  }
-
-  private func handleURLSetVolume(_ components: URLComponents) {
-    guard let appID = components.queryItems?.first(where: { $0.name == "app" })?.value,
-          let volumeValue = components.queryItems?.first(where: { $0.name == "volume" })?.value,
-          appID.count <= 256,
-          volumeValue.count <= 32,
-          let volume = Float(volumeValue),
-          volume >= 0,
-          volume <= 1 else {
-      showToast(title: "URL command blocked", detail: "Set-volume command was invalid.", kind: .warning)
-      return
-    }
-
-    guard let app = session.apps.first(matchingAppKey: appID) else {
-      showToast(title: "URL command blocked", detail: "App not found: \(String(appID.prefix(64)))", kind: .warning)
-      return
-    }
-
-    guard !isExcluded(app) else {
-      showToast(title: "URL command blocked", detail: "App is excluded from Waves.", kind: .warning)
-      return
-    }
-
-    setDesiredVolume(volume, for: app)
-    commitDesiredVolume(for: app)
-  }
-
-  private func handleURLMute(_ components: URLComponents) {
-    guard let appID = components.queryItems?.first(where: { $0.name == "app" })?.value,
-          let muteValue = components.queryItems?.first(where: { $0.name == "muted" })?.value,
-          appID.count <= 256,
-          muteValue.count <= 16,
-          let shouldMute = Bool(muteValue) else {
-      showToast(title: "URL command blocked", detail: "Mute command was invalid.", kind: .warning)
-      return
-    }
-
-    guard let app = session.apps.first(matchingAppKey: appID) else {
-      showToast(title: "URL command blocked", detail: "App not found: \(String(appID.prefix(64)))", kind: .warning)
-      return
-    }
-
-    guard !isExcluded(app) else {
-      showToast(title: "URL command blocked", detail: "App is excluded from Waves.", kind: .warning)
-      return
-    }
-
-    setMuted(shouldMute, for: app)
-  }
-
-  private func handleURLApplyProfile(_ components: URLComponents) {
-    guard let profileName = components.queryItems?.first(where: { $0.name == "name" })?.value,
-          profileName.count <= 256 else {
-      showToast(title: "URL command blocked", detail: "Profile command was invalid.", kind: .warning)
-      return
-    }
-
-    guard let profile = profiles.first(where: { $0.name.localizedCaseInsensitiveCompare(profileName) == .orderedSame }) else {
-      showToast(title: "Profile not found", detail: "No profile named: \(String(profileName.prefix(64)))", kind: .warning)
-      return
-    }
-
-    applyProfile(profile)
-  }
-
-  private func checkURLSchemeRateLimit() -> Bool {
-    let now = Date()
-    let cutoff = now.addingTimeInterval(-urlSchemeRequestWindow)
-    urlSchemeRequestTimes.removeAll { $0 < cutoff }
-    guard urlSchemeRequestTimes.count < maxURLSchemeRequests else {
-      return false
-    }
-    urlSchemeRequestTimes.append(now)
-    return true
   }
 
   // MARK: - Complete app-intent transactions
 
-  private static func allocateAppIntentGeneration() -> UInt64 {
-    appIntentGenerationCounter &+= appIntentGenerationStride
-    return appIntentGenerationCounter
+  private func allocateAppIntentGeneration() -> UInt64 {
+    appIntentCoordinator.allocateGeneration()
   }
 
   /// Reusable transaction boundary for direct controls today and profile /
@@ -1637,47 +1943,35 @@ final class AppStore {
       )
       return Task { result }
     }
-    let generation = Self.allocateAppIntentGeneration()
-    let intent = completeAppRouteIntent(
-      forAppID: appID,
+    let start = appIntentCoordinator.beginTransaction(
+      appID: appID,
+      sessionApp: session.apps.first(matchingAppKey: appID),
+      persistedEqualizer: preferences.appAudioIntents[appID]?.equalizerSettings,
+      legacyEqualizer: preferences.appEqualizerSettings[appID],
+      isExcluded: preferences.excludedAppIDs.contains(appID),
       overrides: overrides,
-      generation: generation,
-      reason: reason
+      reason: reason,
+      optimistic: optimistic
     )
-    let projectedMuteSource = overrides.muteSource
-      ?? (overrides.isMuted == nil
-        ? session.apps.first(matchingAppKey: appID)?.muteSource
-        : nil)
-
-    appIntentTasks[appID]?.cancel()
-    currentAppIntentGeneration[appID] = generation
-    if optimistic {
-      let projection = AppIntentProjection(
-        generation: generation,
-        intent: intent,
-        muteSource: projectedMuteSource
-      )
-      optimisticAppIntentProjections[appID] = projection
+    if let projection = start.projection {
       applyOptimisticProjection(projection, toAppID: appID)
-    } else {
-      optimisticAppIntentProjections.removeValue(forKey: appID)
     }
 
     let backend = backend
     let deviceIDAtSubmission = currentDeviceID
     let task = Task { @MainActor [weak self] in
-      let backendResult = await backend.applyAppIntent(intent)
+      let backendResult = await backend.applyAppIntent(start.intent)
       guard let self else { return backendResult }
+      defer { self.appIntentCoordinator.settleAppTask(token: start.token) }
       return await self.finishAppIntentTransaction(
-        intent: intent,
-        projectedMuteSource: projectedMuteSource,
+        start: start,
         backendResult: backendResult,
         persistencePolicy: persistencePolicy,
         deviceIDAtSubmission: deviceIDAtSubmission,
         feedbackPolicy: feedbackPolicy
       )
     }
-    appIntentTasks[appID] = task
+    appIntentCoordinator.registerAppTask(task, for: start)
     return task
   }
 
@@ -1687,60 +1981,32 @@ final class AppStore {
     generation: UInt64,
     reason: AppRouteIntentReason
   ) -> AppRouteIntent {
-    let confirmed = confirmedAppsByLogicalID[appID]
-      ?? session.apps.first(matchingAppKey: appID)
-    var desiredVolume = confirmed?.desiredVolume ?? 1
-    var isMuted = confirmed?.isMuted ?? false
-    var volumeBoost = confirmed?.volumeBoost ?? 1
-    var equalizer = confirmedEqualizerByLogicalID[appID]
-      ?? preferences.appAudioIntents[appID]?.equalizerSettings
-      ?? preferences.appEqualizerSettings[appID]
-      ?? EqualizerSettings()
-    var targetDeviceUID = confirmed?.targetDeviceUID
-
-    // A newer complete edit must carry forward the user's still-current projected
-    // fields from the transaction it supersedes; a slider-only pending target is
-    // intentionally excluded until commitDesiredVolume establishes a boundary.
-    if let projection = optimisticAppIntentProjections[appID],
-       currentAppIntentGeneration[appID] == projection.generation,
-       !projection.intent.isExcluded {
-      desiredVolume = projection.intent.desiredVolume
-      isMuted = projection.intent.isMuted
-      volumeBoost = projection.intent.volumeBoost
-      equalizer = projection.intent.equalizerSettings
-      targetDeviceUID = projection.intent.targetDeviceUID
-    }
-
-    if let value = overrides.desiredVolume { desiredVolume = value }
-    if let value = overrides.isMuted { isMuted = value }
-    if let value = overrides.volumeBoost { volumeBoost = value }
-    if let value = overrides.equalizerSettings { equalizer = value }
-    if overrides.replacesTargetDevice { targetDeviceUID = overrides.targetDeviceUID }
-
-    return AppRouteIntent(
+    appIntentCoordinator.completeIntent(
       appID: appID,
-      desiredVolume: desiredVolume,
-      isMuted: isMuted,
-      volumeBoost: volumeBoost,
-      equalizerSettings: equalizer,
-      targetDeviceUID: targetDeviceUID,
+      sessionApp: session.apps.first(matchingAppKey: appID),
+      persistedEqualizer: preferences.appAudioIntents[appID]?.equalizerSettings,
+      legacyEqualizer: preferences.appEqualizerSettings[appID],
+      isExcluded: preferences.excludedAppIDs.contains(appID),
+      overrides: overrides,
       generation: generation,
-      reason: reason,
-      isExcluded: overrides.isExcluded
-        ?? preferences.excludedAppIDs.contains(appID)
+      reason: reason
     )
   }
 
   private func finishAppIntentTransaction(
-    intent: AppRouteIntent,
-    projectedMuteSource: MuteSource?,
+    start: AppIntentTransactionStart,
     backendResult: AppIntentApplyResult,
     persistencePolicy: AppIntentPersistencePolicy,
     deviceIDAtSubmission: String?,
     feedbackPolicy: AppIntentFeedbackPolicy
   ) async -> AppIntentApplyResult {
+    let intent = start.intent
     let appID = intent.appID
-    guard currentAppIntentGeneration[appID] == intent.generation else {
+    switch appIntentCoordinator.completionDisposition(
+      for: start,
+      backendGeneration: backendResult.generation
+    ) {
+    case .stale:
       return AppIntentApplyResult(
         appID: appID,
         generation: intent.generation,
@@ -1749,17 +2015,12 @@ final class AppStore {
         backendStatus: backendResult.backendStatus,
         detail: "A newer AppStore transaction superseded this result."
       )
-    }
-    guard backendResult.generation == intent.generation else {
-      if optimisticAppIntentProjections[appID]?.generation == intent.generation {
-        optimisticAppIntentProjections.removeValue(forKey: appID)
-      }
+    case .backendGenerationMismatch:
       let confirmedSnapshot = await backend.currentSnapshot()
-      if currentAppIntentGeneration[appID] == intent.generation {
+      if appIntentCoordinator.isCurrent(intent.generation, for: appID) {
         session = mergedSession(with: confirmedSnapshot, cached: session)
         syncOnboarding(using: session)
         persistSessionSnapshot()
-        appIntentTasks.removeValue(forKey: appID)
       }
       return AppIntentApplyResult(
         appID: appID,
@@ -1769,18 +2030,19 @@ final class AppStore {
         backendStatus: confirmedSnapshot.backendStatus,
         detail: "The backend returned a result for a different generation."
       )
+    case .current:
+      break
     }
 
-    optimisticAppIntentProjections.removeValue(forKey: appID)
     reconcileAppIntentResult(
       backendResult,
       intent: intent,
-      projectedMuteSource: projectedMuteSource
+      projectedMuteSource: start.projectedMuteSource
     )
 
     let persistenceResult: AcceptedIntentPersistenceResult
     if backendResult.outcome == .applied || backendResult.outcome == .noChange {
-      confirmedEqualizerByLogicalID[appID] = intent.equalizerSettings
+      appIntentCoordinator.recordConfirmedEqualizer(intent.equalizerSettings, for: appID)
       persistenceResult = await persistAcceptedAppIntent(
         intent,
         result: backendResult,
@@ -1793,7 +2055,7 @@ final class AppStore {
 
     let refreshedDiagnostics = await backend.diagnosticsReport()
     let captureAuthorization = await backend.captureAuthorizationResult()
-    if currentAppIntentGeneration[appID] == intent.generation {
+    if appIntentCoordinator.isCurrent(intent.generation, for: appID) {
       diagnostics = refreshedDiagnostics
       onboarding.captureAuthorization = captureAuthorization
       syncOnboarding(using: session)
@@ -1802,7 +2064,18 @@ final class AppStore {
         persistenceResult: persistenceResult,
         policy: feedbackPolicy
       )
-      appIntentTasks.removeValue(forKey: appID)
+      if backendResult.outcome == .applied || backendResult.outcome == .noChange,
+        let acceptedApp = backendResult.resultingApp
+          ?? session.apps.first(matchingAppKey: appID)
+      {
+        guidedMixerTourCoordinator.observe(
+          .acceptedIntent(
+            appID: appID,
+            desiredVolume: acceptedApp.desiredVolume,
+            isMuted: acceptedApp.isMuted
+          )
+        )
+      }
     }
     return backendResult
   }
@@ -1812,22 +2085,17 @@ final class AppStore {
     intent: AppRouteIntent,
     projectedMuteSource: MuteSource?
   ) {
-    session.backendStatus = result.backendStatus
-    if var resultingApp = result.resultingApp {
-      let cachedMuteSource = session.apps
-        .first(matchingAppKey: intent.appID)?.muteSource
-      confirmedAppsByLogicalID[resultingApp.logicalID] = resultingApp
-      resultingApp.isPinned = preferences.pinnedAppIDs.contains(resultingApp.logicalID)
-      if resultingApp.isMuted {
-        let accepted = result.outcome == .applied || result.outcome == .noChange
-        resultingApp.muteSource = intent.reason == .automation && !accepted
-          ? (cachedMuteSource ?? resultingApp.muteSource)
-          : (projectedMuteSource ?? resultingApp.muteSource)
-      } else {
-        resultingApp.muteSource = .user
-      }
-      if preferences.excludedAppIDs.contains(resultingApp.logicalID)
-        || result.outcome == .excluded {
+    let mutation = appIntentCoordinator.reconcileRuntime(
+      result,
+      intent: intent,
+      projectedMuteSource: projectedMuteSource,
+      cachedApp: session.apps.first(matchingAppKey: intent.appID),
+      pinnedAppIDs: Set(preferences.pinnedAppIDs),
+      excludedAppIDs: Set(preferences.excludedAppIDs)
+    )
+    session.backendStatus = mutation.backendStatus
+    if var resultingApp = mutation.resultingApp {
+      if mutation.shouldPresentAsExcluded {
         makeExcludedPresentation(&resultingApp)
       }
       if let index = session.apps.firstIndex(matchingAppKey: intent.appID) {
@@ -1835,12 +2103,10 @@ final class AppStore {
       } else {
         session.apps.append(resultingApp)
       }
-    } else if result.outcome == .unavailable {
-      session.apps.removeAll { $0.logicalID == intent.appID || $0.id == intent.appID }
-      confirmedAppsByLogicalID.removeValue(forKey: intent.appID)
+    } else if let removedAppID = mutation.removedAppID {
+      session.apps.removeAll { $0.logicalID == removedAppID || $0.id == removedAppID }
     }
     applyPendingVolumeProjection(forAppID: intent.appID)
-    invalidateVisibleAppsCache()
     syncOnboarding(using: session)
     persistSessionSnapshot()
   }
@@ -1859,18 +2125,19 @@ final class AppStore {
       session.apps[index].targetDeviceUID = projection.intent.targetDeviceUID
       session.apps[index].muteSource = projection.muteSource ?? session.apps[index].muteSource
       if session.apps[index].routingState == .managed {
-        session.apps[index].appliedVolume = projection.intent.isMuted
+        session.apps[index].appliedVolume =
+          projection.intent.isMuted
           ? 0
           : projection.intent.desiredVolume
       }
     }
-    invalidateVisibleAppsCache()
   }
 
   private func applyPendingVolumeProjection(forAppID appID: String) {
-    guard let target = pendingVolumeTargets[appID],
-          let index = session.apps.firstIndex(matchingAppKey: appID),
-          !preferences.excludedAppIDs.contains(appID) else { return }
+    guard let target = appIntentCoordinator.pendingVolume(for: appID),
+      let index = session.apps.firstIndex(matchingAppKey: appID),
+      !preferences.excludedAppIDs.contains(appID)
+    else { return }
     session.apps[index].desiredVolume = target
     if session.apps[index].routingState == .managed {
       session.apps[index].appliedVolume = session.apps[index].isMuted ? 0 : target
@@ -1910,15 +2177,13 @@ final class AppStore {
       equalizerSettings: intent.equalizerSettings,
       targetDeviceUID: acceptedApp?.targetDeviceUID ?? intent.targetDeviceUID
     )
-    durableIntentMutationGeneration[appID] = intent.generation
+    appIntentCoordinator.claimDurableMutation(for: appID, generation: intent.generation)
     preferences.appAudioIntents[appID] = durableIntent
     preferences.appEqualizerSettings[appID] = durableIntent.equalizerSettings
-    invalidateVisibleAppsCache()
-
     do {
       try await savePreferencesDurably()
     } catch {
-      if durableIntentMutationGeneration[appID] == intent.generation {
+      if appIntentCoordinator.ownsDurableMutation(for: appID, generation: intent.generation) {
         if let savedIntent = durablySavedPreferences.appAudioIntents[appID] {
           preferences.appAudioIntents[appID] = savedIntent
         } else {
@@ -1929,25 +2194,29 @@ final class AppStore {
         } else {
           preferences.appEqualizerSettings.removeValue(forKey: appID)
         }
-        durableIntentMutationGeneration.removeValue(forKey: appID)
+        appIntentCoordinator.releaseDurableMutation(for: appID, generation: intent.generation)
       }
-      reportPersistenceFailure(storeName: "settings", error: error, showWarning: false)
+      reportPersistenceFailure(store: .preferences, error: error, showWarning: false)
       return .settingsFailed(error.localizedDescription)
     }
-    guard durableIntentMutationGeneration[appID] == intent.generation else {
+    guard appIntentCoordinator.ownsDurableMutation(for: appID, generation: intent.generation) else {
       // A newer accepted transaction now owns durable and preset persistence.
       return .saved
     }
-    durableIntentMutationGeneration.removeValue(forKey: appID)
+    appIntentCoordinator.releaseDurableMutation(for: appID, generation: intent.generation)
 
     guard updateDevicePreset,
-          preferences.enablePerDeviceVolumePresets,
-          let deviceID = deviceIDAtSubmission else {
+      preferences.enablePerDeviceVolumePresets,
+      let deviceID = deviceIDAtSubmission
+    else {
       return .saved
     }
 
     let mutationKey = "\(deviceID)\u{0}\(appID)"
-    devicePresetMutationGeneration[mutationKey] = intent.generation
+    appIntentCoordinator.claimDevicePresetMutation(
+      key: mutationKey,
+      generation: intent.generation
+    )
     deviceVolumePresets.saveVolumeSettings(
       for: appID,
       deviceID: deviceID,
@@ -1960,9 +2229,14 @@ final class AppStore {
     do {
       try await saveDeviceVolumePresetsDurably()
     } catch {
-      if devicePresetMutationGeneration[mutationKey] == intent.generation {
-        if let savedPreset = durablySavedDeviceVolumePresets
-          .getVolumeSettings(for: appID, deviceID: deviceID) {
+      if appIntentCoordinator.ownsDevicePresetMutation(
+        key: mutationKey,
+        generation: intent.generation
+      ) {
+        if let savedPreset =
+          durablySavedDeviceVolumePresets
+          .getVolumeSettings(for: appID, deviceID: deviceID)
+        {
           deviceVolumePresets.saveVolumeSettings(
             for: appID,
             deviceID: deviceID,
@@ -1974,13 +2248,22 @@ final class AppStore {
             deviceVolumePresets.deviceVolumes.removeValue(forKey: deviceID)
           }
         }
-        devicePresetMutationGeneration.removeValue(forKey: mutationKey)
+        appIntentCoordinator.releaseDevicePresetMutation(
+          key: mutationKey,
+          generation: intent.generation
+        )
       }
-      reportPersistenceFailure(storeName: "device presets", error: error, showWarning: false)
+      reportPersistenceFailure(store: .deviceVolumePresets, error: error, showWarning: false)
       return .devicePresetFailed(error.localizedDescription)
     }
-    if devicePresetMutationGeneration[mutationKey] == intent.generation {
-      devicePresetMutationGeneration.removeValue(forKey: mutationKey)
+    if appIntentCoordinator.ownsDevicePresetMutation(
+      key: mutationKey,
+      generation: intent.generation
+    ) {
+      appIntentCoordinator.releaseDevicePresetMutation(
+        key: mutationKey,
+        generation: intent.generation
+      )
     }
     return .saved
   }
@@ -2050,7 +2333,8 @@ final class AppStore {
     case let .reinclusion(appName, announce):
       guard announce else { return }
       if (result.outcome == .applied || result.outcome == .noChange),
-         result.resultingApp?.routingState == .managed {
+        result.resultingApp?.routingState == .managed
+      {
         showToast(
           title: "Managed by Waves",
           detail: appName,
@@ -2068,10 +2352,7 @@ final class AppStore {
   }
 
   private func supersedeAppIntentWork(forAppID appID: String) {
-    appIntentTasks[appID]?.cancel()
-    appIntentTasks.removeValue(forKey: appID)
-    currentAppIntentGeneration[appID] = Self.allocateAppIntentGeneration()
-    optimisticAppIntentProjections.removeValue(forKey: appID)
+    appIntentCoordinator.supersedeApp(appID)
   }
 
   func setDesiredVolume(_ value: Float, for app: AudioApp) {
@@ -2088,9 +2369,8 @@ final class AppStore {
     }
 
     let clamped = max(0, min(1, value))
-    pendingVolumeTargets[appID] = clamped
+    appIntentCoordinator.setPendingVolume(clamped, for: appID)
     applyPendingVolumeProjection(forAppID: appID)
-    invalidateVisibleAppsCache()
     scheduleVolumeTransaction(clamped, forAppID: appID)
   }
 
@@ -2116,7 +2396,7 @@ final class AppStore {
   private func scheduleVolumeTransaction(_ value: Float, forAppID appID: String) {
     // Always retire the previous nudge, even when the route has stopped being
     // managed since the last slider event.
-    pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
+    appIntentCoordinator.cancelVolumeDebounce(for: appID)
 
     // Only nudge a route that already exists. Applying to an unmanaged app can
     // fall into the branch that builds a tap and an aggregate device — and if a
@@ -2125,18 +2405,23 @@ final class AppStore {
     // once, at the end, where a brief interruption is expected.
     guard session.apps.first(matchingAppKey: appID)?.routingState == .managed else { return }
 
-    pendingVolumeDebounceTasks[appID] = Task { @MainActor [weak self] in
+    let token = appIntentCoordinator.beginVolumeDebounce(for: appID)
+    let coordinator = appIntentCoordinator
+    let task = Task { @MainActor [weak self] in
+      defer { coordinator.settleVolumeDebounce(token) }
       do {
         try await Task.sleep(for: Self.volumeDragInterval)
       } catch {
         return
       }
       guard let self, !Task.isCancelled else { return }
-      self.pendingVolumeDebounceTasks.removeValue(forKey: appID)
-      let routeIsManaged = self.session.apps
+      let routeIsManaged =
+        self.session.apps
         .first(matchingAppKey: appID)?.routingState == .managed
-      guard self.pendingVolumeTargets[appID] == value,
-            routeIsManaged else {
+      guard coordinator.isCurrentVolumeDebounce(token, for: appID),
+        coordinator.pendingVolume(for: appID) == value,
+        routeIsManaged
+      else {
         return
       }
       self.startAppIntentTransaction(
@@ -2148,6 +2433,7 @@ final class AppStore {
         optimistic: false
       )
     }
+    appIntentCoordinator.registerVolumeDebounce(task, token: token, appID: appID)
   }
 
   func commitDesiredVolume(for app: AudioApp) {
@@ -2156,8 +2442,9 @@ final class AppStore {
     let appID = app.logicalID
     // The drag is over; no in-flight nudge should land after the commit and
     // reinstate an intermediate value.
-    pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
-    let target = pendingVolumeTargets.removeValue(forKey: appID)
+    appIntentCoordinator.cancelVolumeDebounce(for: appID)
+    let target =
+      appIntentCoordinator.takePendingVolume(for: appID)
       ?? session.apps.first(matchingAppKey: appID)?.desiredVolume
       ?? app.desiredVolume
     startAppIntentTransaction(
@@ -2176,32 +2463,13 @@ final class AppStore {
 
   private func cleanupStaleEntries() {
     let currentAppIDs = Set(session.apps.map(\.logicalID))
-    let staleIDs = Set(currentAppIntentGeneration.keys).subtracting(currentAppIDs)
-    for appID in staleIDs {
-      supersedeAppIntentWork(forAppID: appID)
-      currentAppIntentGeneration.removeValue(forKey: appID)
-      confirmedAppsByLogicalID.removeValue(forKey: appID)
-    }
-    pendingVolumeTargets = pendingVolumeTargets.filter { currentAppIDs.contains($0.key) }
-    pendingEqualizerSettings = pendingEqualizerSettings.filter { currentAppIDs.contains($0.key) }
-    let staleVolumeIDs = pendingVolumeDebounceTasks.keys.filter { !currentAppIDs.contains($0) }
-    for appID in staleVolumeIDs {
-      pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
-    }
-    let staleEqualizerIDs = pendingEqualizerDebounceTasks.keys.filter {
-      !currentAppIDs.contains($0)
-    }
-    for appID in staleEqualizerIDs {
-      pendingEqualizerDebounceTasks[appID]?.cancel()
-      pendingEqualizerDebounceTasks.removeValue(forKey: appID)
-    }
-    pausedMusicApps = pausedMusicApps.filter { currentAppIDs.contains($0) }
+    appIntentCoordinator.retainAppState(in: currentAppIDs)
   }
 
   func setMuted(_ isMuted: Bool, for app: AudioApp) {
     guard requireAudioRunning() else { return }
     guard !isExcluded(app) else { return }
-    if !isMuted { pausedMusicApps.remove(app.logicalID) }
+    appIntentCoordinator.releaseAutomaticMute(for: app.logicalID)
     startAppIntentTransaction(
       forAppID: app.logicalID,
       overrides: AppIntentOverrides(isMuted: isMuted, muteSource: .user),
@@ -2237,14 +2505,13 @@ final class AppStore {
   // MARK: - Per-app equalizer and adaptive mixing
 
   func equalizerSettings(for app: AudioApp) -> EqualizerSettings {
-    if let pending = pendingEqualizerSettings[app.logicalID] {
+    if let pending = appIntentCoordinator.pendingEqualizer(for: app.logicalID) {
       return pending
     }
-    if let projection = optimisticAppIntentProjections[app.logicalID],
-       currentAppIntentGeneration[app.logicalID] == projection.generation {
+    if let projection = appIntentCoordinator.currentProjection(for: app.logicalID) {
       return projection.intent.equalizerSettings
     }
-    return confirmedEqualizerByLogicalID[app.logicalID]
+    return appIntentCoordinator.confirmedEqualizer(for: app.logicalID)
       ?? preferences.appAudioIntents[app.logicalID]?.equalizerSettings
       ?? preferences.appEqualizerSettings[app.logicalID]
       ?? EqualizerSettings()
@@ -2442,23 +2709,26 @@ final class AppStore {
     guard !isExcluded(app) else { return }
     var settings = equalizerSettings(for: app)
     mutation(&settings)
-    pendingEqualizerSettings[app.logicalID] = settings
+    appIntentCoordinator.setPendingEqualizer(settings, for: app.logicalID)
     scheduleEqualizerTransaction(settings, for: app)
   }
 
   private func scheduleEqualizerTransaction(_ settings: EqualizerSettings, for app: AudioApp) {
     let appID = app.logicalID
-    pendingEqualizerDebounceTasks[appID]?.cancel()
-    pendingEqualizerDebounceTasks[appID] = Task { @MainActor [weak self] in
+    let token = appIntentCoordinator.beginEqualizerDebounce(for: appID)
+    let coordinator = appIntentCoordinator
+    let task = Task { @MainActor [weak self] in
+      defer { coordinator.settleEqualizerDebounce(token) }
       do {
         try await Task.sleep(for: .milliseconds(80))
       } catch {
         return
       }
       guard let self, !Task.isCancelled,
-            self.pendingEqualizerSettings[appID] == settings else { return }
-      self.pendingEqualizerSettings.removeValue(forKey: appID)
-      self.pendingEqualizerDebounceTasks.removeValue(forKey: appID)
+        coordinator.isCurrentEqualizerDebounce(token, for: appID),
+        coordinator.pendingEqualizer(for: appID) == settings
+      else { return }
+      _ = coordinator.takePendingEqualizer(for: appID)
       self.startAppIntentTransaction(
         forAppID: appID,
         overrides: AppIntentOverrides(equalizerSettings: settings),
@@ -2472,39 +2742,24 @@ final class AppStore {
         optimistic: true
       )
     }
+    appIntentCoordinator.registerEqualizerDebounce(task, token: token, appID: appID)
   }
 
   private func restartAdaptiveMixing() {
     guard startupState == .running else { return }
-    adaptiveMixTask?.cancel()
-    adaptiveMixTask = nil
-
-    guard preferences.adaptiveMixMode != .off else {
-      speechDetectionStates.removeAll()
-      speechDuckingStates.removeAll()
-      loudnessTrimStates.removeAll()
-      adaptivePolicyEngine.reset()
-      adaptiveGainsDBByAppID = [:]
-      lastPublishedAdaptiveGains = [:]
-      adaptiveGainRepublishCountdown = 0
-      startOwnedOperation { store in
-        await store.backend.setAdaptiveGains([:])
+    adaptiveMixCoordinator.restart(
+      isEnabled: preferences.adaptiveMixMode != .off,
+      activeInterval: adaptiveMixInterval,
+      idleInterval: adaptiveMixIdleInterval,
+      performPass: { [weak self] in
+        await self?.performAdaptiveMixPassIfNeeded() ?? false
+      },
+      reset: { [weak self] in
+        guard let self else { return }
+        self.adaptiveGainsDBByAppID = [:]
+        await self.backend.setAdaptiveGains([:])
       }
-      return
-    }
-
-    adaptiveMixTask = Task { [weak self] in
-      guard let self else { return }
-      while !Task.isCancelled {
-        let didWork = await self.performAdaptiveMixPassIfNeeded()
-        guard !Task.isCancelled else { break }
-        try? await Task.sleep(
-          for: didWork ? self.adaptiveMixInterval : self.adaptiveMixIdleInterval)
-      }
-      self.adaptiveGainsDBByAppID = [:]
-      self.lastPublishedAdaptiveGains = [:]
-      await self.backend.setAdaptiveGains([:])
-    }
+    )
   }
 
   /// The apps Adaptive Mix is allowed to act on: everything in the session that
@@ -2528,73 +2783,40 @@ final class AppStore {
   /// the candidate list.
   private func performAdaptiveMixPassIfNeeded() async -> Bool {
     guard startupState == .running else { return false }
-
-    guard adaptiveCandidateApps.contains(where: { $0.routingState == .managed }) else {
-      // Nothing routed. Clear any gains left over from the route that just went
-      // away, once, then idle — repeated empty writes would defeat the point.
-      if !adaptiveGainsDBByAppID.isEmpty || !lastPublishedAdaptiveGains.isEmpty {
-        adaptiveGainsDBByAppID = [:]
-        lastPublishedAdaptiveGains = [:]
-        adaptiveGainRepublishCountdown = 0
-        // Reset the engine too, matching what the backend is now applying
-        // (unity for every controller). Leaving it frozen at its last
-        // attenuation meant the first pass after a route returned would resume
-        // from stale ducking — and it kept per-app state for apps that had since
-        // quit.
-        adaptivePolicyEngine.reset()
-        await backend.setAdaptiveGains([:])
-      }
-      return false
-    }
-
-    await performAdaptiveMixPass(elapsed: 0.1)
-    return true
-  }
-
-  private func performAdaptiveMixPass(elapsed: TimeInterval) async {
-    guard startupState == .running else { return }
-    let analysis = await backend.adaptiveAnalysis()
-    guard !Task.isCancelled, preferences.adaptiveMixMode != .off else { return }
-
     let mode = preferences.adaptiveMixMode
     let apps = adaptiveCandidateApps
-    adaptivePolicyEngine.usesLoudnessCorrection = mode.usesLoudnessBalance
-    adaptivePolicyEngine.focusMode = preferences.adaptiveFocusMode
+    let hasManagedRoute = apps.contains { $0.routingState == .managed }
+    let analysis = hasManagedRoute ? await backend.adaptiveAnalysis() : [:]
+    guard !Task.isCancelled, startupState == .running,
+      preferences.adaptiveMixMode == mode,
+      mode != .off
+    else { return false }
+
     let frontmostAppID = frontmostManagedAppIDForAdaptiveMix(in: apps)
-    let inputs = apps.map { app in
-      let levels = analysis[app.logicalID]
-      return AdaptiveMixInput(
-        appID: app.logicalID,
-        policy: adaptivePolicy(for: app),
-        isManaged: app.routingState == .managed && levels != nil,
-        isMuted: app.isMuted,
-        rms: levels?.rms ?? 0,
-        voiceBandEnergy: levels?.voiceBandEnergy ?? 0,
-        isFrontmost: app.logicalID == frontmostAppID
-      )
-    }
-    let gainsDB = adaptivePolicyEngine.update(inputs: inputs, elapsed: elapsed)
+    let output = adaptiveMixCoordinator.evaluate(
+      AdaptiveMixPassInput(
+        mode: mode,
+        focusMode: preferences.adaptiveFocusMode,
+        apps: apps.map { app in
+          AdaptiveMixAppInput(
+            app: app,
+            policy: adaptivePolicy(for: app),
+            levels: analysis[app.logicalID],
+            isFrontmost: app.logicalID == frontmostAppID
+          )
+        }
+      ))
 
     guard !Task.isCancelled, startupState == .running,
-          preferences.adaptiveMixMode == mode else { return }
-    // Publish only meaningful corrections (> ~0.05 dB) so the UI's "adaptive
-    // is acting" indicators don't flicker on numerical dust.
-    let significant = gainsDB.filter { abs($0.value) >= 0.05 }
-    if significant != adaptiveGainsDBByAppID {
-      adaptiveGainsDBByAppID = significant
+      preferences.adaptiveMixMode == mode
+    else { return false }
+    if output.visibleGains != adaptiveGainsDBByAppID {
+      adaptiveGainsDBByAppID = output.visibleGains
     }
-
-    // Rewriting identical gains ten times a second wakes the backend actor and
-    // every managed controller to change nothing. Publish on change, plus a
-    // bounded periodic refresh so a route rebuilt underneath us cannot sit at
-    // unity gain waiting for a value that never changes.
-    adaptiveGainRepublishCountdown -= 1
-    guard gainsDB != lastPublishedAdaptiveGains || adaptiveGainRepublishCountdown <= 0 else {
-      return
+    if let backendGains = output.backendGains {
+      await backend.setAdaptiveGains(backendGains)
     }
-    lastPublishedAdaptiveGains = gainsDB
-    adaptiveGainRepublishCountdown = adaptiveGainRepublishPasses
-    await backend.setAdaptiveGains(gainsDB)
+    return output.didWork
   }
 
   func togglePinned(_ app: AudioApp) {
@@ -2616,7 +2838,6 @@ final class AppStore {
     // any code reading session.apps directly agrees); visibleApps reconciles too.
     if let index = session.apps.firstIndex(matchingAppKey: appKey) {
       session.apps[index].isPinned = willPin
-      invalidateVisibleAppsCache()
     }
 
     // Keep the backend snapshot in step on a best-effort basis; preferences
@@ -2813,16 +3034,12 @@ final class AppStore {
     preferences.excludedAppIDs = Array(ids).sorted()
     persistPreferences()
 
-    pendingVolumeTargets.removeValue(forKey: appID)
-    pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
-    pendingEqualizerSettings.removeValue(forKey: appID)
-    pendingEqualizerDebounceTasks[appID]?.cancel()
-    pendingEqualizerDebounceTasks.removeValue(forKey: appID)
+    appIntentCoordinator.clearPendingVolume(for: appID)
+    appIntentCoordinator.cancelVolumeDebounce(for: appID)
+    appIntentCoordinator.clearPendingEqualizer(for: appID)
+    appIntentCoordinator.cancelEqualizerDebounce(for: appID)
     supersedeAppIntentWork(forAppID: appID)
-    speechDetectionStates.removeValue(forKey: appID)
-    speechDuckingStates.removeValue(forKey: appID)
-    loudnessTrimStates.removeValue(forKey: appID)
-    pausedMusicApps.remove(appID)
+    appIntentCoordinator.releaseAutomaticMute(for: appID)
 
     if excluded {
       startAppIntentTransaction(
@@ -2834,11 +3051,12 @@ final class AppStore {
         optimistic: true
       )
     } else {
-      let overrides = effectiveRestorationOverrides(
-        forAppID: appID,
-        deviceID: currentDeviceID,
-        includeDevicePreset: preferences.enablePerDeviceVolumePresets
-      ) ?? AppIntentOverrides(isExcluded: false, muteSource: .user)
+      let overrides =
+        effectiveRestorationOverrides(
+          forAppID: appID,
+          deviceID: currentDeviceID,
+          includeDevicePreset: preferences.enablePerDeviceVolumePresets
+        ) ?? AppIntentOverrides(isExcluded: false, muteSource: .user)
       startAppIntentTransaction(
         forAppID: appID,
         overrides: overrides,
@@ -2848,7 +3066,6 @@ final class AppStore {
         optimistic: false
       )
     }
-    invalidateVisibleAppsCache()
   }
 
   /// Excludes every app in `apps` that does not expose a manageable audio stream
@@ -2888,6 +3105,28 @@ final class AppStore {
     )
   }
 
+  var lifecycleSnapshot: AppStoreLifecycleSnapshot {
+    AppStoreLifecycleSnapshot(
+      intent: appIntentCoordinator.lifecycleSnapshot,
+      persistence: persistenceCoordinator.lifecycleSnapshot,
+      adaptive: adaptiveMixCoordinator.lifecycleSnapshot,
+      deviceSuppression: deviceChangeSuppression.lifecycleSnapshot,
+      startupTaskCount: [privacySetupTask, audioStartupTask].compactMap { $0 }.count,
+      ownedOperationCount: ownedOperationTasks.count,
+      hasLevelPoll: levelPollTask != nil,
+      hasSessionMaintenance: sessionMaintenanceTask != nil,
+      toastDismissalCount: toastDismissals.count,
+      lingerTaskCount: lingerRemovalTasks.count,
+      observerCount: [frontmostAppObserver, appTerminationObserver].compactMap { $0 }.count
+        + (deviceChangeObserver == nil ? 0 : 1),
+      backendStarted: hasStartedAudioBackend
+    )
+  }
+
+  var automationParserInvocationCount: Int {
+    automationParser.invocationCount
+  }
+
   func refreshOutputDevices() {
     guard requireAudioRunning() else { return }
     startOwnedOperation { store in
@@ -2902,7 +3141,7 @@ final class AppStore {
     guard device.id != currentDeviceID else { return }
     // Mark this switch as self-initiated so the device-change listener's
     // handleDeviceChange skips its duplicate "Output device changed" info toast.
-    pendingSelfInitiatedDeviceID = device.id
+    deviceChangeSuppression.begin(deviceID: device.id)
     startOwnedOperation { store in
       do {
         try await store.backend.setDefaultOutputDevice(uid: device.id)
@@ -2912,7 +3151,7 @@ final class AppStore {
         store.showToast(title: "Output switched", detail: device.name, kind: .success, duration: .seconds(1.4))
       } catch {
         guard store.startupState == .running else { return }
-        store.pendingSelfInitiatedDeviceID = nil
+        store.deviceChangeSuppression.clear(ifMatching: device.id)
         store.showToast(title: "Couldn't switch output", detail: error.localizedDescription, kind: .error)
       }
     }
@@ -2966,56 +3205,55 @@ final class AppStore {
   }
 
   private func performDeviceChangePass() async {
-      // The lightweight refresh below must run on EVERY device-change event:
-      // session.currentDevice, the device list, diagnostics, and onboarding would
-      // otherwise go stale (picker label / checkmark stuck on the old device)
-      // until some unrelated event refreshes them. This shared state sync is
-      // unconditional; only per-device preset restore is gated, on its own toggle.
-      //
-      // The backend has already re-established managed routes before emitting the
-      // event, so read the current snapshot rather than restoring again.
-      let previousDeviceID = currentDeviceID
-      // Merge cached-only fields (like the .autoConferencing muteSource tag,
-      // which the backend never knows about) instead of reassigning wholesale
-      // — a bare reassignment resets muteSource to .user, so auto-paused
-      // media could never auto-resume after a device change.
-      let backendSnapshot = await backend.currentSnapshot()
-      guard !Task.isCancelled, startupState == .running else { return }
-      session = mergedSession(with: backendSnapshot, cached: session)
-      invalidateVisibleAppsCache()
+    // The lightweight refresh below must run on EVERY device-change event:
+    // session.currentDevice, the device list, diagnostics, and onboarding would
+    // otherwise go stale (picker label / checkmark stuck on the old device)
+    // until some unrelated event refreshes them. This shared state sync is
+    // unconditional; only per-device preset restore is gated, on its own toggle.
+    //
+    // The backend has already re-established managed routes before emitting the
+    // event, so read the current snapshot rather than restoring again.
+    let previousDeviceID = currentDeviceID
+    // Merge cached-only fields (like the .autoConferencing muteSource tag,
+    // which the backend never knows about) instead of reassigning wholesale
+    // — a bare reassignment resets muteSource to .user, so auto-paused
+    // media could never auto-resume after a device change.
+    let backendSnapshot = await backend.currentSnapshot()
+    guard !Task.isCancelled, startupState == .running else { return }
+    session = mergedSession(with: backendSnapshot, cached: session)
+    // Per-device preset restore additionally requires "Auto-restore device" —
+    // it IS the auto-restore behavior for saved per-app volumes, so honoring
+    // the per-device-presets toggle alone while ignoring the opt-out would
+    // restore levels the user explicitly asked Waves not to apply automatically.
+    if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice,
+      let newDeviceID = currentDeviceID, previousDeviceID != newDeviceID
+    {
+      await restoreDeviceVolumePresets(for: newDeviceID)
+    }
 
-      // Per-device preset restore additionally requires "Auto-restore device" —
-      // it IS the auto-restore behavior for saved per-app volumes, so honoring
-      // the per-device-presets toggle alone while ignoring the opt-out would
-      // restore levels the user explicitly asked Waves not to apply automatically.
-      if preferences.enablePerDeviceVolumePresets, preferences.autoRestoreDevice,
-         let newDeviceID = currentDeviceID, previousDeviceID != newDeviceID {
-        await restoreDeviceVolumePresets(for: newDeviceID)
-      }
+    persistSessionSnapshot()
+    diagnostics = await backend.diagnosticsReport()
+    onboarding.captureAuthorization = await backend.captureAuthorizationResult()
+    availableDevices = await backend.availableOutputDevices()
+    syncOnboarding(using: session)
+    let didDefaultDeviceChange = previousDeviceID != currentDeviceID
 
-      persistSessionSnapshot()
-      diagnostics = await backend.diagnosticsReport()
-      onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-      availableDevices = await backend.availableOutputDevices()
-      syncOnboarding(using: session)
-      let didDefaultDeviceChange = previousDeviceID != currentDeviceID
-
-      // Suppress the info toast when this change was triggered by our own
-      // selectOutputDevice (which already showed an "Output switched" success
-      // toast). Clearing the flag here makes it one-shot, so the next genuinely
-      // external device change still announces itself.
-      let wasSelfInitiated = didDefaultDeviceChange && pendingSelfInitiatedDeviceID == currentDeviceID
-      if didDefaultDeviceChange {
-        pendingSelfInitiatedDeviceID = nil
-      }
-      if didDefaultDeviceChange && !wasSelfInitiated {
-        showToast(
-          title: "Output device changed",
-          detail: currentDeviceName,
-          kind: .info,
-          duration: .seconds(1.5)
-        )
-      }
+    // Suppress the info toast when this change was triggered by our own
+    // selectOutputDevice (which already showed an "Output switched" success
+    // toast). Clearing the flag here makes it one-shot, so the next genuinely
+    // external device change still announces itself.
+    let wasSelfInitiated = deviceChangeSuppression.consumeIfMatching(
+      deviceID: currentDeviceID,
+      didChange: didDefaultDeviceChange
+    )
+    if didDefaultDeviceChange && !wasSelfInitiated {
+      showToast(
+        title: "Output device changed",
+        detail: currentDeviceName,
+        kind: .info,
+        duration: .seconds(1.5)
+      )
+    }
   }
 
   private func effectiveRestorationOverrides(
@@ -3028,8 +3266,9 @@ final class AppStore {
     var isMuted = durable.isMuted
     var volumeBoost = durable.volumeBoost
     if includeDevicePreset,
-       let deviceID,
-       let preset = deviceVolumePresets.getVolumeSettings(for: appID, deviceID: deviceID) {
+      let deviceID,
+      let preset = deviceVolumePresets.getVolumeSettings(for: appID, deviceID: deviceID)
+    {
       desiredVolume = preset.desiredVolume
       isMuted = preset.isMuted
       volumeBoost = preset.volumeBoost
@@ -3053,13 +3292,15 @@ final class AppStore {
     includeDevicePreset: Bool
   ) async -> AppIntentApplyResult? {
     guard !preferences.excludedAppIDs.contains(appID),
-          session.apps.contains(where: { $0.logicalID == appID }),
-          let overrides = effectiveRestorationOverrides(
-            forAppID: appID,
-            deviceID: deviceID,
-            includeDevicePreset: includeDevicePreset
-          ) else { return nil }
-    let hasPreset = includeDevicePreset
+      session.apps.contains(where: { $0.logicalID == appID }),
+      let overrides = effectiveRestorationOverrides(
+        forAppID: appID,
+        deviceID: deviceID,
+        includeDevicePreset: includeDevicePreset
+      )
+    else { return nil }
+    let hasPreset =
+      includeDevicePreset
       && deviceID.map {
         deviceVolumePresets.getVolumeSettings(for: appID, deviceID: $0) != nil
       } == true
@@ -3079,19 +3320,22 @@ final class AppStore {
     for index in session.apps.indices where session.apps[index].muteSource == .autoConferencing {
       session.apps[index].muteSource = .user
     }
-    pausedMusicApps.removeAll()
+    appIntentCoordinator.clearAutomaticMuteOwners()
 
     let deviceID = currentDeviceID
-    let includePreset = preferences.enablePerDeviceVolumePresets
+    let includePreset =
+      preferences.enablePerDeviceVolumePresets
       && preferences.autoRestoreDevice
     var failedPinnedAppIDs: [String] = []
     for appID in session.apps.map(\.logicalID) {
-      guard let result = await restoreConfiguredApp(
-        appID: appID,
-        defaultReason: .startupRestore,
-        deviceID: deviceID,
-        includeDevicePreset: includePreset
-      ) else { continue }
+      guard
+        let result = await restoreConfiguredApp(
+          appID: appID,
+          defaultReason: .startupRestore,
+          deviceID: deviceID,
+          includeDevicePreset: includePreset
+        )
+      else { continue }
       let accepted = result.outcome == .applied || result.outcome == .noChange
       if !accepted, preferences.appAudioIntents[appID]?.targetDeviceUID != nil {
         failedPinnedAppIDs.append(appID)
@@ -3113,7 +3357,8 @@ final class AppStore {
   private func restoreNewlyAppearedConfiguredApps(excluding knownAppIDs: Set<String>) async {
     let newAppIDs = session.apps.map(\.logicalID).filter { !knownAppIDs.contains($0) }
     guard !newAppIDs.isEmpty else { return }
-    let includePreset = preferences.enablePerDeviceVolumePresets
+    let includePreset =
+      preferences.enablePerDeviceVolumePresets
       && preferences.autoRestoreDevice
     for appID in newAppIDs {
       _ = await restoreConfiguredApp(
@@ -3173,25 +3418,24 @@ final class AppStore {
       self.appTerminationObserver = nil
     }
 
-    let persistenceTasks = [
-      preferencesPersistenceTask,
-      profilesPersistenceTask,
-      sessionPersistenceTask,
-      devicePresetsPersistenceTask,
-    ].compactMap { $0 }
-    let appTransactions = Array(appIntentTasks.values)
+    let persistenceTasks = persistenceCoordinator.beginShutdown()
+    let intentTasks = appIntentCoordinator.shutdown()
+    let adaptiveTask = adaptiveMixCoordinator.shutdown()
+    let suppressionTasks = deviceChangeSuppression.beginShutdown()
+    automationParser.shutdown()
+    urlInvocationLimiter.reset()
+    let appTransactions = intentTasks.appTransactions
     var mutationTasks = [
       privacySetupTask,
       audioStartupTask,
       deviceChangeObserver,
       sessionMaintenanceTask,
-      adaptiveMixTask,
       levelPollTask,
     ].compactMap { $0 }
+    if let adaptiveTask { mutationTasks.append(adaptiveTask) }
+    mutationTasks.append(contentsOf: suppressionTasks)
+    mutationTasks.append(contentsOf: intentTasks.mutations)
     mutationTasks.append(contentsOf: ownedOperationTasks.values)
-    mutationTasks.append(contentsOf: pendingEqualizerDebounceTasks.values)
-    mutationTasks.append(contentsOf: pendingVolumeDebounceTasks.values)
-    mutationTasks.append(contentsOf: profileApplyTasks.values)
     mutationTasks.append(contentsOf: toastDismissals.values)
     mutationTasks.append(contentsOf: lingerRemovalTasks.values)
 
@@ -3203,31 +3447,13 @@ final class AppStore {
     audioStartupTask = nil
     deviceChangeObserver = nil
     sessionMaintenanceTask = nil
-    adaptiveMixTask = nil
     levelPollTask = nil
     activeLevelPollInterval = nil
     ownedOperationTasks.removeAll()
-    pendingEqualizerDebounceTasks.removeAll()
-    pendingVolumeDebounceTasks.removeAll()
-    profileApplyTasks.removeAll()
     toastDismissals.removeAll()
     lingerRemovalTasks.removeAll()
-    appIntentTasks.removeAll()
-    preferencesPersistenceTask = nil
-    profilesPersistenceTask = nil
-    sessionPersistenceTask = nil
-    devicePresetsPersistenceTask = nil
-
-    for appID in Array(currentAppIntentGeneration.keys) {
-      currentAppIntentGeneration[appID] = Self.allocateAppIntentGeneration()
-    }
-    currentProfileGeneration = nil
-    pendingEqualizerSettings.removeAll()
-    pendingVolumeTargets.removeAll()
-    optimisticAppIntentProjections.removeAll()
     pendingDeviceChangeRerun = false
     pendingAutoPausePassRerun = false
-    pendingSelfInitiatedDeviceID = nil
     liveLevelsRefcount = 0
     liveLevels.removeAll()
     recentlyLiveIDs.removeAll()
@@ -3263,12 +3489,11 @@ final class AppStore {
       await backend.setAdaptiveGains([:])
       let confirmed = await backend.currentSnapshot()
       session = mergedSession(with: confirmed, cached: session)
-      invalidateVisibleAppsCache()
       syncOnboarding(using: session)
     }
 
-    let failureMarker = persistenceFailureHistory.count
-    isFinalizingShutdownPersistence = true
+    let failureMarker = persistenceCoordinator.failureHistory.count
+    persistenceCoordinator.beginFinalization()
     enqueuePreferencesPersistence(preferences)
     enqueueProfilesPersistence(profiles)
     if preferences.hasCompletedPrivacySetup {
@@ -3278,8 +3503,10 @@ final class AppStore {
     // Non-throwing: each store reports its own failure, so none can suppress
     // another's flush.
     await drainAndFlushPersistence()
-    isFinalizingShutdownPersistence = false
-    let persistenceDegradations = Array(persistenceFailureHistory.dropFirst(failureMarker))
+    persistenceCoordinator.endFinalization()
+    let persistenceDegradations = Array(
+      persistenceCoordinator.failureHistory.dropFirst(failureMarker)
+    )
 
     let backendResult: BackendShutdownResult?
     if hasStartedAudioBackend {
@@ -3293,6 +3520,7 @@ final class AppStore {
       persistenceDegradations: persistenceDegradations,
       backendResult: backendResult
     )
+    persistenceCoordinator.finishShutdown()
     shutdownResult = result
     if result.completion == .clean {
       logger.info("Shutdown completed cleanly")
@@ -3325,28 +3553,43 @@ final class AppStore {
       queue: .main
     ) { [weak self] note in
       guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-      let bundleID = app.bundleIdentifier
       let pid = app.processIdentifier
       MainActor.assumeIsolated {
-        self?.handleAppTermination(bundleID: bundleID, pid: pid)
+        self?.handleAppTermination(pid: pid)
       }
     }
   }
 
-  private func handleAppTermination(bundleID: String?, pid: Int32) {
+  func handleAppTermination(pid: Int32) {
     guard startupState == .running else { return }
+    guard runtimeProcessProbe(pid) == nil else {
+      // The workspace notification carries only a reusable PID, not the
+      // lifetime that generated the event. Any process currently holding that
+      // PID makes immediate teardown ambiguous, even if the refreshed session
+      // already describes that live replacement. Maintenance remains the
+      // non-destructive fallback.
+      return
+    }
+    let matchingRows = session.apps.filter { $0.pid == pid }
+    guard matchingRows.count == 1,
+      let storedIdentity = matchingRows[0].runtimeIdentity,
+      storedIdentity.lifetime.pid == pid
+    else {
+      // A legacy or ambiguous row is not safe immediate-teardown authority.
+      // The ordinary maintenance refresh remains the non-destructive fallback.
+      return
+    }
+
     // Release the quit app's tap/aggregate device promptly instead of waiting
     // for the next refresh. Termination must NOT clear the user's saved mute.
     startOwnedOperation { store in
       await store.backend.releaseControllers(
-        forBundleID: bundleID,
-        pid: pid,
+        forRuntimeIdentity: storedIdentity,
         clearMuteState: false
       )
     }
 
     // Reflect the termination in the UI immediately.
-    var changed = false
     // Every session row matching the quit process — collected BEFORE the
     // routing-state guard below — so linger cleanup covers an app that had
     // already gone quiet (its row sits in Live only via the linger set, with a
@@ -3355,7 +3598,7 @@ final class AppStore {
     var matchedIDs: [String] = []
     for index in session.apps.indices {
       let app = session.apps[index]
-      guard (bundleID != nil && app.bundleID == bundleID) || app.pid == pid else { continue }
+      guard app.runtimeIdentity == storedIdentity else { continue }
       matchedIDs.append(app.logicalID)
       if app.isActive || app.routingState == .managed || app.routingState == .live {
         session.apps[index].isActive = false
@@ -3363,33 +3606,27 @@ final class AppStore {
         session.apps[index].appliedVolume = nil
         session.apps[index].peakLevel = 0
         session.apps[index].rmsLevel = 0
-        changed = true
       }
     }
-    pausedMusicApps = pausedMusicApps.filter { id in
-      session.apps.contains { $0.logicalID == id }
-    }
+    appIntentCoordinator.retainAutomaticMuteOwners(
+      in: Set(session.apps.map(\.logicalID))
+    )
     // A quit app must not keep lingering as "live": cancel its pending linger drop
     // and remove it from the set now, so its row leaves the Live list at once
     // rather than ghosting there for the linger window after the process is gone.
     for id in matchedIDs {
       if let task = lingerRemovalTasks.removeValue(forKey: id) { task.cancel() }
-      pendingEqualizerDebounceTasks[id]?.cancel()
-      pendingEqualizerDebounceTasks.removeValue(forKey: id)
-      pendingEqualizerSettings.removeValue(forKey: id)
-      pendingVolumeTargets.removeValue(forKey: id)
-      pendingVolumeDebounceTasks.removeValue(forKey: id)?.cancel()
+      appIntentCoordinator.clearPendingEqualizer(for: id)
+      appIntentCoordinator.cancelEqualizerDebounce(for: id)
+      appIntentCoordinator.clearPendingVolume(for: id)
+      appIntentCoordinator.cancelVolumeDebounce(for: id)
       supersedeAppIntentWork(forAppID: id)
-      speechDetectionStates.removeValue(forKey: id)
-      speechDuckingStates.removeValue(forKey: id)
-      loudnessTrimStates.removeValue(forKey: id)
+      appIntentCoordinator.releaseAutomaticMute(for: id)
     }
     if !matchedIDs.isEmpty {
       let next = recentlyLiveIDs.subtracting(matchedIDs)
       if next != recentlyLiveIDs { recentlyLiveIDs = next }
     }
-    if changed { invalidateVisibleAppsCache() }
-
     // Resume hook for the quit (not switched-away-from) case: resume is normally
     // driven by didActivateApplication, but if a conferencing app quits/crashes
     // and macOS doesn't promptly activate another app, no resume pass fires and
@@ -3544,9 +3781,10 @@ final class AppStore {
           optimistic: false
         )
         guard (result.outcome == .applied || result.outcome == .noChange),
-              result.resultingApp?.isMuted == true,
-              session.apps.first(matchingAppKey: app.logicalID)?.isMuted == true,
-              currentAppIntentGeneration[app.logicalID] == result.generation else {
+          result.resultingApp?.isMuted == true,
+          session.apps.first(matchingAppKey: app.logicalID)?.isMuted == true,
+          appIntentCoordinator.isCurrent(result.generation, for: app.logicalID)
+        else {
           logger.error(
             "Auto-pause did not commit for \(app.displayName, privacy: .public): \(String(describing: result.outcome), privacy: .public)"
           )
@@ -3555,7 +3793,12 @@ final class AppStore {
         if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
           session.apps[index].muteSource = .autoConferencing
         }
-        pausedMusicApps.insert(app.logicalID)
+        guard
+          appIntentCoordinator.claimAutomaticMute(
+            for: app.logicalID,
+            generation: result.generation
+          )
+        else { continue }
         pausedNames.append(app.displayName)
         logger.info("Auto-paused music app: \(app.displayName, privacy: .public)")
       }
@@ -3563,7 +3806,7 @@ final class AppStore {
       let resumable = visibleApps.filter {
         $0.isMuted
           && $0.muteSource == .autoConferencing
-          && pausedMusicApps.contains($0.logicalID)
+          && appIntentCoordinator.ownsAutomaticMute(for: $0.logicalID)
           && !isExcluded($0)
       }
       for app in resumable {
@@ -3576,9 +3819,10 @@ final class AppStore {
           optimistic: false
         )
         guard (result.outcome == .applied || result.outcome == .noChange),
-              result.resultingApp?.isMuted == false,
-              session.apps.first(matchingAppKey: app.logicalID)?.isMuted == false,
-              currentAppIntentGeneration[app.logicalID] == result.generation else {
+          result.resultingApp?.isMuted == false,
+          session.apps.first(matchingAppKey: app.logicalID)?.isMuted == false,
+          appIntentCoordinator.isCurrent(result.generation, for: app.logicalID)
+        else {
           logger.error(
             "Auto-resume did not commit for \(app.displayName, privacy: .public): \(String(describing: result.outcome), privacy: .public)"
           )
@@ -3587,19 +3831,19 @@ final class AppStore {
         if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
           session.apps[index].muteSource = .user
         }
-        pausedMusicApps.remove(app.logicalID)
+        appIntentCoordinator.releaseAutomaticMute(for: app.logicalID)
         resumedNames.append(app.displayName)
         logger.info("Auto-resumed music app: \(app.displayName, privacy: .public)")
       }
     }
 
     guard !pausedNames.isEmpty || !resumedNames.isEmpty else { return }
-    invalidateVisibleAppsCache()
     persistSessionSnapshot()
     syncOnboarding(using: session)
 
     if !pausedNames.isEmpty {
-      let detail = pausedNames.count == 1
+      let detail =
+        pausedNames.count == 1
         ? "\(pausedNames[0]) muted for your call."
         : "\(pausedNames.count) apps muted for your call."
       showToast(
@@ -3609,7 +3853,8 @@ final class AppStore {
         duration: .seconds(2.4)
       )
     } else {
-      let detail = resumedNames.count == 1
+      let detail =
+        resumedNames.count == 1
         ? "\(resumedNames[0]) resumed."
         : "\(resumedNames.count) apps resumed."
       showToast(
@@ -3643,8 +3888,6 @@ final class AppStore {
     if purpose == .userProfile, profile.carriesLevels, mixRestorePoint == nil {
       captureMixRestorePoint(before: profile)
     }
-    let generation = Self.allocateAppIntentGeneration()
-    currentProfileGeneration = generation
     let excludedAppIDsAtSubmission = Set(preferences.excludedAppIDs)
     var backendProfile = profile
     // Keep every source row in its original slot, but neutralize an excluded
@@ -3658,24 +3901,11 @@ final class AppStore {
         : entry
     }
     let liveAppIDs = Set(session.apps.map(\.logicalID))
-    let affectedLiveAppIDs = Set(profile.entries.compactMap { entry in
-      entry.hasLevels && liveAppIDs.contains(entry.appID) ? entry.appID : nil
-    })
-
-    // A batch owns the same generation for every live actionable row. Cancel all
-    // older store-side work before calling the backend so an old direct result or
-    // delayed EQ debounce cannot project over the profile when it eventually lands.
-    for appID in affectedLiveAppIDs {
-      appIntentTasks[appID]?.cancel()
-      appIntentTasks.removeValue(forKey: appID)
-      pendingVolumeTargets.removeValue(forKey: appID)
-      pendingVolumeDebounceTasks.removeValue(forKey: appID)?.cancel()
-      pendingEqualizerSettings.removeValue(forKey: appID)
-      pendingEqualizerDebounceTasks[appID]?.cancel()
-      pendingEqualizerDebounceTasks.removeValue(forKey: appID)
-      optimisticAppIntentProjections.removeValue(forKey: appID)
-      currentAppIntentGeneration[appID] = generation
-    }
+    let affectedLiveAppIDs = Set(
+      profile.entries.compactMap { entry in
+        entry.hasLevels && liveAppIDs.contains(entry.appID) ? entry.appID : nil
+      })
+    let generation = appIntentCoordinator.beginProfile(affectedAppIDs: affectedLiveAppIDs)
 
     // Preserve the immediate group-selection behavior for pure membership
     // profiles while still sending every source row through the ordered result API.
@@ -3689,7 +3919,7 @@ final class AppStore {
     let task = Task { @MainActor [weak self] in
       let backendResult = await backend.applyProfileWithResults(backendProfile, generation: generation)
       guard let self else { return }
-      defer { self.profileApplyTasks.removeValue(forKey: generation) }
+      defer { self.appIntentCoordinator.settleProfileTask(generation: generation) }
       await self.finishProfileApplication(
         profile,
         purpose: purpose,
@@ -3699,7 +3929,7 @@ final class AppStore {
         backendResult: backendResult
       )
     }
-    profileApplyTasks[generation] = task
+    appIntentCoordinator.registerProfileTask(task, generation: generation)
   }
 
   private func finishProfileApplication(
@@ -3719,7 +3949,7 @@ final class AppStore {
 
     // A newer profile owns focus, persistence, diagnostics, and feedback. The old
     // backend call may still unwind, but it cannot publish any store state.
-    guard currentProfileGeneration == generation else { return }
+    guard appIntentCoordinator.isCurrentProfile(generation) else { return }
 
     reconcileProfileRuntime(
       result,
@@ -3741,7 +3971,7 @@ final class AppStore {
       profile: profile,
       generation: generation
     )
-    guard currentProfileGeneration == generation else { return }
+    guard appIntentCoordinator.isCurrentProfile(generation) else { return }
 
     lastProfileApplyResult = result
     for row in result.rows {
@@ -3756,7 +3986,7 @@ final class AppStore {
     }
     diagnostics = await backend.diagnosticsReport()
     onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-    guard currentProfileGeneration == generation else { return }
+    guard appIntentCoordinator.isCurrentProfile(generation) else { return }
     // A direct transaction may have refreshed backendStatus while diagnostics was
     // in flight; keep that newer session truth instead of restoring the batch's
     // older aggregate status here.
@@ -3853,50 +4083,56 @@ final class AppStore {
 
     for (entryIndex, entry) in profile.entries.enumerated() {
       guard entry.hasLevels else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .membershipOnly,
-          resultingApp: nil
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .membershipOnly,
+            resultingApp: nil
+          ))
         continue
       }
 
-      if currentProfileGeneration != generation
-        || currentAppIntentGeneration[entry.appID].map({ $0 != generation }) == true {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .superseded,
-          resultingApp: nil,
-          detail: "A newer AppStore transaction superseded this profile row."
-        ))
+      if !appIntentCoordinator.isCurrentProfile(generation)
+        || appIntentCoordinator.hasNewerGeneration(than: generation, for: entry.appID)
+      {
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .superseded,
+            resultingApp: nil,
+            detail: "A newer AppStore transaction superseded this profile row."
+          ))
         continue
       }
 
       guard let backendRow = rowsByIndex[entryIndex]?.first,
-            backendRow.appID == entry.appID else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .failed,
-          resultingApp: nil,
-          detail: "The backend did not return the matching ordered profile row."
-        ))
+        backendRow.appID == entry.appID
+      else {
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .failed,
+            resultingApp: nil,
+            detail: "The backend did not return the matching ordered profile row."
+          ))
         continue
       }
       guard backendRow.generation == generation else {
-        rows.append(ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: .superseded,
-          resultingApp: nil,
-          detail: "The backend returned this profile row for a different generation."
-        ))
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .superseded,
+            resultingApp: nil,
+            detail: "The backend returned this profile row for a different generation."
+          ))
         continue
       }
 
@@ -3918,16 +4154,18 @@ final class AppStore {
         )
         let repaired = await backend.applyAppIntent(exclusionIntent)
         backendStatus = repaired.backendStatus
-        guard currentProfileGeneration == generation,
-              currentAppIntentGeneration[entry.appID] == generation else {
-          rows.append(ProfileRowApplyResult(
-            entryIndex: entryIndex,
-            appID: entry.appID,
-            generation: generation,
-            outcome: .superseded,
-            resultingApp: nil,
-            detail: "A newer transaction superseded exclusion restoration for this profile row."
-          ))
+        guard appIntentCoordinator.isCurrentProfile(generation),
+          appIntentCoordinator.isCurrent(generation, for: entry.appID)
+        else {
+          rows.append(
+            ProfileRowApplyResult(
+              entryIndex: entryIndex,
+              appID: entry.appID,
+              generation: generation,
+              outcome: .superseded,
+              resultingApp: nil,
+              detail: "A newer transaction superseded exclusion restoration for this profile row."
+            ))
           continue
         }
         if repaired.generation == generation, repaired.outcome == .excluded {
@@ -3970,20 +4208,25 @@ final class AppStore {
         continue
       case .unavailable:
         if affectedLiveAppIDs.contains(entry.appID),
-           currentAppIntentGeneration[entry.appID] == generation {
+          appIntentCoordinator.isCurrent(generation, for: entry.appID)
+        {
           session.apps.removeAll { $0.logicalID == entry.appID || $0.id == entry.appID }
-          confirmedAppsByLogicalID.removeValue(forKey: entry.appID)
+          appIntentCoordinator.removeConfirmedApp(for: entry.appID)
         }
       case .applied, .noChange, .excluded, .unsupported, .failed:
         guard var resultingApp = row.resultingApp else { continue }
+        if entry.isMuted != nil {
+          appIntentCoordinator.releaseAutomaticMute(for: entry.appID)
+        }
         let cachedMuteSource = session.apps
           .first(matchingAppKey: entry.appID)?.muteSource
-        confirmedAppsByLogicalID[resultingApp.logicalID] = resultingApp
+        appIntentCoordinator.recordConfirmedApp(resultingApp)
         resultingApp.isPinned = preferences.pinnedAppIDs.contains(resultingApp.logicalID)
         if row.outcome == .excluded || preferences.excludedAppIDs.contains(resultingApp.logicalID) {
           makeExcludedPresentation(&resultingApp)
         } else if resultingApp.isMuted {
-          resultingApp.muteSource = entry.isMuted != nil
+          resultingApp.muteSource =
+            entry.isMuted != nil
             ? .user
             : (cachedMuteSource == .autoConferencing ? .autoConferencing : resultingApp.muteSource)
         } else {
@@ -3997,7 +4240,6 @@ final class AppStore {
       }
     }
 
-    invalidateVisibleAppsCache()
     syncOnboarding(using: session)
     persistSessionSnapshot()
   }
@@ -4013,30 +4255,36 @@ final class AppStore {
 
     for (entry, row) in zip(profile.entries, result.rows) {
       guard entry.hasLevels,
-            row.outcome == .applied || row.outcome == .noChange || row.outcome == .unavailable,
-            currentProfileGeneration == generation,
-            currentAppIntentGeneration[entry.appID].map({ $0 == generation }) ?? true,
-            let durableIntent = durableIntent(for: entry, row: row) else { continue }
+        row.outcome == .applied || row.outcome == .noChange || row.outcome == .unavailable,
+        appIntentCoordinator.isCurrentProfile(generation),
+        appIntentCoordinator.isCurrentOrUnowned(generation, for: entry.appID),
+        let durableIntent = durableIntent(for: entry, row: row)
+      else { continue }
 
-      durableIntentMutationGeneration[entry.appID] = generation
+      appIntentCoordinator.claimDurableMutation(for: entry.appID, generation: generation)
       preferences.appAudioIntents[entry.appID] = durableIntent
       preferences.appEqualizerSettings[entry.appID] = durableIntent.equalizerSettings
       preferenceAppIDs.insert(entry.appID)
 
       if let deviceID {
-        var preset = deviceVolumePresets.getVolumeSettings(
-          for: entry.appID,
-          deviceID: deviceID
-        ) ?? AppVolumeSettings(
-          desiredVolume: durableIntent.desiredVolume,
-          isMuted: durableIntent.isMuted,
-          volumeBoost: durableIntent.volumeBoost
-        )
+        var preset =
+          deviceVolumePresets.getVolumeSettings(
+            for: entry.appID,
+            deviceID: deviceID
+          )
+          ?? AppVolumeSettings(
+            desiredVolume: durableIntent.desiredVolume,
+            isMuted: durableIntent.isMuted,
+            volumeBoost: durableIntent.volumeBoost
+          )
         if entry.desiredVolume != nil { preset.desiredVolume = durableIntent.desiredVolume }
         if entry.isMuted != nil { preset.isMuted = durableIntent.isMuted }
         if entry.volumeBoost != nil { preset.volumeBoost = durableIntent.volumeBoost }
         let mutationKey = "\(deviceID)\u{0}\(entry.appID)"
-        devicePresetMutationGeneration[mutationKey] = generation
+        appIntentCoordinator.claimDevicePresetMutation(
+          key: mutationKey,
+          generation: generation
+        )
         deviceVolumePresets.saveVolumeSettings(
           for: entry.appID,
           deviceID: deviceID,
@@ -4047,17 +4295,17 @@ final class AppStore {
         }
       }
     }
-    invalidateVisibleAppsCache()
-
     var persistenceResult = ProfilePersistenceResult()
     if !preferenceAppIDs.isEmpty {
       do {
         try await savePreferencesDurably()
-        for appID in preferenceAppIDs where durableIntentMutationGeneration[appID] == generation {
-          durableIntentMutationGeneration.removeValue(forKey: appID)
+        for appID in preferenceAppIDs
+        where appIntentCoordinator.ownsDurableMutation(for: appID, generation: generation) {
+          appIntentCoordinator.releaseDurableMutation(for: appID, generation: generation)
         }
       } catch {
-        for appID in preferenceAppIDs where durableIntentMutationGeneration[appID] == generation {
+        for appID in preferenceAppIDs
+        where appIntentCoordinator.ownsDurableMutation(for: appID, generation: generation) {
           if let savedIntent = durablySavedPreferences.appAudioIntents[appID] {
             preferences.appAudioIntents[appID] = savedIntent
           } else {
@@ -4068,9 +4316,9 @@ final class AppStore {
           } else {
             preferences.appEqualizerSettings.removeValue(forKey: appID)
           }
-          durableIntentMutationGeneration.removeValue(forKey: appID)
+          appIntentCoordinator.releaseDurableMutation(for: appID, generation: generation)
         }
-        reportPersistenceFailure(storeName: "settings", error: error, showWarning: false)
+        reportPersistenceFailure(store: .preferences, error: error, showWarning: false)
         persistenceResult.settingsError = error.localizedDescription
       }
     }
@@ -4080,14 +4328,25 @@ final class AppStore {
         try await saveDeviceVolumePresetsDurably()
         for key in devicePresetKeys {
           let mutationKey = "\(key.deviceID)\u{0}\(key.appID)"
-          if devicePresetMutationGeneration[mutationKey] == generation {
-            devicePresetMutationGeneration.removeValue(forKey: mutationKey)
+          if appIntentCoordinator.ownsDevicePresetMutation(
+            key: mutationKey,
+            generation: generation
+          ) {
+            appIntentCoordinator.releaseDevicePresetMutation(
+              key: mutationKey,
+              generation: generation
+            )
           }
         }
       } catch {
         for key in devicePresetKeys {
           let mutationKey = "\(key.deviceID)\u{0}\(key.appID)"
-          guard devicePresetMutationGeneration[mutationKey] == generation else { continue }
+          guard
+            appIntentCoordinator.ownsDevicePresetMutation(
+              key: mutationKey,
+              generation: generation
+            )
+          else { continue }
           if let savedPreset = durablySavedDeviceVolumePresets.getVolumeSettings(
             for: key.appID,
             deviceID: key.deviceID
@@ -4103,9 +4362,12 @@ final class AppStore {
               deviceVolumePresets.deviceVolumes.removeValue(forKey: key.deviceID)
             }
           }
-          devicePresetMutationGeneration.removeValue(forKey: mutationKey)
+          appIntentCoordinator.releaseDevicePresetMutation(
+            key: mutationKey,
+            generation: generation
+          )
         }
-        reportPersistenceFailure(storeName: "device presets", error: error, showWarning: false)
+        reportPersistenceFailure(store: .deviceVolumePresets, error: error, showWarning: false)
         persistenceResult.devicePresetError = error.localizedDescription
       }
     }
@@ -4118,8 +4380,9 @@ final class AppStore {
     row: ProfileRowApplyResult
   ) -> PersistedAppAudioIntent? {
     let existing = preferences.appAudioIntents[entry.appID]
-    let equalizer = existing?.equalizerSettings
-      ?? confirmedEqualizerByLogicalID[entry.appID]
+    let equalizer =
+      existing?.equalizerSettings
+      ?? appIntentCoordinator.confirmedEqualizer(for: entry.appID)
       ?? preferences.appEqualizerSettings[entry.appID]
       ?? EqualizerSettings()
 
@@ -4130,7 +4393,8 @@ final class AppStore {
       // fields the source row omitted. The sole exception is an automatic
       // conferencing mute: a volume/boost-only profile must never make that
       // transient mute durable.
-      let isAutomaticMute = entry.isMuted == nil
+      let isAutomaticMute =
+        entry.isMuted == nil
         && session.apps.first(matchingAppKey: entry.appID)?.muteSource == .autoConferencing
       return PersistedAppAudioIntent(
         appID: entry.appID,
@@ -4161,7 +4425,8 @@ final class AppStore {
   ) -> ProfileApplyResult {
     let rows = zip(profile.entries, result.rows).map { entry, row in
       guard entry.hasLevels,
-            currentAppIntentGeneration[entry.appID].map({ $0 != generation }) == true else {
+        appIntentCoordinator.hasNewerGeneration(than: generation, for: entry.appID)
+      else {
         return row
       }
       return ProfileRowApplyResult(
@@ -4202,7 +4467,8 @@ final class AppStore {
     let unsupportedCount = count(.unsupported)
     let supersededCount = count(.superseded)
     let hasOutcomeWarning = excludedCount + failedCount + unsupportedCount + supersededCount > 0
-    let isFullSuccess = appliedCount == actionableRows.count
+    let isFullSuccess =
+      appliedCount == actionableRows.count
       && unavailableCount == 0
       && !hasOutcomeWarning
       && persistenceResult.isFullySaved
@@ -4238,7 +4504,8 @@ final class AppStore {
     let title: String
     let kind: AppToast.Kind
     if failedCount > 0 || persistenceResult.settingsError != nil {
-      title = appliedCount == 0 && unavailableCount == 0
+      title =
+        appliedCount == 0 && unavailableCount == 0
         ? "Profile apply failed"
         : "Profile applied with errors"
       kind = .error
@@ -4300,7 +4567,8 @@ final class AppStore {
       // whole set. Untouched apps still need a membership-only entry so the
       // restore point remembers they were present, but nothing about their
       // levels needs restoring — they were never changed.
-      let isOwned = app.routingState == .managed
+      let isOwned =
+        app.routingState == .managed
         || preferences.appAudioIntents[app.logicalID] != nil
       guard isOwned else { return ProfileEntry(appID: app.logicalID) }
       return ProfileEntry(
@@ -4447,22 +4715,27 @@ final class AppStore {
   /// otherwise the entries are membership-only (a pure grouping). Pass an `id`
   /// to edit an existing profile in place (so a rename keeps its identity);
   /// otherwise a same-named profile is replaced, or a new one is appended.
-  func saveProfile(id: UUID? = nil, named name: String, appIDs: [String], captureLevels: Bool) {
-    guard startupState != .shuttingDown else { return }
+  @discardableResult
+  func saveProfile(
+    id: UUID? = nil,
+    named name: String,
+    appIDs: [String],
+    captureLevels: Bool
+  ) -> ProfileSaveResult {
+    guard startupState != .shuttingDown else { return .unavailableDuringShutdown }
     let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmedName.isEmpty, trimmedName.count <= 100 else { return }
+    guard !trimmedName.isEmpty else { return .blankName }
+    guard trimmedName.count <= 100 else { return .nameTooLong(maximum: 100) }
 
-    // Resolve which existing profile (if any) this save targets: an explicit id
-    // wins (an edit, even across a rename), otherwise fall back to a name match.
+    // An explicit id identifies an edit. A create request must never replace an
+    // existing same-named profile silently; callers receive a typed duplicate
+    // result and can keep their editor state intact.
     let targetIndex = id.flatMap { id in profiles.firstIndex(where: { $0.id == id }) }
-      ?? profiles.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame })
 
-    // Reject a rename that would collide with a *different* existing profile, so
-    // an edit can't silently produce two profiles with the same name.
-    if let collision = profiles.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame }),
-       collision != targetIndex {
-      showToast(title: "Name already used", detail: "A profile named “\(trimmedName)” already exists.", kind: .warning)
-      return
+    if let collision = profiles.firstIndex(where: {
+      $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame
+    }), collision != targetIndex {
+      return .duplicateName(profiles[collision].name)
     }
 
     // Never bake an excluded app into a profile — applying it later would re-tap
@@ -4473,11 +4746,13 @@ final class AppStore {
     // When editing without re-capturing, keep each existing member's stored
     // levels rather than discarding them — so adding one app to "Focus" doesn't
     // wipe the saved mix. Only an explicit "Capture current levels" re-snapshots.
-    let existingEntries: [String: ProfileEntry] = targetIndex.map {
-      Dictionary(profiles[$0].entries.map { ($0.appID, $0) }, uniquingKeysWith: { first, _ in first })
-    } ?? [:]
+    let existingEntries: [String: ProfileEntry] =
+      targetIndex.map {
+        Dictionary(profiles[$0].entries.map { ($0.appID, $0) }, uniquingKeysWith: { first, _ in first })
+      } ?? [:]
     var seen = Set<String>()
-    let entries: [ProfileEntry] = appIDs
+    let entries: [ProfileEntry] =
+      appIDs
       .filter { !excluded.contains($0) && seen.insert($0).inserted }
       .map { appID in
         if captureLevels, let app = appByID[appID] {
@@ -4493,6 +4768,9 @@ final class AppStore {
         return existingEntries[appID] ?? ProfileEntry(appID: appID)
       }
 
+    guard !entries.isEmpty else { return .noEligibleApps }
+
+    let savedProfileID: UUID
     if let targetIndex {
       var replacement = profiles[targetIndex]
       replacement.name = trimmedName
@@ -4500,10 +4778,12 @@ final class AppStore {
       replacement.updatedAt = .now
       profiles[targetIndex] = replacement
       focusProfile(replacement.id)
+      savedProfileID = replacement.id
     } else {
       let profile = Profile(name: trimmedName, entries: entries)
       profiles.append(profile)
       focusProfile(profile.id)
+      savedProfileID = profile.id
     }
     persistProfiles()
     showToast(
@@ -4512,6 +4792,7 @@ final class AppStore {
       kind: .success,
       duration: .seconds(1.6)
     )
+    return .saved(savedProfileID)
   }
 
   func deleteProfiles(at offsets: IndexSet) {
@@ -4539,7 +4820,7 @@ final class AppStore {
 
   func exportProfile(_ profile: Profile) {
     guard startupState != .shuttingDown else { return }
-    startOwnedOperation { [self] _ in
+    startOwnedOperation { store in
       do {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
@@ -4558,15 +4839,15 @@ final class AppStore {
         // is frontmost), not the mixer window. Settings can be opened from the
         // menu bar with the mixer window closed, leaving NSApp.mainWindow nil.
         guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
-          showToast(title: "Export failed", detail: "No window available.", kind: .error)
+          store.showToast(title: "Export failed", detail: "No window available.", kind: .error)
           return
         }
 
         let response = await savePanel.beginSheetModal(for: window)
-        guard !Task.isCancelled, startupState != .shuttingDown else { return }
+        guard !Task.isCancelled, store.startupState != .shuttingDown else { return }
         if response == .OK, let url = savePanel.url {
           try data.write(to: url, options: .atomic)
-          showToast(
+          store.showToast(
             title: "Profile exported",
             detail: "Saved to \(url.lastPathComponent)",
             kind: .success,
@@ -4574,14 +4855,14 @@ final class AppStore {
           )
         }
       } catch {
-        showToast(title: "Export failed", detail: error.localizedDescription, kind: .error)
+        store.showToast(title: "Export failed", detail: error.localizedDescription, kind: .error)
       }
     }
   }
 
   func importProfiles() {
     guard startupState != .shuttingDown else { return }
-    startOwnedOperation { [self] _ in
+    startOwnedOperation { store in
       let openPanel = NSOpenPanel()
       openPanel.allowedContentTypes = [.json]
       openPanel.canChooseFiles = true
@@ -4592,30 +4873,20 @@ final class AppStore {
       // frontmost). Settings can be opened from the menu bar with the mixer
       // window closed, leaving NSApp.mainWindow nil.
       guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
-        showToast(title: "Import failed", detail: "No window available.", kind: .error)
+        store.showToast(title: "Import failed", detail: "No window available.", kind: .error)
         return
       }
 
       let response = await openPanel.beginSheetModal(for: window)
-      guard !Task.isCancelled, startupState != .shuttingDown else { return }
+      guard !Task.isCancelled, store.startupState != .shuttingDown else { return }
       if response == .OK, let url = openPanel.url {
         do {
           let sizeCap = 10 * 1024 * 1024
-          // Reject over-cap files BEFORE reading so a huge selection can't exhaust
-          // memory in the Data(contentsOf:) allocation. resourceValues is a cheap
-          // stat that doesn't load the file.
-          if let reportedSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-             reportedSize > sizeCap {
-            showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
-            return
-          }
-
-          // Re-enforce the cap on the data actually loaded. The pre-read stat above
-          // bounds the allocation; this post-read check still rejects a file whose
-          // size grew (or a symlink swapped) between the stat and the read.
-          let data = try Data(contentsOf: url)
-          if data.count > sizeCap {
-            showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
+          let data: Data
+          do {
+            data = try BoundedRegularFileReader.read(from: url, maximumBytes: sizeCap)
+          } catch BoundedRegularFileReaderError.fileTooLarge {
+            store.showToast(title: "Import failed", detail: "This file is larger than the 10 MB limit.", kind: .error)
             return
           }
 
@@ -4623,7 +4894,7 @@ final class AppStore {
           // envelope or a bare [Profile]) as well as a single exported Profile, so
           // restoring a backup doesn't fail with a cryptic generic decode error.
           guard let decoded = Self.decodeImportedProfiles(from: data) else {
-            showToast(
+            store.showToast(
               title: "Import failed",
               detail: "Unsupported file. Expected a Waves profile or profiles backup.",
               kind: .error
@@ -4636,7 +4907,7 @@ final class AppStore {
           // without having mutated `profiles`, so a multi-profile backup with a
           // single bad entry leaves the live library (and the UI) unchanged —
           // restoring the original atomic behavior for the multi-profile case.
-          var working = profiles
+          var working = store.profiles
           var importedNames: [String] = []
           for profile in decoded {
             // Validate profile structure. Trim first so a whitespace-only name is
@@ -4644,17 +4915,17 @@ final class AppStore {
             // the editor's 100-character cap.
             let trimmedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedName.isEmpty {
-              showToast(title: "Import failed", detail: "Profile name cannot be empty.", kind: .error)
+              store.showToast(title: "Import failed", detail: "Profile name cannot be empty.", kind: .error)
               return
             }
 
             if trimmedName.count > Profile.maxNameLength {
-              showToast(title: "Import failed", detail: "Profile name exceeds \(Profile.maxNameLength) characters.", kind: .error)
+              store.showToast(title: "Import failed", detail: "Profile name exceeds \(Profile.maxNameLength) characters.", kind: .error)
               return
             }
 
             if profile.entries.count > Profile.maxEntries {
-              showToast(title: "Import failed", detail: "Profile has too many entries (max \(Profile.maxEntries)).", kind: .error)
+              store.showToast(title: "Import failed", detail: "Profile has too many entries (max \(Profile.maxEntries)).", kind: .error)
               return
             }
 
@@ -4682,16 +4953,16 @@ final class AppStore {
           }
 
           // Every profile passed — commit the batch atomically and persist once.
-          profiles = working
-          persistProfiles()
-          showToast(
+          store.profiles = working
+          store.persistProfiles()
+          store.showToast(
             title: importedNames.count == 1 ? "Profile imported" : "Profiles imported",
             detail: importedNames.count == 1 ? importedNames.first : "\(importedNames.count) profiles restored",
             kind: .success,
             duration: .seconds(2.0)
           )
         } catch {
-          showToast(title: "Import failed", detail: error.localizedDescription, kind: .error)
+          store.showToast(title: "Import failed", detail: error.localizedDescription, kind: .error)
         }
       }
     }
@@ -4718,35 +4989,34 @@ final class AppStore {
     guard !isRecovering else { return }
 
     isRecovering = true
-    startOwnedOperation { [self] _ in
-      defer { isRecovering = false }
+    startOwnedOperation { store in
+      defer { store.isRecovering = false }
       do {
-        let recovered = try await backend.recoverRoutes()
-        guard !Task.isCancelled, startupState == .running else { return }
-        session = mergedSession(with: recovered, cached: session)
-        let includePreset = preferences.enablePerDeviceVolumePresets
-        for appID in session.apps.map(\.logicalID) {
-          _ = await restoreConfiguredApp(
+        let recovered = try await store.backend.recoverRoutes()
+        guard !Task.isCancelled, store.startupState == .running else { return }
+        store.session = store.mergedSession(with: recovered, cached: store.session)
+        let includePreset = store.preferences.enablePerDeviceVolumePresets
+        for appID in store.session.apps.map(\.logicalID) {
+          _ = await store.restoreConfiguredApp(
             appID: appID,
             defaultReason: .routeRecovery,
-            deviceID: currentDeviceID,
+            deviceID: store.currentDeviceID,
             includeDevicePreset: includePreset
           )
         }
-        invalidateVisibleAppsCache()
-        diagnostics = await backend.diagnosticsReport()
-        onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-        persistSessionSnapshot()
-        syncOnboarding(using: session)
+        store.diagnostics = await store.backend.diagnosticsReport()
+        store.onboarding.captureAuthorization = await store.backend.captureAuthorizationResult()
+        store.persistSessionSnapshot()
+        store.syncOnboarding(using: store.session)
         // backend.recoverRoutes() does not throw when a prerequisite is still
         // unmet (e.g. capture permission denied or no output device): it rebuilds
         // the snapshot, which recomputes isRouteRecoveryHealthy. Branch on the
         // resulting health instead of reporting success on every no-throw return,
         // so the toast can't claim "Routes recovered" while the Setup step stays
         // in its "needs action" state.
-        let status = session.backendStatus
+        let status = store.session.backendStatus
         if status.isRouteRecoveryHealthy {
-          showToast(
+          store.showToast(
             title: "Routes recovered",
             detail: "Managed routing paths were reattached.",
             kind: .success
@@ -4755,33 +5025,36 @@ final class AppStore {
           let reason: String
           if !status.hasRequiredPermissions {
             reason = "Audio capture isn't granted. Allow audio recording in System Settings, then try again."
-          } else if session.currentDevice == nil {
+          } else if store.session.currentDevice == nil {
             reason = "No output device is available. Connect an output device, then try again."
           } else {
-            reason = status.lastError ?? "Routes are still not healthy. Check the Advanced tab for details."
+            reason = status.lastError ?? "Routes are still not healthy. Check Diagnostics for details."
           }
-          showToast(
+          store.showToast(
             title: "Routes still need attention",
             detail: reason,
             kind: .warning
           )
         }
       } catch {
-        guard startupState == .running else { return }
-        session = mergedSession(with: await backend.currentSnapshot(), cached: session)
-        invalidateVisibleAppsCache()
-        diagnostics = await backend.diagnosticsReport()
-        onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-        persistSessionSnapshot()
-        syncOnboarding(using: session)
-        showToast(title: "Recovery failed", detail: error.localizedDescription, kind: .error)
+        guard store.startupState == .running else { return }
+        store.session = store.mergedSession(with: await store.backend.currentSnapshot(), cached: store.session)
+        store.diagnostics = await store.backend.diagnosticsReport()
+        store.onboarding.captureAuthorization = await store.backend.captureAuthorizationResult()
+        store.persistSessionSnapshot()
+        store.syncOnboarding(using: store.session)
+        store.showToast(title: "Recovery failed", detail: error.localizedDescription, kind: .error)
       }
     }
   }
 
+  func postAccessibilityAnnouncement(_ message: String) {
+    accessibilityAnnouncementPoster.post(AttributedString(message))
+  }
+
   func refreshDiagnostics() {
     guard requireAudioRunning() else { return }
-    startOwnedOperation { [self] _ in
+    startOwnedOperation { store in
       // Rebuild the backend snapshot FIRST so diagnostics are computed from the
       // same freshly-probed state the checklist/session read. diagnosticsReport()
       // re-probes capture authorization, but currentSnapshot() only returns the
@@ -4793,20 +5066,19 @@ final class AppStore {
       // freshly-probed source. Fall back to the cached snapshot if the rebuild
       // throws, so a transient failure still re-syncs from something current.
       let snapshot: AudioSessionSnapshot
-      if let rebuilt = try? await backend.refresh() {
+      if let rebuilt = try? await store.backend.refresh() {
         snapshot = rebuilt
       } else {
-        snapshot = await backend.currentSnapshot()
+        snapshot = await store.backend.currentSnapshot()
       }
-      guard !Task.isCancelled, startupState == .running else { return }
-      diagnostics = await backend.diagnosticsReport()
-      onboarding.captureAuthorization = await backend.captureAuthorizationResult()
-      guard !Task.isCancelled, startupState == .running else { return }
+      guard !Task.isCancelled, store.startupState == .running else { return }
+      store.diagnostics = await store.backend.diagnosticsReport()
+      store.onboarding.captureAuthorization = await store.backend.captureAuthorizationResult()
+      guard !Task.isCancelled, store.startupState == .running else { return }
       // The live snapshot owns backend truth; mergedSession reapplies only the
       // store's current transaction/slider projection and preferences-owned tags.
-      session = mergedSession(with: snapshot, cached: session)
-      invalidateVisibleAppsCache()
-      syncOnboarding(using: session)
+      store.session = store.mergedSession(with: snapshot, cached: store.session)
+      store.syncOnboarding(using: store.session)
     }
   }
 
@@ -4842,7 +5114,7 @@ final class AppStore {
   /// the foreground process is unmanaged or Waves itself.
   private func frontmostManagedAppIDForAdaptiveMix(in apps: [AudioApp]) -> String? {
     guard let frontmost = NSWorkspace.shared.frontmostApplication,
-          frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier
+      frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier
     else {
       return nil
     }
@@ -4905,7 +5177,6 @@ final class AppStore {
 
   func persistPreferences() {
     enqueuePreferencesPersistence(preferences)
-    invalidateVisibleAppsCache()
   }
 
   private func persistProfiles() {
@@ -4917,166 +5188,57 @@ final class AppStore {
   }
 
   private func enqueuePreferencesPersistence(_ snapshot: UserPreferences) {
-    guard startupState != .shuttingDown || isFinalizingShutdownPersistence else { return }
-    pendingPreferencesPersistence = snapshot
-    guard preferencesPersistenceTask == nil else { return }
-    preferencesPersistenceTask = Task { @MainActor [weak self] in
-      await self?.runPreferencesPersistence()
-    }
+    persistenceCoordinator.enqueuePreferences(snapshot)
   }
 
   private func enqueueProfilesPersistence(_ snapshot: [Profile]) {
-    guard startupState != .shuttingDown || isFinalizingShutdownPersistence else { return }
-    pendingProfilesPersistence = snapshot
-    guard profilesPersistenceTask == nil else { return }
-    profilesPersistenceTask = Task { @MainActor [weak self] in
-      await self?.runProfilesPersistence()
-    }
+    persistenceCoordinator.enqueueProfiles(snapshot)
   }
 
   private func enqueueSessionPersistence(_ snapshot: AudioSessionSnapshot) {
-    guard startupState != .shuttingDown || isFinalizingShutdownPersistence else { return }
-    pendingSessionPersistence = snapshot
-    guard sessionPersistenceTask == nil else { return }
-    sessionPersistenceTask = Task { @MainActor [weak self] in
-      await self?.runSessionPersistence()
-    }
+    persistenceCoordinator.enqueueSession(snapshot)
   }
 
   private func enqueueDevicePresetsPersistence(_ snapshot: DeviceVolumePresets) {
-    guard startupState != .shuttingDown || isFinalizingShutdownPersistence else { return }
-    pendingDevicePresetsPersistence = snapshot
-    guard devicePresetsPersistenceTask == nil else { return }
-    devicePresetsPersistenceTask = Task { @MainActor [weak self] in
-      await self?.runDevicePresetsPersistence()
-    }
-  }
-
-  private func runPreferencesPersistence() async {
-    defer { preferencesPersistenceTask = nil }
-    while let snapshot = pendingPreferencesPersistence {
-      pendingPreferencesPersistence = nil
-      do {
-        try await preferencesStore.save(snapshot)
-        durablySavedPreferences = snapshot
-      } catch {
-        reportPersistenceFailure(storeName: "settings", error: error)
-      }
-    }
-  }
-
-  private func runProfilesPersistence() async {
-    defer { profilesPersistenceTask = nil }
-    while let snapshot = pendingProfilesPersistence {
-      pendingProfilesPersistence = nil
-      do {
-        try await profileStore.save(snapshot)
-      } catch {
-        reportPersistenceFailure(storeName: "profiles", error: error)
-      }
-    }
-  }
-
-  private func runSessionPersistence() async {
-    defer { sessionPersistenceTask = nil }
-    while let snapshot = pendingSessionPersistence {
-      pendingSessionPersistence = nil
-      do {
-        try await sessionStore.save(snapshot)
-      } catch {
-        reportPersistenceFailure(storeName: "session cache", error: error)
-      }
-    }
-  }
-
-  private func runDevicePresetsPersistence() async {
-    defer { devicePresetsPersistenceTask = nil }
-    while let snapshot = pendingDevicePresetsPersistence {
-      pendingDevicePresetsPersistence = nil
-      do {
-        try await deviceVolumePresetsStore.save(snapshot)
-        durablySavedDeviceVolumePresets = snapshot
-      } catch {
-        reportPersistenceFailure(storeName: "device presets", error: error)
-      }
-    }
+    persistenceCoordinator.enqueueDevicePresets(snapshot)
   }
 
   /// Waits for every currently tracked background persistence runner. The loop
   /// also observes runners started while an earlier one is suspended, providing
   /// the drain boundary that the checked shutdown task will await later.
   func drainPersistenceTasks() async {
-    while true {
-      let tasks = [
-        preferencesPersistenceTask,
-        profilesPersistenceTask,
-        sessionPersistenceTask,
-        devicePresetsPersistenceTask,
-      ].compactMap { $0 }
-      guard !tasks.isEmpty else { return }
-      for task in tasks {
-        await task.value
-      }
-    }
+    await persistenceCoordinator.drain()
   }
 
   var trackedPersistenceTaskCount: Int {
-    [
-      preferencesPersistenceTask,
-      profilesPersistenceTask,
-      sessionPersistenceTask,
-      devicePresetsPersistenceTask,
-    ].compactMap { $0 }.count
+    persistenceCoordinator.trackedTaskCount
   }
 
   func drainAppIntentTransactions() async {
-    while true {
-      let debounceTasks = Array(pendingEqualizerDebounceTasks.values)
-        + Array(pendingVolumeDebounceTasks.values)
-      for task in debounceTasks { await task.value }
-      let transactionTasks = Array(appIntentTasks.values)
-      let profileTasks = Array(profileApplyTasks.values)
-      guard debounceTasks.isEmpty && transactionTasks.isEmpty && profileTasks.isEmpty else {
-        for task in transactionTasks { _ = await task.value }
-        for task in profileTasks { await task.value }
-        continue
-      }
-      return
-    }
+    await appIntentCoordinator.drain()
   }
 
   var trackedAppIntentTaskCount: Int {
-    appIntentTasks.count + pendingEqualizerDebounceTasks.count
-      + pendingVolumeDebounceTasks.count + profileApplyTasks.count
+    appIntentCoordinator.lifecycleSnapshot.trackedTaskCount
   }
 
   /// Explicit durable boundaries for future transaction/profile/privacy work.
   /// Each helper first removes older queued snapshots, then submits an immutable
   /// current snapshot and surfaces any write failure to its caller.
   func savePreferencesDurably() async throws {
-    await drainPersistenceTasks()
-    let snapshot = preferences
-    try await preferencesStore.save(snapshot)
-    durablySavedPreferences = snapshot
+    try await persistenceCoordinator.savePreferencesDurably(preferences)
   }
 
   func saveProfilesDurably() async throws {
-    await drainPersistenceTasks()
-    let snapshot = profiles
-    try await profileStore.save(snapshot)
+    try await persistenceCoordinator.saveProfilesDurably(profiles)
   }
 
   func saveSessionDurably() async throws {
-    await drainPersistenceTasks()
-    let snapshot = session
-    try await sessionStore.save(snapshot)
+    try await persistenceCoordinator.saveSessionDurably(session)
   }
 
   func saveDeviceVolumePresetsDurably() async throws {
-    await drainPersistenceTasks()
-    let snapshot = deviceVolumePresets
-    try await deviceVolumePresetsStore.save(snapshot)
-    durablySavedDeviceVolumePresets = snapshot
+    try await persistenceCoordinator.saveDevicePresetsDurably(deviceVolumePresets)
   }
 
   /// Flushes every store, independently.
@@ -5088,45 +5250,29 @@ final class AppStore {
   /// data flush" rather than the store that actually failed. Each store now gets
   /// its own attempt and its own attributed report.
   func drainAndFlushPersistence() async {
-    await drainPersistenceTasks()
-
-    let flushes: [(name: String, flush: () async throws -> Void)] = [
-      ("settings", preferencesStore.flush),
-      ("profiles", profileStore.flush),
-      ("session", sessionStore.flush),
-      ("device volume presets", deviceVolumePresetsStore.flush),
-    ]
-
-    for entry in flushes {
-      do {
-        try await entry.flush()
-      } catch {
-        reportPersistenceFailure(storeName: entry.name, error: error, showWarning: false)
-      }
-    }
+    await persistenceCoordinator.flush()
   }
 
   private func reportPersistenceFailure(
-    storeName: String,
+    store: PersistenceStoreIdentifier,
     error: Error,
     showWarning: Bool = true
   ) {
-    let message = "\(storeName): \(error.localizedDescription)"
-    logger.error("Persistence failed for \(storeName): \(error.localizedDescription)")
-    persistenceFailureCount += 1
-    lastPersistenceError = message
-    persistenceFailureHistory.append(message)
-    guard showWarning else { return }
+    persistenceCoordinator.recordFailure(
+      store: store,
+      error: error,
+      showWarning: showWarning
+    )
+  }
 
-    let now = Date()
-    if let lastPersistenceWarningDate,
-       now.timeIntervalSince(lastPersistenceWarningDate) < persistenceWarningDebounceInterval {
-      return
-    }
-    lastPersistenceWarningDate = now
+  private func publishPersistenceFailure(_ failure: AppStorePersistenceFailure) {
+    logger.error("Persistence failed for \(failure.message, privacy: .public)")
+    persistenceFailureCount += 1
+    lastPersistenceError = failure.message
+    guard failure.shouldWarn else { return }
     showToast(
       title: "Changes may not be saved",
-      detail: "Waves couldn't save \(storeName). \(error.localizedDescription)",
+      detail: "Waves couldn't save \(failure.store.displayName). \(failure.errorDescription)",
       kind: .warning
     )
   }
@@ -5140,48 +5286,21 @@ final class AppStore {
     NotificationCenter.default.post(name: .wavesKeyboardShortcutsPreferenceChanged, object: nil)
   }
 
-  /// The key names are sorted by: case- and diacritic-folded, so "Ätna" lands
-  /// next to "Atna" rather than after "Zoom" the way a raw `lowercased()`
-  /// comparison would put it.
-  ///
-  /// `lowercased()` alone is not a substitute for ICU collation — it leaves
-  /// accented characters at their Unicode scalar values, which sorts them after
-  /// every unaccented letter. Folding diacritics too keeps the order a person
-  /// would expect while still reducing each comparison to a plain string compare.
-  static func displayNameSortKey(_ name: String) -> String {
-    name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-  }
-
-  /// Decorate-sort-undecorate: build each app's key once instead of paying for a
-  /// full ICU collation on every one of the O(n log n) comparisons. This is the
-  /// default sort mode and runs on every `visibleApps` read, which the level
-  /// poll drives several times a second.
+  /// Uses the folded key derived once from each app's immutable display name.
   private func sortedByFoldedDisplayName(_ apps: [AudioApp]) -> [AudioApp] {
-    struct SortEntry {
-      let key: String
-      let app: AudioApp
+    apps.sorted { lhs, rhs in
+      if lhs.displayNameSortKey != rhs.displayNameSortKey {
+        return lhs.displayNameSortKey < rhs.displayNameSortKey
+      }
+      return lhs.logicalID < rhs.logicalID
     }
-    let decorated = apps.map { SortEntry(key: Self.displayNameSortKey($0.displayName), app: $0) }
-    let sorted = decorated.sorted { lhs, rhs in
-      if lhs.key != rhs.key { return lhs.key < rhs.key }
-      return lhs.app.logicalID < rhs.app.logicalID
-    }
-    return sorted.map(\.app)
   }
 
   private func sortedApps(_ apps: [AudioApp]) -> [AudioApp] {
-    // Every mode falls back to the folded display name, and folding is a full
-    // ICU pass. Only `.name` used to decorate first, so the other three paid for
-    // one folding per operand of every O(n log n) comparison — on a list the
-    // level poll re-reads several times a second.
-    let nameKeys = Dictionary(
-      apps.map { ($0.logicalID, Self.displayNameSortKey($0.displayName)) },
-      uniquingKeysWith: { first, _ in first }
-    )
     func byName(_ app1: AudioApp, _ app2: AudioApp) -> Bool {
-      let key1 = nameKeys[app1.logicalID] ?? app1.displayName
-      let key2 = nameKeys[app2.logicalID] ?? app2.displayName
-      if key1 != key2 { return key1 < key2 }
+      if app1.displayNameSortKey != app2.displayNameSortKey {
+        return app1.displayNameSortKey < app2.displayNameSortKey
+      }
       return app1.logicalID < app2.logicalID
     }
 
@@ -5251,30 +5370,6 @@ final class AppStore {
     return 4
   }
 
-  /// Shared by every sort mode's name ordering and tiebreak, so all four agree
-  /// on what "alphabetical" means. Falls back to `logicalID` for identical
-  /// names: Swift's sort is not stable, so two apps sharing a display name would
-  /// otherwise swap places between reads and make rows jump under the pointer.
-  private func displayNameComparator(_ app1: AudioApp, _ app2: AudioApp) -> Bool {
-    let key1 = Self.displayNameSortKey(app1.displayName)
-    let key2 = Self.displayNameSortKey(app2.displayName)
-    if key1 != key2 { return key1 < key2 }
-    return app1.logicalID < app2.logicalID
-  }
-
-  private var manualOrderComparator: (AudioApp, AudioApp) -> Bool {
-    let order = preferences.customAppOrder
-    let nameComparator = displayNameComparator
-    return { app1, app2 in
-      let index1 = order.firstIndex(of: app1.logicalID) ?? Int.max
-      let index2 = order.firstIndex(of: app2.logicalID) ?? Int.max
-      if index1 != index2 {
-        return index1 < index2
-      }
-      return nameComparator(app1, app2)
-    }
-  }
-
   func reorderApps(from source: IndexSet, to destination: Int) {
     // Snapshot the order the user actually dragged against BEFORE touching
     // sortMode. visibleApps is a live computed property, so switching to
@@ -5286,7 +5381,8 @@ final class AppStore {
     // session mutation has shrunk the list since SwiftUI computed the drop,
     // bail safely instead of trapping in Array.move.
     guard destination >= 0, destination <= displayedIDs.count,
-          source.allSatisfy({ $0 >= 0 && $0 < displayedIDs.count }) else {
+      source.allSatisfy({ $0 >= 0 && $0 < displayedIDs.count })
+    else {
       return
     }
 
@@ -5324,25 +5420,30 @@ final class AppStore {
     }
     preferences.customAppOrder = merged
     persistPreferences()
-    invalidateVisibleAppsCache()
   }
 
   private func syncOnboarding(using snapshot: AudioSessionSnapshot) {
-    onboarding.hasCompletedPrivacySetup = preferences.hasCompletedPrivacySetup
-    onboarding.audioComponentInstalled = snapshot.backendStatus.isAudioComponentInstalled
-    switch onboarding.captureAuthorization {
+    var next = onboarding
+    next.hasCompletedPrivacySetup = preferences.hasCompletedPrivacySetup
+    next.audioComponentInstalled = snapshot.backendStatus.isAudioComponentInstalled
+    switch next.captureAuthorization {
     case .some(.authorized):
-      onboarding.permissionsGranted = true
+      next.permissionsGranted = true
     case .some(.notGranted), .some(.undetermined), .some(.unsupported), .some(.probeFailed):
-      onboarding.permissionsGranted = false
+      next.permissionsGranted = false
     case .none:
-      onboarding.permissionsGranted = preferences.hasCompletedPrivacySetup
+      next.permissionsGranted =
+        preferences.hasCompletedPrivacySetup
         && snapshot.backendStatus.hasRequiredPermissions
     }
-    onboarding.outputDeviceVisible = snapshot.currentDevice != nil
-    onboarding.routeHealthReady = preferences.hasCompletedPrivacySetup
-      && onboarding.permissionsGranted
+    next.outputDeviceVisible = snapshot.currentDevice != nil
+    next.routeHealthReady =
+      preferences.hasCompletedPrivacySetup
+      && next.permissionsGranted
       && snapshot.backendStatus.isRouteRecoveryHealthy
+    if onboarding != next {
+      onboarding = next
+    }
     reconcileLoginItemStatus()
   }
 
@@ -5359,10 +5460,16 @@ final class AppStore {
   func reconcileLoginItemStatus() {
     guard startupState != .shuttingDown else { return }
     let status = loginItemService.status
-    loginItemStatus = status
+    if loginItemStatus != status {
+      loginItemStatus = status
+    }
     let launchAtLoginIntentEnabled = status.isUserIntentEnabled
-    onboarding.launchAtLoginEnabled = status.isEnabled
-    onboarding.launchAtLoginRequiresApproval = status.requiresApproval
+    if onboarding.launchAtLoginEnabled != status.isEnabled
+      || onboarding.launchAtLoginRequiresApproval != status.requiresApproval
+    {
+      onboarding.launchAtLoginEnabled = status.isEnabled
+      onboarding.launchAtLoginRequiresApproval = status.requiresApproval
+    }
     // Persist the OS-derived launch-at-login state on every reconcile so a
     // mid-session change reaches disk, not only when Settings happens to be
     // open at quit. Guarded by a change check so the frequent refresh/level
@@ -5385,7 +5492,8 @@ final class AppStore {
     for app in session.apps where preferences.appAudioIntents[app.logicalID] == nil {
       let equalizer = preferences.appEqualizerSettings[app.logicalID] ?? defaultEqualizer
       let userMuted = app.muteSource == .user && app.isMuted
-      let isCustomized = abs(app.desiredVolume - 1) > 0.001
+      let isCustomized =
+        abs(app.desiredVolume - 1) > 0.001
         || userMuted
         || abs(app.volumeBoost - 1) > 0.001
         || app.targetDeviceUID != nil
@@ -5405,7 +5513,7 @@ final class AppStore {
     // EQ was durable before the unified intent model and may belong to an app
     // that is not present in the cached live session.
     for (appID, equalizer) in preferences.appEqualizerSettings
-      where preferences.appAudioIntents[appID] == nil && equalizer != defaultEqualizer {
+    where preferences.appAudioIntents[appID] == nil && equalizer != defaultEqualizer {
       preferences.appAudioIntents[appID] = PersistedAppAudioIntent(
         appID: appID,
         equalizerSettings: equalizer
@@ -5415,7 +5523,7 @@ final class AppStore {
     // Keep the legacy map synchronized for one compatibility release so existing
     // EQ call sites and downgrades preserve values during the additive schema-1 rollout.
     for (appID, intent) in preferences.appAudioIntents
-      where preferences.appEqualizerSettings[appID] != intent.equalizerSettings {
+    where preferences.appEqualizerSettings[appID] != intent.equalizerSettings {
       preferences.appEqualizerSettings[appID] = intent.equalizerSettings
     }
 
@@ -5444,10 +5552,7 @@ final class AppStore {
       cached.apps.map { ($0.logicalID, $0) },
       uniquingKeysWith: { first, _ in first }
     )
-    confirmedAppsByLogicalID = Dictionary(
-      liveSession.apps.map { ($0.logicalID, $0) },
-      uniquingKeysWith: { first, _ in first }
-    )
+    appIntentCoordinator.replaceConfirmedApps(liveSession.apps)
 
     var mergedApps = liveSession.apps
     for index in mergedApps.indices {
@@ -5457,7 +5562,8 @@ final class AppStore {
       // The backend owns whether the app is muted. The store owns only the
       // transient explanation for an already-confirmed mute.
       if mergedApps[index].isMuted,
-         cachedByLogicalID[appID]?.muteSource == .autoConferencing {
+        cachedByLogicalID[appID]?.muteSource == .autoConferencing
+      {
         mergedApps[index].muteSource = .autoConferencing
       }
 
@@ -5466,21 +5572,21 @@ final class AppStore {
         continue
       }
 
-      if let projection = optimisticAppIntentProjections[appID],
-         currentAppIntentGeneration[appID] == projection.generation {
+      if let projection = appIntentCoordinator.currentProjection(for: appID) {
         mergedApps[index].desiredVolume = projection.intent.desiredVolume
         mergedApps[index].isMuted = projection.intent.isMuted
         mergedApps[index].volumeBoost = projection.intent.volumeBoost
         mergedApps[index].targetDeviceUID = projection.intent.targetDeviceUID
         mergedApps[index].muteSource = projection.muteSource ?? mergedApps[index].muteSource
         if mergedApps[index].routingState == .managed {
-          mergedApps[index].appliedVolume = projection.intent.isMuted
+          mergedApps[index].appliedVolume =
+            projection.intent.isMuted
             ? 0
             : projection.intent.desiredVolume
         }
       }
 
-      if let pendingVolume = pendingVolumeTargets[appID] {
+      if let pendingVolume = appIntentCoordinator.pendingVolume(for: appID) {
         mergedApps[index].desiredVolume = pendingVolume
         if mergedApps[index].routingState == .managed {
           mergedApps[index].appliedVolume = mergedApps[index].isMuted ? 0 : pendingVolume
@@ -5496,36 +5602,6 @@ final class AppStore {
       backendStatus: liveSession.backendStatus,
       updatedAt: liveSession.updatedAt
     )
-  }
-
-  private func mergeAppState(from backendSession: AudioSessionSnapshot, appID: String) {
-    guard let updatedApp = backendSession.apps.first(matchingAppKey: appID) else {
-      session = backendSession
-      invalidateVisibleAppsCache()
-      return
-    }
-
-    if let index = session.apps.firstIndex(matchingAppKey: appID) {
-      session.apps[index] = updatedApp
-      session.currentDevice = backendSession.currentDevice
-      session.recentDeviceIDs = backendSession.recentDeviceIDs
-      session.supportMatrix = backendSession.supportMatrix
-      session.backendStatus = backendSession.backendStatus
-      session.updatedAt = backendSession.updatedAt
-      invalidateVisibleAppsCache()
-    } else {
-      session = backendSession
-      invalidateVisibleAppsCache()
-    }
-  }
-
-  /// Merge a single backend app into the session and immediately re-derive the
-  /// onboarding signals from the now-fresh session.backendStatus, so the route
-  /// health (and other onboarding checklist steps) never lag a session-changing
-  /// action that already updated backendStatus via mergeAppState.
-  private func mergeAppStateAndSyncOnboarding(from backendSession: AudioSessionSnapshot, appID: String) {
-    mergeAppState(from: backendSession, appID: appID)
-    syncOnboarding(using: session)
   }
 
   private func persistSessionSnapshot() {
@@ -5573,7 +5649,7 @@ final class AppStore {
     case .success, .info:
       break
     }
-    AccessibilityNotification.Announcement(announcement).post()
+    accessibilityAnnouncementPoster.post(announcement)
 
     scheduleDismissal(id: toast.id, after: toast.duration)
   }
@@ -5641,7 +5717,7 @@ private extension Array where Element == AudioApp {
   }
 }
 
-struct OnboardingState {
+struct OnboardingState: Equatable {
   var hasCompletedPrivacySetup = false
   var captureAuthorization: CaptureAuthorizationResult?
   var audioComponentInstalled = false

@@ -8,7 +8,7 @@ struct MuteShortcutContext: Identifiable {
 /// Records the keyboard shortcuts for one app, opened from that app's row in the
 /// mixer.
 ///
-/// The same assignments live in Settings ▸ Shortcuts. This exists because the row
+/// The same assignments live in Settings ▸ Shortcuts & Automation. This exists because the row
 /// is where the thought occurs — deciding to mute Slack from anywhere happens
 /// while looking at Slack's row, not while reading a settings list.
 struct MuteShortcutSheet: View {

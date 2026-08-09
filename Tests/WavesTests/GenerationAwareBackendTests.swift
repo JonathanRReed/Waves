@@ -23,18 +23,20 @@ import WavesAudioCore
   )
   let backend = PreviewAudioControlBackend(snapshot: testSnapshot(apps: [collision, intended]))
 
-  let accepted = await backend.applyAppIntent(testIntent(
-    appID: "shared-key",
-    volume: 0.4,
-    generation: 20
-  ))
+  let accepted = await backend.applyAppIntent(
+    testIntent(
+      appID: "shared-key",
+      volume: 0.4,
+      generation: 20
+    ))
   let acceptedSnapshot = await backend.currentSnapshot()
-  let rejected = await backend.applyAppIntent(testIntent(
-    appID: "shared-key",
-    volume: 0.1,
-    generation: 19,
-    isExcluded: true
-  ))
+  let rejected = await backend.applyAppIntent(
+    testIntent(
+      appID: "shared-key",
+      volume: 0.1,
+      generation: 19,
+      isExcluded: true
+    ))
   let rejectedSnapshot = await backend.currentSnapshot()
 
   #expect(accepted.outcome == .applied)
@@ -103,17 +105,18 @@ import WavesAudioCore
     }
   )
 
-  let result = await backend.applyAppIntent(AppRouteIntent(
-    appID: app.logicalID,
-    desiredVolume: 0.1,
-    isMuted: true,
-    volumeBoost: 4,
-    equalizerSettings: EqualizerSettings(isEnabled: true),
-    targetDeviceUID: "device.new",
-    generation: 1,
-    reason: .userEdit,
-    isExcluded: true
-  ))
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.1,
+      isMuted: true,
+      volumeBoost: 4,
+      equalizerSettings: EqualizerSettings(isEnabled: true),
+      targetDeviceUID: "device.new",
+      generation: 1,
+      reason: .userEdit,
+      isExcluded: true
+    ))
   let resultingApp = await backend.currentSnapshot().apps[0]
 
   #expect(result.outcome == .excluded)
@@ -158,19 +161,32 @@ import WavesAudioCore
     testingSnapshot: testSnapshot(apps: [zoom, waveLink]),
     intentRouteApplyOverride: { stagedApp, equalizer in
       await recorder.record(app: stagedApp, equalizer: equalizer)
+    },
+    verifiedRouterConflictProvider: { app in
+      app.logicalID == zoom.logicalID
+        ? VerifiedRouterConflict(
+          routerName: "Elgato Wave Link",
+          kind: .publicTapMembership,
+          detail:
+            "Elgato Wave Link is already routing this app's audio. "
+            + "Waves left it untouched to prevent two copies. "
+            + "Quit Elgato Wave Link before controlling this app in Waves."
+        )
+        : nil
     }
   )
 
-  let result = await backend.applyAppIntent(AppRouteIntent(
-    appID: zoom.logicalID,
-    desiredVolume: 0.5,
-    isMuted: false,
-    volumeBoost: 1,
-    equalizerSettings: EqualizerSettings(),
-    targetDeviceUID: nil,
-    generation: 1,
-    reason: .userEdit
-  ))
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: zoom.logicalID,
+      desiredVolume: 0.5,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .userEdit
+    ))
   let resultingZoom = await backend.currentSnapshot().apps[0]
 
   #expect(result.outcome == .unsupported)
@@ -238,19 +254,21 @@ import WavesAudioCore
   )
 
   let olderTask = Task {
-    await backend.applyAppIntent(testIntent(
-      appID: app.logicalID,
-      volume: 0.2,
-      generation: 1
-    ))
+    await backend.applyAppIntent(
+      testIntent(
+        appID: app.logicalID,
+        volume: 0.2,
+        generation: 1
+      ))
   }
   await gate.waitUntilSuspended()
 
-  let newer = await backend.applyAppIntent(testIntent(
-    appID: app.logicalID,
-    volume: 0.8,
-    generation: 2
-  ))
+  let newer = await backend.applyAppIntent(
+    testIntent(
+      appID: app.logicalID,
+      volume: 0.8,
+      generation: 2
+    ))
   let snapshotAfterNewer = await backend.currentSnapshot()
   await gate.resume()
   let older = await olderTask.value
@@ -276,16 +294,17 @@ import WavesAudioCore
     }
   )
 
-  let result = await backend.applyAppIntent(AppRouteIntent(
-    appID: app.logicalID,
-    desiredVolume: 0.1,
-    isMuted: false,
-    volumeBoost: 4,
-    equalizerSettings: EqualizerSettings(isEnabled: true),
-    targetDeviceUID: "device.unconfirmed",
-    generation: 3,
-    reason: .automation
-  ))
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.1,
+      isMuted: false,
+      volumeBoost: 4,
+      equalizerSettings: EqualizerSettings(isEnabled: true),
+      targetDeviceUID: "device.unconfirmed",
+      generation: 3,
+      reason: .automation
+    ))
   let resultingApp = await backend.currentSnapshot().apps[0]
 
   #expect(result.outcome == .failed)
@@ -373,27 +392,30 @@ import WavesAudioCore
   let result = await backend.applyProfileWithResults(profile, generation: 7)
 
   #expect(result.rows.map(\.entryIndex) == [0, 1, 2, 3, 4])
-  #expect(result.rows.map(\.appID) == [
-    supported.logicalID,
-    "missing.app",
-    supported.logicalID,
-    supported.logicalID,
-    unsupported.logicalID,
-  ])
-  #expect(result.rows.map(\.outcome) == [
-    .membershipOnly,
-    .unavailable,
-    .applied,
-    .noChange,
-    .unsupported,
-  ])
+  #expect(
+    result.rows.map(\.appID) == [
+      supported.logicalID,
+      "missing.app",
+      supported.logicalID,
+      supported.logicalID,
+      unsupported.logicalID,
+    ])
+  #expect(
+    result.rows.map(\.outcome) == [
+      .membershipOnly,
+      .unavailable,
+      .applied,
+      .noChange,
+      .unsupported,
+    ])
   #expect(result.rows.allSatisfy { $0.generation == 7 })
 
-  _ = await backend.applyAppIntent(testIntent(
-    appID: supported.logicalID,
-    volume: 0.6,
-    generation: 10
-  ))
+  _ = await backend.applyAppIntent(
+    testIntent(
+      appID: supported.logicalID,
+      volume: 0.6,
+      generation: 10
+    ))
   let superseded = await backend.applyProfileWithResults(
     Profile(
       name: "Old",
@@ -422,15 +444,16 @@ import WavesAudioCore
     .unsupported,
     .failed,
   ].map(ProfileRowApplyOutcome.init(appIntentOutcome:))
-  #expect(mapped == [
-    .applied,
-    .noChange,
-    .superseded,
-    .excluded,
-    .unavailable,
-    .unsupported,
-    .failed,
-  ])
+  #expect(
+    mapped == [
+      .applied,
+      .noChange,
+      .superseded,
+      .excluded,
+      .unavailable,
+      .unsupported,
+      .failed,
+    ])
 }
 
 @Test func workspaceProfileResultsAreOrderedAndLegacyProfileSurfacesFailures() async {
@@ -462,21 +485,23 @@ import WavesAudioCore
   let result = await backend.applyProfileWithResults(profile, generation: 42)
 
   #expect(result.rows.map(\.entryIndex) == [0, 1, 2, 3])
-  #expect(result.rows.map(\.outcome) == [
-    .membershipOnly,
-    .unavailable,
-    .applied,
-    .unsupported,
-  ])
+  #expect(
+    result.rows.map(\.outcome) == [
+      .membershipOnly,
+      .unavailable,
+      .applied,
+      .unsupported,
+    ])
   #expect(result.rows.allSatisfy { $0.generation == 42 })
   #expect(await recorder.count() == 1)
 
   var legacyThrew = false
   do {
-    _ = try await backend.applyProfile(Profile(
-      name: "Unavailable",
-      entries: [ProfileEntry(appID: "missing.app", desiredVolume: 0.3)]
-    ))
+    _ = try await backend.applyProfile(
+      Profile(
+        name: "Unavailable",
+        entries: [ProfileEntry(appID: "missing.app", desiredVolume: 0.3)]
+      ))
   } catch {
     legacyThrew = true
   }
@@ -491,30 +516,32 @@ import WavesAudioCore
     targetDeviceUID: "device.old"
   )
   let preview = PreviewAudioControlBackend(snapshot: testSnapshot(apps: [app]))
-  _ = await preview.applyAppIntent(AppRouteIntent(
-    appID: app.logicalID,
-    desiredVolume: 0.5,
-    isMuted: true,
-    volumeBoost: 2,
-    equalizerSettings: EqualizerSettings(),
-    targetDeviceUID: "device.old",
-    generation: 100,
-    reason: .automation
-  ))
+  _ = await preview.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.5,
+      isMuted: true,
+      volumeBoost: 2,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: "device.old",
+      generation: 100,
+      reason: .automation
+    ))
 
   try await preview.setDesiredVolume(0.7, forAppID: app.logicalID)
   try await preview.setOutputDevice(uid: "device.new", forAppID: app.logicalID)
   let afterLegacyCalls = await preview.currentSnapshot().apps[0]
-  let stale = await preview.applyAppIntent(AppRouteIntent(
-    appID: app.logicalID,
-    desiredVolume: 0.1,
-    isMuted: false,
-    volumeBoost: 4,
-    equalizerSettings: EqualizerSettings(isEnabled: true),
-    targetDeviceUID: nil,
-    generation: 100,
-    reason: .automation
-  ))
+  let stale = await preview.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.1,
+      isMuted: false,
+      volumeBoost: 4,
+      equalizerSettings: EqualizerSettings(isEnabled: true),
+      targetDeviceUID: nil,
+      generation: 100,
+      reason: .automation
+    ))
 
   #expect(afterLegacyCalls.desiredVolume == 0.7)
   #expect(afterLegacyCalls.isMuted == true)
@@ -592,17 +619,19 @@ import WavesAudioCore
   let backend = PreviewAudioControlBackend(snapshot: testSnapshot(apps: [app]))
   await backend.stop()
 
-  let stoppedResult = await backend.applyAppIntent(testIntent(
-    appID: app.logicalID,
-    volume: 0.2,
-    generation: 1
-  ))
+  let stoppedResult = await backend.applyAppIntent(
+    testIntent(
+      appID: app.logicalID,
+      volume: 0.2,
+      generation: 1
+    ))
   try await backend.start()
-  let restartedResult = await backend.applyAppIntent(testIntent(
-    appID: app.logicalID,
-    volume: 0.8,
-    generation: 1
-  ))
+  let restartedResult = await backend.applyAppIntent(
+    testIntent(
+      appID: app.logicalID,
+      volume: 0.8,
+      generation: 1
+    ))
 
   #expect(stoppedResult.outcome == .failed)
   #expect(restartedResult.outcome == .applied)

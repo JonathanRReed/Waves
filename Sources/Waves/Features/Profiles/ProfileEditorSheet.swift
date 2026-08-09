@@ -10,6 +10,30 @@ struct ProfileEditorContext: Identifiable {
   let preselectedAppIDs: [String]
 }
 
+enum ProfileValidationScope: String, Sendable {
+  case name = "Profile name"
+  case selection = "App selection"
+
+  func accessibilityErrorLabel(for result: ProfileSaveResult) -> String? {
+    result.message.map { "\(rawValue) error: \($0)" }
+  }
+}
+
+struct ProfileValidationFeedback: View {
+  let scope: ProfileValidationScope
+  let result: ProfileSaveResult
+
+  var body: some View {
+    if let message = result.message {
+      Text(message)
+        .font(.caption)
+        .foregroundStyle(.red)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(scope.accessibilityErrorLabel(for: result) ?? message)
+    }
+  }
+}
+
 /// Create or edit a profile: name it, choose which apps belong, and decide
 /// whether to capture the current volume/mute/boost levels or keep it a pure
 /// grouping.
@@ -18,6 +42,8 @@ struct ProfileEditorSheet: View {
   @Environment(\.wavesTheme) private var theme
   @Environment(\.dismiss) private var dismiss
   @Environment(\.colorSchemeContrast) private var contrast
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+  @Environment(\.wavesAccessibilityOverrides) private var accessibilityOverrides
 
   let context: ProfileEditorContext
 
@@ -35,6 +61,7 @@ struct ProfileEditorSheet: View {
   @State private var offlineMemberIDs: [String]
   @State private var didResolveOfflineMembers = false
   @State private var captureLevels: Bool
+  @State private var validationResult: ProfileSaveResult?
 
   init(context: ProfileEditorContext) {
     self.context = context
@@ -45,6 +72,7 @@ struct ProfileEditorSheet: View {
     // profile keeps its stored levels unless the user explicitly re-captures.
     // Capturing is the deliberate opt-in to bake in the *current* mix.
     _captureLevels = State(initialValue: false)
+    _validationResult = State(initialValue: nil)
   }
 
   var body: some View {
@@ -105,15 +133,23 @@ struct ProfileEditorSheet: View {
       TextField("e.g. Work, Gaming, Focus", text: $name)
         .textFieldStyle(.plain)
         .padding(8)
-        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(
+          theme.fieldFill(
+            reduceTransparency: accessibilityOverrides?.reduceTransparency ?? reduceTransparency,
+            increasedContrast: accessibilityOverrides?.increasedContrast ?? (contrast == .increased)
+          ),
+          in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
         .overlay(
           RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .strokeBorder(theme.hairline(increasedContrast: contrast == .increased))
+            .strokeBorder(nameFieldStroke)
         )
-      if isTooLong {
-        Text("Name too long (max \(Self.maxNameLength) characters)")
-          .font(.caption)
-          .foregroundStyle(.red)
+        .accessibilityLabel("Profile name")
+        .accessibilityValue(name)
+        .accessibilityHint(nameValidationMessage ?? "Enter a unique profile name.")
+        .onChange(of: name) { _, _ in clearNameValidation() }
+      if let nameValidationResult {
+        ProfileValidationFeedback(scope: .name, result: nameValidationResult)
       }
     }
   }
@@ -192,6 +228,10 @@ struct ProfileEditorSheet: View {
         }
         .wavesCard(cornerRadius: 12)
       }
+
+      if case .noEligibleApps = validationResult {
+        ProfileValidationFeedback(scope: .selection, result: .noEligibleApps)
+      }
     }
   }
 
@@ -208,19 +248,18 @@ struct ProfileEditorSheet: View {
       Button("Save") { save() }
         .keyboardShortcut(.defaultAction)
         .wavesGlassProminentButton()
-        .disabled(!canSave)
-        .help(saveDisabledReason)
+        .help(saveHelp)
     }
     .padding(20)
   }
 
-  /// Tells the user why Save is disabled instead of leaving a silent dead button.
-  private var saveDisabledReason: String {
-    if canSave { return "Save profile" }
+  private var saveHelp: String {
+    if let message = validationResult?.message { return message }
     if trimmedName.isEmpty { return "Enter a profile name" }
     if isTooLong { return "Name too long (max \(Self.maxNameLength) characters)" }
     if !selectedIDs.isEmpty { return "Every selected app is excluded from Waves" }
-    return "Select at least one app"
+    if selectedIDs.isEmpty { return "Select at least one app" }
+    return "Save profile"
   }
 
   // MARK: - Data
@@ -286,11 +325,8 @@ struct ProfileEditorSheet: View {
 
   private var isTooLong: Bool { trimmedName.count > Self.maxNameLength }
 
-  private var canSave: Bool {
-    !trimmedName.isEmpty && !isTooLong && !savableSelectedIDs.isEmpty
-  }
-
   private func toggle(_ id: String) {
+    if case .noEligibleApps = validationResult { validationResult = nil }
     if selectedIDs.contains(id) {
       selectedIDs.remove(id)
     } else {
@@ -307,19 +343,60 @@ struct ProfileEditorSheet: View {
   }
 
   private func save() {
-    guard canSave else { return }
     // Keep the editor's display order: running (selected-first) then offline.
     // Offline members are filtered by the selection the same way running ones
     // are, so unticking one actually removes it — and leaving it ticked keeps it.
-    let orderedIDs = runningApps.map(\.logicalID).filter { selectedIDs.contains($0) }
+    let orderedIDs =
+      runningApps.map(\.logicalID).filter { selectedIDs.contains($0) }
       + offlineMemberIDs.filter { selectedIDs.contains($0) }
-    store.saveProfile(
+    let result = store.saveProfile(
       id: context.profile?.id,
       named: trimmedName,
       appIDs: orderedIDs,
       captureLevels: captureLevels
     )
-    dismiss()
+    validationResult = result
+    switch result {
+    case .saved:
+      dismiss()
+    default:
+      if let message = result.message {
+        store.postAccessibilityAnnouncement(message)
+      }
+    }
+  }
+
+  private var nameValidationMessage: String? {
+    nameValidationResult?.message
+  }
+
+  private var nameValidationResult: ProfileSaveResult? {
+    if isTooLong {
+      return .nameTooLong(maximum: Self.maxNameLength)
+    }
+    switch validationResult {
+    case .blankName, .nameTooLong, .duplicateName:
+      return validationResult
+    default:
+      return nil
+    }
+  }
+
+  private var nameFieldStroke: Color {
+    nameValidationMessage == nil
+      ? theme.hairline(
+        increasedContrast: accessibilityOverrides?.increasedContrast ?? (contrast == .increased)
+      )
+      : WavesDesign.error
+  }
+
+  private func clearNameValidation() {
+    switch validationResult {
+    case .blankName, .nameTooLong, .duplicateName:
+      validationResult = nil
+    default:
+      break
+    }
   }
 }
 

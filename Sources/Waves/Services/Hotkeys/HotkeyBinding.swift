@@ -310,7 +310,7 @@ enum HotkeyAssignmentError: Error, Equatable {
     case .alreadyUsed(let binding):
       "\(binding.displayString) is already assigned to \(binding.action.displayTitle(appName: appName))."
     case .claimedByAnotherApp(let chord):
-      "\(HotkeyFormatter.string(for: chord)) is already used by macOS or another app."
+      "Registration was refused for \(HotkeyFormatter.string(for: chord)). The combination may be reserved by macOS or another app."
     }
   }
 }

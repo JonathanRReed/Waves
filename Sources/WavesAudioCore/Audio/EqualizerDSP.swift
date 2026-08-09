@@ -155,7 +155,15 @@ public final class EqualizerDSP {
   ) {
     self.sampleRate = sampleRate.isFinite && sampleRate > 0 ? sampleRate : 48_000
     self.channelCount = max(1, channelCount)
-    self.smoothingFrames = max(1, Int(self.sampleRate * max(0, smoothingDuration)))
+    let smoothingFrameCount = self.sampleRate * max(0, smoothingDuration)
+    if smoothingFrameCount.isFinite,
+      smoothingFrameCount >= 1,
+      smoothingFrameCount <= Double(Int.max)
+    {
+      self.smoothingFrames = Int(smoothingFrameCount)
+    } else {
+      self.smoothingFrames = 1
+    }
     self.targetCoefficients = Array(repeating: .identity, count: Self.maximumSections)
     self.channelCoefficients = Array(
       repeating: .identity,
@@ -194,9 +202,10 @@ public final class EqualizerDSP {
   ) {
     let localChannelCount = max(1, bufferChannelCount)
     guard byteCount > 0,
-          channelOffset >= 0,
-          channelOffset + localChannelCount <= channelCount,
-          !isBypassed else { return }
+      channelOffset >= 0,
+      channelOffset + localChannelCount <= channelCount,
+      !isBypassed
+    else { return }
 
     switch format {
     case .float32:
@@ -286,7 +295,8 @@ public final class EqualizerDSP {
           let index = stateIndex(section: section, channel: channel)
           let coefficients = channelCoefficients[index]
           var delay = delayStates[index]
-          let output = coefficients.b0 * sample
+          let output =
+            coefficients.b0 * sample
             + coefficients.b1 * delay.x1
             + coefficients.b2 * delay.x2
             - coefficients.a1 * delay.y1

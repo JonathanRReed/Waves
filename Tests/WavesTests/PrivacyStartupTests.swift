@@ -54,6 +54,186 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func requiredSetupCompletionIsDurableBeforeItBecomesLaunchState() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  let fixture = makePrivacyFixture(preferences: preferences)
+  fixture.store.start()
+  await fixture.store.waitForAudioStartup()
+
+  let completed = await fixture.store.completeRequiredSetup(
+    version: OnboardingExperience.currentVersion
+  )
+
+  #expect(completed)
+  #expect(
+    fixture.store.preferences.requiredSetupVersion == OnboardingExperience.currentVersion
+  )
+  #expect(fixture.store.preferences.hasCompletedGuidedSetup)
+  #expect(
+    fixture.preferencesStore.value.requiredSetupVersion == OnboardingExperience.currentVersion
+  )
+  #expect(fixture.preferencesStore.value.hasCompletedGuidedSetup)
+  _ = await fixture.store.shutdown()
+}
+
+@MainActor
+@Test func requiredSetupLaunchStateRemainsIncompleteWhileDurableSaveIsPending() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  let fixture = makePrivacyFixture(preferences: preferences)
+  fixture.store.start()
+  await fixture.store.waitForAudioStartup()
+  await fixture.preferencesStore.suspendNextSave()
+
+  let completion = Task { @MainActor in
+    await fixture.store.completeRequiredSetup(
+      version: OnboardingExperience.currentVersion
+    )
+  }
+  await fixture.preferencesStore.waitUntilSaveBegins()
+
+  #expect(fixture.store.onboardingLaunchDecision == .requiredSetup(.readiness))
+  #expect(fixture.store.preferences.requiredSetupVersion == 0)
+  #expect(!fixture.store.preferences.hasCompletedGuidedSetup)
+  #expect(fixture.store.trackedPersistenceTaskCount == 1)
+
+  fixture.store.preferences.appearance = .dark
+  fixture.store.persistPreferences()
+
+  await fixture.preferencesStore.resumeSave()
+  #expect(await completion.value)
+  #expect(
+    fixture.store.onboardingLaunchDecision
+      == .mixer(showWhatsNew: false, showTourTip: false)
+  )
+  await fixture.store.drainPersistenceTasks()
+  #expect(fixture.preferencesStore.value.appearance == .dark)
+  #expect(
+    fixture.preferencesStore.value.requiredSetupVersion
+      == OnboardingExperience.currentVersion
+  )
+  _ = await fixture.store.shutdown()
+}
+
+@MainActor
+@Test func requiredSetupPersistenceFailureLeavesSetupIncomplete() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  let fixture = makePrivacyFixture(preferences: preferences)
+  fixture.store.start()
+  await fixture.store.waitForAudioStartup()
+  fixture.preferencesStore.saveError = PrivacyStartupTestError.writeFailed
+
+  let completed = await fixture.store.completeRequiredSetup(
+    version: OnboardingExperience.currentVersion
+  )
+
+  #expect(!completed)
+  #expect(fixture.store.preferences.requiredSetupVersion == 0)
+  #expect(!fixture.store.preferences.hasCompletedGuidedSetup)
+  #expect(fixture.preferencesStore.value.requiredSetupVersion == 0)
+  #expect(fixture.store.toasts.contains { $0.title == "Setup may appear again" })
+  _ = await fixture.store.shutdown()
+}
+
+@MainActor
+@Test func completedUpgradeLaunchesWarmMixerAndOffersWhatsNewOnly() {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  preferences.hasCompletedGuidedSetup = true
+  preferences.requiredSetupVersion = OnboardingExperience.currentVersion
+  let fixture = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [privacyTestApp()]),
+    installLocation: .applications
+  )
+
+  #expect(
+    fixture.store.onboardingLaunchDecision
+      == .mixer(showWhatsNew: true, showTourTip: false)
+  )
+  #expect(fixture.store.showsWarmStartMixer)
+}
+
+@MainActor
+@Test func mountedImageAdvisoryPrecedesSetupAndCanContinue() {
+  let fixture = makePrivacyFixture(installLocation: .mountedDiskImage)
+
+  #expect(
+    fixture.store.onboardingLaunchDecision
+      == .installationAdvisory(.mountedDiskImage)
+  )
+
+  fixture.store.continueFromInstallationAdvisory()
+
+  #expect(fixture.store.onboardingLaunchDecision == .requiredSetup(.welcome))
+}
+
+@MainActor
+@Test func setupWhatsNewAndTourReplayRemainSeparate() {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  preferences.hasCompletedGuidedSetup = true
+  preferences.requiredSetupVersion = OnboardingExperience.currentVersion
+  preferences.whatsNewDismissedVersion = OnboardingExperience.currentVersion
+  let fixture = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [privacyTestApp()])
+  )
+
+  fixture.store.runRequiredSetupReplay()
+  #expect(fixture.store.onboardingLaunchDecision == .requiredSetup(.welcome))
+  #expect(fixture.store.guidedMixerTourCoordinator.state == .inactive)
+
+  fixture.store.cancelRequiredSetupReplay()
+  fixture.store.showWhatsNew()
+  #expect(fixture.store.shouldShowWhatsNew)
+  #expect(fixture.store.guidedMixerTourCoordinator.state == .inactive)
+
+  fixture.store.startGuidedMixerTour()
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .chooseSound, appID: "privacy.app")
+  )
+  #expect(!fixture.store.shouldShowWhatsNew)
+
+  fixture.store.endGuidedMixerTour(reason: .escape)
+  #expect(
+    fixture.store.preferences.guidedTourDismissedVersion
+      == OnboardingExperience.currentVersion
+  )
+}
+
+@MainActor
+@Test func guidedTourRemainsVisibleAndDismissibleAfterItsTargetExits() {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  preferences.hasCompletedGuidedSetup = true
+  preferences.requiredSetupVersion = OnboardingExperience.currentVersion
+  preferences.whatsNewDismissedVersion = OnboardingExperience.currentVersion
+  let fixture = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [privacyTestApp()])
+  )
+
+  fixture.store.startGuidedMixerTour()
+  fixture.store.session.apps = []
+
+  let presentation = fixture.store.guidedMixerTourPresentation
+  #expect(presentation?.appName == "Privacy App")
+  #expect(presentation?.isTargetAvailable == false)
+  fixture.store.advanceGuidedMixerTour()
+  fixture.store.advanceGuidedMixerTour()
+  #expect(
+    fixture.store.guidedMixerTourCoordinator.state
+      == .active(moment: .muteAndRestore, appID: "privacy.app")
+  )
+  fixture.store.endGuidedMixerTour(reason: .escape)
+  #expect(fixture.store.guidedMixerTourPresentation == nil)
+}
+
+@MainActor
 @Test func privacyPersistenceFailureKeepsBackendUntouchedAndSetupIncomplete() async {
   let fixture = makePrivacyFixture()
   fixture.preferencesStore.saveError = PrivacyStartupTestError.writeFailed
@@ -211,6 +391,113 @@ import WavesAudioCore
   _ = await probeFailure.store.shutdown()
 }
 
+@MainActor
+@Test func legacySessionPinsImportOnceAndAdvanceExplicitMarker() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.pinMigrationVersion = 0
+  let legacyPinnedApp = AudioApp(
+    id: "legacy.pin.runtime",
+    logicalID: "legacy.pin",
+    displayName: "Legacy Pin",
+    category: .media,
+    isPinned: true
+  )
+
+  let fixture = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [legacyPinnedApp])
+  )
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.preferences.pinnedAppIDs == ["legacy.pin"])
+  #expect(fixture.store.preferences.pinMigrationVersion == 1)
+  #expect(fixture.preferencesStore.value.pinMigrationVersion == 1)
+}
+
+@MainActor
+@Test func emptyLegacySessionStillAdvancesPinMigrationMarker() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.pinMigrationVersion = 0
+
+  let fixture = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [])
+  )
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.preferences.pinnedAppIDs.isEmpty)
+  #expect(fixture.store.preferences.pinMigrationVersion == 1)
+  #expect(fixture.preferencesStore.value.pinMigrationVersion == 1)
+}
+
+@MainActor
+@Test func completedEmptyPinMigrationNeverReimportsSessionPins() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.pinMigrationVersion = 1
+  preferences.pinnedAppIDs = []
+  let legacyPinnedApp = AudioApp(
+    id: "cleared.pin.runtime",
+    logicalID: "cleared.pin",
+    displayName: "Cleared Pin",
+    category: .media,
+    isPinned: true
+  )
+
+  let firstLaunch = makePrivacyFixture(
+    preferences: preferences,
+    cachedSession: privacyTestSnapshot(apps: [legacyPinnedApp])
+  )
+  await firstLaunch.store.drainPersistenceTasks()
+  let persisted = firstLaunch.preferencesStore.value
+  let secondLaunch = makePrivacyFixture(
+    preferences: persisted,
+    cachedSession: privacyTestSnapshot(apps: [legacyPinnedApp])
+  )
+  await secondLaunch.store.drainPersistenceTasks()
+
+  #expect(firstLaunch.store.preferences.pinnedAppIDs.isEmpty)
+  #expect(secondLaunch.store.preferences.pinnedAppIDs.isEmpty)
+  #expect(secondLaunch.store.preferences.pinMigrationVersion == 1)
+}
+
+@MainActor
+@Test func aggregateAppStoreLifecycleShutdownDrainsEveryOwnerRepeatedly() async {
+  for iteration in 0..<10 {
+    var preferences = freshPrivacyPreferences()
+    preferences.hasCompletedPrivacySetup = true
+    preferences.adaptiveMixMode = .both
+    let app = privacyTestApp()
+    let fixture = makePrivacyFixture(
+      preferences: preferences,
+      cachedSession: privacyTestSnapshot(apps: [app])
+    )
+
+    fixture.store.start()
+    await fixture.store.waitForAudioStartup()
+    fixture.store.beginLiveLevels()
+    fixture.store.setEqualizerEnabled(true, for: app)
+    fixture.store.selectOutputDevice(
+      AudioDevice(
+        id: "device.pending.\(iteration)",
+        name: "Pending \(iteration)",
+        kind: .virtual
+      ))
+    await Task.yield()
+
+    let active = fixture.store.lifecycleSnapshot
+    #expect(active.intent.equalizerDebounces == 1)
+    #expect(active.adaptive.hasLoop)
+    #expect(active.deviceSuppression.trackedTaskCount == 1)
+    #expect(active.hasLevelPoll)
+    #expect(active.hasSessionMaintenance)
+    #expect(active.observerCount == 3)
+    #expect(active.backendStarted)
+
+    _ = await fixture.store.shutdown()
+    #expect(fixture.store.lifecycleSnapshot.isIdle)
+  }
+}
+
 private struct PrivacyFixture {
   let store: AppStore
   let backend: PrivacyRecordingBackend
@@ -223,7 +510,8 @@ private func makePrivacyFixture(
   cachedSession: AudioSessionSnapshot? = nil,
   recorder: PrivacyCallRecorder = PrivacyCallRecorder(),
   startFailures: Int = 0,
-  captureAuthorization: CaptureAuthorizationResult = .authorized
+  captureAuthorization: CaptureAuthorizationResult = .authorized,
+  installLocation: InstallLocationClassification = .applications
 ) -> PrivacyFixture {
   let snapshot = cachedSession ?? privacyTestSnapshot(apps: [])
   let backend = PrivacyRecordingBackend(
@@ -240,7 +528,8 @@ private func makePrivacyFixture(
     profileStore: PrivacyProfilesStore(),
     sessionStore: sessionStore,
     loginItemService: PrivacyLoginItemService(),
-    deviceVolumePresetsStore: PrivacyDevicePresetsStore()
+    deviceVolumePresetsStore: PrivacyDevicePresetsStore(),
+    installLocation: installLocation
   )
   return PrivacyFixture(
     store: store,
@@ -265,6 +554,8 @@ private func privacyTestApp() -> AudioApp {
     displayName: "Privacy App",
     category: .media,
     isActive: true,
+    peakLevel: 0.35,
+    rmsLevel: 0.22,
     desiredVolume: 0.7,
     appliedVolume: 0.7,
     isMuted: false,
@@ -428,7 +719,10 @@ private actor PrivacyRecordingBackend: AudioControlBackend {
     recorder.append("backend.appOutput")
   }
 
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {
     recorder.append("backend.release")
   }
 
@@ -469,6 +763,7 @@ private final class PrivacyPreferencesStore: PreferencesPersisting, @unchecked S
   var saveError: Error?
   private(set) var saveCount = 0
   private let recorder: PrivacyCallRecorder
+  private let saveGate = PrivacySaveGate()
 
   init(value: UserPreferences, recorder: PrivacyCallRecorder) {
     self.value = value
@@ -479,6 +774,7 @@ private final class PrivacyPreferencesStore: PreferencesPersisting, @unchecked S
 
   func save(_ preferences: UserPreferences) async throws {
     recorder.append("preferences.save:\(preferences.hasCompletedPrivacySetup)")
+    await saveGate.waitIfArmed()
     if let saveError { throw saveError }
     value = preferences
     saveCount += 1
@@ -486,6 +782,54 @@ private final class PrivacyPreferencesStore: PreferencesPersisting, @unchecked S
 
   func flush() async throws {}
   func consumeDidRecoverFromCorruptFile() -> Bool { false }
+
+  func suspendNextSave() async {
+    await saveGate.arm()
+  }
+
+  func waitUntilSaveBegins() async {
+    await saveGate.waitUntilStarted()
+  }
+
+  func resumeSave() async {
+    await saveGate.resume()
+  }
+}
+
+private actor PrivacySaveGate {
+  private var isArmed = false
+  private var hasStarted = false
+  private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+  private var resumeContinuation: CheckedContinuation<Void, Never>?
+
+  func arm() {
+    isArmed = true
+    hasStarted = false
+  }
+
+  func waitIfArmed() async {
+    guard isArmed else { return }
+    hasStarted = true
+    let waiters = startedWaiters
+    startedWaiters.removeAll()
+    for waiter in waiters { waiter.resume() }
+    await withCheckedContinuation { continuation in
+      resumeContinuation = continuation
+    }
+    isArmed = false
+  }
+
+  func waitUntilStarted() async {
+    guard !hasStarted else { return }
+    await withCheckedContinuation { continuation in
+      startedWaiters.append(continuation)
+    }
+  }
+
+  func resume() {
+    resumeContinuation?.resume()
+    resumeContinuation = nil
+  }
 }
 
 private final class PrivacyProfilesStore: ProfilesPersisting, @unchecked Sendable {

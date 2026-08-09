@@ -47,6 +47,11 @@ struct UserPreferences: Codable, Sendable {
   /// here (rather than only on the per-app session row) so a pin survives the
   /// app quitting and relaunching, and a full relaunch of Waves.
   var pinnedAppIDs: [String] = []
+  /// One-time migration version for pins that older builds stored only in the
+  /// session cache. New installs start complete. A legacy preferences file
+  /// missing this key decodes as version 0 and advances even when there are no
+  /// cached pins, so a user-cleared empty list can never be resurrected later.
+  var pinMigrationVersion = 1
   /// Legacy EQ-only map retained for one release during the additive schema-1
   /// app-intent rollout.
   var appEqualizerSettings: [String: EqualizerSettings] = [:]
@@ -62,6 +67,17 @@ struct UserPreferences: Codable, Sendable {
   /// New installs continue through readiness and personalization after consent.
   /// Existing preference files skip the new walkthrough and can reopen it from Setup & Repair.
   var hasCompletedGuidedSetup = false
+  /// Highest required setup experience completed. Version 1 is Waves 1.5.
+  /// A legacy file with both completion booleans set migrates to version 1.
+  var requiredSetupVersion = 0
+  /// Highest optional mixer tour completed through its final moment.
+  var guidedTourCompletedVersion = 0
+  /// Highest optional mixer tour explicitly ended or declined.
+  var guidedTourDismissedVersion = 0
+  /// Highest What's New experience dismissed.
+  var whatsNewDismissedVersion = 0
+  /// Tour version waiting to offer one contextual tip when an eligible app appears.
+  var deferredTourVersion = 0
   /// Global adaptive processing mode. Temporary gains themselves are never persisted.
   var adaptiveMixMode: AdaptiveMixMode = .off
   /// Curated starting point for app content and priority policies.
@@ -100,11 +116,17 @@ struct UserPreferences: Codable, Sendable {
     case enableExternalControl
     case excludedAppIDs
     case pinnedAppIDs
+    case pinMigrationVersion
     case appEqualizerSettings
     case appAudioIntents
     case appAudioIntentMigrationVersion
     case hasCompletedPrivacySetup
     case hasCompletedGuidedSetup
+    case requiredSetupVersion
+    case guidedTourCompletedVersion
+    case guidedTourDismissedVersion
+    case whatsNewDismissedVersion
+    case deferredTourVersion
     case adaptiveMixMode
     case adaptiveStrategy
     case adaptiveFocusMode
@@ -145,6 +167,7 @@ struct UserPreferences: Codable, Sendable {
     enableExternalControl = try value(.enableExternalControl, defaults.enableExternalControl)
     excludedAppIDs = try value(.excludedAppIDs, defaults.excludedAppIDs)
     pinnedAppIDs = try value(.pinnedAppIDs, defaults.pinnedAppIDs)
+    pinMigrationVersion = try value(.pinMigrationVersion, 0)
     appEqualizerSettings = try value(.appEqualizerSettings, defaults.appEqualizerSettings)
     appAudioIntents = try value(.appAudioIntents, defaults.appAudioIntents)
     // Preference files predating durable app intents must run the migration once.
@@ -152,6 +175,16 @@ struct UserPreferences: Codable, Sendable {
     // A preference file predating guided setup belongs to an existing install.
     hasCompletedPrivacySetup = try value(.hasCompletedPrivacySetup, true)
     hasCompletedGuidedSetup = try value(.hasCompletedGuidedSetup, true)
+    requiredSetupVersion = try value(
+      .requiredSetupVersion,
+      hasCompletedPrivacySetup && hasCompletedGuidedSetup
+        ? OnboardingExperience.currentVersion
+        : 0
+    )
+    guidedTourCompletedVersion = try value(.guidedTourCompletedVersion, 0)
+    guidedTourDismissedVersion = try value(.guidedTourDismissedVersion, 0)
+    whatsNewDismissedVersion = try value(.whatsNewDismissedVersion, 0)
+    deferredTourVersion = try value(.deferredTourVersion, 0)
     adaptiveMixMode = try value(.adaptiveMixMode, defaults.adaptiveMixMode)
     adaptiveStrategy = try value(.adaptiveStrategy, defaults.adaptiveStrategy)
     adaptiveFocusMode = try value(.adaptiveFocusMode, defaults.adaptiveFocusMode)
@@ -229,8 +262,27 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
 struct DeviceVolumePresets: Codable, Sendable {
   var deviceVolumes: [String: [String: AppVolumeSettings]] = [:]
 
-  mutating func saveVolumeSettings(for appID: String, deviceID: String, settings: AppVolumeSettings)
-  {
+  private enum CodingKeys: String, CodingKey {
+    case deviceVolumes
+  }
+
+  init() {}
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    deviceVolumes =
+      try container.decodeIfPresent(
+        [String: [String: AppVolumeSettings]].self,
+        forKey: .deviceVolumes
+      ) ?? [:]
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(deviceVolumes, forKey: .deviceVolumes)
+  }
+
+  mutating func saveVolumeSettings(for appID: String, deviceID: String, settings: AppVolumeSettings) {
     if deviceVolumes[deviceID] == nil {
       deviceVolumes[deviceID] = [:]
     }

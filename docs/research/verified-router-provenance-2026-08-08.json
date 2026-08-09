@@ -1,0 +1,69 @@
+{
+  "record": {
+    "purpose": "Waves 1.5 Task 3 verified-router descriptor provenance",
+    "accessedAt": "2026-08-08",
+    "scope": "Static inspection only. The official artifact was downloaded to a task-local temporary directory, mounted read-only and non-browsable, never launched or installed, then ejected and removed after inspection."
+  },
+  "officialArtifact": {
+    "releaseNotesURL": "https://help.elgato.com/hc/en-us/articles/48602717332369-Elgato-Wave-Link-3-2-2-macOS-Release-Notes",
+    "artifactURL": "https://edge.elgato.com/egc/macos/ewlm/release/ElgatoWaveLink-3.2.2.2896.dmg",
+    "releaseDate": "2026-07-09",
+    "productVersion": "3.2.2",
+    "build": "2896",
+    "sha256": "a1d57ef953a418cf188ec13335a8ee4d40d55df3b28219f5da69c191ffa47636",
+    "bundleIdentifier": "com.elgato.WaveLink3",
+    "executable": "WaveLinkMacOS",
+    "teamIdentifier": "Y93VXCB8Q5",
+    "architectures": ["arm64", "x86_64"],
+    "designatedRequirement": "anchor apple generic and identifier \"com.elgato.WaveLink3\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] exists or certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = Y93VXCB8Q5)",
+    "signingAuthorities": [
+      "Developer ID Application: Corsair Memory, Inc. (Y93VXCB8Q5)",
+      "Developer ID Certification Authority",
+      "Apple Root CA"
+    ],
+    "notarization": "spctl accepted, Notarized Developer ID"
+  },
+  "installedSDK": {
+    "sdkPath": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+    "sdkVersion": "26.2",
+    "deploymentFloor": "macOS 14.2",
+    "coreAudio": {
+      "AudioHardware.h": {
+        "sha256": "910e8e0fa8da940bdafdbeb15cfb928bdbde1c36229234072fb82da161c63c25",
+        "facts": [
+          "kAudioHardwarePropertyTapList enumerates tap AudioObjectIDs on the system.",
+          "kAudioTapPropertyDescription returns the CATapDescription used to create a tap.",
+          "kAudioProcessPropertyPID and kAudioProcessPropertyIsRunningOutput bind active Core Audio process objects to a PID."
+        ]
+      },
+      "CATapDescription.h": {
+        "sha256": "6f13f17c25e80c52ef3e490fc1b2c236e37c6b4ab5506c8c9962fb2da34e4ca8",
+        "facts": [
+          "CATapDescription.processes describes included or excluded process object IDs.",
+          "isExclusive describes inclusion versus exclusion semantics, but neither it nor processes identifies a tap creator.",
+          "isPrivate denotes a tap visible only to its creating client, not a public creator attribution API."
+        ]
+      }
+    },
+    "security": {
+      "SecCode.h": "47a0cf42f3babd16f5f8523464f9895cc2302650c35e401e1d9923d6c30769db",
+      "SecRequirement.h": "22a9a97d3cedd92d8fe15fc9bec73c201632a3b0f1e19b2cf12e5b2051cbba08",
+      "facts": [
+        "SecCodeCopyGuestWithAttributes accepts kSecGuestAttributePid for a live guest-code reference.",
+        "SecRequirementCreateWithString compiles the recorded requirement.",
+        "SecCodeCheckValidity validates the live code against that requirement."
+      ]
+    }
+  },
+  "runtimeDecision": {
+    "identity": "A descriptor is eligible only when its requirement compiles and a live PID satisfies both Security requirement validation and the recorded Team Identifier.",
+    "pidRace": "The service reads Core Audio, validates the live PID with Security.framework, then reads Core Audio again and requires the same PID and process-object ID. Any stale, exited, reused, or mismatched observation yields no conflict.",
+    "membership": "Waves reads visible system tap descriptions off the realtime path, but makes no ordinary-app public-membership claim. The public SDK exposes no stable tap-to-router creator association, so readable inclusion, exclusive, private, unreadable, and multiple system taps are all unattributable to Wave Link.",
+    "fallback": "When a verified Wave Link process remains actively outputting audio and the ordinary target has active Core Audio output, Waves conservatively uses monitor-only. The returned detail says that public attribution is unavailable and does not claim that the target is Wave Link-owned. An unverified process claiming Wave Link's bundle identifier is not a positive identity signal and cannot trigger this fallback.",
+    "mixedOutput": "Wave Link's own target remains unconditionally excluded by the existing bundle-target rule. The verified provider's router-mixed-output result adds a verified explanation but is not required for that exclusion."
+  },
+  "limitations": [
+    "Core Audio does not expose a public tap-creator PID or other stable tap-to-router association in the inspected SDK headers. The provider therefore never attributes a system tap or its membership to Wave Link.",
+    "No running Wave Link instance, configured Wave Link route, or hardware mutation was used. Physical coexistence, configured-route ownership, private-tap visibility, and device-specific behavior remain release-gate work."
+  ]
+}

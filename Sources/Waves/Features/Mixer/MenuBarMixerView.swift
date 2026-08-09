@@ -17,53 +17,53 @@ struct MenuBarMixerView: View {
     ZStack(alignment: .topTrailing) {
       VStack(alignment: .leading, spacing: 14) {
         if store.privacySetupPresentationState == .hidden {
-        // Pinned chrome — header, the live waves band, and the output/profile
-        // pickers stay put while only the app sections below scroll.
-        MenuBarHeader()
+          // Pinned chrome — header, the live waves band, and the output/profile
+          // pickers stay put while only the app sections below scroll.
+          MenuBarHeader()
 
-        // The "mixed waves" band — live superposition: every playing app is a
-        // thin wave, and the bright wave is their literal sum. Quiet when
-        // silent, alive when sound is flowing. Rendered on a solid content
-        // surface (not glass) per Apple's material guidance for real-time
-        // graphics.
-        HeaderWaveform(height: 56)
-          .padding(.horizontal, 4)
-          .padding(.vertical, 6)
-          .frame(maxWidth: .infinity)
-          .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-              .fill(Color.black.opacity(0.22))
-          )
-          .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-              .strokeBorder(theme.stroke)
-          )
+          // The "mixed waves" band — live superposition: every playing app is a
+          // thin wave, and the bright wave is their literal sum. Quiet when
+          // silent, alive when sound is flowing. Rendered on a solid content
+          // surface (not glass) per Apple's material guidance for real-time
+          // graphics.
+          HeaderWaveform(height: 56)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.black.opacity(0.22))
+            )
+            .overlay(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.stroke)
+            )
 
-        // Output device and profile pickers are the two most-used quick
-        // controls, so they sit as a tight cluster (Control Center groups
-        // related compact rows close together, not with full section spacing).
-        VStack(spacing: 6) {
-          OutputDevicePicker()
-          ProfileQuickPicker()
-        }
-
-        if store.isLoading {
-          HStack(spacing: 8) {
-            ProgressView()
-              .controlSize(.small)
-            Text("Refreshing audio sessions")
-              .font(.caption)
-              .foregroundStyle(.secondary)
+          // Output device and profile pickers are the two most-used quick
+          // controls, so they sit as a tight cluster (Control Center groups
+          // related compact rows close together, not with full section spacing).
+          VStack(spacing: 6) {
+            OutputDevicePicker()
+            ProfileQuickPicker()
           }
-          .accessibilityElement(children: .combine)
-          .accessibilityLabel("Refreshing audio sessions, in progress")
-        }
 
-        sectionsScroller
+          if store.isLoading {
+            HStack(spacing: 8) {
+              ProgressView()
+                .controlSize(.small)
+              Text("Refreshing audio sessions")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Refreshing audio sessions, in progress")
+          }
 
-        Divider()
+          sectionsScroller
 
-        footer
+          Divider()
+
+          footer
         } else {
           PrivacySetupSurface(style: .compact)
 
@@ -184,9 +184,10 @@ struct MenuBarMixerView: View {
         Text("Launch at login")
       }
       .toggleStyle(.switch)
-      .help(store.launchAtLoginRequiresApproval
-        ? "Approve Waves in System Settings > General > Login Items"
-        : "Launch Waves automatically at login")
+      .help(
+        store.launchAtLoginRequiresApproval
+          ? "Approve Waves in System Settings > General > Login Items"
+          : "Launch Waves automatically at login")
     }
     .controlSize(.small)
   }
@@ -358,7 +359,8 @@ private struct ProfileQuickPicker: View {
 
   private var activeProfileName: String {
     guard let id = store.activeProfileID,
-          let profile = store.profiles.first(where: { $0.id == id }) else {
+      let profile = store.profiles.first(where: { $0.id == id })
+    else {
       return "Profiles"
     }
     return profile.name
@@ -407,9 +409,10 @@ private struct CompactSection: View {
               // just-silenced app finishes lingering in Live), so membership
               // changes glide instead of popping. Under Reduce Motion this
               // degrades to a plain fade with no slide/scale (mirrors AppToasts).
-              .transition(reduceMotion
-                ? .opacity
-                : .asymmetric(
+              .transition(
+                reduceMotion
+                  ? .opacity
+                  : .asymmetric(
                     insertion: .opacity.combined(with: .move(edge: .top)),
                     removal: .opacity.combined(with: .scale(scale: 0.96))
                   ))

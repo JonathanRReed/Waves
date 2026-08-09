@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "version": "1.5.0",
+  "build": 13,
+  "minimumMacOSVersion": "14.2",
+  "bundleIdentifier": "com.jonathanreed.Waves",
+  "developerID": {
+    "identity": "Developer ID Application: Jonathan Reed (AJ9VWBRNZN)",
+    "teamIdentifier": "AJ9VWBRNZN",
+    "designatedRequirement": "identifier \"com.jonathanreed.Waves\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = AJ9VWBRNZN"
+  },
+  "releaseAuthority": {
+    "principal": "waves-commit-signing",
+    "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJaVZPTQXnIIPdGksw4PmO3yBLuqEkd+qE4SALWpFpQ waves-commit-signing",
+    "fingerprint": "SHA256:53uCiv5rg7roncACotblHKo4OvHAsvYw/+x/5pU0mCQ",
+    "receiptIssuers": {
+      "securityScan": "codex-security",
+      "remoteElgato": "golden-gate-elgato"
+    }
+  },
+  "sparkle": {
+    "keychainAccount": "com.jonathanreed.Waves",
+    "publicEDKey": "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
+  }
+}

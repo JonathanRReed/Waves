@@ -85,6 +85,23 @@ enum WavesDesign {
   }
 }
 
+struct WavesAccessibilityOverrides: Equatable, Sendable {
+  let reduceMotion: Bool
+  let reduceTransparency: Bool
+  let increasedContrast: Bool
+}
+
+private struct WavesAccessibilityOverridesKey: EnvironmentKey {
+  static let defaultValue: WavesAccessibilityOverrides? = nil
+}
+
+extension EnvironmentValues {
+  var wavesAccessibilityOverrides: WavesAccessibilityOverrides? {
+    get { self[WavesAccessibilityOverridesKey.self] }
+    set { self[WavesAccessibilityOverridesKey.self] = newValue }
+  }
+}
+
 // MARK: - Brand mark
 
 enum WavesBrandAssetLocator {
@@ -234,7 +251,7 @@ struct WavesSectionHeader: View {
 }
 
 /// Single source of truth for a diagnostics check's color/symbol/status word —
-/// previously reimplemented separately in Settings > Advanced's
+/// previously reimplemented separately in the Diagnostics settings
 /// `DiagnosticsCheckRow` and the main window's `DiagnosticsPanel`, which read
 /// the same `store.diagnostics.checks` data but could have drifted in styling
 /// since neither referenced the other.

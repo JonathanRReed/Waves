@@ -1,5 +1,42 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+
+unset CDPATH WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
+  WAVES_RELEASE_PROHIBITED_OVERRIDE 2>/dev/null || :
+case "${BASH_SOURCE[0]}" in
+  */*) ;;
+  *)
+    printf 'Error: make_appcast.sh must be executed through a direct path.\n' >&2
+    exit 2
+    ;;
+esac
+WAVES_RELEASE_ENTRY_DIRECTORY="$(builtin cd -P -- "${BASH_SOURCE[0]%/*}" && builtin pwd -P)" || exit 2
+WAVES_RELEASE_ENVIRONMENT_HELPER="$WAVES_RELEASE_ENTRY_DIRECTORY/release_environment.sh"
+if [ ! -f "$WAVES_RELEASE_ENVIRONMENT_HELPER" ] || [ -L "$WAVES_RELEASE_ENVIRONMENT_HELPER" ]; then
+  printf 'Error: trusted release environment helper is missing or is a symbolic link.\n' >&2
+  exit 2
+fi
+if [ -n "${WAVES_RELEASE_METADATA+x}" ] \
+  || [ -n "${SWIFT_SDK+x}" ] \
+  || [ -n "${WAVES_DSYM_BINARY+x}" ] \
+  || [ -n "${SIGN_UPDATE+x}" ]; then
+  WAVES_RELEASE_PROHIBITED_OVERRIDE=1
+fi
+source "$WAVES_RELEASE_ENVIRONMENT_HELPER"
+waves_release_environment_bootstrap EXPECTED_SHA256 WAVES_RELEASE_TAG
+if [ -n "$WAVES_RELEASE_PROHIBITED_OVERRIDE" ]; then
+  echo "Error: Release environment overrides are prohibited for appcast publication." >&2
+  exit 2
+fi
+unset WAVES_RELEASE_ENTRY_DIRECTORY WAVES_RELEASE_ENVIRONMENT_HELPER \
+  WAVES_RELEASE_PROHIBITED_OVERRIDE
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 set -euo pipefail
+umask 077
+
+run_release_ruby() {
+  /usr/bin/ruby --disable-gems "$@"
+}
 
 usage() {
   echo "usage: $0 VERSION [DMG_PATH] [OUTPUT_PATH]" >&2
@@ -34,57 +71,106 @@ if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; th
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
+RELEASE_GIT="$ROOT_DIR/script/release_git"
+if [ ! -f "$RELEASE_TOOL" ]; then
+  echo "Error: Canonical release metadata reader not found at $RELEASE_TOOL." >&2
+  exit 1
+fi
+if [ ! -x /usr/bin/ruby ]; then
+  echo "Error: system Ruby is required to read canonical release metadata." >&2
+  exit 1
+fi
+if [ ! -x "$RELEASE_GIT" ]; then
+  echo "Error: Repository-native release Git policy is missing or not executable." >&2
+  exit 1
+fi
+CANONICAL_VERSION="$(run_release_ruby "$RELEASE_TOOL" metadata version)"
+CANONICAL_BUILD="$(run_release_ruby "$RELEASE_TOOL" metadata build)"
+MIN_SYSTEM_VERSION="$(run_release_ruby "$RELEASE_TOOL" metadata minimumMacOSVersion)"
+if [ "$VERSION" != "$CANONICAL_VERSION" ]; then
+  echo "Error: VERSION $VERSION does not match canonical release version $CANONICAL_VERSION." >&2
+  exit 2
+fi
 DMG_PATH="${2:-$ROOT_DIR/dist/Waves.dmg}"
 OUTPUT_PATH="${3:-$ROOT_DIR/dist/appcast.xml}"
 CHANGELOG_PATH="$ROOT_DIR/CHANGELOG.md"
-SIGN_UPDATE="${SIGN_UPDATE:-}"
 EXPECTED_SHA256="${EXPECTED_SHA256:-}"
-MIN_SYSTEM_VERSION="14.2"
+RELEASE_TAG="${WAVES_RELEASE_TAG:-}"
+DSYM_BINARY="$ROOT_DIR/dist/Waves.app.dSYM/Contents/Resources/DWARF/Waves"
 DOWNLOAD_URL="https://github.com/JonathanRReed/Waves/releases/download/v$VERSION/Waves.dmg"
+
+if [ -z "$RELEASE_TAG" ]; then
+  echo "Error: WAVES_RELEASE_TAG must name the exact annotated publication tag." >&2
+  exit 2
+fi
+TRUSTED_DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+TRUSTED_SWIFT="$(/usr/bin/xcrun --find swift)"
+TRUSTED_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+run_release_ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/waves-appcast.XXXXXX")"
+chmod 700 "$TMP_DIR"
+MOUNT_POINT="$TMP_DIR/mount"
+MOUNTED=0
+
+cleanup() {
+  if [ "$MOUNTED" -eq 1 ]; then
+    /usr/bin/hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TMP_DIR"
+  waves_release_environment_cleanup
+}
+trap cleanup EXIT
+
+PUBLICATION_MANIFEST="$TMP_DIR/release-evidence.publication.json"
+run_release_ruby "$RELEASE_TOOL" publication-tag "$RELEASE_TAG" "$PUBLICATION_MANIFEST"
+REVISION="$("$RELEASE_GIT" -C "$ROOT_DIR" rev-parse HEAD)"
 
 require_command awk "to extract and format release notes"
 require_command sed "to format release notes"
 require_command hdiutil "to inspect the release disk image"
 require_command plutil "to read release metadata"
 require_command stat "to measure the release disk image"
+require_command swift "to resolve the verified Sparkle signing tool"
+require_command tar "to extract exact revision source"
 
-if [ ! -f "$CHANGELOG_PATH" ]; then
-  echo "Error: Changelog not found at $CHANGELOG_PATH." >&2
-  exit 1
-fi
 if [ ! -f "$DMG_PATH" ]; then
   echo "Error: DMG not found at $DMG_PATH." >&2
   exit 1
 fi
-
-if [ -z "$SIGN_UPDATE" ]; then
-  while IFS= read -r candidate; do
-    SIGN_UPDATE="$candidate"
-    break
-  done < <(find "$ROOT_DIR/.build/artifacts" -type f -path '*/bin/sign_update' -perm -111 -print 2>/dev/null | LC_ALL=C sort)
-fi
-if [ -z "$SIGN_UPDATE" ] || [ ! -x "$SIGN_UPDATE" ]; then
-  echo "Error: Sparkle sign_update was not found under $ROOT_DIR/.build/artifacts." >&2
-  echo "Set SIGN_UPDATE to the executable path if Sparkle is built elsewhere." >&2
+if [ ! -f "$DSYM_BINARY" ]; then
+  echo "Error: dSYM binary not found at $DSYM_BINARY." >&2
   exit 1
 fi
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/waves-appcast.XXXXXX")"
-MOUNT_POINT="$TMP_DIR/mount"
-MOUNTED=0
+DMG_PATH="$(run_release_ruby "$RELEASE_TOOL" private-stage-file "$DMG_PATH" "$TMP_DIR" Waves.dmg)"
+DSYM_BINARY="$(run_release_ruby "$RELEASE_TOOL" private-stage-file "$DSYM_BINARY" "$TMP_DIR" Waves.dSYM)"
+if [ -e "$OUTPUT_PATH" ] || [ -L "$OUTPUT_PATH" ]; then
+  EXISTING_APPCAST=1
+  SOURCE_APPCAST="$(run_release_ruby "$RELEASE_TOOL" private-stage-file "$OUTPUT_PATH" "$TMP_DIR" source-appcast.xml)"
+else
+  EXISTING_APPCAST=0
+  SOURCE_APPCAST="$TMP_DIR/source-appcast.xml"
+fi
 
-cleanup() {
-  if [ "$MOUNTED" -eq 1 ]; then
-    hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
-  fi
-  rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT
+SIGNER_ARCHIVE="$TMP_DIR/source.tar"
+SIGNER_SOURCE="$TMP_DIR/source"
+SIGNER_SCRATCH="$TMP_DIR/swiftpm"
+SIGNER_IDENTITY="$TMP_DIR/source-identity.json"
+mkdir -p "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
+chmod 700 "$SIGNER_SOURCE" "$SIGNER_SCRATCH"
+run_release_ruby "$RELEASE_TOOL" source-identity "$REVISION" "$SIGNER_ARCHIVE" >"$SIGNER_IDENTITY"
+tar -xf "$SIGNER_ARCHIVE" -C "$SIGNER_SOURCE"
+CHANGELOG_PATH="$SIGNER_SOURCE/CHANGELOG.md"
+if [ ! -f "$CHANGELOG_PATH" ]; then
+  echo "Error: Exact-revision changelog not found at $CHANGELOG_PATH." >&2
+  exit 1
+fi
 
 RELEASE_NOTES_MD="$TMP_DIR/release-notes.md"
 RELEASE_NOTES_HTML="$TMP_DIR/release-notes.html"
 NEW_ITEM="$TMP_DIR/item.xml"
-SOURCE_APPCAST="$TMP_DIR/source-appcast.xml"
 RENDERED_APPCAST="$TMP_DIR/appcast.xml"
 
 awk -v version="$VERSION" '
@@ -201,7 +287,7 @@ awk '
 ' "$RELEASE_NOTES_MD" | sed -E 's/\*\*([^*]+)\*\*/<strong>\1<\/strong>/g' >"$RELEASE_NOTES_HTML"
 
 mkdir -p "$MOUNT_POINT"
-hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null
+/usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null
 MOUNTED=1
 INFO_PLIST="$MOUNT_POINT/Waves.app/Contents/Info.plist"
 if [ ! -f "$INFO_PLIST" ]; then
@@ -210,6 +296,7 @@ if [ ! -f "$INFO_PLIST" ]; then
 fi
 SHORT_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$INFO_PLIST")"
 BUILD_NUMBER="$(plutil -extract CFBundleVersion raw -o - "$INFO_PLIST")"
+PACKAGED_SPARKLE_PUBLIC_KEY="$(plutil -extract SUPublicEDKey raw -o - "$INFO_PLIST")"
 if [ "$SHORT_VERSION" != "$VERSION" ]; then
   echo "Error: $DMG_PATH contains version $SHORT_VERSION; expected $VERSION." >&2
   exit 1
@@ -218,7 +305,14 @@ if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
   echo "Error: $DMG_PATH contains invalid build number $BUILD_NUMBER." >&2
   exit 1
 fi
-hdiutil detach "$MOUNT_POINT" -quiet
+if [ "$BUILD_NUMBER" != "$CANONICAL_BUILD" ]; then
+  echo "Error: $DMG_PATH contains build $BUILD_NUMBER; canonical release build is $CANONICAL_BUILD." >&2
+  exit 1
+fi
+run_release_ruby "$RELEASE_TOOL" verify-release-artifacts \
+  "$PUBLICATION_MANIFEST" "$MOUNT_POINT/Waves.app" "$DMG_PATH" "$DSYM_BINARY" \
+  "$SIGNER_IDENTITY"
+/usr/bin/hdiutil detach "$MOUNT_POINT" -quiet
 MOUNTED=0
 
 # Bind the bytes we are about to sign to the bytes that were published. Without
@@ -234,6 +328,9 @@ if [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
   exit 2
 fi
 ACTUAL_SHA256="$(shasum -a 256 "$DMG_PATH" | cut -d ' ' -f 1)"
+SEALED_SHA256="$(run_release_ruby -rjson -e '
+  puts JSON.parse(File.read(ARGV.fetch(0))).fetch("package").fetch("hashes").fetch("dmg")
+' "$PUBLICATION_MANIFEST")"
 if [ "$(printf '%s' "$ACTUAL_SHA256" | tr 'A-F' 'a-f')" \
      != "$(printf '%s' "$EXPECTED_SHA256" | tr 'A-F' 'a-f')" ]; then
   echo "Error: $DMG_PATH has sha256 $ACTUAL_SHA256; expected $EXPECTED_SHA256." >&2
@@ -241,22 +338,38 @@ if [ "$(printf '%s' "$ACTUAL_SHA256" | tr 'A-F' 'a-f')" \
   echo "       appcast whose signature does not match what users download." >&2
   exit 1
 fi
+if [ "$ACTUAL_SHA256" != "$SEALED_SHA256" ]; then
+  echo "Error: $DMG_PATH does not match the DMG hash in sealed publication evidence." >&2
+  exit 1
+fi
 
 # Sparkle compares <sparkle:version> numerically, so a build number that is not
 # strictly greater than every published one is silently never offered.
-if [ -f "$OUTPUT_PATH" ]; then
+if [ "$EXISTING_APPCAST" -eq 1 ]; then
   HIGHEST_PUBLISHED="$(sed -n 's/.*<sparkle:version>\([0-9][0-9]*\)<\/sparkle:version>.*/\1/p' \
-    "$OUTPUT_PATH" | sort -n | tail -1)"
+    "$SOURCE_APPCAST" | sort -n | tail -1)"
   if [ -n "$HIGHEST_PUBLISHED" ] && [ "$BUILD_NUMBER" -le "$HIGHEST_PUBLISHED" ]; then
     echo "Error: build $BUILD_NUMBER is not greater than published build $HIGHEST_PUBLISHED." >&2
-    echo "       Sparkle would never offer this update. Bump APP_BUILD in" >&2
-    echo "       script/build_and_run.sh and RELEASE_BUILD in the release workflow." >&2
+    echo "       Sparkle would never offer this update. Bump build in" >&2
+    echo "       release/metadata.json before producing another candidate." >&2
     exit 1
   fi
 fi
 
+RESOLVED_BEFORE="$(shasum -a 256 "$SIGNER_SOURCE/Package.resolved" | cut -d ' ' -f 1)"
+"$TRUSTED_SWIFT" package \
+  --package-path "$SIGNER_SOURCE" \
+  --scratch-path "$SIGNER_SCRATCH" \
+  --only-use-versions-from-resolved-file \
+  resolve
+RESOLVED_AFTER="$(shasum -a 256 "$SIGNER_SOURCE/Package.resolved" | cut -d ' ' -f 1)"
+if [ "$RESOLVED_AFTER" != "$RESOLVED_BEFORE" ]; then
+  echo "Error: SwiftPM changed Package.resolved while preparing sign_update." >&2
+  exit 1
+fi
 DMG_LENGTH="$(stat -f '%z' "$DMG_PATH")"
-ED_SIGNATURE="$("$SIGN_UPDATE" -p "$DMG_PATH")"
+ED_SIGNATURE="$(run_release_ruby "$RELEASE_TOOL" sparkle-sign-and-verify \
+  "$SIGNER_SCRATCH" "$DMG_PATH" "$PACKAGED_SPARKLE_PUBLIC_KEY")"
 if [[ ! "$DMG_LENGTH" =~ ^[0-9]+$ ]]; then
   echo "Error: Could not determine the byte length of $DMG_PATH." >&2
   exit 1
@@ -279,9 +392,7 @@ fi
   echo '    </item>'
 } >"$NEW_ITEM"
 
-if [ -f "$OUTPUT_PATH" ]; then
-  cp "$OUTPUT_PATH" "$SOURCE_APPCAST"
-else
+if [ "$EXISTING_APPCAST" -eq 0 ]; then
   cat >"$SOURCE_APPCAST" <<'APPCAST'
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
@@ -345,5 +456,5 @@ if ! awk -v version="$VERSION" -v item_path="$NEW_ITEM" '
 fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
-cp "$RENDERED_APPCAST" "$OUTPUT_PATH"
+run_release_ruby "$RELEASE_TOOL" private-publish-file "$RENDERED_APPCAST" "$OUTPUT_PATH" >/dev/null
 printf 'Wrote %s for Waves %s (build %s).\n' "$OUTPUT_PATH" "$VERSION" "$BUILD_NUMBER"

@@ -20,6 +20,10 @@ enum ControlProtocol {
   /// tiny; anything approaching this is either a bug or an attempt to exhaust
   /// memory. Icon *responses* can be larger — this bounds input only.
   static let maximumLineBytes = 64 * 1024
+
+  /// A slow control surface cannot retain unbounded replies. This includes the
+  /// unwritten tail of a partially written frame.
+  static let maximumQueuedOutputBytes = 2 * 1024 * 1024
 }
 
 // MARK: - Requests
@@ -92,7 +96,7 @@ enum ControlError: String, Codable, Equatable, Sendable {
     case .rateLimited:
       "Too many commands. Slow down."
     case .notPermitted:
-      "External control is turned off. Turn it on in Waves \u{25B8} Settings \u{25B8} Shortcuts \u{25B8} Automation."
+      "External control is turned off. Turn it on in Waves \u{25B8} Settings \u{25B8} Shortcuts & Automation."
     }
   }
 }
@@ -147,7 +151,7 @@ struct ControlResponse: Codable, Equatable, Sendable {
 }
 
 /// Unsolicited pushes, sent only to subscribed connections.
-enum ControlEvent: String, Codable, Equatable, Sendable {
+enum ControlEvent: String, Codable, CaseIterable, Equatable, Sendable {
   /// One app's state moved — mute, volume, or whether it is live.
   case appChanged = "app-changed"
   /// The roster itself changed: an app launched, quit, or was excluded. The
@@ -177,21 +181,27 @@ struct ControlCodec {
   /// correctly will not recover, and buffering more would be the memory
   /// exhaustion the cap exists to prevent.
   mutating func append(_ data: Data) throws -> [Data] {
-    guard buffer.count + data.count <= ControlProtocol.maximumLineBytes else {
-      throw ControlCodecError.lineTooLong
-    }
     buffer.append(data)
 
     var lines: [Data] = []
-    while let newline = buffer.firstIndex(of: 0x0A) {
-      let line = buffer[buffer.startIndex..<newline]
-      buffer = buffer[buffer.index(after: newline)...]
+    var lineStart = buffer.startIndex
+    while let newline = buffer[lineStart...].firstIndex(of: 0x0A) {
+      let line = buffer[lineStart..<newline]
+      guard line.count <= ControlProtocol.maximumLineBytes else {
+        throw ControlCodecError.lineTooLong
+      }
       // Tolerate CRLF and skip blank keepalive lines rather than erroring.
       var trimmed = Data(line)
       if trimmed.last == 0x0D { trimmed.removeLast() }
       if !trimmed.isEmpty { lines.append(trimmed) }
+      lineStart = buffer.index(after: newline)
     }
-    buffer = Data(buffer)
+
+    let tail = buffer[lineStart...]
+    guard tail.count <= ControlProtocol.maximumLineBytes else {
+      throw ControlCodecError.lineTooLong
+    }
+    buffer = Data(tail)
     return lines
   }
 

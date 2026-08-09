@@ -1,0 +1,189 @@
+import Foundation
+import WavesAudioCore
+
+struct AdaptiveMixAppInput: Sendable {
+  let app: AudioApp
+  let policy: AdaptiveAppPolicy
+  let levels: AdaptiveAnalysisLevels?
+  let isFrontmost: Bool
+}
+
+struct AdaptiveMixPassInput: Sendable {
+  let mode: AdaptiveMixMode
+  let focusMode: AdaptiveFocusMode
+  let apps: [AdaptiveMixAppInput]
+}
+
+struct AdaptiveMixPassOutput: Equatable, Sendable {
+  let didWork: Bool
+  let elapsed: TimeInterval
+  let visibleGains: [String: Float]
+  let backendGains: [String: Float]?
+}
+
+struct AdaptiveMixCoordinatorLifecycleSnapshot: Equatable, Sendable {
+  let hasLoop: Bool
+  let publishedGainCount: Int
+
+  static let idle = AdaptiveMixCoordinatorLifecycleSnapshot(
+    hasLoop: false,
+    publishedGainCount: 0
+  )
+}
+
+/// Owns adaptive policy history, gain-write deduplication, and the one adaptive
+/// loop task. AppStore builds each pass input and publishes the typed output.
+@MainActor
+final class AdaptiveMixCoordinator {
+  typealias MonotonicClock = @MainActor @Sendable () -> TimeInterval
+
+  private var policyEngine = AdaptivePolicyEngine()
+  private var lastPublishedGains: [String: Float] = [:]
+  private var republishCountdown = 0
+  private let republishPasses: Int
+  private let now: MonotonicClock
+  private var initialElapsed: TimeInterval
+  private var lastAnalysisTime: TimeInterval?
+  private var loopTask: Task<Void, Never>?
+  private var loopToken: UUID?
+  private var isShutDown = false
+
+  init(
+    republishPasses: Int = 20,
+    initialElapsed: TimeInterval = 0.1,
+    now: @escaping MonotonicClock = { ProcessInfo.processInfo.systemUptime }
+  ) {
+    self.republishPasses = max(1, republishPasses)
+    self.initialElapsed = max(0, initialElapsed)
+    self.now = now
+  }
+
+  var lifecycleSnapshot: AdaptiveMixCoordinatorLifecycleSnapshot {
+    AdaptiveMixCoordinatorLifecycleSnapshot(
+      hasLoop: loopTask != nil,
+      publishedGainCount: lastPublishedGains.count
+    )
+  }
+
+  func evaluate(_ input: AdaptiveMixPassInput) -> AdaptiveMixPassOutput {
+    let currentTime = now()
+    let elapsed = lastAnalysisTime.map { max(0, currentTime - $0) } ?? initialElapsed
+    lastAnalysisTime = currentTime
+    let hasManagedRoute = input.apps.contains { $0.app.routingState == .managed }
+    guard hasManagedRoute else {
+      let needsReset = !lastPublishedGains.isEmpty
+      lastPublishedGains = [:]
+      republishCountdown = 0
+      policyEngine.reset()
+      return AdaptiveMixPassOutput(
+        didWork: false,
+        elapsed: elapsed,
+        visibleGains: [:],
+        backendGains: needsReset ? [:] : nil
+      )
+    }
+
+    policyEngine.usesLoudnessCorrection = input.mode.usesLoudnessBalance
+    policyEngine.focusMode = input.focusMode
+    let gains = policyEngine.update(
+      inputs: input.apps.map { item in
+        AdaptiveMixInput(
+          appID: item.app.logicalID,
+          policy: item.policy,
+          isManaged: item.app.routingState == .managed && item.levels != nil,
+          isMuted: item.app.isMuted,
+          rms: item.levels?.rms ?? 0,
+          voiceBandEnergy: item.levels?.voiceBandEnergy ?? 0,
+          isFrontmost: item.isFrontmost
+        )
+      },
+      elapsed: elapsed
+    )
+    let visible = gains.filter { abs($0.value) >= 0.05 }
+    republishCountdown -= 1
+    let shouldPublish = gains != lastPublishedGains || republishCountdown <= 0
+    if shouldPublish {
+      lastPublishedGains = gains
+      republishCountdown = republishPasses
+    }
+    return AdaptiveMixPassOutput(
+      didWork: true,
+      elapsed: elapsed,
+      visibleGains: visible,
+      backendGains: shouldPublish ? gains : nil
+    )
+  }
+
+  func restart(
+    isEnabled: Bool,
+    activeInterval: Duration,
+    idleInterval: Duration,
+    performPass: @escaping @MainActor @Sendable () async -> Bool,
+    reset: @escaping @MainActor @Sendable () async -> Void
+  ) {
+    loopTask?.cancel()
+    loopTask = nil
+    let token = UUID()
+    loopToken = token
+    initialElapsed = Self.seconds(in: activeInterval)
+    lastAnalysisTime = nil
+    policyEngine.reset()
+    lastPublishedGains = [:]
+    republishCountdown = 0
+    guard !isShutDown else {
+      loopToken = nil
+      return
+    }
+    guard isEnabled else {
+      loopTask = Task { @MainActor [weak self] in
+        await reset()
+        guard let self, self.loopToken == token else { return }
+        self.loopTask = nil
+        self.loopToken = nil
+      }
+      return
+    }
+    loopTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+      while !Task.isCancelled {
+        let didWork = await performPass()
+        guard !Task.isCancelled else { break }
+        try? await Task.sleep(for: didWork ? activeInterval : idleInterval)
+      }
+      guard self.loopToken == token else { return }
+      await reset()
+      guard self.loopToken == token else { return }
+      self.loopTask = nil
+      self.loopToken = nil
+    }
+  }
+
+  func cancel() -> Task<Void, Never>? {
+    let task = loopTask
+    task?.cancel()
+    loopTask = nil
+    loopToken = nil
+    lastAnalysisTime = nil
+    return task
+  }
+
+  func drain() async {
+    await loopTask?.value
+  }
+
+  func shutdown() -> Task<Void, Never>? {
+    isShutDown = true
+    policyEngine.reset()
+    lastPublishedGains = [:]
+    republishCountdown = 0
+    return cancel()
+  }
+
+  private static func seconds(in duration: Duration) -> TimeInterval {
+    let components = duration.components
+    return max(
+      0,
+      Double(components.seconds) + Double(components.attoseconds) / 1e18
+    )
+  }
+}

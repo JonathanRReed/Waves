@@ -53,6 +53,33 @@ import WavesAudioCore
   }
 }
 
+@Test func codecEnforcesTheLimitPerFrameInsteadOfPerRead() throws {
+  var codec = ControlCodec()
+  let validPrefix = Data(repeating: 0x41, count: ControlProtocol.maximumLineBytes - 1)
+  #expect(try codec.append(validPrefix).isEmpty)
+
+  // A kernel read may complete the current near-limit frame and include the
+  // next frame. The aggregate read buffer is larger than one frame, but neither
+  // individual frame is oversized.
+  let lines = try codec.append(Data("\n{}\n".utf8))
+  #expect(lines == [validPrefix, Data("{}".utf8)])
+}
+
+@Test func codecRejectsOversizedCompletedFramesAndUnterminatedTails() {
+  var completed = ControlCodec()
+  let oversizedFrame =
+    Data(repeating: 0x41, count: ControlProtocol.maximumLineBytes + 1) + Data("\n{}\n".utf8)
+  #expect(throws: ControlCodecError.lineTooLong) {
+    _ = try completed.append(oversizedFrame)
+  }
+
+  var unterminated = ControlCodec()
+  let oversizedTail = Data(repeating: 0x41, count: ControlProtocol.maximumLineBytes + 1)
+  #expect(throws: ControlCodecError.lineTooLong) {
+    _ = try unterminated.append(oversizedTail)
+  }
+}
+
 @Test func decodingRejectsUnknownCommands() {
   // The command set is closed, so an unknown verb dies at the decoder and never
   // reaches a handler.
@@ -104,7 +131,69 @@ import WavesAudioCore
   }
   // The first-run case has to tell the user where to go, or the plugin looks
   // broken rather than switched off.
-  #expect(ControlError.notPermitted.message.contains("Settings"))
+  #expect(ControlError.notPermitted.message.contains("Settings ▸ Shortcuts & Automation"))
+  #expect(!ControlError.notPermitted.message.contains("Shortcuts ▸ Automation"))
+}
+
+@Test func protocolV1GoldenNamesAndRepresentativeResponsesStayStable() throws {
+  #expect(ControlProtocol.version == 1)
+  #expect(
+    ControlCommand.allCases.map(\.rawValue) == [
+      "hello", "list-apps", "get-icon", "set-volume", "adjust-volume", "set-mute", "toggle-mute",
+      "subscribe", "unsubscribe",
+    ])
+  #expect(ControlEvent.allCases.map(\.rawValue) == ["app-changed", "apps-changed"])
+  #expect(
+    [
+      ControlError.unsupportedProtocol, .malformedRequest, .missingParameter, .unknownApp, .appExcluded,
+      .audioNotRunning, .rateLimited, .notPermitted,
+    ].map(\.rawValue) == [
+      "unsupported-protocol", "malformed-request", "missing-parameter", "unknown-app", "app-excluded",
+      "audio-not-running", "rate-limited", "not-permitted",
+    ])
+
+  let hello = try #require(
+    ControlCodec.encode(
+      ControlResponse(
+        id: 7, ok: true, protocolVersion: 1, appVersion: "1.5.0", build: "13")))
+  let failure = try #require(ControlCodec.encode(.failure(id: 8, .notPermitted)))
+  #expect(String(decoding: hello, as: UTF8.self).contains(#""protocol":1"#))
+  #expect(String(decoding: failure, as: UTF8.self).contains(#""error":"not-permitted"#))
+}
+
+@Test func writePumpRetainsEveryByteAcrossPartialWriteAndWouldBlock() {
+  var pump = ControlWritePump()
+  let acceptedFirst = pump.enqueue(Data("abcdef".utf8))
+  let acceptedSecond = pump.enqueue(Data("gh".utf8))
+  #expect(acceptedFirst)
+  #expect(acceptedSecond)
+
+  var attempts = 0
+  var observed = Data()
+  let first = pump.drain { frame, offset in
+    attempts += 1
+    guard attempts == 1 else { return .wouldBlock }
+    observed.append(frame.dropFirst(offset).prefix(2))
+    return .written(2)
+  }
+  #expect(first == .blocked)
+  #expect(pump.queuedByteCount == 6)
+
+  let second = pump.drain { frame, offset in
+    observed.append(frame.dropFirst(offset))
+    return .written(frame.count - offset)
+  }
+  #expect(second == .empty)
+  #expect(observed == Data("abcdefgh".utf8))
+  #expect(pump.queuedByteCount == 0)
+}
+
+@Test func writePumpClosesInsteadOfExceedingTheTwoMiBQueueLimit() {
+  var pump = ControlWritePump()
+  let acceptedAtLimit = pump.enqueue(Data(repeating: 1, count: ControlProtocol.maximumQueuedOutputBytes))
+  let acceptedPastLimit = pump.enqueue(Data([2]))
+  #expect(acceptedAtLimit)
+  #expect(!acceptedPastLimit)
 }
 
 // MARK: - Rate limiting

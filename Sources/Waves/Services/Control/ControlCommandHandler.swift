@@ -13,6 +13,12 @@ import WavesAudioCore
 @MainActor
 struct ControlCommandHandler {
   let store: AppStore
+  var testingPreflightFailure: ((ControlRequest) -> ControlError?)? = nil
+
+  struct HandlingResult {
+    let response: ControlResponse
+    let session: Session
+  }
 
   /// One connection's session state. Held by the connection, passed in, so the
   /// handler itself stays stateless and testable.
@@ -21,30 +27,40 @@ struct ControlCommandHandler {
     var isSubscribed = false
   }
 
-  func handle(_ request: ControlRequest, session: inout Session) -> ControlResponse {
+  func handle(_ request: ControlRequest, session: Session) async -> HandlingResult {
+    var session = session
+    if let error = testingPreflightFailure?(request) {
+      return HandlingResult(response: .failure(id: request.id, error), session: session)
+    }
+    guard store.preferences.enableExternalControl else {
+      return HandlingResult(response: .failure(id: request.id, .notPermitted), session: session)
+    }
+
     // The handshake is the only command allowed before one has happened, so a
     // client cannot skip version negotiation and then be surprised by a
     // response shape it does not understand.
     guard request.cmd == .hello || session.didHandshake else {
-      return .failure(id: request.id, .malformedRequest)
+      return HandlingResult(response: .failure(id: request.id, .malformedRequest), session: session)
     }
 
+    let response: ControlResponse
     switch request.cmd {
     case .hello:
-      return handleHello(request, session: &session)
+      response = handleHello(request, session: &session)
     case .subscribe:
       session.isSubscribed = true
-      return .success(id: request.id)
+      response = .success(id: request.id)
     case .unsubscribe:
       session.isSubscribed = false
-      return .success(id: request.id)
+      response = .success(id: request.id)
     case .listApps:
-      return handleListApps(request)
+      response = handleListApps(request)
     case .getIcon:
-      return handleGetIcon(request)
+      response = await handleGetIcon(request)
     case .setVolume, .adjustVolume, .setMute, .toggleMute:
-      return handleMutation(request)
+      response = handleMutation(request)
     }
+    return HandlingResult(response: response, session: session)
   }
 
   private func handleHello(_ request: ControlRequest, session: inout Session) -> ControlResponse {
@@ -69,7 +85,7 @@ struct ControlCommandHandler {
     return response
   }
 
-  private func handleGetIcon(_ request: ControlRequest) -> ControlResponse {
+  private func handleGetIcon(_ request: ControlRequest) async -> ControlResponse {
     guard let appID = request.app else {
       return .failure(id: request.id, .missingParameter)
     }
@@ -78,7 +94,11 @@ struct ControlCommandHandler {
     }
     var response = ControlResponse.success(id: request.id)
     response.app = appID
-    response.icon = app.iconTIFFData.flatMap { Self.base64PNG($0) }
+    if let iconData = app.iconTIFFData {
+      response.icon = await Task.detached(priority: .utility) {
+        ControlIconEncoder.base64PNG(iconData)
+      }.value
+    }
     return response
   }
 
@@ -139,25 +159,35 @@ struct ControlCommandHandler {
     return response
   }
 
-  /// Re-encodes an app icon as base64 PNG at a size a Stream Deck key can use.
-  ///
-  /// Deliberately small: the key art is 144x144 at 2x, so sending anything
-  /// larger would just be bytes the client throws away.
-  static func base64PNG(_ tiffData: Data, side: CGFloat = 144) -> String? {
+}
+
+/// Re-encodes captured icon data off the main actor. The source `Data` is
+/// Sendable and has already been detached from NSWorkspace/AppKit state.
+enum ControlIconEncoder {
+  static let maximumEncodedBytes = 512 * 1024
+
+  nonisolated static func boundedBase64PNG(_ encoded: String?) -> String? {
+    guard let encoded, encoded.utf8.count <= maximumEncodedBytes else { return nil }
+    return encoded
+  }
+
+  nonisolated static func base64PNG(_ tiffData: Data, side: CGFloat = 144) -> String? {
     guard let image = NSImage(data: tiffData) else { return nil }
     let target = NSSize(width: side, height: side)
-    guard let rep = NSBitmapImageRep(
-      bitmapDataPlanes: nil,
-      pixelsWide: Int(side),
-      pixelsHigh: Int(side),
-      bitsPerSample: 8,
-      samplesPerPixel: 4,
-      hasAlpha: true,
-      isPlanar: false,
-      colorSpaceName: .deviceRGB,
-      bytesPerRow: 0,
-      bitsPerPixel: 0
-    ) else { return nil }
+    guard
+      let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: Int(side),
+        pixelsHigh: Int(side),
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+      )
+    else { return nil }
 
     NSGraphicsContext.saveGraphicsState()
     defer { NSGraphicsContext.restoreGraphicsState() }
@@ -166,6 +196,6 @@ struct ControlCommandHandler {
     image.draw(in: NSRect(origin: .zero, size: target))
     context.flushGraphics()
 
-    return rep.representation(using: .png, properties: [:])?.base64EncodedString()
+    return boundedBase64PNG(rep.representation(using: .png, properties: [:])?.base64EncodedString())
   }
 }

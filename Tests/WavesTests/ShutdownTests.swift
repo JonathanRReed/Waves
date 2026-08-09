@@ -99,23 +99,39 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func shutdownDeduplicatesEquivalentSaveAndFlushFailuresInStableOrder() async {
+  let fixture = await makeShutdownFixture(initialStartupState: .running)
+  fixture.preferencesStore.failSaves = true
+  fixture.preferencesStore.failFlushes = true
+
+  let result = await fixture.store.shutdown()
+
+  #expect(result.completion == .degraded)
+  #expect(result.persistenceDegradations.count == 1)
+  #expect(result.persistenceDegradations.first?.contains("settings") == true)
+  #expect(result.persistenceDegradations.first?.isEmpty == false)
+}
+
+@MainActor
 @Test func terminationTimeoutDecisionReturnsWithoutWaitingForSlowCleanup() async {
+  let gate = AsyncShutdownGate()
   let outcome = await AppTerminationTimeoutDecision.awaitShutdown(
     timeout: .milliseconds(5)
   ) {
-    try? await Task.sleep(for: .milliseconds(50))
+    await gate.wait()
     return AppShutdownResult()
   }
 
   #expect(outcome == .timedOut)
-  try? await Task.sleep(for: .milliseconds(60))
+  await gate.release()
 }
 
 @MainActor
-@Test func terminationCoordinatorRepliesExactlyOnceForEveryOutcome() async {
+@Test(.timeLimit(.minutes(1)))
+func terminationCoordinatorRepliesExactlyOnceForEveryOutcome() async {
   await verifyTerminationCoordinator(
     expected: .clean(AppShutdownResult()),
-    timeout: .seconds(5)
+    timeout: .seconds(30)
   ) {
     AppShutdownResult()
   }
@@ -123,19 +139,91 @@ import WavesAudioCore
   let degraded = AppShutdownResult(persistenceDegradations: ["settings: injected failure"])
   await verifyTerminationCoordinator(
     expected: .degraded(degraded),
-    timeout: .seconds(5)
+    timeout: .seconds(30)
   ) {
     degraded
   }
 
+  let timeoutGate = AsyncShutdownGate()
   await verifyTerminationCoordinator(
     expected: .timedOut,
     timeout: .milliseconds(5)
   ) {
-    try? await Task.sleep(for: .milliseconds(50))
+    await timeoutGate.wait()
     return AppShutdownResult()
   }
-  try? await Task.sleep(for: .milliseconds(60))
+  await timeoutGate.release()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func productionTerminationCoordinatorTimesOutWithinTwoHundredFiftyMilliseconds() async {
+  #expect(AppTerminationCoordinator.productionTimeout == .milliseconds(250))
+  let coordinator = AppTerminationCoordinator()
+  let recorder = TerminationReplyRecorder()
+  let completion = TerminationOutcomeProbe()
+  let gate = AsyncShutdownGate()
+
+  #expect(
+    coordinator.requestTermination(
+      shutdown: {
+        await gate.wait()
+        return AppShutdownResult()
+      },
+      report: {
+        recorder.outcomes.append($0)
+        completion.record($0)
+      },
+      reply: { recorder.replies.append($0) }
+    ) == .terminateLater
+  )
+
+  #expect(await completion.wait() == .timedOut)
+
+  #expect(coordinator.completedOutcome == .timedOut)
+  #expect(recorder.outcomes == [.timedOut])
+  #expect(recorder.replies == [true])
+  await gate.release()
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func timedOutTerminationPersistsTruthBeforeReplyAndRepliesOnce() async throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("waves-timeout-report-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let reportStore = ShutdownReportStore(directory: directory)
+  let coordinator = AppTerminationCoordinator(timeout: .milliseconds(5))
+  let gate = AsyncShutdownGate()
+  let completion = TerminationOutcomeProbe()
+  var replyCount = 0
+  var reportSeenAtReply: ShutdownReport?
+
+  #expect(
+    coordinator.requestTermination(
+      shutdown: {
+        await gate.wait()
+        return AppShutdownResult()
+      },
+      report: {
+        reportStore.save(ShutdownReport(outcome: $0))
+        completion.record($0)
+      },
+      reply: { _ in
+        replyCount += 1
+        reportSeenAtReply = reportStore.load()
+      }
+    ) == .terminateLater
+  )
+
+  #expect(await completion.wait() == .timedOut)
+
+  #expect(coordinator.completedOutcome == .timedOut)
+  #expect(replyCount == 1)
+  #expect(reportSeenAtReply?.completion == "timedOut")
+  await gate.release()
+  await Task.yield()
+  #expect(replyCount == 1)
 }
 
 @Test func cleanupAggregationFiltersSuccessAndPreservesFailureOrder() {
@@ -153,6 +241,13 @@ import WavesAudioCore
   #expect(degradations.map(\.nativeStatus) == [-50, -60])
   #expect(BackendShutdownResult(checkedDegradations: []).completion == .clean)
   #expect(BackendShutdownResult(checkedDegradations: degradations).completion == .degraded)
+}
+
+@Test func terminationOutcomeProbeCancellationCannotStrandTheTestTask() async {
+  let probe = TerminationOutcomeProbe()
+  let task = Task { await probe.wait() }
+  task.cancel()
+  #expect(await task.value == nil)
 }
 
 @Test func controllerCleanupSeamAndBackendShutdownDoNotDuplicateDegradations() async {
@@ -207,10 +302,14 @@ private func verifyTerminationCoordinator(
 ) async {
   let coordinator = AppTerminationCoordinator(timeout: timeout)
   let recorder = TerminationReplyRecorder()
+  let completion = TerminationOutcomeProbe()
 
   let firstDecision = coordinator.requestTermination(
     shutdown: shutdown,
-    report: { recorder.outcomes.append($0) },
+    report: {
+      recorder.outcomes.append($0)
+      completion.record($0)
+    },
     reply: { recorder.replies.append($0) }
   )
   let repeatedDecision = coordinator.requestTermination(
@@ -224,7 +323,7 @@ private func verifyTerminationCoordinator(
 
   #expect(firstDecision == .terminateLater)
   #expect(repeatedDecision == .terminateLater)
-  await waitUntil { coordinator.completedOutcome != nil }
+  #expect(await completion.wait() == expected)
   #expect(coordinator.completedOutcome == expected)
   #expect(recorder.outcomes == [expected])
   #expect(recorder.replies == [true])
@@ -244,13 +343,35 @@ private func verifyTerminationCoordinator(
 }
 
 @MainActor
+@discardableResult
 private func waitUntil(
-  attempts: Int = 2_000,
+  timeout: Duration = .seconds(5),
   _ condition: @MainActor () -> Bool
-) async {
-  for _ in 0..<attempts {
-    if condition() { return }
+) async -> Bool {
+  let deadline = ContinuousClock.now.advanced(by: timeout)
+  while ContinuousClock.now < deadline {
+    if condition() { return true }
     await Task.yield()
+  }
+  return condition()
+}
+
+private actor AsyncShutdownGate {
+  private var isReleased = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func wait() async {
+    guard !isReleased else { return }
+    await withCheckedContinuation { continuation in
+      waiters.append(continuation)
+    }
+  }
+
+  func release() {
+    isReleased = true
+    let current = waiters
+    waiters.removeAll()
+    for waiter in current { waiter.resume() }
   }
 }
 
@@ -427,7 +548,10 @@ private actor ShutdownBackend: AudioControlBackend {
     recorder.append("backend.defaultDevice")
   }
   func setOutputDevice(uid: String?, forAppID appID: String) async throws {}
-  func releaseControllers(forBundleID bundleID: String?, pid: Int32, clearMuteState: Bool) async {}
+  func releaseControllers(
+    forRuntimeIdentity runtimeIdentity: AppRuntimeIdentity,
+    clearMuteState: Bool
+  ) async {}
   func audioLevels() async -> [String: AudioLevels] { [:] }
 
   func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult {
@@ -480,6 +604,7 @@ private final class ShutdownPreferencesStore: PreferencesPersisting, @unchecked 
   private var saveResume: CheckedContinuation<Void, Never>?
   private var saveWaiters: [CheckedContinuation<Void, Never>] = []
   var failSaves = false
+  var failFlushes = false
 
   init(value: UserPreferences, recorder: ShutdownRecorder) {
     self.storedValue = value
@@ -537,7 +662,10 @@ private final class ShutdownPreferencesStore: PreferencesPersisting, @unchecked 
     recorder.append("preferences.save.end")
   }
 
-  func flush() async throws { recorder.append("preferences.flush") }
+  func flush() async throws {
+    recorder.append("preferences.flush")
+    if failFlushes { throw ShutdownTestError.persistence }
+  }
   func consumeDidRecoverFromCorruptFile() -> Bool { false }
 }
 
@@ -591,6 +719,53 @@ private final class TerminationReplyRecorder {
   var outcomes: [AppTerminationOutcome] = []
   var replies: [Bool] = []
   var unexpectedShutdownStarts = 0
+}
+
+private final class TerminationOutcomeProbe: @unchecked Sendable {
+  private let lock = NSLock()
+  private var outcome: AppTerminationOutcome?
+  private var waiter:
+    (
+      id: UUID,
+      continuation: CheckedContinuation<AppTerminationOutcome?, Never>
+    )?
+
+  func record(_ outcome: AppTerminationOutcome) {
+    let continuation = lock.withLock { () -> CheckedContinuation<AppTerminationOutcome?, Never>? in
+      self.outcome = outcome
+      defer { waiter = nil }
+      return waiter?.continuation
+    }
+    continuation?.resume(returning: outcome)
+  }
+
+  func wait() async -> AppTerminationOutcome? {
+    let id = UUID()
+    return await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        let immediateResult = lock.withLock {
+          () -> (
+            isReady: Bool,
+            outcome: AppTerminationOutcome?
+          ) in
+          if let outcome { return (true, outcome) }
+          if Task.isCancelled { return (true, nil) }
+          waiter = (id, continuation)
+          return (false, nil)
+        }
+        if immediateResult.isReady {
+          continuation.resume(returning: immediateResult.outcome)
+        }
+      }
+    } onCancel: {
+      let continuation = lock.withLock { () -> CheckedContinuation<AppTerminationOutcome?, Never>? in
+        guard waiter?.id == id else { return nil }
+        defer { waiter = nil }
+        return waiter?.continuation
+      }
+      continuation?.resume(returning: nil)
+    }
+  }
 }
 
 private final class ShutdownCounter: @unchecked Sendable {
