@@ -416,6 +416,8 @@ prepare_isolated_distribution_build() {
   WAVES_RELEASE_OUTPUT_DIR="$ACTIVE_ISOLATION_ROOT/artifacts"
   mkdir -p "$WAVES_RELEASE_OUTPUT_DIR"
   chmod 700 "$WAVES_RELEASE_OUTPUT_DIR"
+  run_release_ruby "$RELEASE_TOOL" private-stage-file \
+    "$identity_path" "$WAVES_RELEASE_OUTPUT_DIR" release-source-identity.json >/dev/null
   WAVES_RELEASE_SCRATCH_ROOT="$scratch_root"
   ROOT_DIR="$source_root"
   RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
@@ -1486,6 +1488,10 @@ release_check() {
 }
 
 notarize_release() {
+  local submission_receipt_path
+  local submission_id
+  local notary_log_path
+
   if [ -z "$SIGN_IDENTITY" ]; then
     echo "Error: SIGN_IDENTITY must be set to a Developer ID Application identity for notarization." >&2
     exit 2
@@ -1497,7 +1503,27 @@ notarize_release() {
 
   require_command xcrun "for notarytool and stapler"
   release_check
-  run_notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  submission_receipt_path="$ACTIVE_ISOLATION_ROOT/notary-submission.json"
+  notary_log_path="$ACTIVE_ISOLATION_ROOT/notary-log.json"
+  run_notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json \
+    >"$submission_receipt_path"
+  submission_id="$(run_release_ruby -rjson -e '
+    receipt = JSON.parse(File.read(ARGV.fetch(0)))
+    abort "Error: Apple notarization was not accepted." unless receipt["status"] == "Accepted"
+    identifier = receipt["id"]
+    abort "Error: Apple notarization did not return a submission UUID." unless
+      identifier.is_a?(String) && identifier.match?(/\A[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\z/)
+    puts identifier
+  ' "$submission_receipt_path")"
+  run_notarytool log "$submission_id" "$notary_log_path" \
+    --keychain-profile "$NOTARY_PROFILE"
+  run_release_ruby -rjson -e '
+    log = JSON.parse(File.read(ARGV.fetch(0)))
+    abort "Error: Apple notary log does not match the accepted submission." unless
+      log["jobId"] == ARGV.fetch(1) && log["status"] == "Accepted" && log["archiveFilename"] == "Waves.dmg"
+  ' "$notary_log_path" "$submission_id"
+  run_release_ruby "$RELEASE_TOOL" private-stage-file \
+    "$notary_log_path" "$DIST_DIR" notary-log.json >/dev/null
   /usr/bin/xcrun stapler staple "$DMG_PATH"
   /usr/bin/xcrun stapler validate "$DMG_PATH"
 

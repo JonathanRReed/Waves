@@ -1410,8 +1410,12 @@ class ReleaseInfraTest < Minitest::Test
       File.write(File.join(source, "Waves.app/Info.plist"), "current app\n")
       File.write(symbol, "current symbols\n")
       File.write(File.join(source, "Waves.dmg"), "current dmg\n")
+      File.write(File.join(source, "release-source-identity.json"), "current source identity\n")
+      File.write(File.join(source, "notary-log.json"), "current notary log\n")
       File.write(File.join(destination, "Waves.app.dSYM.zip"), "stale symbols\n")
       File.write(File.join(destination, "Waves.dmg.sha256"), "stale checksum\n")
+      File.write(File.join(destination, "release-source-identity.json"), "stale source identity\n")
+      File.write(File.join(destination, "notary-log.json"), "stale notary log\n")
 
       stage.publish_release_artifacts!(source_root: source, destination_root: destination)
 
@@ -1425,7 +1429,27 @@ class ReleaseInfraTest < Minitest::Test
       )
       assert archive_status.success?, archive_error
       assert_equal "current symbols\n", archived_symbols
+      assert_equal(
+        "current source identity\n",
+        File.read(File.join(destination, "release-source-identity.json"))
+      )
+      assert_equal(
+        "current notary log\n",
+        File.read(File.join(destination, "notary-log.json"))
+      )
     end
+  end
+
+  def test_notarized_build_exports_exact_source_identity_and_apple_notary_log
+    source = File.read(File.expand_path("../build_and_run.sh", __dir__))
+
+    assert_includes source,
+      '"$identity_path" "$WAVES_RELEASE_OUTPUT_DIR" release-source-identity.json'
+    assert_includes source,
+      'run_notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json'
+    assert_includes source, 'run_notarytool log "$submission_id" "$notary_log_path"'
+    assert_includes source,
+      '"$notary_log_path" "$DIST_DIR" notary-log.json'
   end
 
   def test_task12d_existing_release_package_is_copied_into_one_private_root_before_validation
@@ -2351,7 +2375,8 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes source, "run_notarytool()"
     assert_includes source, 'HOME="$SIGNING_USER_HOME"'
     assert_includes source, 'run_notarytool history --keychain-profile "$NOTARY_PROFILE"'
-    assert_includes source, 'run_notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait'
+    assert_includes source,
+      'run_notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json'
   end
 
   def test_hosted_quality_gate_uses_the_release_ruby_and_only_a_trusted_apple_toolchain

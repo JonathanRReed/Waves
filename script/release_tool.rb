@@ -987,6 +987,17 @@ module WavesRelease
           source: dmg_checksum,
           destination: File.join(destination_root, "Waves.dmg.sha256")
         )
+        publish_file!(
+          source: File.join(source_root, "release-source-identity.json"),
+          destination: File.join(destination_root, "release-source-identity.json")
+        )
+        notary_log = File.join(source_root, "notary-log.json")
+        if File.exist?(notary_log) || File.symlink?(notary_log)
+          publish_file!(
+            source: notary_log,
+            destination: File.join(destination_root, "notary-log.json")
+          )
+        end
       end
       true
     end

@@ -228,13 +228,18 @@ NOTARY_PROFILE="waves-notary" \
 ./script/build_and_run.sh --notarize
 ```
 
-Capture the exact source identity for the evidence input from the same clean
-revision. This command does not build or sign:
+The notarized build publishes the exact archive-backed source identity, Apple
+notarization log, DMG checksum, and zipped dSYM beside the finalized app and
+DMG. Confirm those generated files describe the same candidate before building
+the evidence input:
 
 ```bash
-/usr/bin/ruby --disable-gems script/release_tool.rb source-identity \
-  "$(./script/release_git rev-parse HEAD)" \
-  > dist/release-source-identity.json
+test "$(/usr/bin/ruby --disable-gems -rjson -e \
+  'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("revision")' \
+  dist/release-source-identity.json)" = "$(./script/release_git rev-parse HEAD)"
+test "$(cut -d ' ' -f 1 dist/Waves.dmg.sha256)" = \
+  "$(shasum -a 256 dist/Waves.dmg | cut -d ' ' -f 1)"
+/usr/bin/unzip -t dist/Waves.app.dSYM.zip
 ```
 
 Task 12 must then assemble the complete evidence input and seal the exact local
