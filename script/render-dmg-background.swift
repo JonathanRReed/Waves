@@ -53,7 +53,7 @@ let labelPlateColor = NSColor(calibratedWhite: 0.88, alpha: 0.94)
 labelPlateColor.setFill()
 for originX in [110.0, 430.0] {
   NSBezierPath(
-    roundedRect: NSRect(x: originX, y: 32, width: 120, height: 38),
+    roundedRect: NSRect(x: originX, y: 81, width: 120, height: 38),
     xRadius: 10,
     yRadius: 10
   ).fill()

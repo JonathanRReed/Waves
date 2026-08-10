@@ -92,7 +92,7 @@ class ReleaseInfraTest < Minitest::Test
                 let bitmap = NSBitmapImageRep(data: data) else {
             exit(2)
           }
-          for point in [NSPoint(x: 170, y: 380), NSPoint(x: 490, y: 380)] {
+          for point in [NSPoint(x: 170, y: 330), NSPoint(x: 490, y: 330)] {
             guard let color = bitmap.colorAt(x: Int(point.x), y: Int(point.y))?.usingColorSpace(.deviceRGB) else {
               exit(3)
             }
