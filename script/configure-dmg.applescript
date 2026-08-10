@@ -24,6 +24,7 @@ on run arguments
     set icon size of icon view options of layoutWindow to 128
     set text size of icon view options of layoutWindow to 14
     set background picture of icon view options of layoutWindow to backgroundFile
+    set position of item ".background" of targetFolder to {590, 80}
     set position of item "Waves.app" of targetFolder to {170, 250}
     set position of item "Applications" of targetFolder to {490, 250}
     update targetFolder without registering applications

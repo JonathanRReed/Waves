@@ -52,6 +52,8 @@ class ReleaseInfraTest < Minitest::Test
                     'set backgroundFile to POSIX file (mountPath & "/.background/Waves.png") as alias'
     assert_includes finder_script,
                     "set background picture of icon view options of layoutWindow to backgroundFile"
+    assert_includes finder_script,
+                    'set position of item ".background" of targetFolder to {590, 80}'
     refute_includes finder_script,
                     'file "Waves.png" of folder ".background" of targetFolder'
   end
