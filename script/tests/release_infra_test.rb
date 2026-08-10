@@ -1397,6 +1397,37 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_release_publication_regenerates_checksum_and_symbol_archive_from_finalized_artifacts
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-release-derivatives") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "dist")
+      symbol = File.join(source, "Waves.app.dSYM/Contents/Resources/DWARF/Waves")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.dirname(symbol))
+      FileUtils.mkdir_p(destination)
+      FileUtils.chmod(0o700, source)
+      File.write(File.join(source, "Waves.app/Info.plist"), "current app\n")
+      File.write(symbol, "current symbols\n")
+      File.write(File.join(source, "Waves.dmg"), "current dmg\n")
+      File.write(File.join(destination, "Waves.app.dSYM.zip"), "stale symbols\n")
+      File.write(File.join(destination, "Waves.dmg.sha256"), "stale checksum\n")
+
+      stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+
+      expected_dmg = Digest::SHA256.file(File.join(source, "Waves.dmg")).hexdigest
+      assert_equal "#{expected_dmg}  Waves.dmg\n", File.read(File.join(destination, "Waves.dmg.sha256"))
+      archived_symbols, archive_error, archive_status = Open3.capture3(
+        "/usr/bin/unzip",
+        "-p",
+        File.join(destination, "Waves.app.dSYM.zip"),
+        "Waves.app.dSYM/Contents/Resources/DWARF/Waves"
+      )
+      assert archive_status.success?, archive_error
+      assert_equal "current symbols\n", archived_symbols
+    end
+  end
+
   def test_task12d_existing_release_package_is_copied_into_one_private_root_before_validation
     stage = WavesRelease::PrivateArtifacts
     Dir.mktmpdir("waves-existing-package") do |root|

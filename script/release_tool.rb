@@ -936,18 +936,58 @@ module WavesRelease
       validate_private_root!(source_root)
       raise Error, "release destination must not be a symbolic link" if File.symlink?(destination_root)
       FileUtils.mkdir_p(destination_root)
-      publish_directory!(
-        source: File.join(source_root, "Waves.app"),
-        destination: File.join(destination_root, "Waves.app")
-      )
-      publish_directory!(
-        source: File.join(source_root, "Waves.app.dSYM"),
-        destination: File.join(destination_root, "Waves.app.dSYM")
-      )
-      publish_file!(
-        source: File.join(source_root, "Waves.dmg"),
-        destination: File.join(destination_root, "Waves.dmg")
-      )
+      Dir.mktmpdir(".waves-release-derivatives-", source_root) do |derivative_root|
+        FileUtils.chmod(0o700, derivative_root)
+        dsym = File.join(source_root, "Waves.app.dSYM")
+        dmg = File.join(source_root, "Waves.dmg")
+        dsym_archive = File.join(derivative_root, "Waves.app.dSYM.zip")
+        dmg_checksum = File.join(derivative_root, "Waves.dmg.sha256")
+        dsym_identity = capture_identity!(path: dsym)
+        with_stable_identity!(path: dsym, identity: dsym_identity) do
+          Validation.run(
+            "/usr/bin/ditto",
+            "-c",
+            "-k",
+            "--sequesterRsrc",
+            "--keepParent",
+            dsym,
+            dsym_archive
+          )
+        end
+        archive_identity = capture_identity!(path: dsym_archive)
+        raise Error, "derived dSYM archive must be a regular file" unless archive_identity["type"] == "file"
+
+        dmg_identity = capture_identity!(path: dmg)
+        dmg_digest = with_stable_identity!(path: dmg, identity: dmg_identity) do
+          Digest::SHA256.file(dmg).hexdigest
+        end
+        File.open(dmg_checksum, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+          file.write("#{dmg_digest}  Waves.dmg\n")
+          file.flush
+          file.fsync
+        end
+
+        publish_directory!(
+          source: File.join(source_root, "Waves.app"),
+          destination: File.join(destination_root, "Waves.app")
+        )
+        publish_directory!(
+          source: dsym,
+          destination: File.join(destination_root, "Waves.app.dSYM")
+        )
+        publish_file!(
+          source: dsym_archive,
+          destination: File.join(destination_root, "Waves.app.dSYM.zip")
+        )
+        publish_file!(
+          source: dmg,
+          destination: File.join(destination_root, "Waves.dmg")
+        )
+        publish_file!(
+          source: dmg_checksum,
+          destination: File.join(destination_root, "Waves.dmg.sha256")
+        )
+      end
       true
     end
 
