@@ -11,10 +11,9 @@ Waves is a native macOS per-app audio mixer. It uses local Core Audio process ta
 
 ## Release status
 
-Version **1.4.4** is the latest published, signed, and notarized release. Version
-**1.5.0 build 13** is in development and is not available from the download or
-Homebrew links below. Its publication remains gated on packaged-app validation,
-signed release evidence, and remote Wave Link plus physical Stream Deck tests.
+Version **1.5.0 build 13** is the latest published, signed, and notarized
+release. It is available from GitHub Releases, the signed Sparkle update feed,
+and the Homebrew tap below.
 
 ## Features
 

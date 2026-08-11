@@ -6,13 +6,14 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-08-09
+## [1.5.0] - 2026-08-10
 
 Waves 1.5.0 build 13 is a reliability release for audio routing, automation,
-state recovery, and the release pipeline. It remains a candidate until the
-required Wave Link and physical Stream Deck hardware gate passes.
+state recovery, onboarding, accessibility, and the release pipeline.
 
 ### Added
+- A guided first-run setup with clear local-processing context, focused
+  readiness steps, an optional mixer tour, and an immediate End Tour action.
 - Verified Wave Link coexistence using trusted code identity and observable
   Core Audio activity, with monitor-only explanations for routes Waves yields.
 - A separate protocol version 1 Stream Deck companion compatibility path.

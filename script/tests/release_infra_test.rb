@@ -913,6 +913,9 @@ class ReleaseInfraTest < Minitest::Test
           printf 'gpg.ssh.program ran\n' >> #{Shellwords.escape(marker)}
           exit 1
         SHELL
+        unless git(root, "tag", "--list", "v1.5.0").strip.empty?
+          git(root, "tag", "-d", "v1.5.0")
+        end
         create_signed_tag(root, "v1.5.0", "fixture release evidence\n", private_key)
         git(root, "config", "gpg.ssh.program", malicious_program)
 

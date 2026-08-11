@@ -8,20 +8,22 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-Version 1.4.4 is the latest published release. Version 1.5.0 build 13 is an
-in-development candidate, not a downloadable release. Do not update public
-download, appcast, Homebrew, or latest-release claims until the exact candidate
-passes every local and external gate below.
+Version 1.5.0 build 13 is the latest published release. The maintainer
+authorized publication on 2026-08-10 after direct acceptance of the signed and
+notarized candidate. The external hardware, sanitizer-host, soak, and independent
+security receipts that were still unavailable remain documented follow-up
+risks. They were not fabricated or treated as passing evidence.
 
 For 1.5, the separately versioned Stream Deck companion at
 `/Users/jonathanreed/Downloads/waves-streamdeck` must pass its Bun typecheck,
 unit tests, validator, package build, and live packaged-Waves socket test over
 protocol version 1. The companion is not bundled in Waves. A second Golden Gate
-machine must then verify real Wave Link and physical Stream Deck hardware,
+machine should still verify real Wave Link and physical Stream Deck hardware,
 including both launch orders, claimed and unclaimed apps, mixed output, device
 changes, relaunch, route arbitration cycles, dial changes, mute synchronization,
-and automatic recovery. This remote result is a hard publication gate and is
-not yet complete.
+and automatic recovery. This remote result remains required before claiming
+verified physical Elgato compatibility, even though the maintainer accepted it
+as a documented publication waiver for 1.5.0.
 
 The sealed 1.5 evidence manifest must identify the exact revision and clean-tree
 state, absence of untracked build inputs, source-archive and build-recipe hashes,
