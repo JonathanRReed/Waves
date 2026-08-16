@@ -752,7 +752,22 @@ module WavesRelease
         candidate_path: File.join(scratch_root, SparkleSigningTool::RELATIVE_PATHS.fetch("generate_keys")),
         tool: "generate_keys"
       )
-      derived_public = Validation.run(generate_keys, "--account", account, "-p").strip
+      use_accountless = false
+      derived_public = begin
+        Validation.run(generate_keys, "--account", account, "-p").strip
+      rescue Error => error
+        fallback_error = error.message.strip
+        if fallback_error.include?("No existing signing key found") ||
+          fallback_error.include?("No local keychain key matching account") ||
+          fallback_error.include?("Could not find a signing key") ||
+          fallback_error.empty? ||
+          fallback_error.end_with?("failed:")
+          use_accountless = true
+          Validation.run(generate_keys, "-p").strip
+        else
+          raise error
+        end
+      end
       canonical_public = sparkle.fetch("publicEDKey")
       unless derived_public == canonical_public
         raise Error, "Sparkle account public key does not match canonical release metadata"
@@ -761,7 +776,11 @@ module WavesRelease
         raise Error, "packaged public key does not match the canonical Sparkle account"
       end
 
-      signature = Validation.run(sign_update, "--account", account, "-p", artifact).strip
+      signature = if use_accountless
+        Validation.run(sign_update, "-p", artifact).strip
+      else
+        Validation.run(sign_update, "--account", account, "-p", artifact).strip
+      end
       begin
         decoded = Base64.strict_decode64(signature)
       rescue ArgumentError
@@ -770,15 +789,25 @@ module WavesRelease
       unless decoded.bytesize == 64 && Base64.strict_encode64(decoded) == signature
         raise Error, "Sparkle signer returned an invalid signature encoding"
       end
-      _stdout, stderr, status = Validation.run(
-        sign_update,
-        "--account",
-        account,
-        "--verify",
-        artifact,
-        signature,
-        allow_failure: true
-      )
+      if use_accountless
+        _stdout, stderr, status = Validation.run(
+          sign_update,
+          "--verify",
+          artifact,
+          signature,
+          allow_failure: true
+        )
+      else
+        _stdout, stderr, status = Validation.run(
+          sign_update,
+          "--account",
+          account,
+          "--verify",
+          artifact,
+          signature,
+          allow_failure: true
+        )
+      end
       raise Error, "Sparkle signature verification failed: #{stderr.strip}" unless status.success?
 
       signature
