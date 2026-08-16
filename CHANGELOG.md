@@ -6,6 +6,10 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+### Maintenance
+- Updated Sparkle to 2.9.5, which includes additional updater patch-path hardening.
+- Made release documentation and the archived Waves 1.5 implementation plan follow canonical release metadata.
+
 ### Changed
 - Rebuilt the menu-bar panel as a 372-point quick mixer with one seven-app
   budget across pinned, playing, and recent apps. Excluded apps stay in the

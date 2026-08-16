@@ -1777,6 +1777,40 @@ class ReleaseInfraTest < Minitest::Test
       assert_release_error(/Casks/) do
         WavesRelease::RepositoryContract.validate!(root: root, metadata: metadata)
       end
+
+      write_repository_contract_fixture(root)
+      File.write(File.join(root, "README.md"), "Version **1.4.4 build 12** is the latest published release.\n")
+      assert_release_error(/README/) do
+        WavesRelease::RepositoryContract.validate!(root: root, metadata: metadata)
+      end
+
+      write_repository_contract_fixture(root)
+      File.write(File.join(root, "docs/PRODUCT.md"), "Version 1.4.4 is the latest published release.\n")
+      assert_release_error(/PRODUCT/) do
+        WavesRelease::RepositoryContract.validate!(root: root, metadata: metadata)
+      end
+
+      write_repository_contract_fixture(root)
+      FileUtils.rm(File.join(root, "docs/archive/1.5-update-plan.md"))
+      assert_release_error(/archive/) do
+        WavesRelease::RepositoryContract.validate!(root: root, metadata: metadata)
+      end
+
+      write_repository_contract_fixture(root)
+      write_json(
+        File.join(root, "Package.resolved"),
+        {
+          "pins" => [
+            {
+              "identity" => "sparkle",
+              "state" => { "version" => "2.9.4" },
+            },
+          ],
+        }
+      )
+      assert_release_error(/Sparkle/) do
+        WavesRelease::RepositoryContract.validate!(root: root, metadata: metadata)
+      end
     end
   end
 
@@ -2530,6 +2564,30 @@ class ReleaseInfraTest < Minitest::Test
       "version \"#{VERSION}\"\nsha256 \"RELEASE_WORKFLOW_REPLACES_THIS_SHA256\"\n"
     )
     File.write(File.join(root, "Package.swift"), '.macOS("14.2")')
+    write_json(
+      File.join(root, "Package.resolved"),
+      {
+        "pins" => [
+          {
+            "identity" => "sparkle",
+            "state" => { "version" => "2.9.5" },
+          },
+        ],
+      }
+    )
+    File.write(
+      File.join(root, "README.md"),
+      "Version **#{VERSION} build #{BUILD}** is the latest published release.\n"
+    )
+    FileUtils.mkdir_p(File.join(root, "docs/archive"))
+    File.write(
+      File.join(root, "docs/PRODUCT.md"),
+      "Version #{VERSION} build #{BUILD} is the latest published release.\n"
+    )
+    File.write(
+      File.join(root, "docs/archive/1.5-update-plan.md"),
+      "# Waves 1.5 archived update plan\n"
+    )
   end
 
   def write_workflow_fixtures(root)

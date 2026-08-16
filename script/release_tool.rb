@@ -1168,7 +1168,8 @@ module WavesRelease
     SKIP_PATTERN = /\[(?:skip ci|ci skip|skip actions|actions skip)\]/i
     ADDITIONAL_PROTECTED_PATH = %r{\A(?:
       Tests/|script/|\.github/|release/|Casks/|
-      CHANGELOG\.md\z|1\.5-update-plan\.md\z|docs/(?:RELEASE|PRODUCT|DESIGN|STREAM-DECK)\.md\z
+      CHANGELOG\.md\z|docs/(?:RELEASE|PRODUCT|DESIGN|STREAM-DECK)\.md\z|
+      docs/archive/1\.5-update-plan\.md\z
     )}x
 
     module_function
@@ -1220,6 +1221,38 @@ module WavesRelease
       package = read(root, "Package.swift")
       expected_floor = %(.macOS("#{metadata['minimumMacOSVersion']}"))
       raise Error, "Package.swift deployment floor does not match canonical metadata" unless package.include?(expected_floor)
+
+      resolved = JSON.parse(read(root, "Package.resolved"))
+      sparkle_pin = Array(resolved["pins"]).find { |pin| pin["identity"] == "sparkle" }
+      sparkle_version = sparkle_pin&.dig("state", "version")
+      unless sparkle_version.is_a?(String) && sparkle_version.match?(/\A\d+\.\d+\.\d+\z/)
+        raise Error, "Package.resolved must contain a canonical Sparkle version"
+      end
+      sparkle_components = sparkle_version.split(".").map(&:to_i)
+      if (sparkle_components <=> [2, 9, 5]).negative?
+        raise Error, "Package.resolved Sparkle version must be 2.9.5 or newer"
+      end
+
+      release_label = "#{metadata['version']} build #{metadata['build']}"
+      readme = read(root, "README.md")
+      expected_readme = "Version **#{release_label}** is the latest published"
+      unless readme.include?(expected_readme)
+        raise Error, "README.md published release does not match canonical metadata"
+      end
+
+      product = read(root, "docs/PRODUCT.md")
+      expected_product = "Version #{release_label} is the latest published release."
+      unless product.include?(expected_product)
+        raise Error, "docs/PRODUCT.md published release does not match canonical metadata"
+      end
+
+      archived_plan = File.join(root, "docs/archive/1.5-update-plan.md")
+      unless File.file?(archived_plan)
+        raise Error, "Waves 1.5 update plan archive is missing"
+      end
+      if File.exist?(File.join(root, "1.5-update-plan.md"))
+        raise Error, "Waves 1.5 update plan must live in docs/archive, not the repository root"
+      end
 
       %w[script/build_and_run.sh script/make_appcast.sh].each do |relative|
         script = read(root, relative)
