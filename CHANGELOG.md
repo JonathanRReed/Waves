@@ -6,6 +6,11 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-16
+
+Waves 1.6.0 build 14 turns the menu-bar panel into a compact Quick Mixer and
+includes updater maintenance for the public release.
+
 ### Changed
 - Rebuilt the menu-bar panel as a 372-point quick mixer with one seven-app
   budget across pinned, playing, and recent apps. Excluded apps stay in the
@@ -22,6 +27,9 @@ All notable changes to Waves are documented here. The format follows
 ### Fixed
 - Cap the entire quick mixer rather than each section independently, preventing
   long app histories from pushing the footer beyond a compact display.
+
+### Security
+- Updated Sparkle to 2.9.5, including additional updater patch-path hardening.
 
 ## [1.5.0] - 2026-08-10
 

@@ -43,10 +43,11 @@ pins, hotkeys, EQ, device presets, and automation settings survive an upgrade.
 
 ## Release boundary
 
-Version 1.4.4 is the latest published release. Version 1.5.0 build 13 is an
-in-development candidate until package, signing, notarization, upgrade, local
-QA, and remote Wave Link plus physical Stream Deck gates all pass. Source-level
-completion alone is not publication approval.
+A Waves version is published only after the exact source revision passes the
+package, signing, notarization, upgrade, local QA, and required hardware-evidence
+gates. Source-level completion alone is not publication approval. Canonical
+version and build intent live in `release/metadata.json`; published availability
+is determined by the signed Git tag, GitHub Release, and Sparkle appcast.
 
 ## Brand Personality
 

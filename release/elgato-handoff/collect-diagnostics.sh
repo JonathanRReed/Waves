@@ -27,8 +27,20 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   >"$OUTPUT_ROOT/audio-and-usb.txt"
 /usr/bin/pgrep -fl 'Waves|WaveLink|Wave Link|Stream Deck' \
   >"$OUTPUT_ROOT/relevant-processes.txt" || true
+HANDOFF_JSON="$SCRIPT_ROOT/handoff.json"
+DMG_NAME="$(
+  /usr/bin/ruby --disable-gems -rjson -e '
+    handoff = JSON.parse(File.read(ARGV.fetch(0)))
+    name = handoff.fetch("artifacts").fetch("dmg").fetch("name")
+    unless name.is_a?(String) && File.basename(name) == name &&
+        name.match?(/\AWaves-\d+\.\d+\.\d+-\d+\.dmg\z/)
+      abort("unsafe handoff DMG name")
+    end
+    puts name
+  ' "$HANDOFF_JSON"
+)"
 /usr/bin/shasum -a 256 \
-  "$SCRIPT_ROOT/Waves-1.5.0-13.dmg" \
+  "$SCRIPT_ROOT/$DMG_NAME" \
   "$SCRIPT_ROOT/com.jonathanreed.waves.streamDeckPlugin" \
   >"$OUTPUT_ROOT/handoff-artifact-checksums.txt"
 

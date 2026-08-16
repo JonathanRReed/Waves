@@ -24,11 +24,10 @@ module WavesElgatoReceipt
     device-and-relaunch
     stream-deck-controls
   ].freeze
-  IMMUTABLE_FILES = %w[
+  STATIC_IMMUTABLE_FILES = %w[
     README.md
     ROLLBACK.md
     TEST-CHECKLIST.md
-    Waves-1.5.0-13.dmg
     collect-diagnostics.sh
     com.jonathanreed.waves.streamDeckPlugin
     finalize-receipt.rb
@@ -114,6 +113,12 @@ module WavesElgatoReceipt
     exact_keys!(handoff["artifacts"], %w[dmg streamDeckPlugin], "handoff artifacts")
     exact_keys!(handoff["artifacts"]["dmg"], %w[name sha256], "handoff DMG")
     sha256!(handoff["artifacts"]["dmg"]["sha256"], "handoff DMG SHA-256")
+    dmg_name = handoff["artifacts"]["dmg"]["name"]
+    expected_dmg_name = "Waves-#{handoff.fetch('version')}-#{handoff.fetch('build')}.dmg"
+    unless dmg_name.is_a?(String) && File.basename(dmg_name) == dmg_name &&
+        dmg_name == expected_dmg_name
+      raise Error, "handoff DMG name is not canonical"
+    end
     exact_keys!(
       handoff["artifacts"]["streamDeckPlugin"],
       %w[name sha256 sourceRevision],
@@ -135,7 +140,12 @@ module WavesElgatoReceipt
       raise Error, "handoff checksum file is malformed" unless match
       [match[2], match[1]]
     end
-    raise Error, "handoff checksum file set is not exact" unless checksums.keys.sort == IMMUTABLE_FILES
+    immutable_files = (
+      STATIC_IMMUTABLE_FILES + [handoff.fetch("artifacts").fetch("dmg").fetch("name")]
+    ).sort
+    unless checksums.keys.sort == immutable_files
+      raise Error, "handoff checksum file set is not exact"
+    end
     checksums.each do |name, expected|
       actual = Digest::SHA256.file(safe_file!(root, name)).hexdigest
       raise Error, "handoff checksum mismatch for #{name}" unless actual == expected
