@@ -29,12 +29,14 @@ import WavesAudioCore
     isExcluded: { $0.logicalID == "excluded" }
   )
 
-  #expect(snapshot.items.map(\.app.logicalID) == [
-    "pinned-a", "shared", "live-a", "recent-1", "recent-2", "recent-3", "recent-4",
-  ])
-  #expect(snapshot.items.map(\.group) == [
-    .pinned, .pinned, .live, .recent, .recent, .recent, .recent,
-  ])
+  #expect(
+    snapshot.items.map(\.app.logicalID) == [
+      "pinned-a", "shared", "live-a", "recent-1", "recent-2", "recent-3", "recent-4",
+    ])
+  #expect(
+    snapshot.items.map(\.group) == [
+      .pinned, .pinned, .live, .recent, .recent, .recent, .recent,
+    ])
   #expect(snapshot.hiddenCount == 4)
   #expect(snapshot.overflowFocus == .recent)
 }
