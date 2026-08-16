@@ -22,13 +22,13 @@ jobs:
           persist-credentials: false
 
       - name: Create source archive
-        run: tar --exclude=.git --exclude=.build --exclude=dist -czf waves-source.tgz .
+        run: tar --exclude=.git --exclude=.build --exclude=dist -czf "$RUNNER_TEMP/waves-source.tgz" .
 
       - name: Upload source archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: waves-source-${{ github.event.pull_request.number }}-${{ github.run_number }}
-          path: waves-source.tgz
+          path: ${{ runner.temp }}/waves-source.tgz
           if-no-files-found: error
           retention-days: 1
 
