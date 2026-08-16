@@ -15,6 +15,11 @@ Waves gives macOS the per-app mixer it should already have: native menu-bar acce
 
 The product must be honest about macOS audio constraints. If Waves can see an app but cannot fully control it yet, the interface should say that clearly instead of pretending every row has identical capability.
 
+The menu bar is a quick mixer, not a miniature copy of the main window. It
+keeps volume and mute immediately available for at most seven pinned, playing,
+or recent apps, omits excluded apps, and moves less-frequent routing and shaping
+actions into a row menu. Output and profile switching remain one click away.
+
 That honesty includes coexistence with other routers. Public Core Audio APIs do
 not expose a supported tap-creator association. When verified Wave Link has
 active Core Audio output, Waves conservatively yields affected ordinary routes
