@@ -73,10 +73,6 @@ enum WavesDesign {
 
   // MARK: Layout
 
-  /// Fixed width of the menu-bar popover panel (one source of truth for the panel
-  /// and the toast overlay it hosts).
-  static let menuBarPanelWidth: CGFloat = 440
-
   /// Hairline/border color that becomes a clearly visible separator when the
   /// user has macOS "Increase contrast" enabled (the default 9% white is
   /// invisible to exactly the people who need contrast).

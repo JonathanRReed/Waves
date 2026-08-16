@@ -149,6 +149,21 @@ Depth is primarily material-based, not shadow-based. Use system window, sidebar,
 - **Style:** `NavigationSplitView` for the main window, native `MenuBarExtra` for the compact mixer, and a dedicated `Settings` scene for preferences.
 - **Behavior:** Search applies across the current app list. Profiles and source filters should stay close to the mixer, not buried in a dashboard.
 
+### Menu-bar quick mixer
+- **Width:** 372 points. The system `MenuBarExtra(.window)` owns the outer
+  material; Waves does not add a second full-panel blur behind it.
+- **App budget:** Seven unique rows total, ordered pinned, playing, then recent.
+  The budget is global rather than repeated per section. Excluded apps never
+  render in this surface.
+- **Rows:** App identity, route state, percentage, mute, and More sit above one
+  full-width slider. Boost, EQ, output routing, shortcut assignment, pin,
+  exclusion, and exhausted-route recovery live in More.
+- **Context:** Output and profile menus share one row. The waveform is a
+  28-point live strip that unmounts after its settle animation instead of
+  reserving idle space.
+- **Footer:** Open Waves and Settings only. Launch at Login remains in General
+  Settings with its full approval and repair explanation.
+
 ### Route controls
 
 - **Managed:** Volume, mute, boost, EQ, and output actions are available.

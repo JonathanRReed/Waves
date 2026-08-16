@@ -199,7 +199,7 @@ import WavesAudioCore
     let menu = MenuBarMixerView()
       .environment(fixture.store)
       .wavesTheme(palette: .waves, appearance: appearance)
-      .frame(width: WavesDesign.menuBarPanelWidth, height: 720)
+      .frame(width: MenuBarLayout.panelWidth, height: 720)
 
     try renderEvidence(
       main,
@@ -210,7 +210,7 @@ import WavesAudioCore
     try renderEvidence(
       menu,
       filename: "menu-\(appearance.rawValue).png",
-      size: NSSize(width: WavesDesign.menuBarPanelWidth, height: 720),
+      size: NSSize(width: MenuBarLayout.panelWidth, height: 720),
       appearance: appearance
     )
   }
@@ -324,7 +324,7 @@ import WavesAudioCore
         Text("Menu mixer route states")
           .font(.headline)
         ForEach(fixture.store.session.apps) { app in
-          CompactMixerRow(app: app)
+          MenuBarAppRow(app: app)
         }
       }
       .frame(width: 380)
@@ -338,6 +338,67 @@ import WavesAudioCore
     routeMatrix,
     filename: "route-health-main-menu-dark.png",
     size: NSSize(width: 1212, height: 860),
+    appearance: .dark
+  )
+}
+
+@Test @MainActor func quickMixerRendersCompactDensityAndAccessibilityVariants() async throws {
+  let snapshot = compactMenuSnapshot()
+  let fixture = try await makeRenderedUIFixture(snapshot: snapshot)
+  let profile = Profile(
+    name: "Deep Work With A Deliberately Long Profile Name For Compact Layout Testing",
+    entries: []
+  )
+  fixture.store.profiles = [profile]
+  fixture.store.activeProfileID = profile.id
+  fixture.store.preferences.pinnedAppIDs = ["quick.pinned.one", "quick.pinned.two"]
+  fixture.store.preferences.excludedAppIDs = ["quick.excluded"]
+
+  for width in [CGFloat(360), MenuBarLayout.panelWidth, CGFloat(380)] {
+    let menu = MenuBarMixerView()
+      .environment(fixture.store)
+      .wavesTheme(palette: .waves, appearance: .dark)
+      .frame(width: width, height: 620)
+
+    try renderEvidence(
+      menu,
+      filename: "menu-compact-\(Int(width)).png",
+      size: NSSize(width: width, height: 620),
+      appearance: .dark
+    )
+  }
+
+  let accessible = MenuBarMixerView()
+    .environment(fixture.store)
+    .environment(
+      \.wavesAccessibilityOverrides,
+      WavesAccessibilityOverrides(
+        reduceMotion: true,
+        reduceTransparency: true,
+        increasedContrast: true
+      )
+    )
+    .wavesTheme(palette: .graphite, appearance: .light)
+    .frame(width: MenuBarLayout.panelWidth, height: 620)
+
+  try renderEvidence(
+    accessible,
+    filename: "menu-compact-accessibility.png",
+    size: NSSize(width: MenuBarLayout.panelWidth, height: 620),
+    appearance: .light
+  )
+
+  let allExcludedFixture = try await makeRenderedUIFixture(snapshot: snapshot)
+  allExcludedFixture.store.preferences.excludedAppIDs = snapshot.apps.map(\.logicalID)
+  let allExcluded = MenuBarMixerView()
+    .environment(allExcludedFixture.store)
+    .wavesTheme(palette: .waves, appearance: .dark)
+    .frame(width: MenuBarLayout.panelWidth, height: 320)
+
+  try renderEvidence(
+    allExcluded,
+    filename: "menu-compact-all-excluded.png",
+    size: NSSize(width: MenuBarLayout.panelWidth, height: 320),
     appearance: .dark
   )
 }
@@ -585,6 +646,99 @@ private func renderedUISnapshot() -> AudioSessionSnapshot {
     ),
   ]
   let device = AudioDevice(id: "qa.output", name: "Studio Display", kind: .display)
+  return AudioSessionSnapshot(
+    apps: apps,
+    currentDevice: device,
+    recentDeviceIDs: [device.id],
+    supportMatrix: SupportMatrix(entries: []),
+    backendStatus: BackendStatus(
+      isAudioComponentInstalled: true,
+      hasRequiredPermissions: true,
+      isRouteRecoveryHealthy: true
+    )
+  )
+}
+
+private func compactMenuSnapshot() -> AudioSessionSnapshot {
+  let apps: [AudioApp] =
+    [
+      AudioApp(
+        id: "quick.pinned.one.runtime",
+        logicalID: "quick.pinned.one",
+        bundleID: "test.quick.pinned.one",
+        displayName: "A Very Long Application Name That Must Truncate Without Breaking Controls",
+        category: .media,
+        peakLevel: 0.72,
+        rmsLevel: 0.35,
+        desiredVolume: 0.52,
+        appliedVolume: 0.52,
+        routingState: .managed,
+        compatibility: .supported
+      ),
+      AudioApp(
+        id: "quick.pinned.two.runtime",
+        logicalID: "quick.pinned.two",
+        bundleID: "test.quick.pinned.two",
+        displayName: "Pinned Meeting",
+        category: .conferencing,
+        desiredVolume: 0.68,
+        appliedVolume: 0.68,
+        routingState: .managed,
+        compatibility: .supported
+      ),
+      AudioApp(
+        id: "quick.live.one.runtime",
+        logicalID: "quick.live.one",
+        bundleID: "test.quick.live.one",
+        displayName: "Live Browser",
+        category: .browser,
+        desiredVolume: 0.74,
+        appliedVolume: 0.74,
+        routingState: .live,
+        compatibility: .supported
+      ),
+      AudioApp(
+        id: "quick.live.two.runtime",
+        logicalID: "quick.live.two",
+        bundleID: "test.quick.live.two",
+        displayName: "Live Music",
+        category: .media,
+        desiredVolume: 0.41,
+        appliedVolume: 0.41,
+        routingState: .live,
+        compatibility: .supported
+      ),
+      AudioApp(
+        id: "quick.excluded.runtime",
+        logicalID: "quick.excluded",
+        bundleID: "test.quick.excluded",
+        displayName: "Excluded App",
+        category: .media,
+        desiredVolume: 1,
+        appliedVolume: 1,
+        routingState: .live,
+        compatibility: .supported
+      ),
+    ]
+    + (1...8).map { index in
+      AudioApp(
+        id: "quick.recent.\(index).runtime",
+        logicalID: "quick.recent.\(index)",
+        bundleID: "test.quick.recent.\(index)",
+        displayName: "Recent App \(index)",
+        category: .media,
+        desiredVolume: Float(index) / 10,
+        appliedVolume: Float(index) / 10,
+        routingState: .managed,
+        compatibility: .supported
+      )
+    }
+
+  let device = AudioDevice(
+    id: "qa.compact.output",
+    name: "MacBook Pro Speakers With A Long Connected Device Name",
+    kind: .builtInOutput
+  )
   return AudioSessionSnapshot(
     apps: apps,
     currentDevice: device,

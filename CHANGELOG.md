@@ -6,6 +6,23 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Rebuilt the menu-bar panel as a 372-point quick mixer with one seven-app
+  budget across pinned, playing, and recent apps. Excluded apps stay in the
+  main window instead of occupying disabled menu rows.
+- Moved boost, equalizer, per-app output, shortcut, pin, exclusion, and route
+  recovery actions into each row's More menu, leaving volume and mute directly
+  accessible in a two-line row.
+- Put output and profile selection on one compact line, show the mixed waveform
+  only while audio is active or settling, and keep Launch at Login in General
+  Settings instead of the quick mixer footer.
+- Let the system menu-bar window own its outer material instead of layering a
+  second custom blur and dark rectangle inside it.
+
+### Fixed
+- Cap the entire quick mixer rather than each section independently, preventing
+  long app histories from pushing the footer beyond a compact display.
+
 ## [1.5.0] - 2026-08-10
 
 Waves 1.5.0 build 13 is a reliability release for audio routing, automation,

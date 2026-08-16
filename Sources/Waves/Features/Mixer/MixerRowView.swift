@@ -512,11 +512,13 @@ struct MixerRowView: View {
 /// the menu-bar's compact row never silently falls behind the main window's
 /// full row in capability — a menu-bar-first user can route an app to a
 /// different output device or exclude it without opening the main window.
-private struct MixerRowContextMenuItems: View {
+struct MixerRowContextMenuItems: View {
   @Environment(AppStore.self) private var store
   @Environment(\.openWindow) private var openWindow
   let app: AudioApp
   let opensMainWindow: Bool
+
+  private let boostOptions: [Float] = [1, 2, 3, 4]
 
   private var isExcluded: Bool { store.isExcluded(app) }
   private var routePolicy: MixerRouteControlPolicy { MixerRouteControlPolicy(app: app) }
@@ -524,9 +526,6 @@ private struct MixerRowContextMenuItems: View {
   /// Shows the current chord when there is one, so the menu doubles as the
   /// answer to "did I already give this app a shortcut?".
   private var muteShortcutTitle: String {
-    // Say where it opens when it isn't here. The Equalizer item directly above
-    // sets this convention, and without it the menu-bar panel silently yanks
-    // the full mixer window forward.
     guard let binding = store.preferences.hotkeys.binding(for: .muteApp(app.logicalID)) else {
       return opensMainWindow ? "Set Mute Shortcut in Waves…" : "Assign Mute Shortcut…"
     }
@@ -536,44 +535,46 @@ private struct MixerRowContextMenuItems: View {
   }
 
   var body: some View {
-    Button(opensMainWindow ? "Open Equalizer in Waves" : "Equalizer") {
-      store.focusEqualizer(for: app, source: opensMainWindow ? .running : nil)
-      if opensMainWindow {
-        openWindow(id: AppSceneID.mainWindow)
-        NSApp.activate(ignoringOtherApps: true)
-      }
+    Button(app.isPinned ? "Unpin" : "Pin") {
+      store.togglePinned(app)
     }
-    .disabled(isExcluded || !routePolicy.allowsAudioControl)
 
     if !isExcluded, routePolicy.allowsAudioControl {
-      Button(muteShortcutTitle) {
-        // The compact menu-bar panel has nowhere to put a sheet, so the request
-        // travels to the main window the same way the equalizer does.
-        store.requestMuteShortcutAssignment(for: app)
+      Menu("Boost") {
+        ForEach(boostOptions, id: \.self) { boost in
+          Button {
+            store.setVolumeBoost(boost, for: app)
+          } label: {
+            if boost == app.volumeBoost {
+              Label("\(Int(boost))x", systemImage: "checkmark")
+            } else {
+              Text("\(Int(boost))x")
+            }
+          }
+        }
+      }
+
+      Button(opensMainWindow ? "Open Equalizer in Waves…" : "Equalizer") {
+        store.focusEqualizer(for: app, source: opensMainWindow ? .running : nil)
         if opensMainWindow {
           openWindow(id: AppSceneID.mainWindow)
           NSApp.activate(ignoringOtherApps: true)
         }
       }
-    }
 
-    Divider()
-
-    Button(app.isPinned ? "Unpin" : "Pin") {
-      store.togglePinned(app)
-    }
-    if !isExcluded, routePolicy.allowsAudioControl {
       Menu(MixerRowAccessibility.outputDeviceMenuLabel) {
         Button {
           store.setOutputDevice(nil, for: app)
         } label: {
-          if app.targetDeviceUID == nil { Label("System Default", systemImage: "checkmark") } else { Text("System Default") }
+          if app.targetDeviceUID == nil {
+            Label("System Default", systemImage: "checkmark")
+          } else {
+            Text("System Default")
+          }
         }
+
         if store.availableDevices.isEmpty {
           Divider()
-          // Mirror the menu-bar OutputDevicePicker's empty state so the
-          // per-app submenu doesn't silently collapse to just "System
-          // Default" when no real output devices are available.
           Text("No output devices found")
             .accessibilityLabel("No output devices found")
         } else {
@@ -582,7 +583,11 @@ private struct MixerRowContextMenuItems: View {
             Button {
               store.setOutputDevice(device, for: app)
             } label: {
-              if app.targetDeviceUID == device.id { Label(device.name, systemImage: "checkmark") } else { Text(device.name) }
+              if app.targetDeviceUID == device.id {
+                Label(device.name, systemImage: "checkmark")
+              } else {
+                Text(device.name)
+              }
             }
           }
         }
@@ -590,237 +595,32 @@ private struct MixerRowContextMenuItems: View {
       .onAppear {
         store.refreshOutputDevices()
       }
+
+      Button(muteShortcutTitle) {
+        store.requestMuteShortcutAssignment(for: app)
+        if opensMainWindow {
+          openWindow(id: AppSceneID.mainWindow)
+          NSApp.activate(ignoringOtherApps: true)
+        }
+      }
     }
+
+    if routePolicy.offersRecovery {
+      Divider()
+      Button {
+        store.recoverRoutes()
+      } label: {
+        Label(MixerRowAccessibility.recoveryVisibleLabel, systemImage: "arrow.clockwise")
+      }
+      .disabled(store.isRecovering)
+      .help(MixerRowAccessibility.recoveryHelp)
+    }
+
     Divider()
+
     Button(isExcluded ? "Manage with Waves" : "Exclude from Waves") {
       store.setExcluded(!isExcluded, for: app)
     }
-  }
-}
-
-struct CompactMixerRow: View {
-  @Environment(AppStore.self) private var store
-  @Environment(\.wavesTheme) private var theme
-  @Environment(\.openWindow) private var openWindow
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @Environment(\.colorSchemeContrast) private var contrast
-  let app: AudioApp
-  @State private var animateMuteChange = false
-
-  var body: some View {
-    HStack(spacing: 8) {
-      Button {
-        store.togglePinned(app)
-      } label: {
-        Image(systemName: app.isPinned ? "pin.fill" : "pin")
-          .font(.caption)
-          .foregroundStyle(theme.accentOrTertiary(app.isPinned))
-          .frame(width: 22, height: 22)
-          .contentShape(Rectangle())
-      }
-      .buttonStyle(.borderless)
-      .help(app.isPinned ? "Unpin from the top" : "Pin to the top")
-      .accessibilityLabel(app.isPinned ? "Unpin \(app.displayName)" : "Pin \(app.displayName) to top")
-
-      AppIconView(app: app)
-        .frame(width: 18, height: 18)
-
-      // Match the full row's weight treatment (medium) for the primary label so
-      // the two densities read as the same design language; size steps down to
-      // .caption to fit the compact row's tighter metrics (icon, pin, dot are
-      // already caption/caption2 scale here).
-      Text(app.displayName)
-        .font(.caption.weight(.medium))
-        .lineLimit(1)
-        // Without this, an ordinary 7-8 character name (e.g. "CodexBar")
-        // truncates to "Codex…" — the row's fixed-width trailing controls
-        // (slider/percent/boost/mute) already claim most of the panel's
-        // fixed 400pt width, so the name needs priority over Spacer() to get
-        // its fair share before SwiftUI starts compressing it.
-        .layoutPriority(1)
-
-      if isExcluded {
-        Text("Excluded")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
-          // Without this, the compact row's tight spacing (the app-name
-          // Text just before this now has its own .layoutPriority(1), so it
-          // claims space first) squeezed this single word into a 3-line
-          // vertical wrap ("Ex-/clu-/ded") instead of fitting on one line —
-          // fixedSize forces SwiftUI to honor this label's true single-line
-          // width rather than compressing its height to fit.
-          .fixedSize()
-          .accessibilityLabel("Excluded from Waves")
-      } else {
-        RoutingStateDot(app: app)
-        if routePolicy.offersRecovery {
-          RouteRecoveryButton(app: app, compact: true)
-        }
-      }
-
-      Spacer()
-
-      Slider(
-        value: Binding(
-          get: { Double(app.desiredVolume) },
-          set: { newValue in
-            store.setDesiredVolume(Float(newValue), for: app)
-          }
-        ),
-        in: 0...1,
-        onEditingChanged: { isEditing in
-          if !isEditing {
-            store.commitDesiredVolume(for: app)
-          }
-        }
-      )
-      .controlSize(.small)
-      .tint(theme.accent)
-      .frame(width: 104)
-      .padding(.trailing, 2)
-      .help(volumeSemantics.help)
-      .accessibilityLabel(volumeSemantics.label)
-      .accessibilityValue(volumeSemantics.value ?? "")
-      .accessibilityHint(volumeSemantics.hint)
-      .accessibilitySortPriority(volumeSemantics.sortPriority)
-      .accessibilityAdjustableAction { direction in
-        adjustVolume(direction)
-      }
-      .disabled(!volumeSemantics.isEnabled)
-
-      // Numeric parity with the full row, so a menu-bar-first user dragging the
-      // short slider can read the target they're setting.
-      Text("\(Int((app.desiredVolume * 100).rounded()))%")
-        .font(.caption2.monospacedDigit())
-        .foregroundStyle(.secondary)
-        .frame(width: 30, alignment: .trailing)
-        .contentTransition(.numericText())
-        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: app.desiredVolume)
-        .accessibilityHidden(true)
-
-      BoostMenu(app: app, compact: true)
-        .disabled(!boostSemantics.isEnabled)
-
-      Button {
-        store.focusEqualizer(for: app, source: .running)
-        openWindow(id: AppSceneID.mainWindow)
-        NSApp.activate(ignoringOtherApps: true)
-      } label: {
-        Text("EQ")
-          .font(.caption2.weight(.semibold))
-          .foregroundStyle(theme.accentOrSecondary(equalizerIsEnabled))
-          .frame(width: 28, height: 22)
-          .contentShape(Rectangle())
-      }
-      .buttonStyle(.borderless)
-      .help(equalizerSemantics.help)
-      .accessibilityLabel(equalizerSemantics.label)
-      .accessibilityValue(equalizerSemantics.value ?? "")
-      .accessibilityHint(equalizerSemantics.hint)
-      .accessibilitySortPriority(equalizerSemantics.sortPriority)
-      .disabled(!equalizerSemantics.isEnabled)
-
-      Button {
-        store.setMuted(!app.isMuted, for: app)
-        if !reduceMotion { animateMuteChange.toggle() }
-      } label: {
-        Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-          // Match the full row: morph the speaker ⇄ slash glyph instead of cutting.
-          .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace.downUp))
-          .symbolEffect(.bounce, value: animateMuteChange)
-          .frame(width: 22, height: 22)
-          .contentShape(Rectangle())
-      }
-      .buttonStyle(.borderless)
-      .help(muteSemantics.help)
-      .accessibilityLabel(muteSemantics.label)
-      .accessibilityValue(muteSemantics.value ?? "")
-      .accessibilityHint(muteSemantics.hint)
-      .accessibilitySortPriority(muteSemantics.sortPriority)
-      .disabled(!muteSemantics.isEnabled)
-    }
-    .opacity(isExcluded ? (contrast == .increased ? 0.85 : 0.55) : 1)
-    // Mirror the main window's quiet cyan level meter so a menu-bar-first user
-    // gets the same per-row "playing" feedback. Reuses the store's live-level
-    // poll (already started by the menu panel) and an overlay so layout never
-    // shifts. Same RowLevelMeter as the full row.
-    .overlay(alignment: .bottomLeading) {
-      if showsLevelMeter {
-        RowLevelMeter(rms: meterRMS, peak: meterPeak)
-      }
-    }
-    .contextMenu {
-      // Full parity with the main window's row. Equalizer opens the main
-      // window because an inspector is too large for the compact menu panel.
-      MixerRowContextMenuItems(app: app, opensMainWindow: true)
-    }
-    .accessibilityActions {
-      ForEach(accessibilityActions) { action in
-        Button(action.name) { action.perform() }
-      }
-    }
-  }
-
-  private var isExcluded: Bool { store.isExcluded(app) }
-  private var equalizerIsEnabled: Bool { store.equalizerSettings(for: app).isEnabled }
-  private var routePolicy: MixerRouteControlPolicy { MixerRouteControlPolicy(app: app) }
-  private var volumeSemantics: MixerControlAccessibilitySemantics {
-    accessibilitySemantics(for: .volume)
-  }
-  private var boostSemantics: MixerControlAccessibilitySemantics {
-    accessibilitySemantics(for: .boost)
-  }
-  private var equalizerSemantics: MixerControlAccessibilitySemantics {
-    accessibilitySemantics(for: .equalizer)
-  }
-  private var muteSemantics: MixerControlAccessibilitySemantics {
-    accessibilitySemantics(for: .mute)
-  }
-  private var accessibilityActions: [MixerRowAccessibilityAction] {
-    MixerRowAccessibility.actions(
-      app: app,
-      isExcluded: isExcluded,
-      onPin: { store.togglePinned(app) },
-      onExclusionChange: { store.setExcluded($0, for: app) }
-    )
-  }
-
-  private func accessibilitySemantics(
-    for control: MixerRowAccessibilityControl
-  ) -> MixerControlAccessibilitySemantics {
-    MixerRowAccessibility.semantics(
-      for: control,
-      app: app,
-      isExcluded: isExcluded,
-      isRecovering: store.isRecovering,
-      equalizerIsEnabled: equalizerIsEnabled
-    )
-  }
-
-  private var showsLevelMeter: Bool {
-    !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
-  }
-
-  private var meterRMS: Float { store.liveLevels[app.logicalID]?.rms ?? 0 }
-  private var meterPeak: Float { store.liveLevels[app.logicalID]?.peak ?? 0 }
-
-  private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
-    guard routePolicy.allowsAudioControl else { return }
-    let step: Float = 0.05
-    let nextValue: Float
-
-    switch direction {
-    case .increment:
-      nextValue = min(app.desiredVolume + step, 1)
-    case .decrement:
-      nextValue = max(app.desiredVolume - step, 0)
-    @unknown default:
-      return
-    }
-
-    store.setDesiredVolume(nextValue, for: app)
-    store.commitDesiredVolume(for: app)
   }
 }
 
@@ -999,7 +799,7 @@ private struct RoutingStateIndicator: View {
   }
 }
 
-private struct RoutingStateDot: View {
+struct RoutingStateDot: View {
   @Environment(\.wavesTheme) private var theme
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let app: AudioApp

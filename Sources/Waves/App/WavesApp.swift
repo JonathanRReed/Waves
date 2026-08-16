@@ -156,7 +156,7 @@ struct WavesApp: App {
       MenuBarMixerView()
         .environment(store)
         .environment(updaterService)
-        .frame(width: WavesDesign.menuBarPanelWidth)
+        .frame(width: MenuBarLayout.panelWidth)
         .wavesTheme(
           palette: store.preferences.palette,
           appearance: store.preferences.appearance
