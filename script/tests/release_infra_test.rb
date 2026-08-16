@@ -1153,6 +1153,8 @@ class ReleaseInfraTest < Minitest::Test
       collector = File.read(File.join(output, "collect-diagnostics.sh"))
       assert_equal "#!/bin/bash -p", collector.lines.first.chomp
       assert_includes collector, "/usr/sbin/system_profiler"
+      assert_includes collector, 'fetch("artifacts").fetch("dmg").fetch("name")'
+      refute_includes collector, "Waves-1.5.0-13.dmg"
       refute_match(/defaults write|tccutil|killall|rm -rf/, collector)
 
       handoff.verify!(root: output, metadata: load_metadata)

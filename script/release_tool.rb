@@ -1669,12 +1669,11 @@ module WavesRelease
       device-and-relaunch
       stream-deck-controls
     ].freeze
-    FILES = %w[
+    STATIC_FILES = %w[
       README.md
       ROLLBACK.md
       SHA256SUMS
       TEST-CHECKLIST.md
-      Waves-1.5.0-13.dmg
       collect-diagnostics.sh
       com.jonathanreed.waves.streamDeckPlugin
       finalize-receipt.rb
@@ -1830,7 +1829,7 @@ module WavesRelease
         write_file!(File.join(staging, "TEST-CHECKLIST.md"), checklist(handoff))
         write_file!(File.join(staging, "ROLLBACK.md"), rollback(handoff))
         write_file!(File.join(staging, "results.json"), CanonicalJSON.generate(pending_results(handoff)))
-        write_checksums!(staging)
+        write_checksums!(staging, metadata)
         verify!(root: staging, metadata: metadata)
         File.rename(staging, output_root)
         staging = nil
@@ -1844,9 +1843,10 @@ module WavesRelease
       stat = File.lstat(root)
       raise Error, "Elgato handoff root must not be a symbolic link" if stat.symlink?
       raise Error, "Elgato handoff root must be a directory" unless stat.directory?
+      expected_files = files(metadata)
       actual = Dir.children(root).sort
-      raise Error, "Elgato handoff file set is not exact" unless actual == FILES
-      FILES.each do |name|
+      raise Error, "Elgato handoff file set is not exact" unless actual == expected_files
+      expected_files.each do |name|
         entry = File.lstat(File.join(root, name))
         raise Error, "Elgato handoff entry must be a regular file: #{name}" unless entry.file?
       end
@@ -1906,7 +1906,7 @@ module WavesRelease
         require_passed: false
       )
 
-      verify_checksums!(root)
+      verify_checksums!(root, metadata)
       collector_mode = File.lstat(File.join(root, "collect-diagnostics.sh")).mode & 0o777
       raise Error, "Elgato diagnostics collector must be mode 0700" unless collector_mode == 0o700
       finalizer_mode = File.lstat(File.join(root, "finalize-receipt.rb")).mode & 0o777
@@ -1918,6 +1918,10 @@ module WavesRelease
 
     def dmg_name(metadata)
       "Waves-#{metadata.fetch('version')}-#{metadata.fetch('build')}.dmg"
+    end
+
+    def files(metadata)
+      (STATIC_FILES + [dmg_name(metadata)]).sort
     end
 
     def readme(handoff)
@@ -2086,8 +2090,8 @@ module WavesRelease
     end
     private_class_method :write_file!
 
-    def write_checksums!(root)
-      names = FILES - %w[SHA256SUMS results.json]
+    def write_checksums!(root, metadata)
+      names = files(metadata) - %w[SHA256SUMS results.json]
       contents = names.sort.map do |name|
         "#{Digest::SHA256.file(File.join(root, name)).hexdigest}  #{name}"
       end.join("\n") + "\n"
@@ -2095,8 +2099,8 @@ module WavesRelease
     end
     private_class_method :write_checksums!
 
-    def verify_checksums!(root)
-      expected_names = FILES - %w[SHA256SUMS results.json]
+    def verify_checksums!(root, metadata)
+      expected_names = files(metadata) - %w[SHA256SUMS results.json]
       entries = File.readlines(File.join(root, "SHA256SUMS"), chomp: true).to_h do |line|
         match = line.match(/\A([0-9a-f]{64})  ([^\/\n]+)\z/)
         raise Error, "Elgato handoff checksum file is malformed" unless match
