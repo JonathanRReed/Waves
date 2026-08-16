@@ -11,8 +11,11 @@ require "tmpdir"
 require_relative "../release_tool"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.5.0"
-  BUILD = 13
+  VERSION = "1.6.0"
+  BUILD = 14
+  RELEASE_TAG = "v#{VERSION}"
+  HANDOFF_NAME = "Waves-#{VERSION}-#{BUILD}-Elgato-Handoff"
+  HANDOFF_DMG_NAME = "Waves-#{VERSION}-#{BUILD}.dmg"
   FLOOR = "14.2"
   REVISION = "a" * 40
   BUNDLE_IDENTIFIER = "com.jonathanreed.Waves"
@@ -322,7 +325,7 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def test_tracked_metadata_names_the_waves_1_5_target
+  def test_tracked_metadata_names_the_current_release_target
     metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
     assert_equal VERSION, metadata.fetch("version")
     assert_equal BUILD, metadata.fetch("build")
@@ -339,7 +342,7 @@ class ReleaseInfraTest < Minitest::Test
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
-    future = metadata_hash.merge("version" => "1.5.1", "build" => 14)
+    future = metadata_hash.merge("version" => "1.6.1", "build" => 15)
     with_metadata(future) do |path|
       assert_equal future, WavesRelease::Metadata.load(path)
     end
@@ -350,10 +353,10 @@ class ReleaseInfraTest < Minitest::Test
 
     [
       ["{", /malformed JSON/],
-      ['{"schemaVersion":1,"version":"1.5.0","version":"1.5.1","build":13,"minimumMacOSVersion":"14.2"}', /duplicate key/],
+      ['{"schemaVersion":1,"version":"1.6.0","version":"1.6.1","build":14,"minimumMacOSVersion":"14.2"}', /duplicate key/],
       [metadata_hash.merge("extra" => true), /unknown key/],
-      [metadata_hash.merge("version" => "01.5.0"), /version/],
-      [metadata_hash.merge("build" => "13"), /integer/],
+      [metadata_hash.merge("version" => "01.6.0"), /version/],
+      [metadata_hash.merge("build" => "14"), /integer/],
       [metadata_hash.merge("build" => 0), /positive integer/],
       [metadata_hash.merge("minimumMacOSVersion" => "014.2"), /minimum macOS/],
       [metadata_hash.merge("minimumMacOSVersion" => "14.2.0"), /minimum macOS/],
@@ -701,7 +704,7 @@ class ReleaseInfraTest < Minitest::Test
         "NOTARY_PROFILE" => "waves-notary",
         "WAVES_EXPECTED_REVISION" => expected_revision,
         "WAVES_RELEASE_EVIDENCE" => "dist/release-evidence.candidate.json",
-        "WAVES_RELEASE_TAG" => "v1.5.0",
+        "WAVES_RELEASE_TAG" => RELEASE_TAG,
         "EXPECTED_SHA256" => expected_digest,
         "SMOKE_SECONDS" => "5",
         "SMOKE_LOG_PATH" => File.join(directory, "package-smoke.log"),
@@ -740,7 +743,7 @@ class ReleaseInfraTest < Minitest::Test
       assert_equal "waves-notary", environment["NOTARY_PROFILE"]
       assert_equal expected_revision, environment["WAVES_EXPECTED_REVISION"]
       assert_equal "dist/release-evidence.candidate.json", environment["WAVES_RELEASE_EVIDENCE"]
-      assert_equal "v1.5.0", environment["WAVES_RELEASE_TAG"]
+      assert_equal RELEASE_TAG, environment["WAVES_RELEASE_TAG"]
       assert_equal expected_digest, environment["EXPECTED_SHA256"]
       assert_equal "5", environment["SMOKE_SECONDS"]
       assert_equal File.join(directory, "package-smoke.log"), environment["SMOKE_LOG_PATH"]
@@ -913,14 +916,14 @@ class ReleaseInfraTest < Minitest::Test
           printf 'gpg.ssh.program ran\n' >> #{Shellwords.escape(marker)}
           exit 1
         SHELL
-        unless git(root, "tag", "--list", "v1.5.0").strip.empty?
-          git(root, "tag", "-d", "v1.5.0")
+        unless git(root, "tag", "--list", RELEASE_TAG).strip.empty?
+          git(root, "tag", "-d", RELEASE_TAG)
         end
-        create_signed_tag(root, "v1.5.0", "fixture release evidence\n", private_key)
+        create_signed_tag(root, RELEASE_TAG, "fixture release evidence\n", private_key)
         git(root, "config", "gpg.ssh.program", malicious_program)
 
         _stdout, stderr, status = Open3.capture3(
-          {"WAVES_RELEASE_TAG" => "v1.5.0"},
+          {"WAVES_RELEASE_TAG" => RELEASE_TAG},
           File.join(root, "script/release-gate.sh"),
           "publication",
           chdir: root
@@ -1059,7 +1062,7 @@ class ReleaseInfraTest < Minitest::Test
       dmg = File.join(root, "Waves.dmg")
       plugin = File.join(root, "com.jonathanreed.waves.streamDeckPlugin")
       manifest = File.join(root, "release-evidence.candidate.json")
-      output = File.join(root, "Waves-1.5.0-13-Elgato-Handoff")
+      output = File.join(root, HANDOFF_NAME)
       File.write(dmg, "signed candidate dmg bytes\n")
       File.write(plugin, "stream deck package bytes\n")
 
@@ -1101,12 +1104,12 @@ class ReleaseInfraTest < Minitest::Test
         output_root: output
       )
 
-      expected_files = %w[
+      expected_files = %W[
         README.md
         ROLLBACK.md
         SHA256SUMS
         TEST-CHECKLIST.md
-        Waves-1.5.0-13.dmg
+        #{HANDOFF_DMG_NAME}
         collect-diagnostics.sh
         com.jonathanreed.waves.streamDeckPlugin
         finalize-receipt.rb
@@ -1165,7 +1168,7 @@ class ReleaseInfraTest < Minitest::Test
       dmg = File.join(root, "Waves.dmg")
       plugin = File.join(root, "com.jonathanreed.waves.streamDeckPlugin")
       manifest = File.join(root, "release-evidence.candidate.json")
-      output = File.join(root, "Waves-1.5.0-13-Elgato-Handoff")
+      output = File.join(root, HANDOFF_NAME)
       diagnostics = File.join(root, "diagnostics")
       receipt = File.join(root, "remote-elgato-receipt.json")
       File.write(dmg, "signed candidate dmg bytes\n")
@@ -2046,23 +2049,23 @@ class ReleaseInfraTest < Minitest::Test
         json = WavesRelease::CanonicalJSON.generate(manifest)
         envelope = WavesRelease::TagEnvelope.build(json: json, digest: WavesRelease::CanonicalJSON.sha256(json))
         git(root, "update-ref", "refs/remotes/origin/main", revision)
-        create_signed_tag(root, "v1.5.0", envelope, private_key)
+        create_signed_tag(root, RELEASE_TAG, envelope, private_key)
 
-        WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: metadata)
+        WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
 
-        git(root, "tag", "-d", "v1.5.0")
-        git(root, "tag", "v1.5.0")
+        git(root, "tag", "-d", RELEASE_TAG)
+        git(root, "tag", RELEASE_TAG)
         assert_release_error(/annotated/) do
-          WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: metadata)
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
         end
 
-        git(root, "tag", "-d", "v1.5.0")
-        create_signed_tag(root, "v1.5.0", envelope, private_key)
+        git(root, "tag", "-d", RELEASE_TAG)
+        create_signed_tag(root, RELEASE_TAG, envelope, private_key)
         File.write(File.join(root, "next.txt"), "next\n")
         git(root, "add", ".")
         git(root, "commit", "-m", "docs: next")
         assert_release_error(/HEAD/) do
-          WavesRelease::PublicationTag.validate!(root: root, tag: "v1.5.0", metadata: metadata)
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
         end
       end
     end
@@ -2082,30 +2085,30 @@ class ReleaseInfraTest < Minitest::Test
             "fingerprint" => ssh_fingerprint(correct_public),
           }
 
-          git_with_input(root, "unsigned evidence\n", "tag", "-a", "v1.5.0", "-F", "-")
+          git_with_input(root, "unsigned evidence\n", "tag", "-a", RELEASE_TAG, "-F", "-")
           assert_release_error(/signed/) do
-            authority.verify!(root: root, tag: "v1.5.0", authority: expected)
+            authority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
           end
-          git(root, "tag", "-d", "v1.5.0")
+          git(root, "tag", "-d", RELEASE_TAG)
 
-          create_signed_tag(root, "v1.5.0", "wrong key evidence\n", wrong_private)
+          create_signed_tag(root, RELEASE_TAG, "wrong key evidence\n", wrong_private)
           assert_release_error(/pinned release key|signature/) do
-            authority.verify!(root: root, tag: "v1.5.0", authority: expected)
+            authority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
           end
-          git(root, "tag", "-d", "v1.5.0")
+          git(root, "tag", "-d", RELEASE_TAG)
 
-          create_signed_tag(root, "v1.5.0", "wrong principal evidence\n", correct_private)
+          create_signed_tag(root, RELEASE_TAG, "wrong principal evidence\n", correct_private)
           assert_release_error(/principal/) do
             authority.verify!(
               root: root,
-              tag: "v1.5.0",
+              tag: RELEASE_TAG,
               authority: expected.merge("principal" => "untrusted-release")
             )
           end
-          git(root, "tag", "-d", "v1.5.0")
+          git(root, "tag", "-d", RELEASE_TAG)
 
-          create_signed_tag(root, "v1.5.0", "trusted evidence\n", correct_private)
-          result = authority.verify!(root: root, tag: "v1.5.0", authority: expected)
+          create_signed_tag(root, RELEASE_TAG, "trusted evidence\n", correct_private)
+          result = authority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
           assert_equal RELEASE_PRINCIPAL, result.fetch("principal")
           assert_equal expected.fetch("fingerprint"), result.fetch("fingerprint")
         end
