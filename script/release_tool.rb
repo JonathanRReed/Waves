@@ -668,8 +668,8 @@ module WavesRelease
 
     def signing_details!(path, require_designated_requirement: true)
       details = Validation.run_combined("/usr/bin/codesign", "-dvvv", path)
-      authority = details.lines.filter_map { |line| line.chomp[/\AAuthority=(.+)\z/, 1] }.first
-      team = details.lines.filter_map { |line| line.chomp[/\ATeamIdentifier=(.+)\z/, 1] }.first
+      authority = details.lines.map { |line| line.chomp[/\AAuthority=(.+)\z/, 1] }.compact.first
+      team = details.lines.map { |line| line.chomp[/\ATeamIdentifier=(.+)\z/, 1] }.compact.first
       identity = authority&.strip
       unless identity && team
         raise Error, "could not derive Developer ID identity and teamIdentifier from #{path}"
@@ -682,9 +682,9 @@ module WavesRelease
       }
       if require_designated_requirement
         requirement_output = Validation.run_combined("/usr/bin/codesign", "-dr", "-", path)
-        requirement = requirement_output.lines.filter_map do |line|
+        requirement = requirement_output.lines.map do |line|
           line.chomp[/\Adesignated => (.+)\z/, 1]
-        end.first
+        end.compact.first
         raise Error, "could not derive designated requirement from #{path}" unless requirement
 
         result["designatedRequirement"] = requirement.strip
