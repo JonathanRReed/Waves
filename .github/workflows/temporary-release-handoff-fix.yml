@@ -28,138 +28,201 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
-          def replace_once(path: str, old: str, new: str) -> None:
-              file = Path(path)
-              text = file.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one replacement target, found {count}")
-              file.write_text(text.replace(old, new, 1))
+          def replace_sequence(lines, old, new, label):
+              matches = [
+                  index
+                  for index in range(len(lines) - len(old) + 1)
+                  if lines[index:index + len(old)] == old
+              ]
+              if len(matches) != 1:
+                  raise SystemExit(f"{label}: expected one target, found {len(matches)}")
+              index = matches[0]
+              lines[index:index + len(old)] = new
 
-          release_tool = "script/release_tool.rb"
-          replace_once(release_tool, "    FILES = %w[\n", "    STATIC_FILES = %w[\n")
-          replace_once(release_tool, "      Waves-1.5.0-13.dmg\n", "")
-          replace_once(
-              release_tool,
-              '''      actual = Dir.children(root).sort
-              raise Error, "Elgato handoff file set is not exact" unless actual == FILES
-              FILES.each do |name|
-          ''',
-              '''      expected_files = files(metadata)
-              actual = Dir.children(root).sort
-              raise Error, "Elgato handoff file set is not exact" unless actual == expected_files
-              expected_files.each do |name|
-          ''',
+          release_tool = Path("script/release_tool.rb")
+          lines = release_tool.read_text().splitlines(keepends=True)
+          replace_sequence(
+              lines,
+              ["    FILES = %w[\n"],
+              ["    STATIC_FILES = %w[\n"],
+              "release_tool constant",
           )
-          replace_once(release_tool, "        write_checksums!(staging)\n", "        write_checksums!(staging, metadata)\n")
-          replace_once(release_tool, "      verify_checksums!(root)\n", "      verify_checksums!(root, metadata)\n")
-          replace_once(
-              release_tool,
-              '''    def dmg_name(metadata)
-              "Waves-#{metadata.fetch('version')}-#{metadata.fetch('build')}.dmg"
-            end
-          ''',
-              '''    def dmg_name(metadata)
-              "Waves-#{metadata.fetch('version')}-#{metadata.fetch('build')}.dmg"
-            end
+          replace_sequence(
+              lines,
+              ["      Waves-1.5.0-13.dmg\n"],
+              [],
+              "release_tool stale DMG entry",
+          )
+          replace_sequence(
+              lines,
+              [
+                  "      actual = Dir.children(root).sort\n",
+                  '      raise Error, "Elgato handoff file set is not exact" unless actual == FILES\n',
+                  "      FILES.each do |name|\n",
+              ],
+              [
+                  "      expected_files = files(metadata)\n",
+                  "      actual = Dir.children(root).sort\n",
+                  '      raise Error, "Elgato handoff file set is not exact" unless actual == expected_files\n',
+                  "      expected_files.each do |name|\n",
+              ],
+              "release_tool exact file set",
+          )
+          replace_sequence(
+              lines,
+              ["        write_checksums!(staging)\n"],
+              ["        write_checksums!(staging, metadata)\n"],
+              "release_tool checksum writer call",
+          )
+          replace_sequence(
+              lines,
+              ["      verify_checksums!(root)\n"],
+              ["      verify_checksums!(root, metadata)\n"],
+              "release_tool checksum verifier call",
+          )
+          replace_sequence(
+              lines,
+              [
+                  "    def dmg_name(metadata)\n",
+                  '      "Waves-#{metadata.fetch(\'version\')}-#{metadata.fetch(\'build\')}.dmg"\n',
+                  "    end\n",
+              ],
+              [
+                  "    def dmg_name(metadata)\n",
+                  '      "Waves-#{metadata.fetch(\'version\')}-#{metadata.fetch(\'build\')}.dmg"\n',
+                  "    end\n",
+                  "\n",
+                  "    def files(metadata)\n",
+                  "      (STATIC_FILES + [dmg_name(metadata)]).sort\n",
+                  "    end\n",
+              ],
+              "release_tool dynamic file list",
+          )
+          replace_sequence(
+              lines,
+              [
+                  "    def write_checksums!(root)\n",
+                  "      names = FILES - %w[SHA256SUMS results.json]\n",
+              ],
+              [
+                  "    def write_checksums!(root, metadata)\n",
+                  "      names = files(metadata) - %w[SHA256SUMS results.json]\n",
+              ],
+              "release_tool checksum writer",
+          )
+          replace_sequence(
+              lines,
+              [
+                  "    def verify_checksums!(root)\n",
+                  "      expected_names = FILES - %w[SHA256SUMS results.json]\n",
+              ],
+              [
+                  "    def verify_checksums!(root, metadata)\n",
+                  "      expected_names = files(metadata) - %w[SHA256SUMS results.json]\n",
+              ],
+              "release_tool checksum verifier",
+          )
+          release_tool.write_text("".join(lines))
 
-            def files(metadata)
-              (STATIC_FILES + [dmg_name(metadata)]).sort
-            end
-          ''',
+          collector = Path("release/elgato-handoff/collect-diagnostics.sh")
+          lines = collector.read_text().splitlines(keepends=True)
+          replace_sequence(
+              lines,
+              [
+                  "/usr/bin/shasum -a 256 \\\n",
+                  '  "$SCRIPT_ROOT/Waves-1.5.0-13.dmg" \\\n',
+                  '  "$SCRIPT_ROOT/com.jonathanreed.waves.streamDeckPlugin" \\\n',
+                  '  >"$OUTPUT_ROOT/handoff-artifact-checksums.txt"\n',
+              ],
+              [
+                  'HANDOFF_JSON="$SCRIPT_ROOT/handoff.json"\n',
+                  'DMG_NAME="$(\n',
+                  "  /usr/bin/ruby --disable-gems -rjson -e '\n",
+                  '    handoff = JSON.parse(File.read(ARGV.fetch(0)))\n',
+                  '    name = handoff.fetch("artifacts").fetch("dmg").fetch("name")\n',
+                  '    unless name.is_a?(String) && File.basename(name) == name &&\n',
+                  r'        name.match?(/\AWaves-\d+\.\d+\.\d+-\d+\.dmg\z/)' + "\n",
+                  '      abort("unsafe handoff DMG name")\n',
+                  '    end\n',
+                  '    puts name\n',
+                  "  ' \"$HANDOFF_JSON\"\n",
+                  ')"\n',
+                  "/usr/bin/shasum -a 256 \\\n",
+                  '  "$SCRIPT_ROOT/$DMG_NAME" \\\n',
+                  '  "$SCRIPT_ROOT/com.jonathanreed.waves.streamDeckPlugin" \\\n',
+                  '  >"$OUTPUT_ROOT/handoff-artifact-checksums.txt"\n',
+              ],
+              "diagnostics dynamic DMG",
           )
-          replace_once(
-              release_tool,
-              '''    def write_checksums!(root)
-              names = FILES - %w[SHA256SUMS results.json]
-          ''',
-              '''    def write_checksums!(root, metadata)
-              names = files(metadata) - %w[SHA256SUMS results.json]
-          ''',
-          )
-          replace_once(
-              release_tool,
-              '''    def verify_checksums!(root)
-              expected_names = FILES - %w[SHA256SUMS results.json]
-          ''',
-              '''    def verify_checksums!(root, metadata)
-              expected_names = files(metadata) - %w[SHA256SUMS results.json]
-          ''',
-          )
+          collector.write_text("".join(lines))
 
-          collector = "release/elgato-handoff/collect-diagnostics.sh"
-          replace_once(
-              collector,
-              '''/usr/bin/shasum -a 256 \\
-            "$SCRIPT_ROOT/Waves-1.5.0-13.dmg" \\
-            "$SCRIPT_ROOT/com.jonathanreed.waves.streamDeckPlugin" \\
-            >"$OUTPUT_ROOT/handoff-artifact-checksums.txt"
-          ''',
-              '''HANDOFF_JSON="$SCRIPT_ROOT/handoff.json"
-          DMG_NAME="$(
-            /usr/bin/ruby --disable-gems -rjson -e '
-              handoff = JSON.parse(File.read(ARGV.fetch(0)))
-              name = handoff.fetch("artifacts").fetch("dmg").fetch("name")
-              unless name.is_a?(String) && File.basename(name) == name &&
-                  name.match?(/\\AWaves-\\d+\\.\\d+\\.\\d+-\\d+\\.dmg\\z/)
-                abort("unsafe handoff DMG name")
-              end
-              puts name
-            ' "$HANDOFF_JSON"
-          )"
-          /usr/bin/shasum -a 256 \\
-            "$SCRIPT_ROOT/$DMG_NAME" \\
-            "$SCRIPT_ROOT/com.jonathanreed.waves.streamDeckPlugin" \\
-            >"$OUTPUT_ROOT/handoff-artifact-checksums.txt"
-          ''',
+          finalizer = Path("release/elgato-handoff/finalize-receipt.rb")
+          lines = finalizer.read_text().splitlines(keepends=True)
+          replace_sequence(
+              lines,
+              ["  IMMUTABLE_FILES = %w[\n"],
+              ["  STATIC_IMMUTABLE_FILES = %w[\n"],
+              "finalizer constant",
           )
+          replace_sequence(
+              lines,
+              ["    Waves-1.5.0-13.dmg\n"],
+              [],
+              "finalizer stale DMG entry",
+          )
+          replace_sequence(
+              lines,
+              [
+                  '    exact_keys!(handoff["artifacts"]["dmg"], %w[name sha256], "handoff DMG")\n',
+                  '    sha256!(handoff["artifacts"]["dmg"]["sha256"], "handoff DMG SHA-256")\n',
+              ],
+              [
+                  '    exact_keys!(handoff["artifacts"]["dmg"], %w[name sha256], "handoff DMG")\n',
+                  '    sha256!(handoff["artifacts"]["dmg"]["sha256"], "handoff DMG SHA-256")\n',
+                  '    dmg_name = handoff["artifacts"]["dmg"]["name"]\n',
+                  '    expected_dmg_name = "Waves-#{handoff.fetch(\'version\')}-#{handoff.fetch(\'build\')}.dmg"\n',
+                  '    unless dmg_name.is_a?(String) && File.basename(dmg_name) == dmg_name &&\n',
+                  '        dmg_name == expected_dmg_name\n',
+                  '      raise Error, "handoff DMG name is not canonical"\n',
+                  '    end\n',
+              ],
+              "finalizer canonical DMG validation",
+          )
+          replace_sequence(
+              lines,
+              ['    raise Error, "handoff checksum file set is not exact" unless checksums.keys.sort == IMMUTABLE_FILES\n'],
+              [
+                  '    immutable_files = (\n',
+                  '      STATIC_IMMUTABLE_FILES + [handoff.fetch("artifacts").fetch("dmg").fetch("name")]\n',
+                  '    ).sort\n',
+                  '    unless checksums.keys.sort == immutable_files\n',
+                  '      raise Error, "handoff checksum file set is not exact"\n',
+                  '    end\n',
+              ],
+              "finalizer dynamic immutable files",
+          )
+          finalizer.write_text("".join(lines))
 
-          finalizer = "release/elgato-handoff/finalize-receipt.rb"
-          replace_once(finalizer, "  IMMUTABLE_FILES = %w[\n", "  STATIC_IMMUTABLE_FILES = %w[\n")
-          replace_once(finalizer, "    Waves-1.5.0-13.dmg\n", "")
-          replace_once(
-              finalizer,
-              '''    exact_keys!(handoff["artifacts"]["dmg"], %w[name sha256], "handoff DMG")
-              sha256!(handoff["artifacts"]["dmg"]["sha256"], "handoff DMG SHA-256")
-          ''',
-              '''    exact_keys!(handoff["artifacts"]["dmg"], %w[name sha256], "handoff DMG")
-              sha256!(handoff["artifacts"]["dmg"]["sha256"], "handoff DMG SHA-256")
-              dmg_name = handoff["artifacts"]["dmg"]["name"]
-              expected_dmg_name = "Waves-#{handoff.fetch('version')}-#{handoff.fetch('build')}.dmg"
-              unless dmg_name.is_a?(String) && File.basename(dmg_name) == dmg_name &&
-                  dmg_name == expected_dmg_name
-                raise Error, "handoff DMG name is not canonical"
-              end
-          ''',
+          tests = Path("script/tests/release_infra_test.rb")
+          lines = tests.read_text().splitlines(keepends=True)
+          replace_sequence(
+              lines,
+              [
+                  '      assert_includes collector, "/usr/sbin/system_profiler"\n',
+                  '      refute_match(/defaults write|tccutil|killall|rm -rf/, collector)\n',
+              ],
+              [
+                  '      assert_includes collector, "/usr/sbin/system_profiler"\n',
+                  '      assert_includes collector, \'fetch("artifacts").fetch("dmg").fetch("name")\'\n',
+                  '      refute_includes collector, "Waves-1.5.0-13.dmg"\n',
+                  '      refute_match(/defaults write|tccutil|killall|rm -rf/, collector)\n',
+              ],
+              "release tests dynamic diagnostics assertion",
           )
-          replace_once(
-              finalizer,
-              '''    raise Error, "handoff checksum file set is not exact" unless checksums.keys.sort == IMMUTABLE_FILES
-          ''',
-              '''    immutable_files = (
-              STATIC_IMMUTABLE_FILES + [handoff.fetch("artifacts").fetch("dmg").fetch("name")]
-            ).sort
-              unless checksums.keys.sort == immutable_files
-                raise Error, "handoff checksum file set is not exact"
-              end
-          ''',
-          )
-
-          tests = "script/tests/release_infra_test.rb"
-          replace_once(
-              tests,
-              '''      assert_includes collector, "/usr/sbin/system_profiler"
-              refute_match(/defaults write|tccutil|killall|rm -rf/, collector)
-          ''',
-              '''      assert_includes collector, "/usr/sbin/system_profiler"
-              assert_includes collector, 'fetch("artifacts").fetch("dmg").fetch("name")'
-              refute_includes collector, "Waves-1.5.0-13.dmg"
-              refute_match(/defaults write|tccutil|killall|rm -rf/, collector)
-          ''',
-          )
+          tests.write_text("".join(lines))
 
           for path in [release_tool, collector, finalizer]:
-              if "Waves-1.5.0-13.dmg" in Path(path).read_text():
+              if "Waves-1.5.0-13.dmg" in path.read_text():
                   raise SystemExit(f"{path}: stale release-specific DMG filename remains")
           PY
 
