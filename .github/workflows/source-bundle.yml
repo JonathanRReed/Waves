@@ -43,4 +43,4 @@ jobs:
           persist-credentials: false
 
       - name: Run focused tests
-        run: swift test --filter MenuBarLayoutTests
+        run: swift test --filter 'MenuBar(Layout|Presentation|AppRow)Tests'
