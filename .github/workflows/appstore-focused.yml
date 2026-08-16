@@ -1,0 +1,24 @@
+name: AppStore Focused Verification
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appstore-focused-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run focused AppStore tests
+        run: swift test --filter AppStorePresentationCoordinatorTests
