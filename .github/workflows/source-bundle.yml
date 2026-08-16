@@ -1,0 +1,46 @@
+name: Source Bundle
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: Bundle source for the implementation workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create source archive
+        run: tar --exclude=.git --exclude=.build --exclude=dist -czf waves-source.tgz .
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: waves-source-${{ github.event.pull_request.number }}-${{ github.run_number }}
+          path: waves-source.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  focused-test:
+    name: Verify menu-bar layout policy
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run focused tests
+        run: swift test --filter MenuBarLayoutTests
