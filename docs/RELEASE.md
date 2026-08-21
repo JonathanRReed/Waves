@@ -8,13 +8,12 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-Version 1.5.0 build 13 is the latest published release. The maintainer
-authorized publication on 2026-08-10 after direct acceptance of the signed and
-notarized candidate. The external hardware, sanitizer-host, soak, and independent
-security receipts that were still unavailable remain documented follow-up
-risks. They were not fabricated or treated as passing evidence.
+Version 1.6.0 build 14 is the latest published release. GitHub published it on
+2026-08-16 from the signed annotated `v1.6.0` tag. The release includes the DMG,
+checksum, notary log, source identity, candidate and publication evidence, and
+dSYM. Later commits on `main` are not part of that published build.
 
-For 1.5, the separately versioned Stream Deck companion at
+The separately versioned Stream Deck companion at
 `/Users/jonathanreed/Downloads/waves-streamdeck` must pass its Bun typecheck,
 unit tests, validator, package build, and live packaged-Waves socket test over
 protocol version 1. The companion is not bundled in Waves. A second Golden Gate
@@ -22,10 +21,10 @@ machine should still verify real Wave Link and physical Stream Deck hardware,
 including both launch orders, claimed and unclaimed apps, mixed output, device
 changes, relaunch, route arbitration cycles, dial changes, mute synchronization,
 and automatic recovery. This remote result remains required before claiming
-verified physical Elgato compatibility, even though the maintainer accepted it
-as a documented publication waiver for 1.5.0.
+verified physical Elgato compatibility. Any publication waiver is bound to one
+release's evidence and does not carry forward.
 
-The sealed 1.5 evidence manifest must identify the exact revision and clean-tree
+Each sealed evidence manifest must identify the exact revision and clean-tree
 state, absence of untracked build inputs, source-archive and build-recipe hashes,
 toolchain, test counts, performance comparison, package identities,
 architectures, hashes, signatures, notarization, Gatekeeper result, local QA,
@@ -276,7 +275,7 @@ that checkout's exact lowercase revision. The output directory must not exist.
   /ABSOLUTE/PATH/TO/dist/release-evidence.candidate.json \
   /ABSOLUTE/PATH/TO/com.jonathanreed.waves.streamDeckPlugin \
   PLUGIN_40_CHARACTER_REVISION \
-  /ABSOLUTE/PATH/TO/Waves-1.5.0-13-Elgato-Handoff
+  /ABSOLUTE/PATH/TO/Waves-1.6.0-14-Elgato-Handoff
 ```
 
 The command reruns the complete candidate gate, privately snapshots and
@@ -314,8 +313,9 @@ that canonical manifest and sidecar hash can pass
 `./script/release-gate.sh publication`. Git verifies the SSH signature against
 the public key and `waves-commit-signing` principal pinned in canonical metadata,
 without using global Git signing configuration. A lightweight or unsigned tag,
-wrong key or principal, wrong revision, dirty tree, mismatched `origin/main`,
-missing or skipped gate, pending remote result, or changed artifact hash fails.
+wrong key or principal, wrong revision, dirty tree, a tag outside the current
+`HEAD` ancestry, missing or skipped gate, pending remote result, or changed
+artifact hash fails.
 The manifest also binds the security-scan and remote-Elgato receipt digests to
 the exact source revision and DMG, and binds the Apple notary-log digest and
 submission to that same DMG.
@@ -334,7 +334,7 @@ quality and release-preflight scripts, pinned actions, bounded execution,
 serialized noncanceling concurrency, and 14-day log retention. It accepts an
 exact revision rather than a tag and cannot access signing credentials, sign,
 notarize, upload a candidate, or create a release. The maintainer Mac remains
-the only Waves 1.5 signing authority.
+the only Waves release-signing authority.
 
 The generated cask is a release artifact; the workflow does not replace the
 checksum placeholder in the repository. Audit the generated file before

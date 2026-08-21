@@ -2035,7 +2035,7 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def test_publication_tag_requires_annotated_exact_matching_tag_and_origin_main
+  def test_publication_tag_requires_an_annotated_version_tag_on_the_current_history
     with_git_repo do |root|
       with_ephemeral_ssh_keypair("waves-release-publication") do |private_key, public_key|
         metadata = security_metadata_hash(
@@ -2066,7 +2066,16 @@ class ReleaseInfraTest < Minitest::Test
         File.write(File.join(root, "next.txt"), "next\n")
         git(root, "add", ".")
         git(root, "commit", "-m", "docs: next")
-        assert_release_error(/HEAD/) do
+        git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "HEAD").strip)
+
+        WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+
+        git(root, "checkout", "--orphan", "diverged")
+        git(root, "rm", "-rf", ".")
+        File.write(File.join(root, "diverged.txt"), "diverged\n")
+        git(root, "add", ".")
+        git(root, "commit", "-m", "docs: divergent history")
+        assert_release_error(/ancestor of HEAD/) do
           WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
         end
       end
