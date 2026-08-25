@@ -61,6 +61,8 @@ struct VerifiedRouterObservationSnapshot: Hashable, Sendable {
 }
 
 struct VerifiedRouterProcessIdentity: Hashable, Sendable {
+  static let signingInformationFlags = SecCSFlags(rawValue: kSecCSSigningInformation)
+
   let pid: pid_t
   let teamIdentifier: String
   let matchesDesignatedRequirement: Bool
@@ -411,7 +413,12 @@ private extension VerifiedRouterProcessIdentity {
       return nil
     }
     var information: CFDictionary?
-    guard SecCodeCopySigningInformation(staticCode, SecCSFlags(), &information) == errSecSuccess,
+    guard
+      SecCodeCopySigningInformation(
+        staticCode,
+        signingInformationFlags,
+        &information
+      ) == errSecSuccess,
       let information,
       let teamIdentifier = (information as NSDictionary)[kSecCodeInfoTeamIdentifier] as? String
     else {

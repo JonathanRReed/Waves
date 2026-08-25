@@ -8,7 +8,7 @@ All notable changes to Waves are documented here. The format follows
 
 ## [1.7.0] - 2026-08-25
 
-Waves 1.7.0 build 16 adds explicit control over how Waves coexists with Elgato
+Waves 1.7.0 build 17 adds explicit control over how Waves coexists with Elgato
 Wave Link.
 
 ### Added
@@ -21,6 +21,8 @@ Wave Link.
 - Stop reporting apps such as Zoom as managed when Wave Link can send a parallel
   copy around the Waves route. Compatibility mode now yields the route, while
   the explicit compatibility opt-out remains available for custom routing.
+- Request Wave Link's cryptographic signing metadata when verifying its live
+  process, allowing compatibility mode to recognize the signed router reliably.
 - Keep onboarding primary button labels legible by removing a second
   onboarding-wide accent tint from the already themed setup flow.
 

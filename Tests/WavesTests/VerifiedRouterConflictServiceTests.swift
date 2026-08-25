@@ -1,4 +1,5 @@
 import AudioToolbox
+import Security
 import Testing
 import WavesAudioCore
 
@@ -366,6 +367,13 @@ import WavesAudioCore
     $0.hasConstructibleRequirement
   }
   #expect(allRequirementsAreConstructible)
+}
+
+@Test func liveIdentityVerificationRequestsCryptographicSigningMetadata() {
+  #expect(
+    VerifiedRouterProcessIdentity.signingInformationFlags.rawValue
+      & kSecCSSigningInformation != 0
+  )
 }
 
 @Test func verifiedRouterActivitySnapshotScansOnceForMultipleApps() {
