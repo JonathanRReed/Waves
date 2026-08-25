@@ -72,7 +72,6 @@ struct OnboardingView: View {
           .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
       }
     }
-    .tint(theme.accent)
     .onAppear {
       coordinator.update(facts: store.guidedSetupFacts)
     }

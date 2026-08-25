@@ -250,8 +250,8 @@ When switching audio devices:
 - Try refreshing the app list (⌘R)
 
 ### Volume changes not applying
-- In Settings ▸ Mixer, confirm that the intended app owns **Per-app controller**. Wave Link-owned routes are intentionally monitor-only in Waves
-- If you use a custom routing workaround, disable **Wave Link compatibility**. This also disables duplicate-route safeguards
+- In Settings ▸ Mixer, confirm the preferred **Per-app controller**. Compatibility keeps a verified parallel Wave Link path monitor-only in Waves so a displayed level cannot be bypassed
+- If your custom Wave Link routing already prevents a parallel monitored copy, disable **Wave Link compatibility** to force Waves control. This also disables duplicate-route safeguards
 - Use Recover Routes from the main window status action, Setup, or Diagnostics to re-establish Waves-managed routing
 - Check the current route and permission details in Diagnostics
 - Ensure macOS 14.2+ is installed for per-app routing

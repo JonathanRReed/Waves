@@ -199,7 +199,7 @@ import WavesAudioCore
   #expect(await recorder.count() == 0)
 }
 
-@Test func changingPerAppControllerChangesVerifiedWaveLinkOwnershipAtRuntime() async {
+@Test func controllerPreferenceCannotBypassVerifiedWaveLinkCompatibility() async {
   let app = AudioApp(
     id: "runtime.browser",
     logicalID: "com.example.browser",
@@ -254,12 +254,12 @@ import WavesAudioCore
     )
   )
 
-  #expect(wavesResult.outcome == .applied)
+  #expect(wavesResult.outcome == .unsupported)
   #expect(waveLinkResult.outcome == .unsupported)
-  #expect(await recorder.count() == 1)
+  #expect(await recorder.count() == 0)
 }
 
-@Test func switchingBackToWavesImmediatelyReclaimsAWaveLinkYieldedRoute() async {
+@Test func switchingBackToWavesDoesNotBypassVerifiedWaveLinkCompatibility() async {
   let app = waveLinkYieldedTestApp()
   #expect(
     WorkspaceAudioControlBackend.isRouteRecoveryCandidate(
@@ -286,8 +286,9 @@ import WavesAudioCore
   await backend.reattachRoutesForTesting([app.logicalID])
   let recovered = await backend.currentSnapshot()
 
-  #expect(recovered.apps[0].routingState == .managed)
-  #expect(recovered.apps[0].routeHealthContext == nil)
+  #expect(recovered.apps[0].routingState == .monitorOnly)
+  #expect(recovered.apps[0].routeHealthContext == .unattributableRouterFallback)
+  #expect(recovered.apps[0].notes?.contains("Wave Link") == true)
 }
 
 @Test func disablingCompatibilityImmediatelyReclaimsAWaveLinkYieldedRoute() async {

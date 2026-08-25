@@ -110,7 +110,7 @@ struct HelpView: View {
           "Monitoring only means Waves can see the app but is not currently changing its audio path"
         )
         bullet(
-          "Choose the per-app controller in Settings > Mixer. Waves keeps ordinary apps manageable, or Wave Link takes ownership while Waves monitors them"
+          "Choose the preferred per-app controller in Settings > Mixer. Compatibility still keeps any verified parallel Wave Link path monitoring only so a Waves level cannot be bypassed"
         )
         bullet(
           "With compatibility enabled, Waves never wraps Wave Link's mixed output. Adjust upstream apps inside Wave Link"
@@ -362,7 +362,7 @@ struct HelpView: View {
         troubleshootingItem(
           issue: "Volume changes not applying",
           solution:
-            "Check Per-app controller in Settings > Mixer. Wave Link-owned routes must be adjusted in Wave Link. Custom workarounds can disable Wave Link compatibility, which also disables duplicate-route safeguards. For a failed Waves route, use Recover Routes, then check Diagnostics"
+            "Check Per-app controller in Settings > Mixer. A Wave Link-owned route must be adjusted in Wave Link. If your custom Wave Link setup already prevents parallel monitoring, disable Wave Link compatibility to force a Waves route. For a failed Waves route, use Recover Routes, then check Diagnostics"
         )
         troubleshootingItem(
           issue: "An app shows a red Core Audio error",

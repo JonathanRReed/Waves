@@ -1309,7 +1309,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           status: .informational,
           detail: waveLinkCompatibilityEnabled
             ? perAppAudioController == .waves
-              ? "Waves owns ordinary per-app routes. Wave Link mixed outputs remain excluded."
+              ? "Waves owns routes that Wave Link cannot bypass. Verified Wave Link paths remain monitoring only to prevent duplicate audio."
               : "Elgato Wave Link owns ordinary per-app routes while it is active. Waves monitors those apps."
             : "Wave Link compatibility is disabled. Waves applies no Wave Link-specific route safeguards."
         ),
@@ -2997,6 +2997,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     for logicalID in targetLogicalIDs {
       guard !isShuttingDown else { return }
       guard let app = snapshot.apps.first(where: { $0.logicalID == logicalID }) else { continue }
+
+      if let conflict = competingAudioRouterConflict(
+        for: app,
+        routerActivity: routerActivity
+      ) {
+        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
+          suspendManagedRouteForConflict(at: index, conflict: conflict)
+        }
+        continue
+      }
 
       do {
         try await applyRoute(

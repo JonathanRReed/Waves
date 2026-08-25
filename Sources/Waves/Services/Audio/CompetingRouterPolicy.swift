@@ -29,10 +29,7 @@ enum CompetingRouterPolicy {
       )
     }
     guard let verifiedConflict else { return nil }
-    if verifiedConflict.kind == .routerMixedOutput {
-      return verifiedConflict
-    }
-    return controller == .waveLink ? verifiedConflict : nil
+    return verifiedConflict
   }
 
   static func conflictDetail(

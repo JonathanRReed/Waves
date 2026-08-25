@@ -4,7 +4,7 @@ import WavesAudioCore
 
 @testable import Waves
 
-@Test func wavesControllerKeepsOrdinaryAppsEligibleWhileWaveLinkRuns() {
+@Test func compatibilityPreventsWavesFromClaimingAppsWhileWaveLinkCanBypassTheRoute() {
   let target = routerTestApp(id: "target", pid: 101)
   let verifiedConflict = VerifiedRouterConflict(
     routerName: "Elgato Wave Link",
@@ -18,7 +18,7 @@ import WavesAudioCore
       verifiedConflict: verifiedConflict,
       controller: .waves,
       compatibilityEnabled: true
-    ) == nil
+    ) == verifiedConflict
   )
 }
 
@@ -84,6 +84,45 @@ import WavesAudioCore
   )
 
   #expect(conflict == nil)
+}
+
+@Test func zeroVolumeRouteStopsClaimingManagedWhenWaveLinkCanStillMonitorIt() async throws {
+  var zoom = routerTestApp(id: "zoom", pid: 101)
+  zoom.desiredVolume = 0
+  zoom.appliedVolume = 0
+  let controller = try PerAppTapController.testingController(
+    appID: zoom.id,
+    logicalID: zoom.logicalID,
+    targetProcessObjectIDs: [1],
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: { noErr },
+      stopIOProc: { noErr },
+      restoreTapMuting: { noErr }
+    )
+  )
+  let conflict = VerifiedRouterConflict(
+    routerName: "Elgato Wave Link",
+    kind: .unattributableTapFallback,
+    detail: "Wave Link can send a parallel copy to the monitor."
+  )
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: routerActivitySnapshot(apps: [zoom]),
+    verifiedRouterConflictProvider: { _ in conflict },
+    testingControllers: [controller],
+    processObjectLivenessProvider: { _ in true }
+  )
+
+  await backend.updateAudioLevels(at: .zero)
+  await backend.updateAudioLevels(at: .milliseconds(250))
+  let snapshot = await backend.currentSnapshot()
+  let lifecycle = await backend.lifecycleDebugSnapshot()
+
+  #expect(snapshot.apps[0].routingState == .monitorOnly)
+  #expect(snapshot.apps[0].appliedVolume == nil)
+  #expect(snapshot.apps[0].routeHealthContext == .unattributableRouterFallback)
+  #expect(snapshot.apps[0].notes == conflict.detail)
+  #expect(lifecycle.liveControllers == 0)
+  _ = await backend.shutdownWithResult()
 }
 
 @Test func verifiedActiveWaveLinkUsesCoreAudioOutputFallbackWhenSystemTapOwnershipIsUnavailable() {

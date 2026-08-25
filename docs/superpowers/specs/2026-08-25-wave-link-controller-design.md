@@ -19,9 +19,11 @@ Changing either setting persists immediately and rebuilds managed routes.
 
 ## Routing Policy
 
-With compatibility enabled and Waves selected, Waves ignores Wave Link claims
-for ordinary apps and continues to provide per-app volume and equalization. It
-still refuses to wrap Wave Link's mixed output.
+With compatibility enabled and Waves selected, Waves manages ordinary apps only
+when a verified Wave Link path cannot bypass its renderer. Apps with a parallel
+Wave Link path become monitor-only instead of showing a managed level that does
+not control every audible copy. Waves also refuses to wrap Wave Link's mixed
+output.
 
 With compatibility enabled and Elgato Wave Link selected, verified Wave Link
 claims make affected ordinary apps monitor-only in Waves. Wave Link's mixed
@@ -35,9 +37,12 @@ custom workaround can then create duplicate or silent audio.
 
 For the default configuration:
 
-`App -> Waves volume and EQ -> Wave Link virtual channel -> Wave Link monitor and stream mix`
+`App -> Waves volume and EQ -> selected output`
 
-The same app should not be assigned independently through both mixers.
+Wave Link can continue handling microphone effects, Stream Deck actions, and
+stream mixes. The same app must not be monitored independently through both
+mixers. When a custom Wave Link setup already prevents that second copy, the
+user can disable compatibility to force the Waves route.
 
 ## Verification
 
