@@ -109,11 +109,12 @@ SMOKE_SECONDS="${SMOKE_SECONDS:-5}"
 
 # Some Command Line Tools releases install a newer default SDK whose SwiftUI
 # interface references SwiftUIMacros without shipping that macro plugin. Prefer
-# the compatible macOS 26 SDK on those machines so local builds remain usable.
+# the compatible macOS 26.5 SDK on those machines so local and distribution
+# builds remain usable.
 if [ -z "$SWIFT_SDK" ] \
   && [ ! -f /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib ] \
-  && [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk ]; then
-  SWIFT_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
+  && [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]; then
+  SWIFT_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
 fi
 
 if [ "$MODE" = "--dmg" ] \
@@ -123,7 +124,7 @@ if [ "$MODE" = "--dmg" ] \
   || [ "$MODE" = "notarize" ]; then
   TRUSTED_DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
   TRUSTED_SWIFT="$(/usr/bin/xcrun --find swift)"
-  TRUSTED_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+  TRUSTED_SDK="${SWIFT_SDK:-$(/usr/bin/xcrun --sdk macosx --show-sdk-path)}"
   run_release_ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
   SWIFT_SDK="$TRUSTED_SDK"
 fi
