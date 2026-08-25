@@ -45,6 +45,7 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes build_script, "hdiutil convert"
     assert_includes build_script, ".background"
     assert_includes build_script, ".DS_Store"
+    assert_includes build_script, "finder_metadata_attempt"
 
     finder_script = File.read(finder_script_path)
     assert_includes finder_script, "set bounds of layoutWindow to {100, 100, 760, 530}"

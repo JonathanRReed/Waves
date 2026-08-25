@@ -1450,6 +1450,12 @@ create_dmg() {
     -mountpoint "$ACTIVE_MOUNT_DIR" >/dev/null
   /usr/bin/osascript "$DMG_FINDER_LAYOUT" "$ACTIVE_MOUNT_DIR"
   /bin/sync
+  finder_metadata_attempt=0
+  while [ ! -f "$ACTIVE_MOUNT_DIR/.DS_Store" ] && [ "$finder_metadata_attempt" -lt 20 ]; do
+    sleep 0.25
+    /bin/sync
+    finder_metadata_attempt=$((finder_metadata_attempt + 1))
+  done
   rm -rf \
     "$ACTIVE_MOUNT_DIR/.Trashes" \
     "$ACTIVE_MOUNT_DIR/.fseventsd" \
