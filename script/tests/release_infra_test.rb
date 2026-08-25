@@ -48,6 +48,8 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes build_script, "finder_metadata_attempt"
     assert_includes build_script, '/private/tmp/waves-dmg-layout.XXXXXX'
     assert_includes build_script, '/private/tmp/waves-dmg-mount.XXXXXX'
+    assert_includes build_script, 'layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"'
+    assert_includes build_script, 'diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME"'
 
     finder_script = File.read(finder_script_path)
     assert_includes finder_script, "set bounds of layoutWindow to {100, 100, 760, 530}"

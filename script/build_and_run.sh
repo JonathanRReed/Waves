@@ -1411,6 +1411,7 @@ validate_unsigned_package() {
 
 create_dmg() {
   require_command hdiutil "to create $DMG_PATH"
+  require_command diskutil "to finalize the $DMG_PATH volume name"
   require_command ditto "to stage $APP_NAME.app"
   require_command osascript "to configure the Finder disk image"
   require_command sync "to flush Finder metadata"
@@ -1437,8 +1438,9 @@ create_dmg() {
   ACTIVE_WRITABLE_DMG="$(mktemp "/private/tmp/waves-dmg-layout.XXXXXX")"
   rm -f "$ACTIVE_WRITABLE_DMG"
   ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"
+  layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"
   /usr/bin/hdiutil create \
-    -volname "$APP_NAME" \
+    -volname "$layout_volume_name" \
     -srcfolder "$ACTIVE_STAGING_DIR" \
     -ov \
     -format UDRW \
@@ -1469,6 +1471,9 @@ create_dmg() {
     echo "Error: Finder did not create the required DMG layout metadata." >&2
     exit 1
   fi
+  # Finder caches window state by volume name. A unique temporary name forces
+  # it to write this image's layout before the published name is restored.
+  /usr/sbin/diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME" >/dev/null
   /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet
   rm -rf "$ACTIVE_MOUNT_DIR"
   ACTIVE_MOUNT_DIR=""
