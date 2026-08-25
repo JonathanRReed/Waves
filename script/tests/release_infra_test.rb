@@ -46,6 +46,7 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes build_script, ".background"
     assert_includes build_script, ".DS_Store"
     assert_includes build_script, "finder_metadata_attempt"
+    assert_includes build_script, '/private/tmp/waves-dmg-layout.XXXXXX'
     assert_includes build_script, '/private/tmp/waves-dmg-mount.XXXXXX'
 
     finder_script = File.read(finder_script_path)

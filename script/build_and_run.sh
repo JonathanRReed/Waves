@@ -1432,7 +1432,9 @@ create_dmg() {
   chmod 755 "$ACTIVE_STAGING_DIR/.background"
   chmod 644 "$ACTIVE_STAGING_DIR/.background/Waves.png"
 
-  ACTIVE_WRITABLE_DMG="$(mktemp "$DIST_DIR/.dmg-layout.XXXXXX")"
+  # Finder resolves the writable image through its backing-file URL while
+  # saving the window layout. Keep that URL short as well as the mount path.
+  ACTIVE_WRITABLE_DMG="$(mktemp "/private/tmp/waves-dmg-layout.XXXXXX")"
   rm -f "$ACTIVE_WRITABLE_DMG"
   ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"
   /usr/bin/hdiutil create \
