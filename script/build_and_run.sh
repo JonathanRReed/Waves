@@ -1442,7 +1442,10 @@ create_dmg() {
     -format UDRW \
     "$ACTIVE_WRITABLE_DMG"
 
-  ACTIVE_MOUNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/waves-dmg-mount.XXXXXX")"
+  # Finder resolves aliases through a file-ID URL while writing `.DS_Store`.
+  # Deep isolated-release TMPDIR paths can exceed its internal path limit even
+  # though the mounted volume itself is valid, so keep this mount point short.
+  ACTIVE_MOUNT_DIR="$(mktemp -d "/private/tmp/waves-dmg-mount.XXXXXX")"
   /usr/bin/hdiutil attach \
     "$ACTIVE_WRITABLE_DMG" \
     -noautoopen \
