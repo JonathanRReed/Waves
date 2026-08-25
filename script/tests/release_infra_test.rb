@@ -11,8 +11,8 @@ require "tmpdir"
 require_relative "../release_tool"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.6.0"
-  BUILD = 14
+  VERSION = "1.7.0"
+  BUILD = 15
   RELEASE_TAG = "v#{VERSION}"
   HANDOFF_NAME = "Waves-#{VERSION}-#{BUILD}-Elgato-Handoff"
   HANDOFF_DMG_NAME = "Waves-#{VERSION}-#{BUILD}.dmg"
@@ -342,7 +342,7 @@ class ReleaseInfraTest < Minitest::Test
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
-    future = metadata_hash.merge("version" => "1.6.1", "build" => 15)
+    future = metadata_hash.merge("version" => "1.7.1", "build" => 16)
     with_metadata(future) do |path|
       assert_equal future, WavesRelease::Metadata.load(path)
     end

@@ -71,6 +71,35 @@ import WavesAudioCore
   #expect(UserPreferences().pinMigrationVersion == 1)
 }
 
+@Test func newAndLegacyUserPreferencesDefaultToWavesAsThePerAppController() throws {
+  #expect(UserPreferences().perAppAudioController == .waves)
+
+  let legacy = try JSONDecoder().decode(UserPreferences.self, from: Data("{}".utf8))
+  #expect(legacy.perAppAudioController == .waves)
+}
+
+@Test func waveLinkPerAppControllerChoiceRoundTrips() throws {
+  var prefs = UserPreferences()
+  prefs.perAppAudioController = .waveLink
+
+  let data = try JSONEncoder().encode(prefs)
+  let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
+
+  #expect(decoded.perAppAudioController == .waveLink)
+}
+
+@Test func waveLinkCompatibilityDefaultsOnAndCanBeDisabled() throws {
+  #expect(UserPreferences().waveLinkCompatibilityEnabled)
+  let legacy = try JSONDecoder().decode(UserPreferences.self, from: Data("{}".utf8))
+  #expect(legacy.waveLinkCompatibilityEnabled)
+
+  var prefs = UserPreferences()
+  prefs.waveLinkCompatibilityEnabled = false
+  let data = try JSONEncoder().encode(prefs)
+  let decoded = try JSONDecoder().decode(UserPreferences.self, from: data)
+  #expect(!decoded.waveLinkCompatibilityEnabled)
+}
+
 @Test func legacyUserPreferencesMissingPinMigrationMarkerDecodeAsVersionZero() throws {
   let data = Data("{\"pinnedAppIDs\":[]}".utf8)
   let prefs = try JSONDecoder().decode(UserPreferences.self, from: data)
@@ -127,6 +156,8 @@ import WavesAudioCore
   #expect(prefs.palette == .waves)
   #expect(prefs.appearance == .system)
   #expect(prefs.managedAudioEqualizer == GlobalEqualizerSettings())
+  #expect(prefs.perAppAudioController == .waves)
+  #expect(prefs.waveLinkCompatibilityEnabled)
   #expect(prefs.hasCompletedGuidedSetup == true)
   #expect(prefs.requiredSetupVersion == OnboardingExperience.currentVersion)
   #expect(prefs.guidedTourCompletedVersion == 0)

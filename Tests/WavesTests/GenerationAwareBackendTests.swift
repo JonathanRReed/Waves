@@ -173,7 +173,8 @@ import WavesAudioCore
             + "Quit Elgato Wave Link before controlling this app in Waves."
         )
         : nil
-    }
+    },
+    perAppAudioController: .waveLink
   )
 
   let result = await backend.applyAppIntent(
@@ -196,6 +197,135 @@ import WavesAudioCore
   #expect(resultingZoom.desiredVolume == 1)
   #expect(resultingZoom.appliedVolume == nil)
   #expect(await recorder.count() == 0)
+}
+
+@Test func changingPerAppControllerChangesVerifiedWaveLinkOwnershipAtRuntime() async {
+  let app = AudioApp(
+    id: "runtime.browser",
+    logicalID: "com.example.browser",
+    pid: 101,
+    bundleID: "com.example.browser",
+    displayName: "Browser",
+    category: .media,
+    isActive: true,
+    desiredVolume: 1,
+    appliedVolume: 1,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let recorder = AppliedIntentRecorder()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    intentRouteApplyOverride: { stagedApp, equalizer in
+      await recorder.record(app: stagedApp, equalizer: equalizer)
+    },
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link is active, but its targets are not publicly attributable."
+      )
+    }
+  )
+
+  let wavesResult = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.7,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .userEdit
+    )
+  )
+  await backend.setPerAppAudioController(.waveLink)
+  let waveLinkResult = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.5,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 2,
+      reason: .userEdit
+    )
+  )
+
+  #expect(wavesResult.outcome == .applied)
+  #expect(waveLinkResult.outcome == .unsupported)
+  #expect(await recorder.count() == 1)
+}
+
+@Test func switchingBackToWavesImmediatelyReclaimsAWaveLinkYieldedRoute() async {
+  let app = waveLinkYieldedTestApp()
+  #expect(
+    WorkspaceAudioControlBackend.isRouteRecoveryCandidate(
+      app,
+      hasActiveController: false,
+      reclaimMixedOutput: false
+    )
+  )
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns this route."
+      )
+    },
+    perAppAudioController: .waveLink,
+    controllerFactory: waveLinkRecoveryControllerFactory,
+    processObjectIDResolver: { _ in [1] }
+  )
+
+  await backend.setPerAppAudioController(.waves)
+  await backend.reattachRoutesForTesting([app.logicalID])
+  let recovered = await backend.currentSnapshot()
+
+  #expect(recovered.apps[0].routingState == .managed)
+  #expect(recovered.apps[0].routeHealthContext == nil)
+}
+
+@Test func disablingCompatibilityImmediatelyReclaimsAWaveLinkYieldedRoute() async {
+  let app = waveLinkYieldedTestApp(context: .routerMixedOutput)
+  #expect(
+    WorkspaceAudioControlBackend.isRouteRecoveryCandidate(
+      app,
+      hasActiveController: false,
+      reclaimMixedOutput: true
+    )
+  )
+  #expect(
+    !WorkspaceAudioControlBackend.isRouteRecoveryCandidate(
+      app,
+      hasActiveController: false,
+      reclaimMixedOutput: false
+    )
+  )
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns this route."
+      )
+    },
+    perAppAudioController: .waveLink,
+    controllerFactory: waveLinkRecoveryControllerFactory,
+    processObjectIDResolver: { _ in [1] }
+  )
+
+  await backend.setWaveLinkCompatibilityEnabled(false)
+  await backend.reattachRoutesForTesting([app.logicalID])
+  let recovered = await backend.currentSnapshot()
+
+  #expect(recovered.apps[0].routingState == .managed)
+  #expect(recovered.apps[0].routeHealthContext == nil)
 }
 
 @Test func waveLinkMixedOutputCannotBeWrappedInAWavesRenderer() async {
@@ -744,4 +874,41 @@ private actor AppliedIntentRecorder {
   func count() -> Int {
     apps.count
   }
+}
+
+private func waveLinkYieldedTestApp(
+  context: RouteHealthContext = .unattributableRouterFallback
+) -> AudioApp {
+  AudioApp(
+    id: "runtime.yielded",
+    logicalID: "com.example.yielded",
+    pid: 303,
+    bundleID: "com.example.yielded",
+    displayName: "Yielded App",
+    category: .media,
+    isActive: true,
+    desiredVolume: 0.6,
+    appliedVolume: 0.6,
+    routingState: .monitorOnly,
+    compatibility: .supported,
+    routeHealthContext: context
+  )
+}
+
+private let waveLinkRecoveryControllerFactory: WorkspaceAudioControlBackend.ControllerFactory = {
+  app,
+  processObjectIDs,
+  _,
+  _,
+  _ in
+  try PerAppTapController.testingController(
+    appID: app.id,
+    logicalID: app.logicalID,
+    targetProcessObjectIDs: processObjectIDs,
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: { 0 },
+      stopIOProc: { 0 },
+      restoreTapMuting: { 0 }
+    )
+  )
 }

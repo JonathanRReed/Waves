@@ -92,6 +92,10 @@ struct UserPreferences: Codable, Sendable {
   var appearance: WavesAppearance = .system
   /// Equalization applied to every stream currently managed by Waves.
   var managedAudioEqualizer = GlobalEqualizerSettings()
+  /// Which mixer owns ordinary per-app routes while verified Wave Link audio is active.
+  var perAppAudioController: PerAppAudioController = .waves
+  /// Whether Waves applies Wave Link-specific ownership and mixed-output safeguards.
+  var waveLinkCompatibilityEnabled = true
   /// The profile Waves applies automatically when audio starts, so the user's
   /// baseline mix is in place without a manual apply. Nil means no default.
   var defaultProfileID: UUID?
@@ -134,6 +138,8 @@ struct UserPreferences: Codable, Sendable {
     case palette
     case appearance
     case managedAudioEqualizer
+    case perAppAudioController
+    case waveLinkCompatibilityEnabled
     case defaultProfileID
   }
 
@@ -192,6 +198,11 @@ struct UserPreferences: Codable, Sendable {
     palette = try value(.palette, defaults.palette)
     appearance = try value(.appearance, defaults.appearance)
     managedAudioEqualizer = try value(.managedAudioEqualizer, defaults.managedAudioEqualizer)
+    perAppAudioController = try value(.perAppAudioController, defaults.perAppAudioController)
+    waveLinkCompatibilityEnabled = try value(
+      .waveLinkCompatibilityEnabled,
+      defaults.waveLinkCompatibilityEnabled
+    )
     defaultProfileID = try container.decodeIfPresent(UUID.self, forKey: .defaultProfileID)
   }
 }

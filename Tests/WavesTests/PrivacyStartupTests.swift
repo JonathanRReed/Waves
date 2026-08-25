@@ -36,6 +36,96 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func startupAppliesPersistedPerAppControllerBeforeStartingAudio() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  preferences.perAppAudioController = .waveLink
+  preferences.waveLinkCompatibilityEnabled = false
+  let recorder = PrivacyCallRecorder()
+  let fixture = makePrivacyFixture(preferences: preferences, recorder: recorder)
+
+  fixture.store.start()
+  await fixture.store.waitForAudioStartup()
+
+  let events = recorder.events()
+  let controllerIndex = events.firstIndex(of: "backend.perAppController:wave_link")
+  let compatibilityIndex = events.firstIndex(of: "backend.waveLinkCompatibility:false")
+  let startIndex = events.firstIndex(of: "backend.start")
+  #expect(controllerIndex != nil)
+  #expect(compatibilityIndex != nil)
+  #expect(startIndex != nil)
+  if let controllerIndex, let startIndex {
+    #expect(controllerIndex < startIndex)
+  }
+  if let compatibilityIndex, let startIndex {
+    #expect(compatibilityIndex < startIndex)
+  }
+  _ = await fixture.store.shutdown()
+}
+
+@MainActor
+@Test func disablingWaveLinkCompatibilityPersistsAndRecoversRoutesImmediately() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  let fixture = makePrivacyFixture(preferences: preferences)
+  fixture.store.start()
+  await fixture.store.waitForAudioStartup()
+
+  fixture.store.setWaveLinkCompatibilityEnabled(false)
+  for _ in 0..<100 where await fixture.backend.callCount(named: "backend.recover") == 0 {
+    await Task.yield()
+  }
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(!fixture.store.preferences.waveLinkCompatibilityEnabled)
+  #expect(!fixture.preferencesStore.value.waveLinkCompatibilityEnabled)
+  #expect(await fixture.backend.callCount(named: "backend.waveLinkCompatibility:false") == 1)
+  #expect(await fixture.backend.callCount(named: "backend.recover") == 1)
+  _ = await fixture.store.shutdown()
+}
+
+@MainActor
+@Test func controllerChangeDuringStartupRunsDeferredRecoveryAfterStartup() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  let fixture = makePrivacyFixture(preferences: preferences, suspendStart: true)
+
+  fixture.store.start()
+  await fixture.backend.waitUntilStartIsSuspended()
+  fixture.store.setPerAppAudioController(.waveLink)
+  await fixture.backend.resumeStart()
+  await fixture.store.waitForAudioStartup()
+  for _ in 0..<100 where await fixture.backend.callCount(named: "backend.recover") == 0 {
+    await Task.yield()
+  }
+
+  #expect(fixture.store.startupState == .running)
+  #expect(await fixture.backend.callCount(named: "backend.recover") == 1)
+  _ = await fixture.store.shutdown()
+}
+
+@MainActor
+@Test func changingPerAppControllerPersistsAndRecoversRoutesImmediately() async {
+  var preferences = freshPrivacyPreferences()
+  preferences.hasCompletedPrivacySetup = true
+  let fixture = makePrivacyFixture(preferences: preferences)
+  fixture.store.start()
+  await fixture.store.waitForAudioStartup()
+
+  fixture.store.setPerAppAudioController(.waveLink)
+  for _ in 0..<100 where await fixture.backend.callCount(named: "backend.recover") == 0 {
+    await Task.yield()
+  }
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.preferences.perAppAudioController == .waveLink)
+  #expect(fixture.preferencesStore.value.perAppAudioController == .waveLink)
+  #expect(await fixture.backend.callCount(named: "backend.perAppController:wave_link") == 1)
+  #expect(await fixture.backend.callCount(named: "backend.recover") == 1)
+  _ = await fixture.store.shutdown()
+}
+
+@MainActor
 @Test func continueSavesConsentBeforeStartingAudio() async {
   let recorder = PrivacyCallRecorder()
   let fixture = makePrivacyFixture(recorder: recorder)
@@ -45,7 +135,18 @@ import WavesAudioCore
 
   let events = recorder.events()
   #expect(events.first == "preferences.save:true")
-  #expect(events.dropFirst().first == "backend.start")
+  let compatibilityIndex = events.firstIndex(of: "backend.waveLinkCompatibility:true")
+  let controllerIndex = events.firstIndex(of: "backend.perAppController:waves")
+  let startIndex = events.firstIndex(of: "backend.start")
+  #expect(compatibilityIndex != nil)
+  #expect(controllerIndex != nil)
+  #expect(startIndex != nil)
+  if let compatibilityIndex, let startIndex {
+    #expect(compatibilityIndex < startIndex)
+  }
+  if let controllerIndex, let startIndex {
+    #expect(controllerIndex < startIndex)
+  }
   #expect(fixture.preferencesStore.value.hasCompletedPrivacySetup)
   #expect(fixture.store.preferences.hasCompletedPrivacySetup)
   #expect(fixture.store.startupState == .running)
@@ -510,6 +611,7 @@ private func makePrivacyFixture(
   cachedSession: AudioSessionSnapshot? = nil,
   recorder: PrivacyCallRecorder = PrivacyCallRecorder(),
   startFailures: Int = 0,
+  suspendStart: Bool = false,
   captureAuthorization: CaptureAuthorizationResult = .authorized,
   installLocation: InstallLocationClassification = .applications
 ) -> PrivacyFixture {
@@ -518,6 +620,7 @@ private func makePrivacyFixture(
     snapshot: snapshot,
     recorder: recorder,
     startFailures: startFailures,
+    suspendStart: suspendStart,
     captureAuthorization: captureAuthorization
   )
   let preferencesStore = PrivacyPreferencesStore(value: preferences, recorder: recorder)
@@ -611,25 +714,53 @@ private actor PrivacyRecordingBackend: AudioControlBackend {
   private var snapshot: AudioSessionSnapshot
   private let recorder: PrivacyCallRecorder
   private var startFailuresRemaining: Int
+  private let suspendStart: Bool
+  private var startIsSuspended = false
+  private var startSuspensionWaiters: [CheckedContinuation<Void, Never>] = []
+  private var startResumeContinuation: CheckedContinuation<Void, Never>?
   private let captureAuthorization: CaptureAuthorizationResult
 
   init(
     snapshot: AudioSessionSnapshot,
     recorder: PrivacyCallRecorder,
     startFailures: Int,
+    suspendStart: Bool,
     captureAuthorization: CaptureAuthorizationResult
   ) {
     self.snapshot = snapshot
     self.recorder = recorder
     self.startFailuresRemaining = startFailures
+    self.suspendStart = suspendStart
     self.captureAuthorization = captureAuthorization
   }
 
   func calls() -> [String] { recorder.events().filter { $0.hasPrefix("backend.") } }
   func callCount(named name: String) -> Int { calls().count { $0 == name } }
 
+  func waitUntilStartIsSuspended() async {
+    if startIsSuspended { return }
+    await withCheckedContinuation { continuation in
+      startSuspensionWaiters.append(continuation)
+    }
+  }
+
+  func resumeStart() {
+    startResumeContinuation?.resume()
+    startResumeContinuation = nil
+  }
+
   func start() async throws {
     recorder.append("backend.start")
+    if suspendStart {
+      startIsSuspended = true
+      let waiters = startSuspensionWaiters
+      startSuspensionWaiters.removeAll()
+      for waiter in waiters { waiter.resume() }
+      await withCheckedContinuation { continuation in
+        startResumeContinuation = continuation
+      }
+      startIsSuspended = false
+    }
     if startFailuresRemaining > 0 {
       startFailuresRemaining -= 1
       throw PrivacyStartupTestError.startFailed
@@ -662,6 +793,14 @@ private actor PrivacyRecordingBackend: AudioControlBackend {
 
   func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws {
     recorder.append("backend.equalizer")
+  }
+
+  func setPerAppAudioController(_ controller: PerAppAudioController) async {
+    recorder.append("backend.perAppController:\(controller.rawValue)")
+  }
+
+  func setWaveLinkCompatibilityEnabled(_ isEnabled: Bool) async {
+    recorder.append("backend.waveLinkCompatibility:\(isEnabled)")
   }
 
   func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels] {

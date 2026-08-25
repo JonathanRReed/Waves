@@ -4,6 +4,88 @@ import WavesAudioCore
 
 @testable import Waves
 
+@Test func wavesControllerKeepsOrdinaryAppsEligibleWhileWaveLinkRuns() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let verifiedConflict = VerifiedRouterConflict(
+    routerName: "Elgato Wave Link",
+    kind: .unattributableTapFallback,
+    detail: "Verified Wave Link is active, but Core Audio cannot attribute its targets."
+  )
+
+  #expect(
+    CompetingRouterPolicy.conflict(
+      for: target,
+      verifiedConflict: verifiedConflict,
+      controller: .waves,
+      compatibilityEnabled: true
+    ) == nil
+  )
+}
+
+@Test func waveLinkControllerReceivesOrdinaryAppsWhileWaveLinkRuns() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let verifiedConflict = VerifiedRouterConflict(
+    routerName: "Elgato Wave Link",
+    kind: .unattributableTapFallback,
+    detail: "Verified Wave Link is active, but Core Audio cannot attribute its targets."
+  )
+
+  let conflict = CompetingRouterPolicy.conflict(
+    for: target,
+    verifiedConflict: verifiedConflict,
+    controller: .waveLink,
+    compatibilityEnabled: true
+  )
+
+  #expect(conflict == verifiedConflict)
+}
+
+@Test func wavesControllerStillRefusesToWrapWaveLinkMixedOutput() {
+  let waveLink = AudioApp(
+    id: "wave-link",
+    pid: 202,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "Wave Link",
+    category: .media,
+    routingState: .live,
+    compatibility: .supported
+  )
+
+  let conflict = CompetingRouterPolicy.conflict(
+    for: waveLink,
+    verifiedConflict: nil,
+    controller: .waves,
+    compatibilityEnabled: true
+  )
+
+  #expect(conflict?.kind == .routerMixedOutput)
+}
+
+@Test func disabledWaveLinkCompatibilityBypassesMixedOutputSafeguard() {
+  let waveLink = AudioApp(
+    id: "wave-link",
+    pid: 202,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "Wave Link",
+    category: .media,
+    routingState: .live,
+    compatibility: .supported
+  )
+
+  let conflict = CompetingRouterPolicy.conflict(
+    for: waveLink,
+    verifiedConflict: VerifiedRouterConflict(
+      routerName: "Elgato Wave Link",
+      kind: .routerMixedOutput,
+      detail: "Wave Link mixed output"
+    ),
+    controller: .waveLink,
+    compatibilityEnabled: false
+  )
+
+  #expect(conflict == nil)
+}
+
 @Test func verifiedActiveWaveLinkUsesCoreAudioOutputFallbackWhenSystemTapOwnershipIsUnavailable() {
   let target = routerTestApp(id: "target", pid: 101)
   let service = verifiedRouterService(

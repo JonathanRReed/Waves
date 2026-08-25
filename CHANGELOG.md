@@ -6,6 +6,17 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-25
+
+Waves 1.7.0 build 15 adds explicit control over how Waves coexists with Elgato
+Wave Link.
+
+### Added
+- Choose Waves or Elgato Wave Link as the ordinary per-app audio controller
+  while both apps remain open. Changes persist and rebuild routes immediately.
+- Disable Wave Link compatibility when using a custom routing workaround. This
+  bypasses all Wave Link-specific ownership and mixed-output safeguards.
+
 ## [1.6.0] - 2026-08-16
 
 Waves 1.6.0 build 14 turns the menu-bar panel into a compact Quick Mixer and

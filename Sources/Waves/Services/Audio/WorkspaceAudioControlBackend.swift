@@ -411,6 +411,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let routeMaintenanceOverride: RouteMaintenanceOverride?
   private let verifiedRouterConflictProvider: VerifiedRouterConflictProvider?
   private let verifiedRouterActivityProvider: VerifiedRouterActivityProvider?
+  private var perAppAudioController: PerAppAudioController
+  private var waveLinkCompatibilityEnabled: Bool
   private let controllerFactory: ControllerFactory?
   private let processObjectIDResolver: ProcessObjectIDResolver?
   private let processTargetResolver: ProcessTargetResolver?
@@ -425,7 +427,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   init(
     verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
-    verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil
+    verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil,
+    perAppAudioController: PerAppAudioController = .waves,
+    waveLinkCompatibilityEnabled: Bool = true
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
@@ -435,6 +439,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.routeMaintenanceOverride = nil
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
     self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
+    self.perAppAudioController = perAppAudioController
+    self.waveLinkCompatibilityEnabled = waveLinkCompatibilityEnabled
     self.controllerFactory = nil
     self.processObjectIDResolver = nil
     self.processTargetResolver = nil
@@ -455,6 +461,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     shutdownCleanupOverride: ShutdownCleanupOverride? = nil,
     verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
     verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil,
+    perAppAudioController: PerAppAudioController = .waves,
+    waveLinkCompatibilityEnabled: Bool = true,
     routerObservationNativeCalls: RouterObservationListenerNativeCalls? = nil,
     testingControllers: [PerAppTapController] = [],
     routeMaintenanceOverride: RouteMaintenanceOverride? = nil,
@@ -477,6 +485,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.routeMaintenanceOverride = routeMaintenanceOverride
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
     self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
+    self.perAppAudioController = perAppAudioController
+    self.waveLinkCompatibilityEnabled = waveLinkCompatibilityEnabled
     self.controllerFactory = controllerFactory
     self.processObjectIDResolver = processObjectIDResolver
     self.processTargetResolver = processTargetResolver
@@ -1172,7 +1182,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
     let managedLogicalIDs = Set(
       snapshot.apps
-        .filter { $0.routingState == .managed || controllers[$0.id]?.isActive == true }
+        .filter {
+          Self.isRouteRecoveryCandidate(
+            $0,
+            hasActiveController: controllers[$0.id]?.isActive == true,
+            reclaimMixedOutput: !waveLinkCompatibilityEnabled
+          )
+        }
         .map(\.logicalID)
     )
 
@@ -1189,6 +1205,35 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     return snapshot
+  }
+
+  static func isRouteRecoveryCandidate(
+    _ app: AudioApp,
+    hasActiveController: Bool,
+    reclaimMixedOutput: Bool
+  ) -> Bool {
+    if app.routingState == .managed || hasActiveController { return true }
+    guard app.routingState == .monitorOnly else { return false }
+    switch app.routeHealthContext {
+    case .verifiedRouterOwnership, .unattributableRouterFallback:
+      return true
+    case .routerMixedOutput:
+      return reclaimMixedOutput
+    case nil, .geometryRecoveryInProgress, .geometryRecoveryExhausted:
+      return false
+    }
+  }
+
+  func setPerAppAudioController(_ controller: PerAppAudioController) async {
+    guard perAppAudioController != controller else { return }
+    perAppAudioController = controller
+    markRouterObservationDirty()
+  }
+
+  func setWaveLinkCompatibilityEnabled(_ isEnabled: Bool) async {
+    guard waveLinkCompatibilityEnabled != isEnabled else { return }
+    waveLinkCompatibilityEnabled = isEnabled
+    markRouterObservationDirty()
   }
 
   func autoRestoreDevice() async throws -> AudioSessionSnapshot {
@@ -1258,6 +1303,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           title: "Audio capture permission",
           status: captureAuthorizationStatus,
           detail: captureAuthorizationDetail
+        ),
+        DiagnosticsCheck(
+          title: "Per-app controller",
+          status: .informational,
+          detail: waveLinkCompatibilityEnabled
+            ? perAppAudioController == .waves
+              ? "Waves owns ordinary per-app routes. Wave Link mixed outputs remain excluded."
+              : "Elgato Wave Link owns ordinary per-app routes while it is active. Waves monitors those apps."
+            : "Wave Link compatibility is disabled. Waves applies no Wave Link-specific route safeguards."
         ),
         DiagnosticsCheck(
           title: "Route recovery",
@@ -3141,7 +3195,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     return CompetingRouterPolicy.conflict(
       for: app,
-      verifiedConflict: conflict
+      verifiedConflict: conflict,
+      controller: perAppAudioController,
+      compatibilityEnabled: waveLinkCompatibilityEnabled
     )
   }
 
