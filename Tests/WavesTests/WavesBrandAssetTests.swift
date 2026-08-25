@@ -34,6 +34,33 @@ import Testing
   #expect(locatedURL == logoURL)
 }
 
+@Test func brandAssetLocatorSupportsPackagedBundleContentsResourcesLayout() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("waves-brand-bundle-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+
+  let appURL = root.appendingPathComponent("Waves.app", isDirectory: true)
+  let resourcesURL = appURL.appendingPathComponent("Contents/Resources", isDirectory: true)
+  let logoURL =
+    resourcesURL
+    .appendingPathComponent(WavesBrandAssetLocator.resourceBundleName, isDirectory: true)
+    .appendingPathComponent("Contents/Resources", isDirectory: true)
+    .appendingPathComponent(WavesBrandAssetLocator.logoFilename, isDirectory: false)
+  try FileManager.default.createDirectory(
+    at: logoURL.deletingLastPathComponent(),
+    withIntermediateDirectories: true
+  )
+  try Data([0x89, 0x50, 0x4E, 0x47]).write(to: logoURL)
+
+  let locatedURL = WavesBrandAssetLocator.logoURL(
+    bundleURL: appURL,
+    resourceURL: resourcesURL,
+    executableURL: appURL.appendingPathComponent("Contents/MacOS/Waves", isDirectory: false)
+  )
+
+  #expect(locatedURL == logoURL)
+}
+
 @Test func brandAssetLocatorReturnsNilInsteadOfTrappingWhenLogoIsMissing() {
   let missingRoot = FileManager.default.temporaryDirectory
     .appendingPathComponent("waves-missing-brand-assets-\(UUID().uuidString)", isDirectory: true)

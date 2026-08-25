@@ -1075,6 +1075,7 @@ validate_app_bundle() {
   local entitlement_key
   local entitlement_value
   local nested_item
+  local packaged_logo
 
   require_command plutil "to validate $label metadata"
   require_command codesign "to validate $label entitlements"
@@ -1116,11 +1117,15 @@ validate_app_bundle() {
     echo "Error: $label is missing its SwiftPM resource bundle at $resources/$RESOURCE_BUNDLE_NAME." >&2
     exit 1
   fi
-  if [ ! -f "$resources/$RESOURCE_BUNDLE_NAME/waves-logo.png" ]; then
+  packaged_logo="$resources/$RESOURCE_BUNDLE_NAME/waves-logo.png"
+  if [ ! -f "$packaged_logo" ]; then
+    packaged_logo="$resources/$RESOURCE_BUNDLE_NAME/Contents/Resources/waves-logo.png"
+  fi
+  if [ ! -f "$packaged_logo" ]; then
     echo "Error: $label is missing its packaged logo resource." >&2
     exit 1
   fi
-  if ! cmp -s "$LOGO_RESOURCE" "$resources/$RESOURCE_BUNDLE_NAME/waves-logo.png"; then
+  if ! cmp -s "$LOGO_RESOURCE" "$packaged_logo"; then
     echo "Error: $label contains an unexpected packaged logo resource." >&2
     exit 1
   fi

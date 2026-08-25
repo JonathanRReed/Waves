@@ -131,15 +131,22 @@ enum WavesBrandAssetLocator {
     }
 
     for container in containers {
-      let candidate =
+      let resourceBundleURL =
         container
         .appendingPathComponent(resourceBundleName, isDirectory: true)
-        .appendingPathComponent(logoFilename, isDirectory: false)
-      var isDirectory: ObjCBool = false
-      if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
-        !isDirectory.boolValue
-      {
-        return candidate
+      let candidates = [
+        resourceBundleURL.appendingPathComponent(logoFilename, isDirectory: false),
+        resourceBundleURL
+          .appendingPathComponent("Contents/Resources", isDirectory: true)
+          .appendingPathComponent(logoFilename, isDirectory: false),
+      ]
+      for candidate in candidates {
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+          !isDirectory.boolValue
+        {
+          return candidate
+        }
       }
     }
     return nil
