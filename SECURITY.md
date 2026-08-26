@@ -22,5 +22,9 @@ window to address the issue before any public disclosure.
 
 Waves is a non-sandboxed utility that uses Core Audio process taps (which require
 audio-capture permission) and an opt-in `waves://` URL automation scheme that is
-**off by default**. Security reports touching audio capture, the URL scheme, the
-login item, or local file handling are especially welcome.
+**off by default**. It also exposes an opt-in same-user control Unix socket
+(used by `wavesctl` and the Stream Deck plugin), and, in Wave Link compatibility
+mode, connects to Elgato Wave Link's loopback control WebSocket only after
+verifying the listener's code signature. Security reports touching audio
+capture, the URL scheme, the control socket, the Wave Link bridge and its
+signature gate, the login item, or local file handling are especially welcome.

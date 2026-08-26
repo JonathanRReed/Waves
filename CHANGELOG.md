@@ -6,7 +6,7 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.7.0] - 2026-08-25
+## [1.7.0] - Unreleased
 
 Waves 1.7.0 build 18 adds explicit control over how Waves coexists with Elgato
 Wave Link.

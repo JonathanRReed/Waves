@@ -66,7 +66,7 @@ import Testing
     .init(pid: 99, port: 49_204),
     .init(pid: 1_366, port: 1_884),
   ]
-  let verifyOnly1366: WaveLinkLoopbackPeerVerifier.IdentityVerifier = { pid, descriptor in
+  let verifyOnly1366: WaveLinkEndpointDiscovery.IdentityVerifier = { pid, descriptor in
     guard pid == 1_366 else { return nil }
     return VerifiedRouterProcessIdentity(
       pid: pid,
@@ -76,7 +76,7 @@ import Testing
   }
 
   // The published port wins when its listener verifies.
-  let verifyEverything: WaveLinkLoopbackPeerVerifier.IdentityVerifier = { pid, descriptor in
+  let verifyEverything: WaveLinkEndpointDiscovery.IdentityVerifier = { pid, descriptor in
     VerifiedRouterProcessIdentity(
       pid: pid,
       teamIdentifier: descriptor.teamIdentifier,

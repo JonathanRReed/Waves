@@ -21,6 +21,14 @@ no account, analytics, or telemetry.
   with the system's own hot-key API. It is handed those combinations and nothing
   else — it does not read, store, or transmit any other keystroke, and it needs
   no Accessibility permission to do this.
+- **Wave Link coexistence (only while Elgato Wave Link runs).** When Wave Link
+  compatibility is enabled and a code-signature-verified Wave Link process is
+  routing audio, Waves connects to Wave Link's local control service over a
+  loopback-only WebSocket (`127.0.0.1`) to apply the volume and mute you set,
+  and inspects local listener processes (via `lsof`) solely to confirm that the
+  service belongs to the signed Wave Link app before connecting. This traffic
+  never leaves your Mac, carries only channel volume/mute commands, and happens
+  only in response to your controls.
 
 ## What Waves stores
 
@@ -57,7 +65,9 @@ be turned off in General Settings.
 ## What Waves does **not** do
 
 - No telemetry, analytics, crash reporting, or tracking.
-- No network requests except update checks and update downloads you request.
+- No network requests that leave your Mac except update checks and update
+  downloads you request. (Wave Link compatibility uses a loopback-only
+  connection to Wave Link on the same machine, described above.)
 - No recording or transmission of any audio.
 
 ## Permissions summary

@@ -289,41 +289,6 @@ actor WaveLinkControlBridge: WaveLinkControlling {
   }
 }
 
-enum WaveLinkLoopbackPeerVerifier {
-  typealias IdentityVerifier =
-    @Sendable (
-      pid_t,
-      VerifiedRouterDescriptor
-    ) -> VerifiedRouterProcessIdentity?
-
-  static func validate(
-    listenerPIDs: [pid_t],
-    descriptor: VerifiedRouterDescriptor = .waveLink3_2_2,
-    identityVerifier: IdentityVerifier
-  ) throws {
-    let hasVerifiedOwner = listenerPIDs.contains { pid in
-      guard let identity = identityVerifier(pid, descriptor) else { return false }
-      return identity.pid == pid
-        && identity.teamIdentifier == descriptor.teamIdentifier
-        && identity.matchesDesignatedRequirement
-    }
-    guard hasVerifiedOwner else {
-      throw WaveLinkControlBridgeError.unverifiedLoopbackPeer
-    }
-  }
-
-  static func parseListenerPIDs(_ output: String) -> [pid_t] {
-    Array(
-      Set(
-        output.split(whereSeparator: \.isNewline).compactMap { line in
-          guard line.first == "p", let pid = pid_t(line.dropFirst()) else { return nil }
-          return pid
-        }
-      )
-    ).sorted()
-  }
-}
-
 private actor WaveLinkJSONRPCTransport {
   typealias PortProvider = @Sendable () async throws -> UInt16
 
