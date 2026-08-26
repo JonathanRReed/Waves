@@ -48,11 +48,12 @@ module WavesRelease
       nonempty_string!(value["detail"], "#{context}.detail")
     end
 
-    def run(*command, chdir: nil, stdin_data: nil, allow_failure: false)
+    def run(*command, chdir: nil, stdin_data: nil, allow_failure: false, env: nil)
       options = {}
       options[:chdir] = chdir if chdir
       options[:stdin_data] = stdin_data if stdin_data
-      stdout, stderr, status = Open3.capture3(*command, **options)
+      arguments = env ? [env] + command : command
+      stdout, stderr, status = Open3.capture3(*arguments, **options)
       return [stdout, stderr, status] if allow_failure
       raise Error, "#{command.join(' ')} failed: #{stderr.strip}" unless status.success?
 
@@ -734,12 +735,42 @@ module WavesRelease
     end
   end
 
+  # Sparkle's signing tools read the EdDSA key from the release account's login
+  # keychain, which Security.framework resolves through HOME. The release
+  # environment runs every step under a private HOME, so — exactly like the
+  # notarytool hand-off in build_and_run.sh — the Sparkle child processes are
+  # given only the validated release-signing account home.
+  module SigningAccountHome
+    module_function
+
+    def resolve!
+      account = Validation.run("/usr/bin/id", "-un").strip
+      raise Error, "could not resolve the release-signing account" if account.empty?
+      record = Validation.run("/usr/bin/dscl", ".", "-read", "/Users/#{account}", "NFSHomeDirectory")
+      home = record.split(":", 2).fetch(1, "").strip
+      unless !home.empty? && home.start_with?("/")
+        raise Error, "release-signing account home record is invalid"
+      end
+      home = File.realpath(home)
+      stat = File.stat(home)
+      raise Error, "release-signing account home ownership is unsafe" unless stat.uid == Process.uid
+      raise Error, "release-signing account home permissions are unsafe" unless (stat.mode & 0o022).zero?
+      home
+    end
+
+    def child_environment
+      home = resolve!
+      {"HOME" => home, "CFFIXED_USER_HOME" => home}
+    end
+  end
+
   module SparkleKeyBinding
     module_function
 
     def sign_and_verify!(scratch_root:, artifact:, metadata:, packaged_public_key:)
       sparkle = metadata.fetch("sparkle")
       account = sparkle.fetch("keychainAccount")
+      signing_env = SigningAccountHome.child_environment
       raise Error, "explicit Waves Sparkle account is required" unless account == "com.jonathanreed.Waves"
 
       sign_update = SparkleSigningTool.verify!(
@@ -754,7 +785,7 @@ module WavesRelease
       )
       use_accountless = false
       derived_public = begin
-        Validation.run(generate_keys, "--account", account, "-p").strip
+        Validation.run(generate_keys, "--account", account, "-p", env: signing_env).strip
       rescue Error => error
         fallback_error = error.message.strip
         if fallback_error.include?("No existing signing key found") ||
@@ -763,7 +794,7 @@ module WavesRelease
           fallback_error.empty? ||
           fallback_error.end_with?("failed:")
           use_accountless = true
-          Validation.run(generate_keys, "-p").strip
+          Validation.run(generate_keys, "-p", env: signing_env).strip
         else
           raise error
         end
@@ -777,9 +808,9 @@ module WavesRelease
       end
 
       signature = if use_accountless
-        Validation.run(sign_update, "-p", artifact).strip
+        Validation.run(sign_update, "-p", artifact, env: signing_env).strip
       else
-        Validation.run(sign_update, "--account", account, "-p", artifact).strip
+        Validation.run(sign_update, "--account", account, "-p", artifact, env: signing_env).strip
       end
       begin
         decoded = Base64.strict_decode64(signature)
@@ -795,7 +826,8 @@ module WavesRelease
           "--verify",
           artifact,
           signature,
-          allow_failure: true
+          allow_failure: true,
+          env: signing_env
         )
       else
         _stdout, stderr, status = Validation.run(
@@ -805,7 +837,8 @@ module WavesRelease
           "--verify",
           artifact,
           signature,
-          allow_failure: true
+          allow_failure: true,
+          env: signing_env
         )
       end
       raise Error, "Sparkle signature verification failed: #{stderr.strip}" unless status.success?
