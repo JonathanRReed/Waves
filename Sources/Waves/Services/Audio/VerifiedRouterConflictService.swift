@@ -21,7 +21,23 @@ struct VerifiedRouterDescriptor: Hashable, Sendable {
       + "certificate leaf[subject.OU] = Y93VXCB8Q5)"
   )
 
-  static let supported = [waveLink3_2_2]
+  /// Wave Link 1.x and 2.x ship as `com.elgato.WaveLink` under the same Elgato
+  /// team. Their loopback control protocol predates the Wave Link 3 bridge, so
+  /// recognizing them yields monitoring-only coexistence: no duplicate audio,
+  /// with volume and mute staying in Wave Link itself.
+  static let waveLinkLegacy = VerifiedRouterDescriptor(
+    displayName: "Elgato Wave Link",
+    bundleIdentifier: "com.elgato.WaveLink",
+    teamIdentifier: "Y93VXCB8Q5",
+    designatedRequirement:
+      "anchor apple generic and identifier \"com.elgato.WaveLink\" and "
+      + "(certificate leaf[field.1.2.840.113635.100.6.1.9] exists or "
+      + "certificate 1[field.1.2.840.113635.100.6.2.6] exists and "
+      + "certificate leaf[field.1.2.840.113635.100.6.1.13] exists and "
+      + "certificate leaf[subject.OU] = Y93VXCB8Q5)"
+  )
+
+  static let supported = [waveLink3_2_2, waveLinkLegacy]
 
   var hasConstructibleRequirement: Bool {
     var requirement: SecRequirement?
@@ -61,6 +77,8 @@ struct VerifiedRouterObservationSnapshot: Hashable, Sendable {
 }
 
 struct VerifiedRouterProcessIdentity: Hashable, Sendable {
+  static let signingInformationFlags = SecCSFlags(rawValue: kSecCSSigningInformation)
+
   let pid: pid_t
   let teamIdentifier: String
   let matchesDesignatedRequirement: Bool
@@ -76,6 +94,10 @@ struct VerifiedRouterConflict: Hashable, Sendable {
   let routerName: String
   let kind: Kind
   let detail: String
+  /// True only when the active verified router speaks the Wave Link 3 control
+  /// protocol, so the backend knows a bridge apply can possibly succeed.
+  /// Legacy Wave Link generations coexist as monitoring-only instead.
+  var supportsBridgeControl: Bool = false
 }
 
 struct VerifiedRouterActivitySnapshot: Sendable {
@@ -95,9 +117,6 @@ struct VerifiedRouterActivitySnapshot: Sendable {
 
   func conflict(for app: AudioApp) -> VerifiedRouterConflict? {
     guard let targetPID = app.pid else { return nil }
-    guard processObjects.contains(where: { $0.pid == targetPID && $0.isRunningOutput }) else {
-      return nil
-    }
 
     if let router = routers.first(where: { $0.pid == targetPID }) {
       return VerifiedRouterConflict(
@@ -125,7 +144,10 @@ struct VerifiedRouterActivitySnapshot: Sendable {
         detail:
           "Core Audio cannot publicly attribute the system tap list to verified \(router.descriptor.displayName). "
           + "Because its verified routing process owns active Core Audio output, Waves is monitoring only to avoid "
-          + "duplicate or silent playback until that router releases the path.\(ambiguityDetail)"
+          + "duplicate or silent playback until that router releases the path.\(ambiguityDetail)",
+        supportsBridgeControl: routers.contains {
+          $0.descriptor.bundleIdentifier == VerifiedRouterDescriptor.waveLink3_2_2.bundleIdentifier
+        }
       )
     }
 
@@ -380,7 +402,7 @@ private extension VerifiedRouterObservationSnapshot {
   }
 }
 
-private extension VerifiedRouterProcessIdentity {
+extension VerifiedRouterProcessIdentity {
   static func verifyLive(
     pid: pid_t,
     descriptor: VerifiedRouterDescriptor
@@ -411,7 +433,12 @@ private extension VerifiedRouterProcessIdentity {
       return nil
     }
     var information: CFDictionary?
-    guard SecCodeCopySigningInformation(staticCode, SecCSFlags(), &information) == errSecSuccess,
+    guard
+      SecCodeCopySigningInformation(
+        staticCode,
+        signingInformationFlags,
+        &information
+      ) == errSecSuccess,
       let information,
       let teamIdentifier = (information as NSDictionary)[kSecCodeInfoTeamIdentifier] as? String
     else {

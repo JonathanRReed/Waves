@@ -1,8 +1,130 @@
 import AudioToolbox
+import Security
 import Testing
 import WavesAudioCore
 
 @testable import Waves
+
+@Test func compatibilityPreventsWavesFromClaimingAppsWhileWaveLinkCanBypassTheRoute() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let verifiedConflict = VerifiedRouterConflict(
+    routerName: "Elgato Wave Link",
+    kind: .unattributableTapFallback,
+    detail: "Verified Wave Link is active, but Core Audio cannot attribute its targets."
+  )
+
+  #expect(
+    CompetingRouterPolicy.conflict(
+      for: target,
+      verifiedConflict: verifiedConflict,
+      controller: .waves,
+      compatibilityEnabled: true
+    ) == verifiedConflict
+  )
+}
+
+@Test func waveLinkControllerReceivesOrdinaryAppsWhileWaveLinkRuns() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let verifiedConflict = VerifiedRouterConflict(
+    routerName: "Elgato Wave Link",
+    kind: .unattributableTapFallback,
+    detail: "Verified Wave Link is active, but Core Audio cannot attribute its targets."
+  )
+
+  let conflict = CompetingRouterPolicy.conflict(
+    for: target,
+    verifiedConflict: verifiedConflict,
+    controller: .waveLink,
+    compatibilityEnabled: true
+  )
+
+  #expect(conflict == verifiedConflict)
+}
+
+@Test func wavesControllerStillRefusesToWrapWaveLinkMixedOutput() {
+  let waveLink = AudioApp(
+    id: "wave-link",
+    pid: 202,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "Wave Link",
+    category: .media,
+    routingState: .live,
+    compatibility: .supported
+  )
+
+  let conflict = CompetingRouterPolicy.conflict(
+    for: waveLink,
+    verifiedConflict: nil,
+    controller: .waves,
+    compatibilityEnabled: true
+  )
+
+  #expect(conflict?.kind == .routerMixedOutput)
+}
+
+@Test func disabledWaveLinkCompatibilityBypassesMixedOutputSafeguard() {
+  let waveLink = AudioApp(
+    id: "wave-link",
+    pid: 202,
+    bundleID: "com.elgato.WaveLink3",
+    displayName: "Wave Link",
+    category: .media,
+    routingState: .live,
+    compatibility: .supported
+  )
+
+  let conflict = CompetingRouterPolicy.conflict(
+    for: waveLink,
+    verifiedConflict: VerifiedRouterConflict(
+      routerName: "Elgato Wave Link",
+      kind: .routerMixedOutput,
+      detail: "Wave Link mixed output"
+    ),
+    controller: .waveLink,
+    compatibilityEnabled: false
+  )
+
+  #expect(conflict == nil)
+}
+
+@Test func zeroVolumeRouteStopsClaimingManagedWhenWaveLinkCanStillMonitorIt() async throws {
+  var zoom = routerTestApp(id: "zoom", pid: 101)
+  zoom.desiredVolume = 0
+  zoom.appliedVolume = 0
+  let controller = try PerAppTapController.testingController(
+    appID: zoom.id,
+    logicalID: zoom.logicalID,
+    targetProcessObjectIDs: [1],
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: { noErr },
+      stopIOProc: { noErr },
+      restoreTapMuting: { noErr }
+    )
+  )
+  let conflict = VerifiedRouterConflict(
+    routerName: "Elgato Wave Link",
+    kind: .unattributableTapFallback,
+    detail: "Wave Link can send a parallel copy to the monitor."
+  )
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: routerActivitySnapshot(apps: [zoom]),
+    verifiedRouterConflictProvider: { _ in conflict },
+    testingControllers: [controller],
+    processObjectLivenessProvider: { _ in true }
+  )
+
+  await backend.updateAudioLevels(at: .zero)
+  await backend.updateAudioLevels(at: .milliseconds(250))
+  let snapshot = await backend.currentSnapshot()
+  let lifecycle = await backend.lifecycleDebugSnapshot()
+
+  #expect(snapshot.apps[0].routingState == .monitorOnly)
+  #expect(snapshot.apps[0].appliedVolume == nil)
+  #expect(snapshot.apps[0].routeHealthContext == .unattributableRouterFallback)
+  #expect(snapshot.apps[0].notes == conflict.detail)
+  #expect(lifecycle.liveControllers == 0)
+  _ = await backend.shutdownWithResult()
+}
 
 @Test func verifiedActiveWaveLinkUsesCoreAudioOutputFallbackWhenSystemTapOwnershipIsUnavailable() {
   let target = routerTestApp(id: "target", pid: 101)
@@ -20,6 +142,39 @@ import WavesAudioCore
   #expect(conflict.kind == .unattributableTapFallback)
   #expect(conflict.detail.contains("cannot publicly attribute"))
   #expect(conflict.detail.contains("Core Audio output"))
+}
+
+@Test func verifiedActiveWaveLinkYieldsAnIdleOrdinaryAppBeforeItStartsOutput() {
+  let idleApp = routerTestApp(id: "idle-app", pid: 101)
+  let service = verifiedRouterService(
+    snapshot: .init(
+      processObjects: [
+        .init(id: 1, pid: 101, isRunningOutput: false),
+        .init(id: 3, pid: 202, isRunningOutput: true),
+      ],
+      taps: []
+    )
+  )
+
+  let conflict = try! #require(service.conflict(for: idleApp))
+  #expect(conflict.kind == .unattributableTapFallback)
+}
+
+@Test func verifiedActiveWaveLinkYieldsAnAppWhoseAudioRunsInAHelperProcess() {
+  let parentApp = routerTestApp(id: "helper-backed-app", pid: 101)
+  let service = verifiedRouterService(
+    snapshot: .init(
+      processObjects: [
+        .init(id: 1, pid: 101, isRunningOutput: false),
+        .init(id: 2, pid: 303, isRunningOutput: true),
+        .init(id: 3, pid: 202, isRunningOutput: true),
+      ],
+      taps: []
+    )
+  )
+
+  let conflict = try! #require(service.conflict(for: parentApp))
+  #expect(conflict.kind == .unattributableTapFallback)
 }
 
 @Test func unrelatedReadableTapDoesNotBecomeAWaveLinkPublicMembershipClaim() {
@@ -240,11 +395,47 @@ import WavesAudioCore
   #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
+@Test func legacyWaveLinkYieldsMonitoringOnlyWithoutBridgeControl() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let snapshot = VerifiedRouterObservationSnapshot(
+    processObjects: [
+      .init(id: 1, pid: 101, isRunningOutput: true),
+      .init(id: 3, pid: 202, isRunningOutput: true),
+    ],
+    taps: []
+  )
+  let makeService: (VerifiedRouterDescriptor) -> VerifiedRouterConflictService = { active in
+    VerifiedRouterConflictService(
+      snapshotProvider: { snapshot },
+      identityVerifier: { pid, descriptor in
+        guard pid == 202, descriptor == active else { return nil }
+        return .init(pid: pid, teamIdentifier: "Y93VXCB8Q5", matchesDesignatedRequirement: true)
+      }
+    )
+  }
+
+  // A legacy Wave Link (1.x/2.x) install is recognized, so ordinary apps stay
+  // monitoring-only, but its protocol predates the bridge.
+  let legacyConflict = try! #require(makeService(.waveLinkLegacy).conflict(for: target))
+  #expect(legacyConflict.kind == .unattributableTapFallback)
+  #expect(legacyConflict.supportsBridgeControl == false)
+
+  let modernConflict = try! #require(makeService(.waveLink3_2_2).conflict(for: target))
+  #expect(modernConflict.supportsBridgeControl)
+}
+
 @Test func everySupportedDescriptorHasAConstructibleRequirement() {
   let allRequirementsAreConstructible = VerifiedRouterDescriptor.supported.allSatisfy {
     $0.hasConstructibleRequirement
   }
   #expect(allRequirementsAreConstructible)
+}
+
+@Test func liveIdentityVerificationRequestsCryptographicSigningMetadata() {
+  #expect(
+    VerifiedRouterProcessIdentity.signingInformationFlags.rawValue
+      & kSecCSSigningInformation != 0
+  )
 }
 
 @Test func verifiedRouterActivitySnapshotScansOnceForMultipleApps() {
@@ -274,7 +465,7 @@ import WavesAudioCore
 
   #expect(scans.value == 2)
   #expect(activity.conflict(for: first)?.kind == .unattributableTapFallback)
-  #expect(activity.conflict(for: second) == nil)
+  #expect(activity.conflict(for: second)?.kind == .unattributableTapFallback)
   #expect(scans.value == 2)
 }
 

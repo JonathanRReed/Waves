@@ -109,11 +109,18 @@ SMOKE_SECONDS="${SMOKE_SECONDS:-5}"
 
 # Some Command Line Tools releases install a newer default SDK whose SwiftUI
 # interface references SwiftUIMacros without shipping that macro plugin. Prefer
-# the compatible macOS 26 SDK on those machines so local builds remain usable.
+# the newest compatible macOS 26 SDK actually installed so local and
+# distribution builds remain usable on every build machine.
 if [ -z "$SWIFT_SDK" ] \
-  && [ ! -f /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib ] \
-  && [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk ]; then
-  SWIFT_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
+  && [ ! -f /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib ]; then
+  for candidate_sdk in \
+    /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
+    /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk; do
+    if [ -d "$candidate_sdk" ]; then
+      SWIFT_SDK="$candidate_sdk"
+      break
+    fi
+  done
 fi
 
 if [ "$MODE" = "--dmg" ] \
@@ -123,7 +130,7 @@ if [ "$MODE" = "--dmg" ] \
   || [ "$MODE" = "notarize" ]; then
   TRUSTED_DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
   TRUSTED_SWIFT="$(/usr/bin/xcrun --find swift)"
-  TRUSTED_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+  TRUSTED_SDK="${SWIFT_SDK:-$(/usr/bin/xcrun --sdk macosx --show-sdk-path)}"
   run_release_ruby "$RELEASE_TOOL" trusted-toolchain "$TRUSTED_DEVELOPER_DIR" "$TRUSTED_SDK" "$TRUSTED_SWIFT" >/dev/null
   SWIFT_SDK="$TRUSTED_SDK"
 fi
@@ -1074,6 +1081,7 @@ validate_app_bundle() {
   local entitlement_key
   local entitlement_value
   local nested_item
+  local packaged_logo
 
   require_command plutil "to validate $label metadata"
   require_command codesign "to validate $label entitlements"
@@ -1115,11 +1123,15 @@ validate_app_bundle() {
     echo "Error: $label is missing its SwiftPM resource bundle at $resources/$RESOURCE_BUNDLE_NAME." >&2
     exit 1
   fi
-  if [ ! -f "$resources/$RESOURCE_BUNDLE_NAME/waves-logo.png" ]; then
+  packaged_logo="$resources/$RESOURCE_BUNDLE_NAME/waves-logo.png"
+  if [ ! -f "$packaged_logo" ]; then
+    packaged_logo="$resources/$RESOURCE_BUNDLE_NAME/Contents/Resources/waves-logo.png"
+  fi
+  if [ ! -f "$packaged_logo" ]; then
     echo "Error: $label is missing its packaged logo resource." >&2
     exit 1
   fi
-  if ! cmp -s "$LOGO_RESOURCE" "$resources/$RESOURCE_BUNDLE_NAME/waves-logo.png"; then
+  if ! cmp -s "$LOGO_RESOURCE" "$packaged_logo"; then
     echo "Error: $label contains an unexpected packaged logo resource." >&2
     exit 1
   fi
@@ -1405,6 +1417,7 @@ validate_unsigned_package() {
 
 create_dmg() {
   require_command hdiutil "to create $DMG_PATH"
+  require_command diskutil "to finalize the $DMG_PATH volume name"
   require_command ditto "to stage $APP_NAME.app"
   require_command osascript "to configure the Finder disk image"
   require_command sync "to flush Finder metadata"
@@ -1426,17 +1439,23 @@ create_dmg() {
   chmod 755 "$ACTIVE_STAGING_DIR/.background"
   chmod 644 "$ACTIVE_STAGING_DIR/.background/Waves.png"
 
-  ACTIVE_WRITABLE_DMG="$(mktemp "$DIST_DIR/.dmg-layout.XXXXXX")"
+  # Finder resolves the writable image through its backing-file URL while
+  # saving the window layout. Keep that URL short as well as the mount path.
+  ACTIVE_WRITABLE_DMG="$(mktemp "/private/tmp/waves-dmg-layout.XXXXXX")"
   rm -f "$ACTIVE_WRITABLE_DMG"
   ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"
+  layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"
   /usr/bin/hdiutil create \
-    -volname "$APP_NAME" \
+    -volname "$layout_volume_name" \
     -srcfolder "$ACTIVE_STAGING_DIR" \
     -ov \
     -format UDRW \
     "$ACTIVE_WRITABLE_DMG"
 
-  ACTIVE_MOUNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/waves-dmg-mount.XXXXXX")"
+  # Finder resolves aliases through a file-ID URL while writing `.DS_Store`.
+  # Deep isolated-release TMPDIR paths can exceed its internal path limit even
+  # though the mounted volume itself is valid, so keep this mount point short.
+  ACTIVE_MOUNT_DIR="$(mktemp -d "/private/tmp/waves-dmg-mount.XXXXXX")"
   /usr/bin/hdiutil attach \
     "$ACTIVE_WRITABLE_DMG" \
     -noautoopen \
@@ -1444,6 +1463,12 @@ create_dmg() {
     -mountpoint "$ACTIVE_MOUNT_DIR" >/dev/null
   /usr/bin/osascript "$DMG_FINDER_LAYOUT" "$ACTIVE_MOUNT_DIR"
   /bin/sync
+  finder_metadata_attempt=0
+  while [ ! -f "$ACTIVE_MOUNT_DIR/.DS_Store" ] && [ "$finder_metadata_attempt" -lt 20 ]; do
+    sleep 0.25
+    /bin/sync
+    finder_metadata_attempt=$((finder_metadata_attempt + 1))
+  done
   rm -rf \
     "$ACTIVE_MOUNT_DIR/.Trashes" \
     "$ACTIVE_MOUNT_DIR/.fseventsd" \
@@ -1452,6 +1477,9 @@ create_dmg() {
     echo "Error: Finder did not create the required DMG layout metadata." >&2
     exit 1
   fi
+  # Finder caches window state by volume name. A unique temporary name forces
+  # it to write this image's layout before the published name is restored.
+  /usr/sbin/diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME" >/dev/null
   /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet
   rm -rf "$ACTIVE_MOUNT_DIR"
   ACTIVE_MOUNT_DIR=""

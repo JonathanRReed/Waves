@@ -411,6 +411,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let routeMaintenanceOverride: RouteMaintenanceOverride?
   private let verifiedRouterConflictProvider: VerifiedRouterConflictProvider?
   private let verifiedRouterActivityProvider: VerifiedRouterActivityProvider?
+  private var perAppAudioController: PerAppAudioController
+  private var waveLinkCompatibilityEnabled: Bool
+  private let waveLinkController: (any WaveLinkControlling)?
+  /// Tail of the strictly serialized queue of in-flight bridge applies.
+  private var waveLinkApplyQueueTail: Task<Void, Never>?
   private let controllerFactory: ControllerFactory?
   private let processObjectIDResolver: ProcessObjectIDResolver?
   private let processTargetResolver: ProcessTargetResolver?
@@ -425,7 +430,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   init(
     verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
-    verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil
+    verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil,
+    perAppAudioController: PerAppAudioController = .waves,
+    waveLinkCompatibilityEnabled: Bool = true
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
@@ -435,6 +442,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.routeMaintenanceOverride = nil
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
     self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
+    self.perAppAudioController = perAppAudioController
+    self.waveLinkCompatibilityEnabled = waveLinkCompatibilityEnabled
+    self.waveLinkController = WaveLinkControlBridge()
     self.controllerFactory = nil
     self.processObjectIDResolver = nil
     self.processTargetResolver = nil
@@ -455,6 +465,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     shutdownCleanupOverride: ShutdownCleanupOverride? = nil,
     verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
     verifiedRouterActivityProvider: VerifiedRouterActivityProvider? = nil,
+    perAppAudioController: PerAppAudioController = .waves,
+    waveLinkCompatibilityEnabled: Bool = true,
+    waveLinkController: (any WaveLinkControlling)? = nil,
     routerObservationNativeCalls: RouterObservationListenerNativeCalls? = nil,
     testingControllers: [PerAppTapController] = [],
     routeMaintenanceOverride: RouteMaintenanceOverride? = nil,
@@ -477,6 +490,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.routeMaintenanceOverride = routeMaintenanceOverride
     self.verifiedRouterConflictProvider = verifiedRouterConflictProvider
     self.verifiedRouterActivityProvider = verifiedRouterActivityProvider
+    self.perAppAudioController = perAppAudioController
+    self.waveLinkCompatibilityEnabled = waveLinkCompatibilityEnabled
+    self.waveLinkController = waveLinkController
     self.controllerFactory = controllerFactory
     self.processObjectIDResolver = processObjectIDResolver
     self.processTargetResolver = processTargetResolver
@@ -763,6 +779,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       for: snapshot.apps[acceptedIndex],
       routerActivity: routerActivity
     ) {
+      if shouldControlThroughWaveLink(snapshot.apps[acceptedIndex], conflict: conflict) {
+        return await applyIntentThroughWaveLink(
+          intent,
+          logicalID: logicalID,
+          acceptedIndex: acceptedIndex,
+          conflict: conflict
+        )
+      }
       let detail = conflict.detail
       suspendManagedRouteForConflict(at: acceptedIndex, conflict: conflict)
       clearStagedIntentIfCurrent(intent, logicalID: logicalID)
@@ -925,6 +949,160 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       snapshot.updatedAt = .now
       refreshGlobalRouteHealth(latestError: error.localizedDescription)
 
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .failed,
+        resultingApp: snapshot.apps.first(where: { $0.logicalID == logicalID }),
+        backendStatus: snapshot.backendStatus,
+        detail: error.localizedDescription
+      )
+    }
+  }
+
+  private func shouldControlThroughWaveLink(
+    _ app: AudioApp,
+    conflict: VerifiedRouterConflict
+  ) -> Bool {
+    waveLinkCompatibilityEnabled
+      && perAppAudioController == .waves
+      && waveLinkController != nil
+      && conflict.supportsBridgeControl
+      && app.bundleID?.isEmpty == false
+      && conflict.kind != .routerMixedOutput
+  }
+
+  private func applyIntentThroughWaveLink(
+    _ intent: AppRouteIntent,
+    logicalID: String,
+    acceptedIndex: Int,
+    conflict: VerifiedRouterConflict
+  ) async -> AppIntentApplyResult {
+    let previousApp = snapshot.apps[acceptedIndex]
+    suspendManagedRouteForConflict(at: acceptedIndex, conflict: conflict)
+    snapshot.apps[acceptedIndex].routeHealthContext = .waveLinkBridge
+    snapshot.apps[acceptedIndex].notes =
+      "Waves is controlling this app through Wave Link without creating a second audio route."
+
+    let generationContext = IntentGenerationContext(
+      logicalID: logicalID,
+      generation: intent.generation,
+      lifecycleEpoch: lifecycleEpoch
+    )
+
+    // Wave Link's channel protocol carries only volume and mute. A change that
+    // is purely boost, equalizer, or output routing must be refused honestly
+    // instead of reported as applied.
+    let dspChangeRequested =
+      intent.volumeBoost != previousApp.volumeBoost
+      || intent.targetDeviceUID != previousApp.targetDeviceUID
+    let audioChangeRequested =
+      intent.desiredVolume != previousApp.desiredVolume
+      || intent.isMuted != previousApp.isMuted
+    if dspChangeRequested, !audioChangeRequested {
+      snapshot.apps[acceptedIndex].notes =
+        "Boost, equalizer, and output routing are unavailable while Wave Link owns this app's audio. Adjust them in Wave Link, or disable Wave Link compatibility in Settings."
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unavailable,
+        resultingApp: snapshot.apps[acceptedIndex],
+        backendStatus: snapshot.backendStatus,
+        detail: snapshot.apps[acceptedIndex].notes
+      )
+    }
+
+    do {
+      guard let bundleIdentifier = previousApp.bundleID, let waveLinkController else {
+        throw WaveLinkControlBridgeError.invalidBundleIdentifier
+      }
+
+      // Bridge applies are strictly serialized. Concurrent sequences on the
+      // shared control socket can consume each other's replies, and a stale
+      // write finishing after a newer one would desynchronize Wave Link from
+      // the state Waves reports.
+      let previousApply = waveLinkApplyQueueTail
+      let (applyFinished, applyFinishedContinuation) = AsyncStream<Void>.makeStream()
+      waveLinkApplyQueueTail = Task { for await _ in applyFinished {} }
+      defer { applyFinishedContinuation.finish() }
+      if let previousApply {
+        await previousApply.value
+      }
+
+      try ensureGenerationCurrent(generationContext)
+      let confirmation = try await waveLinkController.apply(
+        bundleIdentifier: bundleIdentifier,
+        volume: intent.desiredVolume,
+        isMuted: intent.isMuted
+      )
+      try ensureGenerationCurrent(generationContext)
+
+      guard let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else {
+        clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+        return AppIntentApplyResult(
+          appID: intent.appID,
+          generation: intent.generation,
+          outcome: .unavailable,
+          resultingApp: nil,
+          backendStatus: snapshot.backendStatus,
+          detail: "The app left the current audio session before Wave Link confirmed the change."
+        )
+      }
+
+      snapshot.apps[currentIndex].desiredVolume = intent.desiredVolume
+      snapshot.apps[currentIndex].isMuted = intent.isMuted
+      snapshot.apps[currentIndex].appliedVolume = intent.isMuted ? 0 : confirmation.appliedVolume
+      snapshot.apps[currentIndex].routingState = .monitorOnly
+      snapshot.apps[currentIndex].hasNoAudioCapability = false
+      snapshot.apps[currentIndex].routeHealthContext = .waveLinkBridge
+      snapshot.apps[currentIndex].notes =
+        "Controlled through Wave Link channel \(confirmation.channelName). Boost, equalizer, and output routing are paused while Wave Link owns audio."
+      if intent.isMuted {
+        snapshot.apps[currentIndex].peakLevel = 0
+        snapshot.apps[currentIndex].rmsLevel = 0
+      }
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
+      refreshGlobalRouteHealth()
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .applied,
+        resultingApp: snapshot.apps[currentIndex],
+        backendStatus: snapshot.backendStatus,
+        detail: snapshot.apps[currentIndex].notes
+      )
+    } catch is IntentSupersededError {
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      return supersededResult(for: intent, logicalID: logicalID)
+    } catch is IntentBackendStoppedError {
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .failed,
+        resultingApp: snapshot.apps.first(where: { $0.logicalID == logicalID }),
+        backendStatus: snapshot.backendStatus,
+        detail: "The audio backend stopped before Wave Link confirmed the intent."
+      )
+    } catch {
+      guard isGenerationCurrent(generationContext) else {
+        clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+        return supersededResult(for: intent, logicalID: logicalID)
+      }
+      if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
+        snapshot.apps[currentIndex].desiredVolume = previousApp.desiredVolume
+        snapshot.apps[currentIndex].isMuted = previousApp.isMuted
+        snapshot.apps[currentIndex].appliedVolume = nil
+        snapshot.apps[currentIndex].routingState = .monitorOnly
+        snapshot.apps[currentIndex].routeHealthContext = .waveLinkBridge
+        snapshot.apps[currentIndex].notes = error.localizedDescription
+      }
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
+      refreshGlobalRouteHealth(latestError: error.localizedDescription)
       return AppIntentApplyResult(
         appID: intent.appID,
         generation: intent.generation,
@@ -1172,7 +1350,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
     let managedLogicalIDs = Set(
       snapshot.apps
-        .filter { $0.routingState == .managed || controllers[$0.id]?.isActive == true }
+        .filter {
+          Self.isRouteRecoveryCandidate(
+            $0,
+            hasActiveController: controllers[$0.id]?.isActive == true,
+            reclaimMixedOutput: !waveLinkCompatibilityEnabled
+          )
+        }
         .map(\.logicalID)
     )
 
@@ -1189,6 +1373,69 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     return snapshot
+  }
+
+  static func isRouteRecoveryCandidate(
+    _ app: AudioApp,
+    hasActiveController: Bool,
+    reclaimMixedOutput: Bool
+  ) -> Bool {
+    if app.routingState == .managed || hasActiveController { return true }
+    guard app.routingState == .monitorOnly else { return false }
+    switch app.routeHealthContext {
+    case .verifiedRouterOwnership, .unattributableRouterFallback, .waveLinkBridge:
+      return true
+    case .routerMixedOutput:
+      return reclaimMixedOutput
+    case nil, .geometryRecoveryInProgress, .geometryRecoveryExhausted:
+      return false
+    }
+  }
+
+  func setPerAppAudioController(_ controller: PerAppAudioController) async {
+    guard perAppAudioController != controller else { return }
+    perAppAudioController = controller
+    refreshCompetingRouterControlPresentation()
+    markRouterObservationDirty()
+  }
+
+  func setWaveLinkCompatibilityEnabled(_ isEnabled: Bool) async {
+    guard waveLinkCompatibilityEnabled != isEnabled else { return }
+    waveLinkCompatibilityEnabled = isEnabled
+    if isEnabled { refreshCompetingRouterControlPresentation() }
+    markRouterObservationDirty()
+  }
+
+  private func refreshCompetingRouterControlPresentation() {
+    let routerActivity = verifiedRouterActivityProvider?()
+    var changed = false
+    for index in snapshot.apps.indices {
+      // Restamp only rows the route machinery already owns: managed routes,
+      // live controllers, and rows previously suspended for a router conflict.
+      // Stamping a router context on an untouched or excluded row would later
+      // let conflict release or route recovery promote it to a managed tap the
+      // user never asked for.
+      let app = snapshot.apps[index]
+      guard
+        Self.isRouteRecoveryCandidate(
+          app,
+          hasActiveController: controllers[app.id]?.isActive == true,
+          reclaimMixedOutput: true
+        )
+      else { continue }
+      guard
+        let conflict = competingAudioRouterConflict(
+          for: app,
+          routerActivity: routerActivity
+        )
+      else { continue }
+      suspendManagedRouteForConflict(at: index, conflict: conflict)
+      changed = true
+    }
+    if changed {
+      snapshot.updatedAt = .now
+      refreshGlobalRouteHealth()
+    }
   }
 
   func autoRestoreDevice() async throws -> AudioSessionSnapshot {
@@ -1258,6 +1505,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           title: "Audio capture permission",
           status: captureAuthorizationStatus,
           detail: captureAuthorizationDetail
+        ),
+        DiagnosticsCheck(
+          title: "Per-app controller",
+          status: .informational,
+          detail: waveLinkCompatibilityEnabled
+            ? perAppAudioController == .waves
+              ? "Waves owns routes that Wave Link cannot bypass. Verified Wave Link paths remain monitoring only to prevent duplicate audio."
+              : "Elgato Wave Link owns ordinary per-app routes while it is active. Waves monitors those apps."
+            : "Wave Link compatibility is disabled. Waves applies no Wave Link-specific route safeguards."
         ),
         DiagnosticsCheck(
           title: "Route recovery",
@@ -2944,6 +3200,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       guard !isShuttingDown else { return }
       guard let app = snapshot.apps.first(where: { $0.logicalID == logicalID }) else { continue }
 
+      if let conflict = competingAudioRouterConflict(
+        for: app,
+        routerActivity: routerActivity
+      ) {
+        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
+          suspendManagedRouteForConflict(at: index, conflict: conflict)
+        }
+        continue
+      }
+
       do {
         try await applyRoute(
           for: app,
@@ -3141,7 +3407,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     return CompetingRouterPolicy.conflict(
       for: app,
-      verifiedConflict: conflict
+      verifiedConflict: conflict,
+      controller: perAppAudioController,
+      compatibilityEnabled: waveLinkCompatibilityEnabled
     )
   }
 
@@ -3158,12 +3426,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].peakLevel = 0
     snapshot.apps[index].rmsLevel = 0
     snapshot.apps[index].notes = conflict.detail
-    snapshot.apps[index].routeHealthContext =
-      switch conflict.kind {
-      case .publicTapMembership: .verifiedRouterOwnership
-      case .unattributableTapFallback: .unattributableRouterFallback
-      case .routerMixedOutput: .routerMixedOutput
-      }
+    if shouldControlThroughWaveLink(app, conflict: conflict) {
+      snapshot.apps[index].routeHealthContext = .waveLinkBridge
+      snapshot.apps[index].notes =
+        "Waves can control this app through Wave Link without creating a second audio route."
+    } else {
+      snapshot.apps[index].routeHealthContext =
+        switch conflict.kind {
+        case .publicTapMembership: .verifiedRouterOwnership
+        case .unattributableTapFallback: .unattributableRouterFallback
+        case .routerMixedOutput: .routerMixedOutput
+        }
+    }
   }
 
   private func observeCompetingRouterConflicts(
@@ -3194,7 +3468,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       case .conflictReleased:
         guard snapshot.apps[index].routingState == .monitorOnly else { continue }
         switch snapshot.apps[index].routeHealthContext {
-        case .verifiedRouterOwnership, .unattributableRouterFallback, .routerMixedOutput:
+        case .verifiedRouterOwnership, .unattributableRouterFallback, .routerMixedOutput,
+          .waveLinkBridge:
           break
         default:
           continue

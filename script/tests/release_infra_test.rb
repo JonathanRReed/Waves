@@ -11,8 +11,8 @@ require "tmpdir"
 require_relative "../release_tool"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.6.0"
-  BUILD = 14
+  VERSION = "1.7.0"
+  BUILD = 18
   RELEASE_TAG = "v#{VERSION}"
   HANDOFF_NAME = "Waves-#{VERSION}-#{BUILD}-Elgato-Handoff"
   HANDOFF_DMG_NAME = "Waves-#{VERSION}-#{BUILD}.dmg"
@@ -45,6 +45,11 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes build_script, "hdiutil convert"
     assert_includes build_script, ".background"
     assert_includes build_script, ".DS_Store"
+    assert_includes build_script, "finder_metadata_attempt"
+    assert_includes build_script, '/private/tmp/waves-dmg-layout.XXXXXX'
+    assert_includes build_script, '/private/tmp/waves-dmg-mount.XXXXXX'
+    assert_includes build_script, 'layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"'
+    assert_includes build_script, 'diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME"'
 
     finder_script = File.read(finder_script_path)
     assert_includes finder_script, "set bounds of layoutWindow to {100, 100, 760, 530}"
@@ -342,7 +347,7 @@ class ReleaseInfraTest < Minitest::Test
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
-    future = metadata_hash.merge("version" => "1.6.1", "build" => 15)
+    future = metadata_hash.merge("version" => "1.7.1", "build" => 16)
     with_metadata(future) do |path|
       assert_equal future, WavesRelease::Metadata.load(path)
     end

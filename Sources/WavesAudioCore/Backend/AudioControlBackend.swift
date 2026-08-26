@@ -10,6 +10,8 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   func setVolumeBoost(_ boost: Float, forAppID appID: String) async throws
   func setEqualizer(_ settings: EqualizerSettings, forAppID appID: String) async throws
   func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async
+  func setPerAppAudioController(_ controller: PerAppAudioController) async
+  func setWaveLinkCompatibilityEnabled(_ isEnabled: Bool) async
   func adaptiveAnalysis() async -> [String: AdaptiveAnalysisLevels]
   func setAdaptiveGains(_ gainsDB: [String: Float]) async
   func setVolumeControlMode(_ mode: VolumeControlMode, forDeviceID deviceID: String) async throws
@@ -76,6 +78,15 @@ public extension AudioControlBackend {
   func setManagedAudioEqualizer(_ settings: GlobalEqualizerSettings) async {
     // Legacy and test backends remain source-compatible. Backends that own
     // managed routes override this to propagate the shared EQ to live streams.
+  }
+
+  func setPerAppAudioController(_ controller: PerAppAudioController) async {
+    // Legacy and test backends remain source-compatible. Backends that arbitrate
+    // ownership with another mixer override this to update their route policy.
+  }
+
+  func setWaveLinkCompatibilityEnabled(_ isEnabled: Bool) async {
+    // Legacy and test backends remain source-compatible.
   }
 
   func applyAppIntent(_ intent: AppRouteIntent) async -> AppIntentApplyResult {

@@ -37,7 +37,7 @@ and the Homebrew tap below.
 - **Global Output Switching**: Change the system output device from the menu-bar panel
 - **Device Auto-Restore**: Automatically re-establishes audio routes when switching output devices
 - **Per-Device Volume Memory**: Remember volume settings for each app across different audio devices
-- **Wave Link Coexistence**: Recognizes verified active Wave Link Core Audio output, conservatively yields affected ordinary routes when public APIs cannot attribute its targets, and never wraps Wave Link's own mixed output
+- **Wave Link Coexistence**: Run both mixers, choose whether Waves or Wave Link owns ordinary per-app control, or disable Wave Link-specific safeguards when using a custom routing workaround
 - **Asynchronous Route Recovery**: Rebuilds changed audio geometry outside realtime callbacks and exposes progress or a global recovery action
 
 ### Automation and Integration
@@ -199,8 +199,9 @@ While the mixer list is focused, use the arrow keys to select an app. Press
 Space or M to mute, = or - to adjust volume, B to cycle boost, P to pin, E to
 open that app's equalizer, O to cycle output, or R to run global route recovery
 when the selected route has exhausted automatic recovery. Capability-gated
-routes, including conservative Wave Link handoff, ignore controls Waves must not
-claim.
+routes owned by Wave Link ignore controls Waves must not claim. Choose the
+per-app controller, or disable Wave Link compatibility for a custom routing
+workaround, in **Settings ▸ Mixer**.
 
 ### URL Scheme Automation
 
@@ -249,7 +250,8 @@ When switching audio devices:
 - Try refreshing the app list (⌘R)
 
 ### Volume changes not applying
-- Read the route status first. Wave Link-owned routes are intentionally monitor-only and must be adjusted in Wave Link
+- In Settings ▸ Mixer, confirm the preferred **Per-app controller**. Compatibility keeps a verified parallel Wave Link path monitor-only in Waves so a displayed level cannot be bypassed
+- If your custom Wave Link routing already prevents a parallel monitored copy, disable **Wave Link compatibility** to force Waves control. This also disables duplicate-route safeguards
 - Use Recover Routes from the main window status action, Setup, or Diagnostics to re-establish Waves-managed routing
 - Check the current route and permission details in Diagnostics
 - Ensure macOS 14.2+ is installed for per-app routing

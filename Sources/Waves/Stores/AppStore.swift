@@ -464,6 +464,8 @@ final class AppStore {
   // clears it and runs exactly one more pass, which re-reads the *current*
   // frontmost app — so the latest app switch always wins and none are dropped.
   private var pendingAutoPausePassRerun = false
+  private var waveLinkSettingsGeneration: UInt64 = 0
+  private var pendingWaveLinkRouteRecovery = false
   private let accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster
 
   init(
@@ -1538,6 +1540,9 @@ final class AppStore {
         syncOnboarding(using: session)
       }
 
+      await backend.setWaveLinkCompatibilityEnabled(preferences.waveLinkCompatibilityEnabled)
+      await backend.setPerAppAudioController(preferences.perAppAudioController)
+      guard !Task.isCancelled, startupState != .shuttingDown else { return }
       try await backend.start()
       // Even if shutdown began while backend.start() was suspended, record the
       // successful native start so the checked shutdown path tears it back down.
@@ -1566,6 +1571,7 @@ final class AppStore {
       observeFrontmostAppChanges()
       observeAppTermination()
       startupState = .running
+      requestWaveLinkRouteRecoveryIfNeeded()
       startSessionMaintenance()
       restartAdaptiveMixing()
       startLiveLevelPollingIfNeeded()
@@ -3706,6 +3712,56 @@ final class AppStore {
     refreshLiveLinger()
   }
 
+  func setPerAppAudioController(_ controller: PerAppAudioController) {
+    guard startupState != .shuttingDown else { return }
+    guard preferences.perAppAudioController != controller else { return }
+    preferences.perAppAudioController = controller
+    persistPreferences()
+    applyWaveLinkSettingsAndRecoverRoutes()
+  }
+
+  func setWaveLinkCompatibilityEnabled(_ isEnabled: Bool) {
+    guard startupState != .shuttingDown else { return }
+    guard preferences.waveLinkCompatibilityEnabled != isEnabled else { return }
+    preferences.waveLinkCompatibilityEnabled = isEnabled
+    persistPreferences()
+    applyWaveLinkSettingsAndRecoverRoutes()
+  }
+
+  private func applyWaveLinkSettingsAndRecoverRoutes() {
+    waveLinkSettingsGeneration &+= 1
+    let generation = waveLinkSettingsGeneration
+    let compatibilityEnabled = preferences.waveLinkCompatibilityEnabled
+    let controller = preferences.perAppAudioController
+    startOwnedOperation { store in
+      await store.backend.setWaveLinkCompatibilityEnabled(compatibilityEnabled)
+      await store.backend.setPerAppAudioController(controller)
+      guard !Task.isCancelled else { return }
+      guard generation == store.waveLinkSettingsGeneration else {
+        await store.backend.setWaveLinkCompatibilityEnabled(
+          store.preferences.waveLinkCompatibilityEnabled
+        )
+        await store.backend.setPerAppAudioController(store.preferences.perAppAudioController)
+        return
+      }
+      if store.startupState == .running {
+        store.pendingWaveLinkRouteRecovery = true
+        store.requestWaveLinkRouteRecoveryIfNeeded()
+      } else if store.startupState == .startingAudio
+        || store.startupState == .savingPrivacyConsent
+      {
+        store.pendingWaveLinkRouteRecovery = true
+      }
+    }
+  }
+
+  private func requestWaveLinkRouteRecoveryIfNeeded() {
+    guard pendingWaveLinkRouteRecovery, startupState == .running else { return }
+    guard !isRecovering else { return }
+    pendingWaveLinkRouteRecovery = false
+    recoverRoutes()
+  }
+
   func checkAutoPauseMusic() {
     guard requireAudioRunning() else { return }
     // Coalesce overlapping passes (mirroring handleDeviceChange) so two never
@@ -4994,7 +5050,10 @@ final class AppStore {
 
     isRecovering = true
     startOwnedOperation { store in
-      defer { store.isRecovering = false }
+      defer {
+        store.isRecovering = false
+        store.requestWaveLinkRouteRecoveryIfNeeded()
+      }
       do {
         let recovered = try await store.backend.recoverRoutes()
         guard !Task.isCancelled, store.startupState == .running else { return }

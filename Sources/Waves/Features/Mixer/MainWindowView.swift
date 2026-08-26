@@ -933,9 +933,11 @@ struct MixerKeyboardCommandsModifier: ViewModifier {
   /// remove keyboard control from the focused mixer list.
   private func handleKey(_ command: MixerKeyboardCommand) -> KeyPress.Result {
     guard let app = selectedApp else { return .ignored }
-    if command != .togglePin, !MixerRouteControlPolicy(app: app).allowsAudioControl {
+    let policy = MixerRouteControlPolicy(app: app)
+    if command != .togglePin, !policy.allowsAudioControl {
       return .ignored
     }
+    if command == .cycleBoost, !policy.allowsDSPControl { return .ignored }
     switch command {
     case .toggleMute:
       store.setMuted(command.updatedMute(for: app) ?? app.isMuted, for: app)
@@ -952,7 +954,7 @@ struct MixerKeyboardCommandsModifier: ViewModifier {
   }
 
   private func openEqualizer() -> KeyPress.Result {
-    guard let app = selectedApp, MixerRouteControlPolicy(app: app).allowsAudioControl else {
+    guard let app = selectedApp, MixerRouteControlPolicy(app: app).allowsDSPControl else {
       return .ignored
     }
     store.focusEqualizer(for: app)
@@ -960,7 +962,7 @@ struct MixerKeyboardCommandsModifier: ViewModifier {
   }
 
   private func cycleOutputDevice() -> KeyPress.Result {
-    guard let app = selectedApp, MixerRouteControlPolicy(app: app).allowsAudioControl else {
+    guard let app = selectedApp, MixerRouteControlPolicy(app: app).allowsDSPControl else {
       return .ignored
     }
     let devices =
@@ -1344,6 +1346,7 @@ private struct RouteHealthBadge: View {
     let priority: [RouteHealthContext] = [
       .geometryRecoveryExhausted,
       .geometryRecoveryInProgress,
+      .waveLinkBridge,
       .unattributableRouterFallback,
       .verifiedRouterOwnership,
       .routerMixedOutput,

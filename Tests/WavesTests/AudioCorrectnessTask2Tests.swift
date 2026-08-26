@@ -157,7 +157,8 @@ import WavesAudioCore
         kind: .unattributableTapFallback,
         detail: providerDetail
       )
-    }
+    },
+    perAppAudioController: .waveLink
   )
 
   await backend.updateAudioLevels(at: Duration.zero)

@@ -28,7 +28,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
   var subtitle: String {
     switch self {
     case .general: "Appearance, menu bar, updates"
-    case .mixer: "App list and volume memory"
+    case .mixer: "App list, Wave Link, volume memory"
     case .profiles: "Saved mixes and startup"
     case .control: "Keys and automation"
     case .setup: "Permissions and repair"

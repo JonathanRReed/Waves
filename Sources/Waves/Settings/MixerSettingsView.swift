@@ -1,4 +1,5 @@
 import SwiftUI
+import WavesAudioCore
 
 struct MixerSettingsView: View {
   @Environment(AppStore.self) private var store
@@ -6,6 +7,41 @@ struct MixerSettingsView: View {
 
   var body: some View {
     SettingsForm {
+      Section {
+        Toggle(
+          "Wave Link compatibility",
+          isOn: Binding(
+            get: { store.preferences.waveLinkCompatibilityEnabled },
+            set: { store.setWaveLinkCompatibilityEnabled($0) }
+          )
+        )
+        Picker(
+          "Per-app controller",
+          selection: Binding(
+            get: { store.preferences.perAppAudioController },
+            set: { store.setPerAppAudioController($0) }
+          )
+        ) {
+          ForEach(PerAppAudioController.allCases) { controller in
+            Text(controller.displayName).tag(controller)
+          }
+        }
+        .pickerStyle(.radioGroup)
+        .disabled(!store.preferences.waveLinkCompatibilityEnabled)
+
+        Text(waveLinkControllerDescription)
+          .font(.callout)
+          .foregroundStyle(.secondary)
+      } header: {
+        Text("Wave Link")
+      } footer: {
+        Text(
+          store.preferences.waveLinkCompatibilityEnabled
+            ? "Only one app renders each audio path. With Waves selected, volume and mute use a dedicated Wave Link software channel."
+            : "Compatibility is off. Use this only after your custom Wave Link routing prevents a second monitored copy."
+        )
+      }
+
       Section {
         Toggle(isOn: PreferenceBinding.durable(store: store, \.showRecentApps)) {
           Text("Show recent apps")
@@ -118,6 +154,18 @@ struct MixerSettingsView: View {
 
   private var hasAnyPresets: Bool {
     devicesWithPresetsCount > 0
+  }
+
+  private var waveLinkControllerDescription: String {
+    guard store.preferences.waveLinkCompatibilityEnabled else {
+      return "Waves applies normal per-app routing and ignores Wave Link-specific conflicts."
+    }
+    switch store.preferences.perAppAudioController {
+    case .waves:
+      return "Waves remains your per-app mixer. While Wave Link is active, Waves controls each app through a dedicated Wave Link software channel so audio is not doubled. Boost, equalizer, and output routing pause for those apps."
+    case .waveLink:
+      return "Wave Link controls app levels while it is active. Waves monitors affected apps without creating a second route."
+    }
   }
 
 }
