@@ -166,30 +166,6 @@ import Testing
   #expect(counter.finished == 2)
 }
 
-@Test func waveLinkLoopbackPeerRequiresTheSignedElgatoListener() throws {
-  let parsed = WaveLinkLoopbackPeerVerifier.parseListenerPIDs("p1366\nf9\np1366\np42\n")
-  #expect(parsed == [42, 1366])
-
-  try WaveLinkLoopbackPeerVerifier.validate(listenerPIDs: parsed) { pid, descriptor in
-    guard pid == 1366 else { return nil }
-    return VerifiedRouterProcessIdentity(
-      pid: pid,
-      teamIdentifier: descriptor.teamIdentifier,
-      matchesDesignatedRequirement: true
-    )
-  }
-
-  #expect(throws: WaveLinkControlBridgeError.unverifiedLoopbackPeer) {
-    try WaveLinkLoopbackPeerVerifier.validate(listenerPIDs: parsed) { pid, _ in
-      VerifiedRouterProcessIdentity(
-        pid: pid,
-        teamIdentifier: "NOT-ELGATO",
-        matchesDesignatedRequirement: true
-      )
-    }
-  }
-}
-
 private actor WaveLinkRPCStub {
   struct AddRequest: Codable, Equatable, Sendable {
     let appID: String

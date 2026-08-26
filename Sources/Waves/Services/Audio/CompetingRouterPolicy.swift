@@ -46,3 +46,23 @@ enum CompetingRouterPolicy {
     )?.detail
   }
 }
+
+enum CompetingRouterRouteDisposition: Equatable, Sendable {
+  case none
+  case monitorOnly
+}
+
+struct CompetingRouterConflictDecision: Equatable, Sendable {
+  let routeDisposition: CompetingRouterRouteDisposition
+  let detail: String
+
+  static func make(routerName: String, isVerified: Bool) -> Self {
+    guard isVerified else {
+      return Self(routeDisposition: .none, detail: "")
+    }
+    return Self(
+      routeDisposition: .monitorOnly,
+      detail: "\(routerName) is routing this app's audio. Waves is monitoring only until that router releases the route."
+    )
+  }
+}

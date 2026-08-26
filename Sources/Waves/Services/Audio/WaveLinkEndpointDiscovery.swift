@@ -8,6 +8,12 @@ import Foundation
 /// Link process before Waves connects, so a stale file or a squatting process
 /// can never receive control traffic.
 enum WaveLinkEndpointDiscovery {
+  typealias IdentityVerifier =
+    @Sendable (
+      pid_t,
+      VerifiedRouterDescriptor
+    ) -> VerifiedRouterProcessIdentity?
+
   struct Listener: Hashable, Sendable {
     let pid: pid_t
     let port: UInt16
@@ -91,7 +97,7 @@ enum WaveLinkEndpointDiscovery {
     candidatePorts: [UInt16],
     listeners: [Listener],
     descriptor: VerifiedRouterDescriptor = .waveLink3_2_2,
-    identityVerifier: WaveLinkLoopbackPeerVerifier.IdentityVerifier
+    identityVerifier: IdentityVerifier
   ) throws -> Listener {
     guard !listeners.isEmpty else {
       throw WaveLinkControlBridgeError.unavailable(

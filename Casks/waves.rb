@@ -1,8 +1,10 @@
 # Homebrew cask template for Waves.
 #
-# The release workflow validates `version`, replaces the intentionally invalid
-# checksum placeholder in a generated dist/waves.rb, and publishes that generated
-# file as a release artifact. It does not mutate this repository template.
+# Release tooling validates `version` and replaces the intentionally invalid
+# checksum placeholder in a generated dist/waves.rb on the maintainer Mac; the
+# published cask lives in the JonathanRReed/homebrew-tap repository (see
+# docs/RELEASE.md, "Release Channels Checklist"). Nothing mutates this
+# repository template.
 cask "waves" do
   version "1.7.0"
   sha256 "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"

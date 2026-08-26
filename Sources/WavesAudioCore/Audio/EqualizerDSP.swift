@@ -187,12 +187,6 @@ public final class EqualizerDSP {
     configure(settings, smooth: true)
   }
 
-  public func resetState() {
-    for index in delayStates.indices {
-      delayStates[index] = BiquadDelayState()
-    }
-  }
-
   public func process(
     _ data: UnsafeMutableRawPointer,
     byteCount: Int,

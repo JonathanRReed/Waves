@@ -1,9 +1,9 @@
 name: Release Candidate
 
 # Manual, read-only verification workflow.
-# Waves 1.5 is signed and notarized locally on the maintainer Mac. This workflow
-# does not accept a tag, access signing credentials, sign, notarize, upload a
-# release candidate, create a release, or publish anything.
+# Waves releases are signed and notarized locally on the maintainer Mac. This
+# workflow does not accept a tag, access signing credentials, sign, notarize,
+# upload a release candidate, create a release, or publish anything.
 on:
   workflow_dispatch:
     inputs:
