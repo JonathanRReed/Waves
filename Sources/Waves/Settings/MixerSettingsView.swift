@@ -37,7 +37,7 @@ struct MixerSettingsView: View {
       } footer: {
         Text(
           store.preferences.waveLinkCompatibilityEnabled
-            ? "Waves will not claim an app while Wave Link can send a parallel copy to your monitor."
+            ? "Only one app renders each audio path. With Waves selected, volume and mute use a dedicated Wave Link software channel."
             : "Compatibility is off. Use this only after your custom Wave Link routing prevents a second monitored copy."
         )
       }
@@ -162,7 +162,7 @@ struct MixerSettingsView: View {
     }
     switch store.preferences.perAppAudioController {
     case .waves:
-      return "Waves controls apps that Wave Link has not claimed. If Wave Link can bypass a Waves route, the app stays Monitoring only instead of showing a false managed level."
+      return "Waves remains your per-app mixer. While Wave Link is active, Waves controls each app through a dedicated Wave Link software channel so audio is not doubled. Boost, equalizer, and output routing pause for those apps."
     case .waveLink:
       return "Wave Link controls app levels while it is active. Waves monitors affected apps without creating a second route."
     }

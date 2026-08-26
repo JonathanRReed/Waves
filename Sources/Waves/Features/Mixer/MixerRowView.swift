@@ -33,6 +33,7 @@ enum MixerRowAccessibility {
   ) -> MixerControlAccessibilitySemantics {
     let policy = MixerRouteControlPolicy(app: app)
     let isAudioControlEnabled = !isExcluded && policy.allowsAudioControl
+    let isDSPControlEnabled = !isExcluded && policy.allowsDSPControl
     let order = focusOrder(compact: false, offersRecovery: policy.offersRecovery)
     let priority = order.firstIndex(of: control).map { Double(order.count - $0) } ?? 0
 
@@ -50,18 +51,18 @@ enum MixerRowAccessibility {
       return MixerControlAccessibilitySemantics(
         label: "Boost for \(app.displayName)",
         value: "\(Int(app.volumeBoost))x",
-        help: policy.allowsAudioControl ? "Set boost for \(app.displayName)" : policy.controlHint,
+        help: policy.allowsDSPControl ? "Set boost for \(app.displayName)" : policy.controlHint,
         hint: policy.controlHint,
-        isEnabled: isAudioControlEnabled,
+        isEnabled: isDSPControlEnabled,
         sortPriority: priority
       )
     case .equalizer:
       return MixerControlAccessibilitySemantics(
         label: equalizerLabel(for: app),
         value: equalizerIsEnabled ? "On" : "Off",
-        help: policy.allowsAudioControl ? "Equalizer for \(app.displayName)" : policy.controlHint,
+        help: policy.allowsDSPControl ? "Equalizer for \(app.displayName)" : policy.controlHint,
         hint: policy.controlHint,
-        isEnabled: isAudioControlEnabled,
+        isEnabled: isDSPControlEnabled,
         sortPriority: priority
       )
     case .mute:
@@ -148,6 +149,7 @@ struct MixerRotorCatalog {
 
 struct MixerRouteControlPolicy: Equatable, Sendable {
   let allowsAudioControl: Bool
+  let allowsDSPControl: Bool
   let offersRecovery: Bool
   let sliderHelp: String
   let muteHelp: String
@@ -173,6 +175,15 @@ struct MixerRouteControlPolicy: Equatable, Sendable {
         offersRecovery: false,
         reason: "Waves leaves Wave Link mixed output untouched. Adjust upstream apps in Wave Link."
       )
+    case .waveLinkBridge:
+      self.init(
+        allowsAudioControl: true,
+        allowsDSPControl: false,
+        offersRecovery: false,
+        sliderHelp: "Adjust \(app.displayName) through its dedicated Wave Link channel.",
+        muteHelp: app.isMuted ? "Unmute through Wave Link" : "Mute through Wave Link",
+        controlHint: "Waves sends volume and mute changes to Wave Link without creating another audio route."
+      )
     case .geometryRecoveryInProgress:
       self.init(
         allowsAudioControl: false,
@@ -189,6 +200,7 @@ struct MixerRouteControlPolicy: Equatable, Sendable {
       let isManaged = app.routingState == .managed
       self.init(
         allowsAudioControl: true,
+        allowsDSPControl: true,
         offersRecovery: false,
         sliderHelp: isManaged
           ? "Adjust \(app.displayName) volume"
@@ -204,6 +216,7 @@ struct MixerRouteControlPolicy: Equatable, Sendable {
   private init(allowsAudioControl: Bool, offersRecovery: Bool, reason: String) {
     self.init(
       allowsAudioControl: allowsAudioControl,
+      allowsDSPControl: allowsAudioControl,
       offersRecovery: offersRecovery,
       sliderHelp: reason,
       muteHelp: reason,
@@ -213,12 +226,14 @@ struct MixerRouteControlPolicy: Equatable, Sendable {
 
   private init(
     allowsAudioControl: Bool,
+    allowsDSPControl: Bool,
     offersRecovery: Bool,
     sliderHelp: String,
     muteHelp: String,
     controlHint: String
   ) {
     self.allowsAudioControl = allowsAudioControl
+    self.allowsDSPControl = allowsDSPControl
     self.offersRecovery = offersRecovery
     self.sliderHelp = sliderHelp
     self.muteHelp = muteHelp
@@ -539,7 +554,7 @@ struct MixerRowContextMenuItems: View {
       store.togglePinned(app)
     }
 
-    if !isExcluded, routePolicy.allowsAudioControl {
+    if !isExcluded, routePolicy.allowsDSPControl {
       Menu("Boost") {
         ForEach(boostOptions, id: \.self) { boost in
           Button {
@@ -596,6 +611,9 @@ struct MixerRowContextMenuItems: View {
         store.refreshOutputDevices()
       }
 
+    }
+
+    if !isExcluded, routePolicy.allowsAudioControl {
       Button(muteShortcutTitle) {
         store.requestMuteShortcutAssignment(for: app)
         if opensMainWindow {

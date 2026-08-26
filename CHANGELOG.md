@@ -8,7 +8,7 @@ All notable changes to Waves are documented here. The format follows
 
 ## [1.7.0] - 2026-08-25
 
-Waves 1.7.0 build 17 adds explicit control over how Waves coexists with Elgato
+Waves 1.7.0 build 18 adds explicit control over how Waves coexists with Elgato
 Wave Link.
 
 ### Added
@@ -18,6 +18,14 @@ Wave Link.
   bypasses all Wave Link-specific ownership and mixed-output safeguards.
 
 ### Fixed
+- Treat verified active Wave Link output as a global single-owner boundary,
+  including idle apps and browser or Electron helper processes, so Waves never
+  leaves a second renderer attached and doubles audio.
+- Let Waves send per-app volume and mute changes through a dedicated Wave Link
+  software channel, with read-back confirmation and no fallback renderer when
+  Wave Link cannot guarantee independent control.
+- Verify that Wave Link's signed Elgato process owns the loopback control port
+  before sending any app or channel command.
 - Stop reporting apps such as Zoom as managed when Wave Link can send a parallel
   copy around the Waves route. Compatibility mode now yields the route, while
   the explicit compatibility opt-out remains available for custom routing.

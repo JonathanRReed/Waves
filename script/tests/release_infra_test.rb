@@ -12,7 +12,7 @@ require_relative "../release_tool"
 
 class ReleaseInfraTest < Minitest::Test
   VERSION = "1.7.0"
-  BUILD = 17
+  BUILD = 18
   RELEASE_TAG = "v#{VERSION}"
   HANDOFF_NAME = "Waves-#{VERSION}-#{BUILD}-Elgato-Handoff"
   HANDOFF_DMG_NAME = "Waves-#{VERSION}-#{BUILD}.dmg"

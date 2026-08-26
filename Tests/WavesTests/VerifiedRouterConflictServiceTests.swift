@@ -144,6 +144,39 @@ import WavesAudioCore
   #expect(conflict.detail.contains("Core Audio output"))
 }
 
+@Test func verifiedActiveWaveLinkYieldsAnIdleOrdinaryAppBeforeItStartsOutput() {
+  let idleApp = routerTestApp(id: "idle-app", pid: 101)
+  let service = verifiedRouterService(
+    snapshot: .init(
+      processObjects: [
+        .init(id: 1, pid: 101, isRunningOutput: false),
+        .init(id: 3, pid: 202, isRunningOutput: true),
+      ],
+      taps: []
+    )
+  )
+
+  let conflict = try! #require(service.conflict(for: idleApp))
+  #expect(conflict.kind == .unattributableTapFallback)
+}
+
+@Test func verifiedActiveWaveLinkYieldsAnAppWhoseAudioRunsInAHelperProcess() {
+  let parentApp = routerTestApp(id: "helper-backed-app", pid: 101)
+  let service = verifiedRouterService(
+    snapshot: .init(
+      processObjects: [
+        .init(id: 1, pid: 101, isRunningOutput: false),
+        .init(id: 2, pid: 303, isRunningOutput: true),
+        .init(id: 3, pid: 202, isRunningOutput: true),
+      ],
+      taps: []
+    )
+  )
+
+  let conflict = try! #require(service.conflict(for: parentApp))
+  #expect(conflict.kind == .unattributableTapFallback)
+}
+
 @Test func unrelatedReadableTapDoesNotBecomeAWaveLinkPublicMembershipClaim() {
   let target = routerTestApp(id: "target", pid: 101)
   let service = verifiedRouterService(
@@ -403,7 +436,7 @@ import WavesAudioCore
 
   #expect(scans.value == 2)
   #expect(activity.conflict(for: first)?.kind == .unattributableTapFallback)
-  #expect(activity.conflict(for: second) == nil)
+  #expect(activity.conflict(for: second)?.kind == .unattributableTapFallback)
   #expect(scans.value == 2)
 }
 

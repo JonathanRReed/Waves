@@ -97,9 +97,6 @@ struct VerifiedRouterActivitySnapshot: Sendable {
 
   func conflict(for app: AudioApp) -> VerifiedRouterConflict? {
     guard let targetPID = app.pid else { return nil }
-    guard processObjects.contains(where: { $0.pid == targetPID && $0.isRunningOutput }) else {
-      return nil
-    }
 
     if let router = routers.first(where: { $0.pid == targetPID }) {
       return VerifiedRouterConflict(
@@ -382,7 +379,7 @@ private extension VerifiedRouterObservationSnapshot {
   }
 }
 
-private extension VerifiedRouterProcessIdentity {
+extension VerifiedRouterProcessIdentity {
   static func verifyLive(
     pid: pid_t,
     descriptor: VerifiedRouterDescriptor

@@ -2,10 +2,23 @@
 
 ## Goal
 
-Let Waves and Elgato Wave Link run together while the user chooses which app
-owns ordinary per-app audio control. Waves remains the default controller. Wave
-Link can continue to provide effects, Stream Deck integration, monitor routing,
-and the stream mix.
+Let Waves and Elgato Wave Link run together without duplicate or bypass audio.
+Waves remains the preferred per-app interface. Wave Link remains the audio owner
+for effects, Stream Deck integration, monitor routing, and stream mixes whenever
+Wave Link compatibility is enabled and verified Wave Link audio is active.
+
+## Nonnegotiable Invariant
+
+Compatibility mode permits only one process-tap owner.
+
+When a signed, supported Wave Link process owns active Core Audio output, Waves
+must not create, retain, recover, or rebuild a per-app process tap for any
+ordinary app. This rule applies before an app begins playing and does not depend
+on the app row PID, browser helper layout, bundle nesting, or readable Wave Link
+tap membership.
+
+This conservative rule closes the idle-to-playing race that allowed browser and
+Electron helpers to become audible through two renderers.
 
 ## Settings
 
@@ -15,37 +28,74 @@ Settings > Mixer contains a Wave Link section with:
 - **Per-app controller**, with Waves as the default and Elgato Wave Link as the
   alternative.
 
-Changing either setting persists immediately and rebuilds managed routes.
+Changing either setting persists immediately and reconciles managed routes.
 
-## Routing Policy
+## Waves Controller Through Wave Link
 
-With compatibility enabled and Waves selected, Waves manages ordinary apps only
-when a verified Wave Link path cannot bypass its renderer. Apps with a parallel
-Wave Link path become monitor-only instead of showing a managed level that does
-not control every audible copy. Waves also refuses to wrap Wave Link's mixed
-output.
+When compatibility and the Waves controller are both selected, Waves controls
+Wave Link instead of creating a second Core Audio tap.
 
-With compatibility enabled and Elgato Wave Link selected, verified Wave Link
-claims make affected ordinary apps monitor-only in Waves. Wave Link's mixed
-output remains excluded.
+The bridge:
 
-With compatibility disabled, Waves bypasses all Wave Link-specific conflict
-handling, including the mixed-output safeguard. The interface warns that a
-custom workaround can then create duplicate or silent audio.
+- connects only to `ws://127.0.0.1:1884` through `URLSessionWebSocketTask`;
+- uses the `streamdeck://` origin expected by Wave Link;
+- sends JSON-RPC 2.0 requests;
+- requires `getApplicationInfo` to return `appID = EWL` and
+  `interfaceRevision >= 2` before any mutation;
+- uses `getChannels` to match an exact app bundle identifier to a software
+  channel;
+- uses `setChannel` for volume and mute;
+- may use `addToChannel` only to move an exact app bundle identifier to an empty
+  software channel;
+- reads channels again after mutation and reports success only when the requested
+  state is confirmed.
 
-## Intended Signal Path
+A channel is safe for per-app control only when it contains exactly one app.
+Waves may move an app to an empty software channel to establish that condition.
+If no unique or empty channel exists, the bridge fails closed. Waves leaves the
+app monitoring-only, creates no process tap, and explains that a dedicated Wave
+Link software channel is required.
 
-For the default configuration:
+Boost, per-app EQ, and per-app output-device routing are unavailable for a
+bridge-managed app because Wave Link's channel protocol does not provide those
+Waves DSP stages. The interface must describe that limitation instead of
+claiming they were applied.
 
-`App -> Waves volume and EQ -> selected output`
+## Wave Link Controller
 
-Wave Link can continue handling microphone effects, Stream Deck actions, and
-stream mixes. The same app must not be monitored independently through both
-mixers. When a custom Wave Link setup already prevents that second copy, the
-user can disable compatibility to force the Waves route.
+When Elgato Wave Link is selected, ordinary apps remain monitoring-only in
+Waves. Volume, mute, effects, and mix changes happen in Wave Link.
+
+## Compatibility Disabled
+
+When compatibility is disabled, Waves bypasses Wave Link-specific ownership and
+mixed-output safeguards. This is an expert escape hatch for a custom signal
+path. The interface warns that duplicate or silent audio can result.
+
+## Mixed Output
+
+Waves never wraps Wave Link's mixed output while compatibility is enabled. A
+nested route could duplicate, mute, or feed back the entire mix.
+
+## Failure Behavior
+
+The bridge never falls back to a Waves process tap after a connection, protocol,
+mapping, timeout, or confirmation failure. Failures leave the route
+monitoring-only. Disabling compatibility is the only explicit way to restore the
+old unmanaged coexistence behavior.
 
 ## Verification
 
-Tests cover additive preference decoding, startup ordering, immediate route
-recovery, runtime controller changes, ordinary-app ownership, mixed-output
-exclusion, and the explicit compatibility opt-out.
+Tests cover:
+
+- verified Wave Link activity yielding idle and active apps before tap creation;
+- browser, Electron, helper, and ordinary rows receiving the same global
+  ownership decision;
+- Wave Link mixed-output exclusion;
+- JSON-RPC handshake validation;
+- exact bundle-to-channel matching;
+- unique-channel volume and mute updates;
+- empty-channel assignment;
+- shared-channel and protocol failures remaining monitoring-only;
+- compatibility opt-out reclaiming Waves routes;
+- no controller factory call while verified Wave Link ownership is active.

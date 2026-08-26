@@ -44,6 +44,14 @@ struct RouteHealthPresentation: Equatable, Sendable {
         symbolName: "waveform.path.badge.minus",
         tone: .warning
       )
+    case .waveLinkBridge:
+      self.init(
+        title: "Managed through Wave Link",
+        value: "Single audio route active",
+        help: app.notes ?? "Waves controls volume and mute through Wave Link without creating a second renderer.",
+        symbolName: "link.circle.fill",
+        tone: .success
+      )
     case .geometryRecoveryInProgress:
       self.init(
         title: "Recovering route",

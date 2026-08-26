@@ -259,6 +259,121 @@ import WavesAudioCore
   #expect(await recorder.count() == 0)
 }
 
+@Test func wavesControllerUsesWaveLinkBridgeWithoutCreatingASecondRenderer() async {
+  let app = AudioApp(
+    id: "runtime.browser",
+    logicalID: "com.example.browser",
+    pid: 101,
+    bundleID: "com.example.browser",
+    displayName: "Browser",
+    category: .media,
+    isActive: false,
+    desiredVolume: 1,
+    appliedVolume: 1,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let bridge = WaveLinkControllerSpy()
+  let renderer = AppliedIntentRecorder()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    intentRouteApplyOverride: { stagedApp, equalizer in
+      await renderer.record(app: stagedApp, equalizer: equalizer)
+    },
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output."
+      )
+    },
+    waveLinkController: bridge
+  )
+
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .userEdit
+    )
+  )
+  let resultingApp = await backend.currentSnapshot().apps[0]
+
+  #expect(result.outcome == .applied)
+  #expect(resultingApp.routingState == .monitorOnly)
+  #expect(resultingApp.routeHealthContext == .waveLinkBridge)
+  #expect(resultingApp.desiredVolume == 0)
+  #expect(resultingApp.appliedVolume == 0)
+  #expect(await bridge.requests == [.init(bundleIdentifier: "com.example.browser", volume: 0, isMuted: false)])
+  #expect(await renderer.count() == 0)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+
+  await backend.setPerAppAudioController(.waveLink)
+  let handedOffApp = await backend.currentSnapshot().apps[0]
+  #expect(handedOffApp.routeHealthContext == .unattributableRouterFallback)
+  #expect(MixerRouteControlPolicy(app: handedOffApp).allowsAudioControl == false)
+}
+
+@Test func waveLinkBridgeFailureNeverFallsBackToAWavesRenderer() async {
+  let app = AudioApp(
+    id: "runtime.browser",
+    logicalID: "com.example.browser",
+    pid: 101,
+    bundleID: "com.example.browser",
+    displayName: "Browser",
+    category: .media,
+    desiredVolume: 1,
+    appliedVolume: 1,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let bridge = WaveLinkControllerSpy(
+    error: .dedicatedChannelRequired("com.example.browser")
+  )
+  let renderer = AppliedIntentRecorder()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    intentRouteApplyOverride: { stagedApp, equalizer in
+      await renderer.record(app: stagedApp, equalizer: equalizer)
+    },
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output."
+      )
+    },
+    waveLinkController: bridge
+  )
+
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.4,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .userEdit
+    )
+  )
+  let resultingApp = await backend.currentSnapshot().apps[0]
+
+  #expect(result.outcome == .failed)
+  #expect(resultingApp.routingState == .monitorOnly)
+  #expect(resultingApp.routeHealthContext == .waveLinkBridge)
+  #expect(resultingApp.appliedVolume == nil)
+  #expect(result.detail?.contains("empty software channel") == true)
+  #expect(await renderer.count() == 0)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+}
+
 @Test func switchingBackToWavesDoesNotBypassVerifiedWaveLinkCompatibility() async {
   let app = waveLinkYieldedTestApp()
   #expect(
@@ -874,6 +989,38 @@ private actor AppliedIntentRecorder {
 
   func count() -> Int {
     apps.count
+  }
+}
+
+private actor WaveLinkControllerSpy: WaveLinkControlling {
+  struct Request: Equatable, Sendable {
+    let bundleIdentifier: String
+    let volume: Float
+    let isMuted: Bool
+  }
+
+  private(set) var requests: [Request] = []
+  private let error: WaveLinkControlBridgeError?
+
+  init(error: WaveLinkControlBridgeError? = nil) {
+    self.error = error
+  }
+
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool
+  ) throws -> WaveLinkControlConfirmation {
+    requests.append(
+      Request(bundleIdentifier: bundleIdentifier, volume: volume, isMuted: isMuted)
+    )
+    if let error { throw error }
+    return WaveLinkControlConfirmation(
+      channelID: "dedicated",
+      channelName: "Dedicated",
+      appliedVolume: volume,
+      isMuted: isMuted
+    )
   }
 }
 

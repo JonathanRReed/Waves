@@ -188,6 +188,40 @@ import WavesAudioCore
     #expect(policy.sliderHelp.contains("starts managing") == false)
   }
 
+  let bridged = MixerRouteControlPolicy(
+    app: task9App(state: .monitorOnly, context: .waveLinkBridge)
+  )
+  #expect(bridged.allowsAudioControl)
+  #expect(bridged.allowsDSPControl == false)
+  #expect(bridged.offersRecovery == false)
+  #expect(bridged.controlHint.contains("Wave Link"))
+
+  let bridgedApp = task9App(state: .monitorOnly, context: .waveLinkBridge)
+  #expect(
+    MixerRowAccessibility.semantics(
+      for: .volume,
+      app: bridgedApp,
+      isExcluded: false,
+      isRecovering: false
+    ).isEnabled
+  )
+  #expect(
+    MixerRowAccessibility.semantics(
+      for: .mute,
+      app: bridgedApp,
+      isExcluded: false,
+      isRecovering: false
+    ).isEnabled
+  )
+  #expect(
+    MixerRowAccessibility.semantics(
+      for: .boost,
+      app: bridgedApp,
+      isExcluded: false,
+      isRecovering: false
+    ).isEnabled == false
+  )
+
   let recovering = MixerRouteControlPolicy(
     app: task9App(state: .managed, context: .geometryRecoveryInProgress)
   )

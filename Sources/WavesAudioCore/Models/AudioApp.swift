@@ -225,6 +225,7 @@ public enum RouteHealthContext: String, Codable, Hashable, Sendable {
   case verifiedRouterOwnership = "verified_router_ownership"
   case unattributableRouterFallback = "unattributable_router_fallback"
   case routerMixedOutput = "router_mixed_output"
+  case waveLinkBridge = "wave_link_bridge"
   case geometryRecoveryInProgress = "geometry_recovery_in_progress"
   case geometryRecoveryExhausted = "geometry_recovery_exhausted"
 }
