@@ -101,6 +101,14 @@ extension WorkspaceAudioControlBackend {
         )
       }
 
+      if let reclaimed = reclaimedRouteResultSupersedingBridgeApply(
+        intent,
+        logicalID: logicalID,
+        currentIndex: currentIndex
+      ) {
+        return reclaimed
+      }
+
       snapshot.apps[currentIndex].desiredVolume = intent.desiredVolume
       snapshot.apps[currentIndex].isMuted = intent.isMuted
       snapshot.apps[currentIndex].appliedVolume = intent.isMuted ? 0 : confirmation.appliedVolume
@@ -143,6 +151,13 @@ extension WorkspaceAudioControlBackend {
         return supersededResult(for: intent, logicalID: logicalID)
       }
       if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
+        if let reclaimed = reclaimedRouteResultSupersedingBridgeApply(
+          intent,
+          logicalID: logicalID,
+          currentIndex: currentIndex
+        ) {
+          return reclaimed
+        }
         snapshot.apps[currentIndex].desiredVolume = previousApp.desiredVolume
         snapshot.apps[currentIndex].isMuted = previousApp.isMuted
         snapshot.apps[currentIndex].appliedVolume = nil
@@ -162,6 +177,41 @@ extension WorkspaceAudioControlBackend {
         detail: error.localizedDescription
       )
     }
+  }
+
+  /// Resolves the race where the verified router quits while a bridge apply is
+  /// suspended awaiting Wave Link: conflict release can promote the row back to
+  /// `.managed` and recreate a Waves tap before the bridge call returns.
+  ///
+  /// The reclaimed tap is the newer ownership decision, so the stale bridge
+  /// result yields to it — overwriting the row with a bridge label here would
+  /// leave a live tap rendering under a row that claims Wave Link owns it. If
+  /// a live tap coexists with a *still-active* conflict instead, the tap is the
+  /// intruder and yields exactly like any conflicted route.
+  private func reclaimedRouteResultSupersedingBridgeApply(
+    _ intent: AppRouteIntent,
+    logicalID: String,
+    currentIndex: Int
+  ) -> AppIntentApplyResult? {
+    let app = snapshot.apps[currentIndex]
+    guard controllers[app.id]?.isActive == true else { return nil }
+    if let conflict = competingAudioRouterConflict(
+      for: app,
+      routerActivity: verifiedRouterActivityProvider?()
+    ) {
+      suspendManagedRouteForConflict(at: currentIndex, conflict: conflict)
+      snapshot.updatedAt = .now
+      return nil
+    }
+    clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+    return AppIntentApplyResult(
+      appID: intent.appID,
+      generation: intent.generation,
+      outcome: .superseded,
+      resultingApp: snapshot.apps[currentIndex],
+      backendStatus: snapshot.backendStatus,
+      detail: "The router released this route while Wave Link was confirming the change, so Waves reclaimed the app with its own route."
+    )
   }
 
   func setPerAppAudioController(_ controller: PerAppAudioController) async {

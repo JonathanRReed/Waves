@@ -585,6 +585,79 @@ import WavesAudioCore
   #expect(resulting.routeHealthContext == .waveLinkBridge)
 }
 
+@Test func routerExitDuringBridgeApplyKeepsTheReclaimedTapAuthoritative() async throws {
+  let app = AudioApp(
+    id: "runtime.browser",
+    logicalID: "com.example.browser",
+    pid: 101,
+    bundleID: "com.example.browser",
+    displayName: "Browser",
+    category: .media,
+    isActive: true,
+    desiredVolume: 1,
+    appliedVolume: 1,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let conflictSwitch = RouterConflictSwitch(
+    conflict: VerifiedRouterConflict(
+      routerName: "Elgato Wave Link",
+      kind: .unattributableTapFallback,
+      detail: "Wave Link owns active Core Audio output.",
+      supportsBridgeControl: true
+    )
+  )
+  let bridge = GatedWaveLinkControllerSpy()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    verifiedRouterConflictProvider: { _ in conflictSwitch.conflict },
+    waveLinkController: bridge,
+    controllerFactory: waveLinkRecoveryControllerFactory,
+    processObjectIDResolver: { _ in [1] }
+  )
+
+  // Let the conflict debouncer latch the active conflict first.
+  await backend.markRouterObservationDirty()
+  await backend.updateAudioLevels(at: .zero)
+  await backend.updateAudioLevels(at: .milliseconds(300))
+
+  let apply = Task {
+    await backend.applyAppIntent(
+      AppRouteIntent(
+        appID: app.logicalID,
+        desiredVolume: 0.3,
+        isMuted: false,
+        volumeBoost: 1,
+        equalizerSettings: EqualizerSettings(),
+        targetDeviceUID: nil,
+        generation: 1,
+        reason: .userEdit
+      )
+    )
+  }
+  #expect(await pollCondition { await bridge.requestCount() == 1 })
+
+  // Wave Link quits while the bridge apply is suspended; conflict release
+  // promotes the row back to managed and recreates the Waves tap.
+  conflictSwitch.conflict = nil
+  await backend.markRouterObservationDirty()
+  await backend.updateAudioLevels(at: .milliseconds(600))
+  await backend.updateAudioLevels(at: .milliseconds(900))
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+
+  await bridge.openGate()
+  let result = await apply.value
+  let resultingApp = await backend.currentSnapshot().apps[0]
+  let lifecycle = await backend.lifecycleDebugSnapshot()
+
+  // The reclaimed Waves tap is authoritative. The stale bridge result must
+  // never relabel the row as Wave Link-managed while a live tap renders it.
+  #expect(result.outcome == .superseded)
+  #expect(lifecycle.liveControllers == 1)
+  #expect(resultingApp.routingState == .managed)
+  #expect(resultingApp.routeHealthContext != .waveLinkBridge)
+}
+
 @Test func bridgeRefusesAPureDSPChangeInsteadOfClaimingItApplied() async {
   let app = AudioApp(
     id: "runtime.browser",
@@ -1253,6 +1326,14 @@ private actor GatedWaveLinkControllerSpy: WaveLinkControlling {
       appliedVolume: volume,
       isMuted: isMuted
     )
+  }
+}
+
+private final class RouterConflictSwitch: @unchecked Sendable {
+  var conflict: VerifiedRouterConflict?
+
+  init(conflict: VerifiedRouterConflict?) {
+    self.conflict = conflict
   }
 }
 
