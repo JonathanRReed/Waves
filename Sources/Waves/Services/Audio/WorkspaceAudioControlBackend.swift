@@ -70,10 +70,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private static let maxOrphanDisposeRetries = 5
   private let routeMaintenanceTickInterval = 20
   private let staleRouteThresholdTicks = 24
-  private var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
-  private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
+  var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
+  var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
   private let routerObservationListeners: RouterObservationListenerLifecycle
-  private var defaultOutputDeviceChange = DefaultOutputDeviceChange()
+  var defaultOutputDeviceChange = DefaultOutputDeviceChange()
   private var outputDeviceReadinessError: String?
   let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "AudioBackend")
 
@@ -116,7 +116,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let captureAuthorizationProbe: CaptureAuthorizationProbe?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
-  private nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
+  nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
 
   init(
     verifiedRouterConflictProvider: VerifiedRouterConflictProvider? = nil,
@@ -962,7 +962,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   struct IntentSupersededError: Error {}
   struct IntentBackendStoppedError: Error {}
 
-  private func ensureAcceptingOperations() throws {
+  func ensureAcceptingOperations() throws {
     guard !isShuttingDown else {
       throw BackendError.managedRouteUnavailable("The audio backend is shutting down.")
     }
@@ -1022,7 +1022,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     lastRenderTickByAppID.removeValue(forKey: runtimeID)
   }
 
-  private struct IntentControlValues {
+  struct IntentControlValues {
     let desiredVolume: Float
     let isMuted: Bool
     let volumeBoost: Float
@@ -1030,7 +1030,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let targetDeviceUID: String?
   }
 
-  private func intentControlValues(for app: AudioApp) -> IntentControlValues {
+  func intentControlValues(for app: AudioApp) -> IntentControlValues {
     if let stagedIntent = stagedIntentByLogicalID[app.logicalID] {
       return IntentControlValues(
         desiredVolume: stagedIntent.desiredVolume,
@@ -1057,21 +1057,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     stagedIntentByLogicalID.removeValue(forKey: logicalID)
   }
 
-  private func legacyApp(forAppID appID: String) throws -> AudioApp {
+  func legacyApp(forAppID appID: String) throws -> AudioApp {
     guard let app = snapshot.apps.app(matchingAppKey: appID) else {
       throw BackendError.appNotFound(appID)
     }
     return app
   }
 
-  private func nextLegacyGeneration() -> UInt64 {
+  func nextLegacyGeneration() -> UInt64 {
     let highestAccepted = latestAcceptedGenerationByLogicalID.values.max() ?? 0
     let base = max(legacyGeneration, highestAccepted)
     legacyGeneration = base == .max ? .max : base + 1
     return legacyGeneration
   }
 
-  private func validateLegacyApplyResult(_ result: AppIntentApplyResult) throws {
+  func validateLegacyApplyResult(_ result: AppIntentApplyResult) throws {
     switch result.outcome {
     case .applied, .noChange:
       return
@@ -1576,212 +1576,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return rawUID as String
   }
 
-  private func currentDefaultOutputDeviceUID() throws -> String {
-    try outputDeviceUID(for: currentDefaultOutputDeviceID())
-  }
-
-  private func outputDeviceUID(for deviceID: AudioObjectID) throws -> String {
-    var uidAddress = AudioObjectPropertyAddress(
-      mSelector: kAudioDevicePropertyDeviceUID,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-
-    var uidSize: UInt32 = 0
-    try withStatusCheck(
-      AudioObjectGetPropertyDataSize(deviceID, &uidAddress, 0, nil, &uidSize),
-      action: "read default output uid size"
-    )
-    let expectedUIDSize = UInt32(MemoryLayout<CFString?>.size)
-    guard uidSize == expectedUIDSize else {
-      throw BackendError.managedRouteUnavailable(
-        "Default output UID returned \(uidSize) bytes; expected \(expectedUIDSize)."
-      )
-    }
-
-    var readSize = expectedUIDSize
-    var rawUID: CFString?
-    let uidStatus = withUnsafeMutablePointer(to: &rawUID) {
-      AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &readSize, $0)
-    }
-    try withStatusCheck(uidStatus, action: "read default output uid")
-    guard readSize == expectedUIDSize else {
-      throw BackendError.managedRouteUnavailable(
-        "Default output UID returned \(readSize) bytes; expected \(expectedUIDSize)."
-      )
-    }
-
-    guard let rawUID else {
-      throw BackendError.managedRouteUnavailable("No output device UID returned.")
-    }
-
-    return rawUID as String
-  }
-
-  private func currentOutputDevice() throws -> AudioDevice {
-    let deviceID = try currentDefaultOutputDeviceID()
-    let uid = try outputDeviceUID(for: deviceID)
-    let name =
-      (try? stringProperty(
-        deviceID,
-        selector: kAudioObjectPropertyName,
-        action: "read default output name"
-      )) ?? "System Output"
-
-    return AudioDevice(
-      id: uid,
-      name: name,
-      kind: OutputDeviceInventory.kind(uid: uid, name: name),
-      isCurrent: true,
-      isManagedRouteAvailable: supportsPerAppRouting
-    )
-  }
-
-  private func currentDefaultOutputDeviceID() throws -> AudioObjectID {
-    var selectorAddress = AudioObjectPropertyAddress(
-      mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-
-    var deviceID = AudioObjectID(kAudioObjectUnknown)
-    var size = UInt32(MemoryLayout<AudioObjectID>.size)
-    try withStatusCheck(
-      AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &selectorAddress, 0, nil, &size, &deviceID),
-      action: "read default output device"
-    )
-
-    guard deviceID != .unknown else {
-      throw BackendError.managedRouteUnavailable("No default output device found.")
-    }
-
-    return deviceID
-  }
-
-  func availableOutputDevices() async -> [AudioDevice] {
-    guard !isShuttingDown, supportsPerAppRouting else { return [] }
-    let currentUID = try? currentDefaultOutputDeviceUID()
-    var devices: [AudioDevice] = []
-    for deviceID in allDeviceIDs() where OutputDeviceInventory.hasOutputStreams(deviceID) {
-      guard let uid = OutputDeviceInventory.deviceUID(deviceID) else { continue }
-      // Skip Waves' own private aggregate devices so they never appear as
-      // user-selectable outputs.
-      if uid.hasPrefix("com.waves.aggregate.") { continue }
-      let name = (try? stringProperty(deviceID, selector: kAudioObjectPropertyName, action: "read device name")) ?? "Output Device"
-      let kind = OutputDeviceInventory.kind(uid: uid, name: name)
-      // Note: do NOT also filter on a "waves" name substring. This app's own
-      // aggregates are reliably identified by the com.waves.aggregate. UID prefix
-      // above; a name-based test would wrongly hide legitimate third-party
-      // hardware from Waves Audio (a real vendor) whose names contain "waves".
-      devices.append(
-        AudioDevice(
-          id: uid,
-          name: name,
-          kind: kind,
-          isCurrent: uid == currentUID,
-          isManagedRouteAvailable: supportsPerAppRouting
-        ))
-    }
-    return devices.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-  }
-
-  func setDefaultOutputDevice(uid: String) async throws {
-    try ensureAcceptingOperations()
-    guard let deviceID = allDeviceIDs().first(where: { OutputDeviceInventory.deviceUID($0) == uid }) else {
-      throw BackendError.managedRouteUnavailable("That output device is no longer available.")
-    }
-
-    var address = AudioObjectPropertyAddress(
-      mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-    var mutableID = deviceID
-    try withStatusCheck(
-      AudioObjectSetPropertyData(
-        AudioObjectID(kAudioObjectSystemObject),
-        &address,
-        0,
-        nil,
-        UInt32(MemoryLayout<AudioObjectID>.size),
-        &mutableID
-      ),
-      action: "set default output device"
-    )
-    // The default-device listener fires from here, driving auto-restore + a
-    // deviceChangeEvents emission that refreshes the UI.
-  }
-
-  func setOutputDevice(uid: String?, forAppID appID: String) async throws {
-    try ensureAcceptingOperations()
-    let app = try legacyApp(forAppID: appID)
-    let values = intentControlValues(for: app)
-    let result = await applyAppIntent(
-      AppRouteIntent(
-        appID: app.logicalID,
-        desiredVolume: values.desiredVolume,
-        isMuted: values.isMuted,
-        volumeBoost: values.volumeBoost,
-        equalizerSettings: values.equalizerSettings,
-        targetDeviceUID: uid,
-        generation: nextLegacyGeneration(),
-        reason: .userEdit
-      ))
-    try validateLegacyApplyResult(result)
-  }
-
-  private func isDeviceAvailable(uid: String) -> Bool {
-    allDeviceIDs().contains { OutputDeviceInventory.deviceUID($0) == uid }
-  }
-
-  private func allDeviceIDs() -> [AudioObjectID] {
-    OutputDeviceInventory.allDeviceIDs { message in
-      logger.warning("\(message, privacy: .public)")
-    }
-  }
-
-  private func stringProperty(
-    _ objectID: AudioObjectID,
-    selector: AudioObjectPropertySelector,
-    action: String
-  ) throws -> String {
-    var address = AudioObjectPropertyAddress(
-      mSelector: selector,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-
-    var propertySize: UInt32 = 0
-    try withStatusCheck(
-      AudioObjectGetPropertyDataSize(objectID, &address, 0, nil, &propertySize),
-      action: "\(action) size"
-    )
-    let expectedSize = UInt32(MemoryLayout<CFString?>.size)
-    guard propertySize == expectedSize else {
-      throw BackendError.managedRouteUnavailable(
-        "\(action) returned an invalid string property size."
-      )
-    }
-
-    var readSize = expectedSize
-    var rawValue: CFString?
-    let status = withUnsafeMutablePointer(to: &rawValue) {
-      AudioObjectGetPropertyData(objectID, &address, 0, nil, &readSize, $0)
-    }
-    try withStatusCheck(status, action: action)
-    guard readSize == expectedSize else {
-      throw BackendError.managedRouteUnavailable(
-        "\(action) returned \(readSize) bytes; expected \(expectedSize)."
-      )
-    }
-
-    guard let rawValue else {
-      throw BackendError.managedRouteUnavailable("\(action) returned no value.")
-    }
-
-    return rawValue as String
-  }
-
   private func translateProcessID(forPID pid: pid_t) throws -> AudioObjectID? {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
@@ -2280,7 +2074,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private func withStatusCheck(_ status: OSStatus, action: String) throws {
+  func withStatusCheck(_ status: OSStatus, action: String) throws {
     if status != noErr {
       throw BackendError.managedRouteUnavailable("\(action) failed (OSStatus: \(status)).")
     }
@@ -2447,7 +2241,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// monitor-only because it is a retryable precondition, not a broken route.
   /// True route failures become `.error`; permanent non-audio rows also record
   /// `hasNoAudioCapability` so UI can suggest exclusion.
-  private func markRouteError(at index: Int, error: Error) {
+  func markRouteError(at index: Int, error: Error) {
     if case BackendError.noActiveAudioStream = error {
       snapshot.apps[index].routingState = .monitorOnly
       snapshot.apps[index].notes = error.localizedDescription
@@ -2466,7 +2260,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  private func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) async {
+  func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) async {
     guard !isShuttingDown else { return }
     // A reattach is one coherent setup pass. Capture router activity before
     // any await so every route sees the same verified Security/Core Audio view.
@@ -2822,157 +2616,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     .nanoseconds(Int64(clamping: DispatchTime.now().uptimeNanoseconds))
   }
 
-  private func addDeviceChangeListener() {
-    guard !isShuttingDown else { return }
-    // Avoid registering a second listener (and leaking the previous block) if
-    // start() runs more than once.
-    guard deviceChangeListenerBlock == nil else { return }
-
-    let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] count, addresses in
-      let selectors = (0..<Int(count)).map { addresses[$0].mSelector }
-      Task { [weak self] in
-        await self?.handleDeviceChange(selectors: selectors)
-      }
-    }
-
-    let selectors: [AudioObjectPropertySelector] = [
-      kAudioHardwarePropertyDefaultOutputDevice,
-      kAudioHardwarePropertyDevices,
-    ]
-
-    for selector in selectors {
-      var address = AudioObjectPropertyAddress(
-        mSelector: selector,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-      )
-
-      let status = AudioObjectAddPropertyListenerBlock(
-        AudioObjectID(kAudioObjectSystemObject),
-        &address,
-        DispatchQueue.main,
-        listenerBlock
-      )
-
-      if status == noErr {
-        deviceChangeListenerSelectors.append(selector)
-      } else {
-        logger.error("Failed to add device change listener \(selector): \(status)")
-      }
-    }
-
-    if !deviceChangeListenerSelectors.isEmpty {
-      deviceChangeListenerBlock = listenerBlock
-    }
-  }
-
-  private func removeDeviceChangeListener() -> [CleanupDegradation] {
-    guard let listenerBlock = deviceChangeListenerBlock else {
-      deviceChangeListenerSelectors.removeAll()
-      return []
-    }
-
-    var observations: [CleanupStatusObservation] = []
-    for selector in deviceChangeListenerSelectors {
-      var address = AudioObjectPropertyAddress(
-        mSelector: selector,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-      )
-
-      observations.append(
-        CleanupStatusObservation(
-          stage: .listenerRemoval,
-          nativeStatus: AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            DispatchQueue.main,
-            listenerBlock
-          ),
-          detail: "Remove device listener selector \(selector)"
-        ))
-    }
-
-    deviceChangeListenerSelectors.removeAll()
-    deviceChangeListenerBlock = nil
-    return checkedCleanupDegradations(from: observations)
-  }
-
-  private func handleDeviceChange(selectors: [AudioObjectPropertySelector]) async {
-    guard !isShuttingDown else { return }
-    let currentDefaultUID = try? currentDefaultOutputDeviceUID()
-    let defaultOutputChanged = defaultOutputDeviceChange.didChange(
-      selectors: selectors,
-      currentUID: currentDefaultUID
-    )
-
-    if defaultOutputChanged {
-      // Re-tap managed routes only when the effective default output changed.
-      // Plain device inventory churn, such as plugging in an unused interface,
-      // should not tear down audible routes.
-      do {
-        _ = try await autoRestoreDevice()
-        guard !isShuttingDown else { return }
-        logger.info("Output device changed, managed routes restored")
-      } catch {
-        guard !isShuttingDown else { return }
-        refreshGlobalRouteHealth(latestError: error.localizedDescription)
-        logger.error("Output device change recovery failed: \(error.localizedDescription)")
-      }
-    } else {
-      await reconcilePinnedRoutesAfterDeviceInventoryChange()
-    }
-    guard !isShuttingDown else { return }
-    // Notify observers (the store) so they can refresh UI state and restore
-    // per-device volume presets, regardless of whether restoration succeeded.
-    deviceChangeContinuation.yield()
-  }
-
-  private func reconcilePinnedRoutesAfterDeviceInventoryChange() async {
-    let availableUIDs = Set(allDeviceIDs().compactMap(OutputDeviceInventory.deviceUID))
-    guard !availableUIDs.isEmpty else { return }
-
-    var lastError: String?
-    var routesNeedingReattach: Set<String> = []
-
-    for app in snapshot.apps {
-      guard let targetDeviceUID = app.targetDeviceUID else { continue }
-      let isActivelyManaged = app.routingState == .managed || controllers[app.id]?.isActive == true
-      let targetIsAvailable = availableUIDs.contains(targetDeviceUID)
-
-      if isActivelyManaged, !targetIsAvailable {
-        if let controller = controllers.removeValue(forKey: app.id) {
-          retainCleanupDegradations(disposeController(controller))
-        }
-        controllerGenerationByRuntimeID.removeValue(forKey: app.id)
-        staleRouteTicks.removeValue(forKey: app.logicalID)
-        lastRenderTickByAppID.removeValue(forKey: app.logicalID)
-        let error = BackendError.managedRouteUnavailable(
-          "The chosen output device for \(app.displayName) is unavailable. Pick another in the app's Output Device menu."
-        )
-        if let index = snapshot.apps.firstIndex(where: { $0.id == app.id || $0.logicalID == app.logicalID }) {
-          markRouteError(at: index, error: error)
-          snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
-          snapshot.apps[index].peakLevel = 0
-          snapshot.apps[index].rmsLevel = 0
-        }
-        lastError = error.localizedDescription
-      } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability {
-        routesNeedingReattach.insert(app.logicalID)
-      }
-    }
-
-    if !routesNeedingReattach.isEmpty {
-      await reattachRoutes(forLogicalIDs: routesNeedingReattach)
-      if lastError != nil {
-        refreshGlobalRouteHealth(latestError: lastError)
-        snapshot.updatedAt = .now
-      }
-    } else if lastError != nil {
-      refreshGlobalRouteHealth(latestError: lastError)
-      snapshot.updatedAt = .now
-    }
-  }
 }
 
 private extension Array where Element == AudioApp {
