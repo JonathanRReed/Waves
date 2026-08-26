@@ -409,12 +409,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         appID: intent.appID,
         generation: intent.generation,
         outcome: .failed,
-        resultingApp: snapshot.apps.app(matchingAppKey: intent.appID),
+        resultingApp: snapshot.apps.app(preferringLogicalID: intent.appID),
         backendStatus: snapshot.backendStatus,
         detail: "The audio backend is shutting down."
       )
     }
-    guard let initialIndex = snapshot.apps.firstIndex(matchingAppKey: intent.appID) else {
+    guard let initialIndex = snapshot.apps.firstIndex(preferringLogicalID: intent.appID) else {
       return AppIntentApplyResult(
         appID: intent.appID,
         generation: intent.generation,
@@ -796,7 +796,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
             appID: entry.appID,
             generation: generation,
             outcome: .failed,
-            resultingApp: snapshot.apps.app(matchingAppKey: entry.appID),
+            resultingApp: snapshot.apps.app(preferringLogicalID: entry.appID),
             detail: "The audio backend is shutting down."
           )
         },
@@ -820,7 +820,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         continue
       }
 
-      guard let appIndex = snapshot.apps.firstIndex(matchingAppKey: entry.appID) else {
+      guard let appIndex = snapshot.apps.firstIndex(preferringLogicalID: entry.appID) else {
         rows.append(
           ProfileRowApplyResult(
             entryIndex: entryIndex,
@@ -1066,7 +1066,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   func legacyApp(forAppID appID: String) throws -> AudioApp {
-    guard let app = snapshot.apps.app(matchingAppKey: appID) else {
+    guard let app = snapshot.apps.app(preferringLogicalID: appID) else {
       throw BackendError.appNotFound(appID)
     }
     return app
@@ -1589,12 +1589,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 }
 
+// Unlike the store's `matchingAppKey` lookup, these prefer a logical-ID match
+// over a runtime-ID match when both exist, so intents follow the logical app.
 private extension Array where Element == AudioApp {
-  func firstIndex(matchingAppKey appKey: String) -> Index? {
+  func firstIndex(preferringLogicalID appKey: String) -> Index? {
     firstIndex { $0.logicalID == appKey } ?? firstIndex { $0.id == appKey }
   }
 
-  func app(matchingAppKey appKey: String) -> AudioApp? {
+  func app(preferringLogicalID appKey: String) -> AudioApp? {
     first { $0.logicalID == appKey } ?? first { $0.id == appKey }
   }
 }
