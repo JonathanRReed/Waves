@@ -109,12 +109,18 @@ SMOKE_SECONDS="${SMOKE_SECONDS:-5}"
 
 # Some Command Line Tools releases install a newer default SDK whose SwiftUI
 # interface references SwiftUIMacros without shipping that macro plugin. Prefer
-# the compatible macOS 26.5 SDK on those machines so local and distribution
-# builds remain usable.
+# the newest compatible macOS 26 SDK actually installed so local and
+# distribution builds remain usable on every build machine.
 if [ -z "$SWIFT_SDK" ] \
-  && [ ! -f /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib ] \
-  && [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]; then
-  SWIFT_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
+  && [ ! -f /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib ]; then
+  for candidate_sdk in \
+    /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
+    /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk; do
+    if [ -d "$candidate_sdk" ]; then
+      SWIFT_SDK="$candidate_sdk"
+      break
+    fi
+  done
 fi
 
 if [ "$MODE" = "--dmg" ] \

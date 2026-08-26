@@ -16,12 +16,23 @@ func wavesCTLRejectsInvalidArgumentsBeforeTransport(_ arguments: [String]) {
   }
 }
 
+private final class WavesCTLBuildDirectoryLocator {}
+
 @Test func wavesCTLExecutableRejectsInvalidVolumeBeforeConnecting() throws {
   let packageRoot = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
     .deletingLastPathComponent()
     .deletingLastPathComponent()
-  let executable = packageRoot.appendingPathComponent(".build/debug/wavesctl")
+  // The products directory follows the active scratch path, so resolve it from
+  // the loaded test bundle before assuming the default `.build` location.
+  let candidates = [
+    Bundle(for: WavesCTLBuildDirectoryLocator.self).bundleURL
+      .deletingLastPathComponent()
+      .appendingPathComponent("wavesctl"),
+    packageRoot.appendingPathComponent(".build/debug/wavesctl"),
+  ]
+  let executable =
+    candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) } ?? candidates[0]
   #expect(FileManager.default.isExecutableFile(atPath: executable.path))
 
   let process = Process()
