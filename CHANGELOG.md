@@ -6,10 +6,11 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.7.0] - Unreleased
+## [1.6.1] - 2026-08-26
 
-Waves 1.7.0 build 18 adds explicit control over how Waves coexists with Elgato
-Wave Link.
+Waves 1.6.1 build 15 is a maintenance release: it makes Waves coexist
+correctly with Elgato Wave Link regardless of which Wave Link generation is
+installed, and cleans up internal structure without changing behavior.
 
 ### Added
 - Choose Waves or Elgato Wave Link as the ordinary per-app audio controller
@@ -26,6 +27,23 @@ Wave Link.
   Wave Link cannot guarantee independent control.
 - Verify that Wave Link's signed Elgato process owns the loopback control port
   before sending any app or channel command.
+- Discover Wave Link 3's per-launch control port from its published
+  `ws-info.json`, falling back to the documented scan range, and accept the
+  interface revision current Wave Link 3 releases actually report.
+- Recognize legacy Wave Link 1.x and 2.x installs, which use a different
+  bundle identifier, so they receive the same monitoring-only protection
+  against duplicate audio. The control bridge stays Wave Link 3-only and
+  fails closed for older generations.
+- Serialize Wave Link bridge writes and close the control socket after each
+  sequence, so rapid volume drags cannot interleave replies or leave Wave
+  Link out of sync with what Waves reports.
+- Yield a stale bridge result when Wave Link quits while a change is in
+  flight and Waves reclaims the route, so a live Waves route is never
+  mislabeled as Wave Link-managed.
+- Keep Wave Link settings changes from claiming untouched or excluded apps
+  when the conflict later clears.
+- Refuse boost, equalizer, and output-routing changes for Wave Link-managed
+  apps instead of reporting them applied.
 - Stop reporting apps such as Zoom as managed when Wave Link can send a parallel
   copy around the Waves route. Compatibility mode now yields the route, while
   the explicit compatibility opt-out remains available for custom routing.
@@ -33,6 +51,15 @@ Wave Link.
   process, allowing compatibility mode to recognize the signed router reliably.
 - Keep onboarding primary button labels legible by removing a second
   onboarding-wide accent tint from the already themed setup flow.
+- Keep local builds working on machines with either supported macOS 26 SDK
+  layout.
+
+### Changed
+- Split the two largest source files (the app store and the audio backend)
+  into focused per-responsibility files with no behavior change.
+- Documented the Wave Link loopback control connection, its code-signature
+  verification, and the opt-in control socket in the privacy and security
+  policies.
 
 ## [1.6.0] - 2026-08-16
 
