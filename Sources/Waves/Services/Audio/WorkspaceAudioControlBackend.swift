@@ -414,6 +414,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private var perAppAudioController: PerAppAudioController
   private var waveLinkCompatibilityEnabled: Bool
   private let waveLinkController: (any WaveLinkControlling)?
+  /// Tail of the strictly serialized queue of in-flight bridge applies.
+  private var waveLinkApplyQueueTail: Task<Void, Never>?
   private let controllerFactory: ControllerFactory?
   private let processObjectIDResolver: ProcessObjectIDResolver?
   private let processTargetResolver: ProcessTargetResolver?
@@ -965,6 +967,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     waveLinkCompatibilityEnabled
       && perAppAudioController == .waves
       && waveLinkController != nil
+      && conflict.supportsBridgeControl
       && app.bundleID?.isEmpty == false
       && conflict.kind != .routerMixedOutput
   }
@@ -987,10 +990,47 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       lifecycleEpoch: lifecycleEpoch
     )
 
+    // Wave Link's channel protocol carries only volume and mute. A change that
+    // is purely boost, equalizer, or output routing must be refused honestly
+    // instead of reported as applied.
+    let dspChangeRequested =
+      intent.volumeBoost != previousApp.volumeBoost
+      || intent.targetDeviceUID != previousApp.targetDeviceUID
+    let audioChangeRequested =
+      intent.desiredVolume != previousApp.desiredVolume
+      || intent.isMuted != previousApp.isMuted
+    if dspChangeRequested, !audioChangeRequested {
+      snapshot.apps[acceptedIndex].notes =
+        "Boost, equalizer, and output routing are unavailable while Wave Link owns this app's audio. Adjust them in Wave Link, or disable Wave Link compatibility in Settings."
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      snapshot.updatedAt = .now
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unavailable,
+        resultingApp: snapshot.apps[acceptedIndex],
+        backendStatus: snapshot.backendStatus,
+        detail: snapshot.apps[acceptedIndex].notes
+      )
+    }
+
     do {
       guard let bundleIdentifier = previousApp.bundleID, let waveLinkController else {
         throw WaveLinkControlBridgeError.invalidBundleIdentifier
       }
+
+      // Bridge applies are strictly serialized. Concurrent sequences on the
+      // shared control socket can consume each other's replies, and a stale
+      // write finishing after a newer one would desynchronize Wave Link from
+      // the state Waves reports.
+      let previousApply = waveLinkApplyQueueTail
+      let (applyFinished, applyFinishedContinuation) = AsyncStream<Void>.makeStream()
+      waveLinkApplyQueueTail = Task { for await _ in applyFinished {} }
+      defer { applyFinishedContinuation.finish() }
+      if let previousApply {
+        await previousApply.value
+      }
+
       try ensureGenerationCurrent(generationContext)
       let confirmation = try await waveLinkController.apply(
         bundleIdentifier: bundleIdentifier,
@@ -1370,9 +1410,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let routerActivity = verifiedRouterActivityProvider?()
     var changed = false
     for index in snapshot.apps.indices {
+      // Restamp only rows the route machinery already owns: managed routes,
+      // live controllers, and rows previously suspended for a router conflict.
+      // Stamping a router context on an untouched or excluded row would later
+      // let conflict release or route recovery promote it to a managed tap the
+      // user never asked for.
+      let app = snapshot.apps[index]
+      guard
+        Self.isRouteRecoveryCandidate(
+          app,
+          hasActiveController: controllers[app.id]?.isActive == true,
+          reclaimMixedOutput: true
+        )
+      else { continue }
       guard
         let conflict = competingAudioRouterConflict(
-          for: snapshot.apps[index],
+          for: app,
           routerActivity: routerActivity
         )
       else { continue }

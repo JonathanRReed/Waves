@@ -180,6 +180,17 @@ import Testing
   )
 }
 
+@Test func legacyWaveLinkGenerationsAreRecognizedAsCompetingRouters() {
+  // Wave Link 1.x and 2.x ship as com.elgato.WaveLink; their mixed output must
+  // get the same never-wrap treatment as Wave Link 3.
+  #expect(
+    AppDiscoveryPolicy.competingAudioRouterName(
+      for: "com.elgato.WaveLink",
+      among: []
+    ) == "Elgato Wave Link"
+  )
+}
+
 // MARK: - Helper-process audio attribution (Chromium / Electron)
 
 @Test func topLevelAppBundlePathResolvesChromiumHelperToParentApp() {

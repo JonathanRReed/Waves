@@ -37,11 +37,19 @@ Wave Link instead of creating a second Core Audio tap.
 
 The bridge:
 
-- connects only to `ws://127.0.0.1:1884` through `URLSessionWebSocketTask`;
+- discovers Wave Link's loopback port from `ws-info.json` (Wave Link 3 picks a
+  new port on every launch and publishes it there), falling back to scanning
+  the documented 1884-1893 range;
+- connects only to `ws://127.0.0.1:<port>` through `URLSessionWebSocketTask`,
+  and only after `lsof` proves the port's listener is the signed Wave Link
+  process;
 - uses the `streamdeck://` origin expected by Wave Link;
-- sends JSON-RPC 2.0 requests;
+- sends JSON-RPC 2.0 requests, one serialized apply sequence at a time, and
+  closes the socket after each sequence;
 - requires `getApplicationInfo` to return `appID = EWL` and
-  `interfaceRevision >= 2` before any mutation;
+  `interfaceRevision >= 1` (the value Wave Link 3.0-3.2 report; earlier Wave
+  Link generations answer `egwl` with a different protocol and are rejected)
+  before any mutation;
 - uses `getChannels` to match an exact app bundle identifier to a software
   channel;
 - uses `setChannel` for volume and mute;
@@ -65,6 +73,15 @@ claiming they were applied.
 
 When Elgato Wave Link is selected, ordinary apps remain monitoring-only in
 Waves. Volume, mute, effects, and mix changes happen in Wave Link.
+
+## Legacy Wave Link Generations
+
+Wave Link 1.x and 2.x ship as `com.elgato.WaveLink` under the same Elgato team
+and are verified with their own descriptor. While a verified legacy Wave Link
+owns output, ordinary apps receive the same monitoring-only protection, but the
+bridge is never attempted: the legacy loopback protocol (`egwl`, integer
+levels, different method names) predates the channel contract, so volume and
+mute stay in Wave Link itself.
 
 ## Compatibility Disabled
 

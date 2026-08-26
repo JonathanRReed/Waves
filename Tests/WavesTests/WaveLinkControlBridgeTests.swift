@@ -121,6 +121,51 @@ import Testing
   #expect(await rpc.applicationInfoRequestCount == 0)
 }
 
+@Test func waveLinkBridgeRejectsAPreRevisionOneInterface() async {
+  let rpc = WaveLinkRPCStub(channels: [], interfaceRevision: 0)
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    try await rpc.request(method: method, params: params)
+  })
+
+  await #expect(throws: WaveLinkControlBridgeError.incompatibleApplication) {
+    try await bridge.apply(bundleIdentifier: "com.example.browser", volume: 0.5, isMuted: false)
+  }
+  #expect(await rpc.channelRequestCount == 0)
+}
+
+@Test func waveLinkBridgeFinishesTheTransportSequenceAfterSuccessAndFailure() async throws {
+  final class SequenceCounter: @unchecked Sendable {
+    var finished = 0
+  }
+  let counter = SequenceCounter()
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(
+        id: "channel-browser",
+        name: "Browser",
+        type: "Software",
+        level: 1,
+        isMuted: false,
+        apps: [.init(id: "com.example.browser")]
+      )
+    ]
+  )
+  let bridge = WaveLinkControlBridge(
+    request: { method, params in
+      try await rpc.request(method: method, params: params)
+    },
+    finishSequence: { counter.finished += 1 }
+  )
+
+  _ = try await bridge.apply(bundleIdentifier: "com.example.browser", volume: 0.5, isMuted: false)
+  #expect(counter.finished == 1)
+
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await bridge.apply(bundleIdentifier: "com.example.other", volume: 0.5, isMuted: false)
+  }
+  #expect(counter.finished == 2)
+}
+
 @Test func waveLinkLoopbackPeerRequiresTheSignedElgatoListener() throws {
   let parsed = WaveLinkLoopbackPeerVerifier.parseListenerPIDs("p1366\nf9\np1366\np42\n")
   #expect(parsed == [42, 1366])
@@ -164,14 +209,18 @@ private actor WaveLinkRPCStub {
 
   private var channels: [WaveLinkChannel]
   private let applicationID: String
+  private let interfaceRevision: Int
   private(set) var applicationInfoRequestCount = 0
   private(set) var addRequests: [AddRequest] = []
   private(set) var setRequests: [SetRequest] = []
   private(set) var channelRequestCount = 0
 
-  init(channels: [WaveLinkChannel], applicationID: String = "EWL") {
+  // Wave Link 3.0-3.2 report interfaceRevision 1, so the stub defaults to the
+  // value real installs answer with.
+  init(channels: [WaveLinkChannel], applicationID: String = "EWL", interfaceRevision: Int = 1) {
     self.channels = channels
     self.applicationID = applicationID
+    self.interfaceRevision = interfaceRevision
   }
 
   func request(method: String, params: Data?) throws -> Data {
@@ -180,7 +229,11 @@ private actor WaveLinkRPCStub {
     case "getApplicationInfo":
       applicationInfoRequestCount += 1
       return try encoder.encode(
-        WaveLinkApplicationInfo(interfaceRevision: 2, appID: applicationID, name: "Wave Link 3")
+        WaveLinkApplicationInfo(
+          interfaceRevision: interfaceRevision,
+          appID: applicationID,
+          name: "Wave Link 3"
+        )
       )
     case "getChannels":
       channelRequestCount += 1

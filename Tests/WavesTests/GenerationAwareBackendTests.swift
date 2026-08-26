@@ -284,7 +284,8 @@ import WavesAudioCore
       VerifiedRouterConflict(
         routerName: "Elgato Wave Link",
         kind: .unattributableTapFallback,
-        detail: "Wave Link owns active Core Audio output."
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
       )
     },
     waveLinkController: bridge
@@ -345,7 +346,8 @@ import WavesAudioCore
       VerifiedRouterConflict(
         routerName: "Elgato Wave Link",
         kind: .unattributableTapFallback,
-        detail: "Wave Link owns active Core Audio output."
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
       )
     },
     waveLinkController: bridge
@@ -442,6 +444,191 @@ import WavesAudioCore
 
   #expect(recovered.apps[0].routingState == .managed)
   #expect(recovered.apps[0].routeHealthContext == nil)
+}
+
+@Test func controllerRoundTripCannotClaimUntouchedRows() async throws {
+  let untouched = AudioApp(
+    id: "runtime.untouched",
+    logicalID: "com.example.untouched",
+    pid: 404,
+    bundleID: "com.example.untouched",
+    displayName: "Untouched",
+    category: .media,
+    isActive: false,
+    desiredVolume: 1,
+    appliedVolume: nil,
+    routingState: .monitorOnly,
+    compatibility: .supported
+  )
+  let managed = AudioApp(
+    id: "runtime.managed",
+    logicalID: "com.example.managed",
+    pid: 505,
+    bundleID: "com.example.managed",
+    displayName: "Managed",
+    category: .media,
+    isActive: true,
+    desiredVolume: 0.7,
+    appliedVolume: 0.7,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [untouched, managed]),
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
+      )
+    },
+    waveLinkController: WaveLinkControllerSpy()
+  )
+
+  await backend.setPerAppAudioController(.waveLink)
+  await backend.setPerAppAudioController(.waves)
+  let snapshot = await backend.currentSnapshot()
+  let untouchedRow = try #require(snapshot.apps.first { $0.logicalID == untouched.logicalID })
+  let managedRow = try #require(snapshot.apps.first { $0.logicalID == managed.logicalID })
+
+  // A row the user never managed or excluded from Waves must stay invisible to
+  // conflict release and route recovery, or Wave Link quitting would promote
+  // every app on the machine to a managed tap.
+  #expect(untouchedRow.routingState == .monitorOnly)
+  #expect(untouchedRow.routeHealthContext == nil)
+  #expect(
+    !WorkspaceAudioControlBackend.isRouteRecoveryCandidate(
+      untouchedRow,
+      hasActiveController: false,
+      reclaimMixedOutput: true
+    )
+  )
+  // The managed row yields to the router and stays reclaimable.
+  #expect(managedRow.routingState == .monitorOnly)
+  #expect(managedRow.routeHealthContext != nil)
+  #expect(
+    WorkspaceAudioControlBackend.isRouteRecoveryCandidate(
+      managedRow,
+      hasActiveController: false,
+      reclaimMixedOutput: true
+    )
+  )
+}
+
+@Test func bridgeAppliesAreSerializedAndStaleWritesAreSkipped() async throws {
+  let app = AudioApp(
+    id: "runtime.browser",
+    logicalID: "com.example.browser",
+    pid: 101,
+    bundleID: "com.example.browser",
+    displayName: "Browser",
+    category: .media,
+    isActive: true,
+    desiredVolume: 1,
+    appliedVolume: 1,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let bridge = GatedWaveLinkControllerSpy()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
+      )
+    },
+    waveLinkController: bridge
+  )
+
+  func intent(volume: Float, generation: UInt64) -> AppRouteIntent {
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: volume,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: generation,
+      reason: .userEdit
+    )
+  }
+
+  let first = Task { await backend.applyAppIntent(intent(volume: 0.3, generation: 1)) }
+  #expect(await pollCondition { await bridge.requestCount() == 1 })
+
+  let second = Task { await backend.applyAppIntent(intent(volume: 0.8, generation: 2)) }
+  // With serialized applies the second intent cannot enter the bridge while
+  // the first is still inside it; this can only observe 2 if that breaks.
+  #expect(
+    await pollCondition(timeout: .milliseconds(300)) { await bridge.requestCount() == 2 } == false
+  )
+
+  await bridge.openGate()
+  let firstResult = await first.value
+  let secondResult = await second.value
+
+  #expect(firstResult.outcome == .superseded)
+  #expect(secondResult.outcome == .applied)
+  #expect(await bridge.maxConcurrentApplies == 1)
+  #expect(
+    await bridge.requests == [
+      .init(bundleIdentifier: "com.example.browser", volume: 0.3, isMuted: false),
+      .init(bundleIdentifier: "com.example.browser", volume: 0.8, isMuted: false),
+    ]
+  )
+  let resulting = await backend.currentSnapshot().apps[0]
+  #expect(resulting.desiredVolume == 0.8)
+  #expect(resulting.routeHealthContext == .waveLinkBridge)
+}
+
+@Test func bridgeRefusesAPureDSPChangeInsteadOfClaimingItApplied() async {
+  let app = AudioApp(
+    id: "runtime.browser",
+    logicalID: "com.example.browser",
+    pid: 101,
+    bundleID: "com.example.browser",
+    displayName: "Browser",
+    category: .media,
+    isActive: true,
+    desiredVolume: 0.5,
+    appliedVolume: 0.5,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let bridge = WaveLinkControllerSpy()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
+      )
+    },
+    waveLinkController: bridge
+  )
+
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.5,
+      isMuted: false,
+      volumeBoost: 2,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .userEdit
+    )
+  )
+
+  #expect(result.outcome == .unavailable)
+  #expect(result.detail?.contains("Boost, equalizer, and output routing are unavailable") == true)
+  #expect(await bridge.requests.isEmpty)
 }
 
 @Test func waveLinkMixedOutputCannotBeWrappedInAWavesRenderer() async {
@@ -1022,6 +1209,64 @@ private actor WaveLinkControllerSpy: WaveLinkControlling {
       isMuted: isMuted
     )
   }
+}
+
+private actor GatedWaveLinkControllerSpy: WaveLinkControlling {
+  struct Request: Equatable, Sendable {
+    let bundleIdentifier: String
+    let volume: Float
+    let isMuted: Bool
+  }
+
+  private(set) var requests: [Request] = []
+  private(set) var maxConcurrentApplies = 0
+  private var activeApplies = 0
+  private var isGateOpen = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func openGate() {
+    isGateOpen = true
+    let resumed = waiters
+    waiters = []
+    for waiter in resumed { waiter.resume() }
+  }
+
+  func requestCount() -> Int {
+    requests.count
+  }
+
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool
+  ) async throws -> WaveLinkControlConfirmation {
+    activeApplies += 1
+    maxConcurrentApplies = max(maxConcurrentApplies, activeApplies)
+    requests.append(Request(bundleIdentifier: bundleIdentifier, volume: volume, isMuted: isMuted))
+    if !isGateOpen {
+      await withCheckedContinuation { waiters.append($0) }
+    }
+    activeApplies -= 1
+    return WaveLinkControlConfirmation(
+      channelID: "dedicated",
+      channelName: "Dedicated",
+      appliedVolume: volume,
+      isMuted: isMuted
+    )
+  }
+}
+
+private func pollCondition(
+  timeout: Duration = .seconds(5),
+  _ condition: @Sendable () async -> Bool
+) async -> Bool {
+  let clock = ContinuousClock()
+  let deadline = clock.now.advanced(by: timeout)
+  while clock.now < deadline {
+    if await condition() { return true }
+    try? await Task.sleep(for: .milliseconds(10))
+  }
+  return await condition()
 }
 
 private func waveLinkYieldedTestApp(

@@ -399,5 +399,8 @@ public enum AppDiscoveryPolicy {
     "extension helper",
   ]
 
-  private static let competingAudioRouterBundleIDs = ["com.elgato.wavelink3": "Elgato Wave Link"]
+  private static let competingAudioRouterBundleIDs = [
+    "com.elgato.wavelink3": "Elgato Wave Link",
+    "com.elgato.wavelink": "Elgato Wave Link",
+  ]
 }

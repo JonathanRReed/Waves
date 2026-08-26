@@ -103,6 +103,7 @@ struct WaveLinkChannelsResponse: Codable, Equatable, Sendable {
 actor WaveLinkControlBridge: WaveLinkControlling {
   typealias Request = @Sendable (_ method: String, _ params: Data?) async throws -> Data
   typealias PeerValidator = @Sendable () async throws -> Void
+  typealias SequenceFinalizer = @Sendable () async -> Void
 
   private struct AddToChannelRequest: Encodable {
     let appID: String
@@ -122,28 +123,65 @@ actor WaveLinkControlBridge: WaveLinkControlling {
 
   private let request: Request
   private let validatePeer: PeerValidator
+  private let finishSequence: SequenceFinalizer
   private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
 
   init(
     request: @escaping Request,
-    validatePeer: @escaping PeerValidator = {}
+    validatePeer: @escaping PeerValidator = {},
+    finishSequence: @escaping SequenceFinalizer = {}
   ) {
     self.request = request
     self.validatePeer = validatePeer
+    self.finishSequence = finishSequence
   }
 
   init() {
-    let transport = WaveLinkJSONRPCTransport()
+    // The resolver both discovers Wave Link's current control port and proves
+    // the listener is the signed Wave Link process, so peer validation and the
+    // transport destination can never disagree.
+    let resolver = WaveLinkVerifiedEndpointResolver()
+    let transport = WaveLinkJSONRPCTransport(portProvider: {
+      try await resolver.verifiedEndpoint().port
+    })
     self.request = { method, params in
-      try await transport.request(method: method, params: params)
+      do {
+        return try await transport.request(method: method, params: params)
+      } catch {
+        // A dead socket usually means Wave Link restarted on a new port.
+        await resolver.invalidate()
+        throw error
+      }
     }
     self.validatePeer = {
-      try await WaveLinkLoopbackPeerVerifier.verify()
+      _ = try await resolver.verifiedEndpoint()
+    }
+    self.finishSequence = {
+      await transport.endSequence()
     }
   }
 
   func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool
+  ) async throws -> WaveLinkControlConfirmation {
+    do {
+      let confirmation = try await performApply(
+        bundleIdentifier: bundleIdentifier,
+        volume: volume,
+        isMuted: isMuted
+      )
+      await finishSequence()
+      return confirmation
+    } catch {
+      await finishSequence()
+      throw error
+    }
+  }
+
+  private func performApply(
     bundleIdentifier: String,
     volume: Float,
     isMuted: Bool
@@ -159,7 +197,11 @@ actor WaveLinkControlBridge: WaveLinkControlling {
 
     let applicationInfoData = try await request("getApplicationInfo", nil)
     let applicationInfo = try decode(WaveLinkApplicationInfo.self, from: applicationInfoData)
-    guard applicationInfo.appID == "EWL", applicationInfo.interfaceRevision >= 2 else {
+    // Wave Link 3 reset its protocol: `appID` is "EWL" and `interfaceRevision`
+    // restarted at 1 (the value 3.0-3.2 report). Earlier Wave Link generations
+    // answer "egwl" with revisions 6-7 and a different method set, so they are
+    // rejected here and stay monitoring-only.
+    guard applicationInfo.appID == "EWL", applicationInfo.interfaceRevision >= 1 else {
       throw WaveLinkControlBridgeError.incompatibleApplication
     }
 
@@ -254,16 +296,6 @@ enum WaveLinkLoopbackPeerVerifier {
       VerifiedRouterDescriptor
     ) -> VerifiedRouterProcessIdentity?
 
-  static func verify() async throws {
-    try await Task.detached(priority: .utility) {
-      let listenerPIDs = try liveListenerPIDs()
-      try validate(
-        listenerPIDs: listenerPIDs,
-        identityVerifier: VerifiedRouterProcessIdentity.verifyLive
-      )
-    }.value
-  }
-
   static func validate(
     listenerPIDs: [pid_t],
     descriptor: VerifiedRouterDescriptor = .waveLink3_2_2,
@@ -290,55 +322,56 @@ enum WaveLinkLoopbackPeerVerifier {
       )
     ).sorted()
   }
-
-  private static func liveListenerPIDs() throws -> [pid_t] {
-    let process = Process()
-    let stdout = Pipe()
-    let stderr = Pipe()
-    process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-    process.arguments = ["-nP", "-a", "-iTCP:1884", "-sTCP:LISTEN", "-Fp"]
-    process.standardOutput = stdout
-    process.standardError = stderr
-    do {
-      try process.run()
-    } catch {
-      throw WaveLinkControlBridgeError.unavailable(
-        "Could not inspect the loopback service owner: \(error.localizedDescription)"
-      )
-    }
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-      throw WaveLinkControlBridgeError.unverifiedLoopbackPeer
-    }
-    let data = stdout.fileHandleForReading.readDataToEndOfFile()
-    guard let output = String(data: data, encoding: .utf8) else {
-      throw WaveLinkControlBridgeError.protocolViolation(
-        "The loopback listener inspection was not UTF-8."
-      )
-    }
-    return parseListenerPIDs(output)
-  }
 }
 
 private actor WaveLinkJSONRPCTransport {
+  typealias PortProvider = @Sendable () async throws -> UInt16
+
   private struct RPCErrorPayload: Decodable {
     let code: Int?
     let message: String?
   }
 
   private let session: URLSession
+  private let portProvider: PortProvider
   private var socket: URLSessionWebSocketTask?
   private var nextRequestID = 1
 
-  init() {
+  init(portProvider: @escaping PortProvider) {
+    // Only the connect handshake gets a session timeout. A resource lifetime
+    // limit would tear the socket down mid-sequence; per-message stalls are
+    // bounded by the receive timeout below instead.
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = 2
-    configuration.timeoutIntervalForResource = 3
     session = URLSession(configuration: configuration)
+    self.portProvider = portProvider
   }
 
   func request(method: String, params: Data?) async throws -> Data {
-    let socket = connectedSocket()
+    do {
+      return try await performRequest(method: method, params: params)
+    } catch {
+      // Never keep a socket that produced any failure; the next sequence
+      // reconnects against a freshly verified endpoint.
+      closeSocket(with: .abnormalClosure)
+      throw error
+    }
+  }
+
+  /// Ends one bridge apply sequence. Wave Link expects short-lived control
+  /// connections, and dropping the socket here keeps an idle Waves from
+  /// pinning a stale connection across Wave Link restarts.
+  func endSequence() {
+    closeSocket(with: .goingAway)
+  }
+
+  private func closeSocket(with code: URLSessionWebSocketTask.CloseCode) {
+    socket?.cancel(with: code, reason: nil)
+    socket = nil
+  }
+
+  private func performRequest(method: String, params: Data?) async throws -> Data {
+    let socket = try await connectedSocket()
     let requestID = nextRequestID
     nextRequestID += 1
 
@@ -389,8 +422,6 @@ private actor WaveLinkJSONRPCTransport {
     } catch let error as WaveLinkControlBridgeError {
       throw error
     } catch {
-      self.socket?.cancel(with: .goingAway, reason: nil)
-      self.socket = nil
       throw WaveLinkControlBridgeError.unavailable(error.localizedDescription)
     }
   }
@@ -414,9 +445,13 @@ private actor WaveLinkJSONRPCTransport {
     }
   }
 
-  private func connectedSocket() -> URLSessionWebSocketTask {
+  private func connectedSocket() async throws -> URLSessionWebSocketTask {
     if let socket { return socket }
-    var request = URLRequest(url: URL(string: "ws://127.0.0.1:1884")!)
+    let port = try await portProvider()
+    guard let url = URL(string: "ws://127.0.0.1:\(port)") else {
+      throw WaveLinkControlBridgeError.unavailable("Port \(port) is not a valid loopback URL.")
+    }
+    var request = URLRequest(url: url)
     request.setValue("streamdeck://", forHTTPHeaderField: "Origin")
     let socket = session.webSocketTask(with: request)
     socket.resume()

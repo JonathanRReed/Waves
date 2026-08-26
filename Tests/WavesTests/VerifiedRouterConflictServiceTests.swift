@@ -395,6 +395,35 @@ import WavesAudioCore
   #expect(conflict.detail.contains("cannot publicly attribute"))
 }
 
+@Test func legacyWaveLinkYieldsMonitoringOnlyWithoutBridgeControl() {
+  let target = routerTestApp(id: "target", pid: 101)
+  let snapshot = VerifiedRouterObservationSnapshot(
+    processObjects: [
+      .init(id: 1, pid: 101, isRunningOutput: true),
+      .init(id: 3, pid: 202, isRunningOutput: true),
+    ],
+    taps: []
+  )
+  let makeService: (VerifiedRouterDescriptor) -> VerifiedRouterConflictService = { active in
+    VerifiedRouterConflictService(
+      snapshotProvider: { snapshot },
+      identityVerifier: { pid, descriptor in
+        guard pid == 202, descriptor == active else { return nil }
+        return .init(pid: pid, teamIdentifier: "Y93VXCB8Q5", matchesDesignatedRequirement: true)
+      }
+    )
+  }
+
+  // A legacy Wave Link (1.x/2.x) install is recognized, so ordinary apps stay
+  // monitoring-only, but its protocol predates the bridge.
+  let legacyConflict = try! #require(makeService(.waveLinkLegacy).conflict(for: target))
+  #expect(legacyConflict.kind == .unattributableTapFallback)
+  #expect(legacyConflict.supportsBridgeControl == false)
+
+  let modernConflict = try! #require(makeService(.waveLink3_2_2).conflict(for: target))
+  #expect(modernConflict.supportsBridgeControl)
+}
+
 @Test func everySupportedDescriptorHasAConstructibleRequirement() {
   let allRequirementsAreConstructible = VerifiedRouterDescriptor.supported.allSatisfy {
     $0.hasConstructibleRequirement
