@@ -74,7 +74,11 @@ extension AppStore {
     }
 
     persistSessionSnapshot()
-    diagnostics = await backend.diagnosticsReport()
+    // A device change is not a reason to re-probe capture authorization: the
+    // probe is a system-wide tap, and every Waves route rebuild produces a
+    // device-change event of its own, so a forced probe here would compound
+    // exactly the churn other audio clients are most sensitive to.
+    diagnostics = await backend.diagnosticsReport(reprobeCaptureAuthorization: false)
     onboarding.captureAuthorization = await backend.captureAuthorizationResult()
     availableDevices = await backend.availableOutputDevices()
     syncOnboarding(using: session)

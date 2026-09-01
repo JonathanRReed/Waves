@@ -212,3 +212,20 @@ struct RowLevelMeter: View {
     }
   }
 }
+
+/// Reads the level poll for exactly one row.
+///
+/// `AppStore.liveLevels` is one observed dictionary, so a row that read it in
+/// its own body re-ran that whole body — four accessibility semantics, the
+/// subtitle, the route policy — every 300 ms while anything on the machine
+/// played, silent rows included. Hosting the read in this leaf means a level
+/// tick invalidates the meters and nothing else.
+struct RowLevelMeterHost: View {
+  @Environment(AppStore.self) private var store
+  let appID: String
+
+  var body: some View {
+    let levels = store.liveLevels[appID]
+    RowLevelMeter(rms: levels?.rms ?? 0, peak: levels?.peak ?? 0)
+  }
+}

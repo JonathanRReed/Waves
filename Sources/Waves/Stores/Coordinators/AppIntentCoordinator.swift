@@ -530,6 +530,13 @@ final class AppIntentCoordinator {
     }
     pendingVolumeTargets = pendingVolumeTargets.filter { appIDs.contains($0.key) }
     pendingEqualizerSettings = pendingEqualizerSettings.filter { appIDs.contains($0.key) }
+    confirmedEqualizers = confirmedEqualizers.filter { appIDs.contains($0.key) }
+    durableMutationGenerations = durableMutationGenerations.filter { appIDs.contains($0.key) }
+    // Device-preset keys are "<device>\0<app>"; retain by the app half.
+    devicePresetMutationGenerations = devicePresetMutationGenerations.filter { entry in
+      guard let separator = entry.key.lastIndex(of: "\u{0}") else { return false }
+      return appIDs.contains(String(entry.key[entry.key.index(after: separator)...]))
+    }
     for appID in currentVolumeDebounceTokens.keys where !appIDs.contains(appID) {
       cancelVolumeDebounce(for: appID)
     }

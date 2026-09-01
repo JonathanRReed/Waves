@@ -375,7 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   // status read) and covers the common case of the user returning from
   // System Settings after changing it there.
   func applicationDidBecomeActive(_ notification: Notification) {
-    store?.reconcileLoginItemStatus()
+    store?.reconcileLoginItemStatus(force: true)
   }
 
   /// Registers Waves's hot keys only while the user has keyboard shortcuts
@@ -403,13 +403,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let shouldRun = store.preferences.enableExternalControl
 
     if shouldRun, controlServer == nil {
-      let server = ControlServer(handler: ControlCommandHandler(store: store))
+      // The broadcast closure is installed only while a client is connected.
+      // With it installed for the life of the socket, every level tick built
+      // and diffed the whole control roster just to drop it on an empty
+      // connection list.
+      let server = ControlServer(
+        handler: ControlCommandHandler(store: store),
+        onConnectionCountChange: { [weak self, weak store] count in
+          guard let store else { return }
+          if count > 0, store.controlBroadcast == nil {
+            store.controlBroadcast = { [weak self] response in
+              self?.controlServer?.broadcast(response)
+            }
+          } else if count == 0 {
+            store.controlBroadcast = nil
+          }
+        }
+      )
       do {
         try server.start()
         controlServer = server
-        store.controlBroadcast = { [weak server] response in
-          server?.broadcast(response)
-        }
       } catch {
         lifecycleLogger.error(
           "Could not open the control socket: \(String(describing: error), privacy: .public)")

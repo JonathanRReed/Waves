@@ -293,6 +293,21 @@ extension AppStore {
       mode != .off
     else { return false }
 
+    // Silence detection: a managed route that is paused, or a call with nobody
+    // talking, gives the policy engine nothing to balance. After a couple of
+    // seconds of that, report no work so the loop drops to its idle cadence
+    // instead of running the analysis hop, the frontmost lookup, and the policy
+    // update ten times a second for hours. The first audible pass brings the
+    // fast cadence straight back.
+    let managedIsSilent =
+      hasManagedRoute
+      && apps.allSatisfy { app in
+        guard app.routingState == .managed, let levels = analysis[app.logicalID] else { return true }
+        return max(levels.rms, levels.voiceBandEnergy) < Self.adaptiveSilenceFloor
+      }
+    adaptiveSilentPasses = managedIsSilent ? adaptiveSilentPasses + 1 : 0
+    let hasSettledIntoSilence = adaptiveSilentPasses >= Self.adaptiveSilentPassesBeforeIdle
+
     let frontmostAppID = frontmostManagedAppIDForAdaptiveMix(in: apps)
     let output = adaptiveMixCoordinator.evaluate(
       AdaptiveMixPassInput(
@@ -317,8 +332,13 @@ extension AppStore {
     if let backendGains = output.backendGains {
       await backend.setAdaptiveGains(backendGains)
     }
-    return output.didWork
+    return output.didWork && !hasSettledIntoSilence
   }
+
+  /// Linear RMS below which a managed app counts as silent for cadence purposes.
+  static let adaptiveSilenceFloor: Float = 0.0005
+  /// Passes of silence (at the 100 ms active cadence) before the loop idles.
+  static let adaptiveSilentPassesBeforeIdle = 20
 
   func togglePinned(_ app: AudioApp) {
     guard requireAudioRunning() else { return }

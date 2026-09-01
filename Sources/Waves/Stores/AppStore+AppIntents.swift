@@ -156,10 +156,20 @@ extension AppStore {
       break
     }
 
+    // A transaction that persists nothing — a slider nudge mid-drag, an
+    // automation step, a startup restore row — is transient: the committing
+    // transaction (or the caller's own pass) writes the session, refreshes
+    // diagnostics, and re-syncs onboarding exactly once afterwards. Doing all
+    // of that here too meant every 80 ms drag step rewrote session.json,
+    // rebuilt the diagnostics checklist, and re-read the login item over XPC.
+    let isTransient: Bool
+    if case .none = persistencePolicy { isTransient = true } else { isTransient = false }
+
     reconcileAppIntentResult(
       backendResult,
       intent: intent,
-      projectedMuteSource: start.projectedMuteSource
+      projectedMuteSource: start.projectedMuteSource,
+      isTransient: isTransient
     )
 
     let persistenceResult: AcceptedIntentPersistenceResult
@@ -175,12 +185,21 @@ extension AppStore {
       persistenceResult = .notRequested
     }
 
-    let refreshedDiagnostics = await backend.diagnosticsReport()
-    let captureAuthorization = await backend.captureAuthorizationResult()
+    // Explicit diagnostics refreshes own the fresh capture probe; a control
+    // change must never create a system-wide probe tap as a side effect.
+    let refreshedDiagnostics =
+      isTransient ? nil : await backend.diagnosticsReport(reprobeCaptureAuthorization: false)
+    let captureAuthorization = isTransient ? nil : await backend.captureAuthorizationResult()
     if appIntentCoordinator.isCurrent(intent.generation, for: appID) {
-      diagnostics = refreshedDiagnostics
-      onboarding.captureAuthorization = captureAuthorization
-      syncOnboarding(using: session)
+      if let refreshedDiagnostics, !Self.diagnosticsContentMatches(refreshedDiagnostics, diagnostics) {
+        diagnostics = refreshedDiagnostics
+      }
+      if let captureAuthorization, onboarding.captureAuthorization != captureAuthorization {
+        onboarding.captureAuthorization = captureAuthorization
+      }
+      if !isTransient {
+        syncOnboarding(using: session)
+      }
       presentAppIntentFeedback(
         backendResult,
         persistenceResult: persistenceResult,
@@ -205,7 +224,8 @@ extension AppStore {
   private func reconcileAppIntentResult(
     _ result: AppIntentApplyResult,
     intent: AppRouteIntent,
-    projectedMuteSource: MuteSource?
+    projectedMuteSource: MuteSource?,
+    isTransient: Bool = false
   ) {
     let mutation = appIntentCoordinator.reconcileRuntime(
       result,
@@ -229,6 +249,7 @@ extension AppStore {
       session.apps.removeAll { $0.logicalID == removedAppID || $0.id == removedAppID }
     }
     applyPendingVolumeProjection(forAppID: intent.appID)
+    guard !isTransient else { return }
     syncOnboarding(using: session)
     persistSessionSnapshot()
   }

@@ -25,7 +25,11 @@ enum RenderCadence: Comparable, Sendable {
     switch self {
     case .paused: nil  // never mounted; see `isAnimating`
     case .background: 1.0 / 30.0
-    case .foreground: nil
+    // 60 Hz, not "follow the display": on a ProMotion Mac the bare
+    // `.animation` clock runs at 120 Hz, and every frame of the waveform draws
+    // several blurred layers. A 48-point wave and a 2.5-point meter bar gain
+    // nothing visible past 60 frames a second.
+    case .foreground: 1.0 / 60.0
     }
   }
 

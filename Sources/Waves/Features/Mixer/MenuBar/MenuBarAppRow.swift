@@ -88,7 +88,7 @@ struct MenuBarAppRow: View {
     }
     .overlay(alignment: .bottomLeading) {
       if showsLevelMeter {
-        RowLevelMeter(rms: meterRMS, peak: meterPeak)
+        RowLevelMeterHost(appID: app.logicalID)
       }
     }
     .contextMenu {
@@ -160,9 +160,6 @@ struct MenuBarAppRow: View {
   private var showsLevelMeter: Bool {
     !app.isMuted && (app.routingState == .managed || app.routingState == .live)
   }
-
-  private var meterRMS: Float { store.liveLevels[app.logicalID]?.rms ?? 0 }
-  private var meterPeak: Float { store.liveLevels[app.logicalID]?.peak ?? 0 }
 
   private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
     guard routePolicy.allowsAudioControl else { return }

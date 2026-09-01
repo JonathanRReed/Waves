@@ -80,7 +80,7 @@ extension AppStore {
   /// `liveLingerWindow`. Mutates the observed set only when membership actually
   /// changes, so a steady scene triggers no redraws.
   func refreshLiveLinger() {
-    let liveNow = Set(visibleApps.lazy.filter(isLive).map(\.logicalID))
+    let liveNow = Set(visibleAppsUnordered.lazy.filter(isLive).map(\.logicalID))
     var next = recentlyLiveIDs
 
     // Audible now: keep it, and cancel any pending "drop it" task.

@@ -167,7 +167,7 @@ struct MixerRouteControlPolicy: Equatable, Sendable {
       self.init(
         allowsAudioControl: false,
         offersRecovery: false,
-        reason: "Waves is yielding this route because Wave Link ownership cannot be publicly attributed. Adjust the app in Wave Link."
+        reason: "Wave Link is mixing this app, so Waves is monitoring only. Adjust the app in Wave Link."
       )
     case .routerMixedOutput:
       self.init(
@@ -180,9 +180,9 @@ struct MixerRouteControlPolicy: Equatable, Sendable {
         allowsAudioControl: true,
         allowsDSPControl: false,
         offersRecovery: false,
-        sliderHelp: "Adjust \(app.displayName) through its dedicated Wave Link channel.",
+        sliderHelp: "Adjust \(app.displayName) through its own Wave Link channel.",
         muteHelp: app.isMuted ? "Unmute through Wave Link" : "Mute through Wave Link",
-        controlHint: "Waves sends volume and mute changes to Wave Link without creating another audio route."
+        controlHint: "Waves sends volume and mute to Wave Link instead of adding a second audio route."
       )
     case .geometryRecoveryInProgress:
       self.init(
@@ -407,7 +407,7 @@ struct MixerRowView: View {
     // visibility-gated live-level poll. Overlay so it never shifts layout.
     .overlay(alignment: .bottomLeading) {
       if showsLevelMeter {
-        RowLevelMeter(rms: meterRMS, peak: meterPeak)
+        RowLevelMeterHost(appID: app.logicalID)
       }
     }
     .contextMenu {
@@ -475,16 +475,14 @@ struct MixerRowView: View {
     !app.isMuted && !isExcluded && (app.routingState == .managed || app.routingState == .live)
   }
 
-  private var meterRMS: Float { store.liveLevels[app.logicalID]?.rms ?? 0 }
-  private var meterPeak: Float { store.liveLevels[app.logicalID]?.peak ?? 0 }
-
   private var subtitle: String {
     var parts: [String] = []
 
-    // Use isRecentlyLive (not isLive) so a row that just went quiet keeps reading
-    // "Playing audio" for the linger window instead of flickering to "Frontmost
-    // app" / "Running app" while it's still sitting in the Live list.
-    if store.isRecentlyLive(app) {
+    // Use the linger set (not isLive) so a row that just went quiet keeps
+    // reading "Playing audio" for the linger window instead of flickering to
+    // "Frontmost app" / "Running app" while it's still sitting in the Live
+    // list — and so this body does not re-run on every level tick.
+    if store.isLingeringLive(app) {
       parts.append("Playing audio")
     } else if app.isActive {
       parts.append("Frontmost app")

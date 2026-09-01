@@ -20,11 +20,13 @@ import WavesAudioCore
   #expect(RenderCadence.foreground.isAnimating)
 }
 
-@Test func backgroundCadenceThrottlesAndForegroundFollowsTheDisplay() {
+@Test func backgroundCadenceThrottlesAndForegroundCapsAtSixtyHertz() {
   // A visible-but-inactive window still has to animate, just more cheaply.
   #expect(RenderCadence.background.minimumInterval == 1.0 / 30.0)
-  // nil means "follow the display", which is what the user looking at it wants.
-  #expect(RenderCadence.foreground.minimumInterval == nil)
+  // Frontmost is capped at 60 Hz rather than following a 120 Hz display: the
+  // waveform draws several blurred layers per frame and nothing that small
+  // benefits from the extra frames.
+  #expect(RenderCadence.foreground.minimumInterval == 1.0 / 60.0)
 }
 
 @Test func cadenceOrdersFromCheapestToMostExpensive() {

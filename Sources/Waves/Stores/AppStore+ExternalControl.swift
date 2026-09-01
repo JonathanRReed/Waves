@@ -526,6 +526,10 @@ extension AppStore {
       if onboarding.captureAuthorization != captureAuthorization {
         onboarding.captureAuthorization = captureAuthorization
       }
+      let bridgeStatus = await backend.waveLinkBridgeStatus()
+      if waveLinkBridgeStatus != bridgeStatus {
+        waveLinkBridgeStatus = bridgeStatus
+      }
       let devices = await backend.availableOutputDevices()
       if availableDevices != devices {
         availableDevices = devices
@@ -548,7 +552,7 @@ extension AppStore {
     return normalizedLHS == normalizedRHS
   }
 
-  private static func diagnosticsContentMatches(
+  static func diagnosticsContentMatches(
     _ lhs: DiagnosticsReport,
     _ rhs: DiagnosticsReport?
   ) -> Bool {
