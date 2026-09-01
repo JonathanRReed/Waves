@@ -6,7 +6,7 @@
 # docs/RELEASE.md, "Release Channels Checklist"). Nothing mutates this
 # repository template.
 cask "waves" do
-  version "1.6.1"
+  version "1.7.0"
   sha256 "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
 
   url "https://github.com/JonathanRReed/Waves/releases/download/v#{version}/Waves.dmg",

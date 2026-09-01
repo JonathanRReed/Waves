@@ -6,6 +6,81 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-01
+
+Waves 1.7.0 build 16 is about running well next to Elgato Wave Link and being
+a lighter process: it fixes the Wave Link control path that could not find
+Wave Link 3's control port, stops two sources of Core Audio churn that could
+destabilize other audio apps, and cuts idle and per-gesture CPU work across
+the app.
+
+### Added
+- **Test Connection** in Settings › Mixer: a read-only check that discovers
+  Wave Link 3's control port, performs the handshake, and lists its channels
+  with how many software channels are free, so "Wave Link is not running" and
+  "every channel already holds an app" are distinguishable without logs.
+- A **Wave Link bridge** check in Diagnostics and a matching section in the
+  diagnostics export (endpoint, Wave Link version, channel layout, last
+  error).
+
+### Fixed
+- Find Wave Link 3's control port on real installs. Wave Link 3 chooses an
+  ephemeral port at every launch and the macOS location of its port file is
+  undocumented, so the previous file-then-scan discovery could fail outright
+  and leave every app uncontrollable while Wave Link ran. Waves now asks the
+  kernel which ports the code-signature-verified Wave Link process is
+  listening on and accepts only a port that answers the Wave Link 3
+  handshake. No `lsof` process is spawned any more.
+- Stop conferencing auto-pause from silently moving apps between Wave Link
+  channels. Automation may mute an app that already has its own channel and
+  is refused honestly otherwise; only your own level change relocates an app.
+- Keep the Wave Link control socket open briefly after a change so a slider
+  drag reuses one connection, and skip the notifications Wave Link pushes on
+  the same socket instead of treating them as replies.
+- Explain Wave Link states in plain language in mixer rows, the route badge,
+  Settings, and Help, and name the app rather than its bundle identifier when
+  no free Wave Link channel is available.
+- Build the per-app aggregate device from the output device's output side
+  only. A device that also has inputs (USB headsets, microphones with a
+  headphone jack, audio interfaces, virtual devices) contributed its input
+  streams next to the tap, every IO cycle was a geometry mismatch, the app
+  was silenced, and Waves held the device's input open.
+- Bound geometry-mismatch recovery. A rebuild now has to render clean for a
+  full second before it counts as recovered; a mismatch that returns sooner
+  backs off and gives up after three attempts, releasing the tap so the app
+  is audible again. Previously a persistent mismatch destroyed and recreated
+  the tap and aggregate device four times a second for as long as the app
+  ran, with every other audio client on the Mac watching the device list
+  change twice per cycle.
+- Stop re-probing audio-capture authorization on the 8-second session
+  refresh and on every device-change event. The probe is a system-wide tap
+  that every audio client observes being created and destroyed; it now runs
+  at startup, on an explicit diagnostics refresh, and on Recover Routes.
+- Coalesce overlapping device-change passes and ignore the inventory events
+  Waves's own private aggregates raise, so a default-output change no longer
+  rebuilds every route twice, and a route pinned to a device that did not
+  change keeps its live tap instead of dropping out.
+- Remove the verified-router hot path from the level tick. The router check
+  ran a full code-signature validation on every audio-playing process, twice,
+  four times a second (roughly ten milliseconds per process per check). It now
+  reads each process's published bundle identifier from Core Audio, validates
+  only a process that claims to be Wave Link, caches the verdict for that
+  process lifetime, and runs only on ticks that re-observe conflicts.
+
+### Changed
+- A slider nudge mid-drag, an automation step, or a startup restore row no
+  longer rewrites the session file, rebuilds the diagnostics checklist, or
+  re-reads the login item over XPC; the committing change does that once.
+- Icons are captured only for apps that can become mixer rows, not for every
+  helper and agent process on each 8-second pass.
+- Adaptive Mix drops to its idle cadence after two seconds of silence across
+  managed apps and returns to the fast cadence on the first audible pass.
+- The header waveform and row meters cap at 60 frames a second in the
+  frontmost window instead of following a 120 Hz display.
+- Level ticks invalidate only each row's meter, not the whole row.
+- The control-socket state broadcast is built only while a client is
+  connected.
+
 ## [1.6.1] - 2026-08-26
 
 Waves 1.6.1 build 15 is a maintenance release: it makes Waves coexist

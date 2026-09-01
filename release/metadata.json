@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "version": "1.6.1",
-  "build": 15,
+  "version": "1.7.0",
+  "build": 16,
   "minimumMacOSVersion": "14.2",
   "bundleIdentifier": "com.jonathanreed.Waves",
   "developerID": {
