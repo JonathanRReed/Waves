@@ -134,7 +134,10 @@ enum RuntimeProcessIdentity {
     capture(pid: pid)
   }
 
-  private static func processLifetime(pid: pid_t) -> AppProcessLifetimeIdentity? {
+  /// The pid plus kernel start time, which together name one process lifetime.
+  /// Shared with the verified-router cache so a verdict can be bound to exactly
+  /// the process it was computed for.
+  static func processLifetime(pid: pid_t) -> AppProcessLifetimeIdentity? {
     var info = proc_bsdinfo()
     let expectedSize = MemoryLayout<proc_bsdinfo>.size
     let readSize = proc_pidinfo(

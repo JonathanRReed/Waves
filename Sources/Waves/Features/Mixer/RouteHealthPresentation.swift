@@ -24,15 +24,15 @@ struct RouteHealthPresentation: Equatable, Sendable {
       self.init(
         title: "Wave Link route",
         value: "Claimed by verified Wave Link",
-        help: "Verified Wave Link is routing this app. Waves is monitoring only and does not control that route.",
+        help: "Wave Link is routing this app. Waves is monitoring only; adjust the app in Wave Link.",
         symbolName: "arrow.triangle.branch",
         tone: .warning
       )
     case .unattributableRouterFallback:
       self.init(
         title: "Conservative handoff",
-        value: "Wave Link activity cannot be attributed",
-        help: "Core Audio cannot publicly attribute the private or unreadable tap. Waves is monitoring only to avoid duplicate or silent playback.",
+        value: "Wave Link is mixing this app",
+        help: "Wave Link is mixing, and macOS cannot tell Waves which apps it captures. Waves is monitoring only so this app is never heard twice. Adjust it in Wave Link.",
         symbolName: "questionmark.diamond",
         tone: .warning
       )
@@ -47,8 +47,8 @@ struct RouteHealthPresentation: Equatable, Sendable {
     case .waveLinkBridge:
       self.init(
         title: "Managed through Wave Link",
-        value: "Single audio route active",
-        help: app.notes ?? "Waves controls volume and mute through Wave Link without creating a second renderer.",
+        value: "Volume and mute via Wave Link",
+        help: app.notes ?? "Waves sends volume and mute to this app's Wave Link channel instead of adding a second audio route.",
         symbolName: "link.circle.fill",
         tone: .success
       )

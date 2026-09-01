@@ -1,4 +1,6 @@
 import Foundation
+import OSLog
+import WavesAudioCore
 
 protocol WaveLinkControlling: Sendable {
   func apply(
@@ -6,185 +8,78 @@ protocol WaveLinkControlling: Sendable {
     volume: Float,
     isMuted: Bool
   ) async throws -> WaveLinkControlConfirmation
-}
 
-struct WaveLinkControlConfirmation: Equatable, Sendable {
-  let channelID: String
-  let channelName: String
-  let appliedVolume: Float
-  let isMuted: Bool
-}
-
-enum WaveLinkControlBridgeError: Error, Equatable, LocalizedError, Sendable {
-  case invalidBundleIdentifier
-  case invalidVolume
-  case unavailable(String)
-  case incompatibleApplication
-  case unverifiedLoopbackPeer
-  case dedicatedChannelRequired(String)
-  case protocolViolation(String)
-  case readBackMismatch(String)
-
-  var errorDescription: String? {
-    switch self {
-    case .invalidBundleIdentifier:
-      "Wave Link control requires the app's exact bundle identifier."
-    case .invalidVolume:
-      "Wave Link rejected a non-finite or out-of-range volume."
-    case .unavailable(let detail):
-      "Wave Link control is unavailable: \(detail)"
-    case .incompatibleApplication:
-      "The loopback control service is not a compatible Elgato Wave Link instance."
-    case .unverifiedLoopbackPeer:
-      "The loopback control service is not owned by the verified Elgato Wave Link process."
-    case .dedicatedChannelRequired(let appID):
-      "Wave Link needs an empty software channel to control \(appID) independently."
-    case .protocolViolation(let detail):
-      "Wave Link returned an invalid control response: \(detail)"
-    case .readBackMismatch(let detail):
-      "Wave Link did not confirm the requested app level: \(detail)"
-    }
-  }
-}
-
-struct WaveLinkApplicationInfo: Codable, Equatable, Sendable {
-  let interfaceRevision: Int
-  let appID: String
-  let name: String?
-}
-
-struct WaveLinkChannelApp: Codable, Equatable, Sendable {
-  let id: String
-}
-
-struct WaveLinkChannel: Codable, Equatable, Sendable {
-  let id: String
-  let name: String
-  let type: String
-  var level: Float
-  var isMuted: Bool
-  var apps: [WaveLinkChannelApp]
-
-  init(
-    id: String,
-    name: String,
-    type: String,
-    level: Float,
-    isMuted: Bool,
-    apps: [WaveLinkChannelApp]
-  ) {
-    self.id = id
-    self.name = name
-    self.type = type
-    self.level = level
-    self.isMuted = isMuted
-    self.apps = apps
-  }
-
-  init(from decoder: Decoder) throws {
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    id = try container.decode(String.self, forKey: .id)
-    name = try container.decode(String.self, forKey: .name)
-    type = try container.decode(String.self, forKey: .type)
-    level = try container.decodeIfPresent(Float.self, forKey: .level) ?? 1
-    isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
-    apps = try container.decodeIfPresent([WaveLinkChannelApp].self, forKey: .apps) ?? []
-  }
-
-  var isSoftware: Bool {
-    type.caseInsensitiveCompare("software") == .orderedSame
-  }
-}
-
-struct WaveLinkChannelsResponse: Codable, Equatable, Sendable {
-  let channels: [WaveLinkChannel]
-}
-
-actor WaveLinkControlBridge: WaveLinkControlling {
-  typealias Request = @Sendable (_ method: String, _ params: Data?) async throws -> Data
-  typealias PeerValidator = @Sendable () async throws -> Void
-  typealias SequenceFinalizer = @Sendable () async -> Void
-
-  private struct AddToChannelRequest: Encodable {
-    let appID: String
-    let channelID: String
-
-    enum CodingKeys: String, CodingKey {
-      case appID = "appId"
-      case channelID = "channelId"
-    }
-  }
-
-  private struct SetChannelRequest: Encodable {
-    let id: String
-    let level: Float
-    let isMuted: Bool
-  }
-
-  private let request: Request
-  private let validatePeer: PeerValidator
-  private let finishSequence: SequenceFinalizer
-  private let encoder = JSONEncoder()
-  private let decoder = JSONDecoder()
-
-  init(
-    request: @escaping Request,
-    validatePeer: @escaping PeerValidator = {},
-    finishSequence: @escaping SequenceFinalizer = {}
-  ) {
-    self.request = request
-    self.validatePeer = validatePeer
-    self.finishSequence = finishSequence
-  }
-
-  init() {
-    // The resolver both discovers Wave Link's current control port and proves
-    // the listener is the signed Wave Link process, so peer validation and the
-    // transport destination can never disagree.
-    let resolver = WaveLinkVerifiedEndpointResolver()
-    let transport = WaveLinkJSONRPCTransport(portProvider: {
-      try await resolver.verifiedEndpoint().port
-    })
-    self.request = { method, params in
-      do {
-        return try await transport.request(method: method, params: params)
-      } catch {
-        // A dead socket usually means Wave Link restarted on a new port.
-        await resolver.invalidate()
-        throw error
-      }
-    }
-    self.validatePeer = {
-      _ = try await resolver.verifiedEndpoint()
-    }
-    self.finishSequence = {
-      await transport.endSequence()
-    }
-  }
-
+  /// `allowsChannelRelocation` permits moving the app onto an empty software
+  /// channel when it does not already have one of its own. Automation must
+  /// pass `false`: silently re-routing an app inside Wave Link changes what
+  /// the stream and monitor mixes hear, which only a deliberate user gesture
+  /// may do.
   func apply(
     bundleIdentifier: String,
     volume: Float,
-    isMuted: Bool
+    isMuted: Bool,
+    allowsChannelRelocation: Bool
+  ) async throws -> WaveLinkControlConfirmation
+
+  /// Read-only connection test: handshake plus a channel listing, recorded in
+  /// the returned status. Never mutates Wave Link.
+  func inspect() async -> WaveLinkBridgeStatus
+
+  /// The status recorded by the most recent exchange, without talking to
+  /// Wave Link.
+  func currentStatus() async -> WaveLinkBridgeStatus
+}
+
+extension WaveLinkControlling {
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool,
+    allowsChannelRelocation: Bool
   ) async throws -> WaveLinkControlConfirmation {
-    do {
-      let confirmation = try await performApply(
-        bundleIdentifier: bundleIdentifier,
-        volume: volume,
-        isMuted: isMuted
-      )
-      await finishSequence()
-      return confirmation
-    } catch {
-      await finishSequence()
-      throw error
+    try await apply(bundleIdentifier: bundleIdentifier, volume: volume, isMuted: isMuted)
+  }
+
+  func inspect() async -> WaveLinkBridgeStatus {
+    // The body records its own outcome and never throws, so the sequence
+    // itself cannot fail; `try?` only satisfies the serialized signature.
+    _ = try? await serialized { () async throws -> Void in
+      do {
+        try await self.validatePeer()
+        let applicationInfo = try await self.handshake()
+        let channels = try await self.readChannels()
+        await self.recordSuccess(applicationInfo: applicationInfo, channels: channels)
+        Self.logger.info(
+          "Connection test succeeded: \(applicationInfo.name ?? "Wave Link", privacy: .public) \(applicationInfo.version ?? "", privacy: .public), \(channels.count) channels"
+        )
+      } catch {
+        await self.recordFailure(error)
+      }
+      await self.finishSequence()
     }
+    return status
+  }
+
+  // MARK: - Sequences
+
+  private func serialized<Value: Sendable>(
+    _ body: @escaping @Sendable () async throws -> Value
+  ) async throws -> Value {
+    let previous = sequenceTail
+    let (finished, continuation) = AsyncStream<Void>.makeStream()
+    sequenceTail = Task { for await _ in finished {} }
+    defer { continuation.finish() }
+    if let previous {
+      await previous.value
+    }
+    return try await body()
   }
 
   private func performApply(
     bundleIdentifier: String,
     volume: Float,
-    isMuted: Bool
+    isMuted: Bool,
+    allowsChannelRelocation: Bool
   ) async throws -> WaveLinkControlConfirmation {
     guard !bundleIdentifier.isEmpty else {
       throw WaveLinkControlBridgeError.invalidBundleIdentifier
@@ -194,39 +89,32 @@ actor WaveLinkControlBridge: WaveLinkControlling {
     }
 
     try await validatePeer()
-
-    let applicationInfoData = try await request("getApplicationInfo", nil)
-    let applicationInfo = try decode(WaveLinkApplicationInfo.self, from: applicationInfoData)
-    // Wave Link 3 reset its protocol: `appID` is "EWL" and `interfaceRevision`
-    // restarted at 1 (the value 3.0-3.2 report). Earlier Wave Link generations
-    // answer "egwl" with revisions 6-7 and a different method set, so they are
-    // rejected here and stay monitoring-only.
-    guard applicationInfo.appID == "EWL", applicationInfo.interfaceRevision >= 1 else {
-      throw WaveLinkControlBridgeError.incompatibleApplication
-    }
+    let applicationInfo = try await handshake()
 
     var channels = try await readChannels()
-    let matchingChannels = channels.filter {
-      $0.isSoftware && $0.apps.contains(where: { $0.id == bundleIdentifier })
-    }
+    let matchingChannels = channels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
 
     let targetChannel: WaveLinkChannel
+    var relocated = false
     if matchingChannels.count == 1,
       let dedicated = matchingChannels.first,
-      dedicated.apps.count == 1,
-      dedicated.apps[0].id == bundleIdentifier
+      dedicated.apps.count == 1
     {
       targetChannel = dedicated
     } else {
+      guard allowsChannelRelocation else {
+        throw WaveLinkControlBridgeError.relocationNotPermitted(bundleIdentifier)
+      }
       guard let empty = channels.first(where: { $0.isSoftware && $0.apps.isEmpty }) else {
         throw WaveLinkControlBridgeError.dedicatedChannelRequired(bundleIdentifier)
       }
+      Self.logger.info(
+        "Moving \(bundleIdentifier, privacy: .public) to empty Wave Link channel \(empty.name, privacy: .public)"
+      )
       let addRequest = AddToChannelRequest(appID: bundleIdentifier, channelID: empty.id)
       _ = try await request("addToChannel", try encoder.encode(addRequest))
       channels = try await readChannels()
-      let movedMatches = channels.filter {
-        $0.isSoftware && $0.apps.contains(where: { $0.id == bundleIdentifier })
-      }
+      let movedMatches = channels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
       guard
         movedMatches.count == 1,
         let moved = movedMatches.first,
@@ -238,15 +126,14 @@ actor WaveLinkControlBridge: WaveLinkControlling {
         )
       }
       targetChannel = moved
+      relocated = true
     }
 
     let setRequest = SetChannelRequest(id: targetChannel.id, level: volume, isMuted: isMuted)
     _ = try await request("setChannel", try encoder.encode(setRequest))
 
     let confirmedChannels = try await readChannels()
-    let confirmedMatches = confirmedChannels.filter {
-      $0.isSoftware && $0.apps.contains(where: { $0.id == bundleIdentifier })
-    }
+    let confirmedMatches = confirmedChannels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
     guard
       confirmedMatches.count == 1,
       let confirmed = confirmedMatches.first,
@@ -263,12 +150,29 @@ actor WaveLinkControlBridge: WaveLinkControlling {
       )
     }
 
+    await recordSuccess(applicationInfo: applicationInfo, channels: confirmedChannels)
+    Self.logger.debug(
+      "Applied level \(volume, privacy: .public) muted \(isMuted, privacy: .public) to \(bundleIdentifier, privacy: .public) on channel \(confirmed.name, privacy: .public)"
+    )
     return WaveLinkControlConfirmation(
       channelID: confirmed.id,
       channelName: confirmed.name,
       appliedVolume: confirmed.level,
-      isMuted: confirmed.isMuted
+      isMuted: confirmed.isMuted,
+      relocated: relocated
     )
+  }
+
+  private func handshake() async throws -> WaveLinkApplicationInfo {
+    let applicationInfoData = try await request("getApplicationInfo", nil)
+    let applicationInfo = try decode(WaveLinkApplicationInfo.self, from: applicationInfoData)
+    guard applicationInfo.isSupportedWaveLink3 else {
+      Self.logger.error(
+        "Rejected control peer appID=\(applicationInfo.appID, privacy: .public) revision=\(applicationInfo.interfaceRevision, privacy: .public)"
+      )
+      throw WaveLinkControlBridgeError.incompatibleApplication
+    }
+    return applicationInfo
   }
 
   private func readChannels() async throws -> [WaveLinkChannel] {
@@ -284,66 +188,233 @@ actor WaveLinkControlBridge: WaveLinkControlling {
     do {
       return try decoder.decode(type, from: data)
     } catch {
+      let excerpt = String(decoding: data.prefix(160), as: UTF8.self)
+      Self.logger.error(
+        "Could not decode \(String(describing: type), privacy: .public): \(error.localizedDescription, privacy: .public) from \(excerpt, privacy: .private)"
+      )
       throw WaveLinkControlBridgeError.protocolViolation(error.localizedDescription)
     }
   }
+
+  // MARK: - Status
+
+  private func recordSuccess(
+    applicationInfo: WaveLinkApplicationInfo,
+    channels: [WaveLinkChannel]
+  ) async {
+    let connection = await describeConnection()
+    let now = Date()
+    status.phase = .connected
+    status.endpoint = connection?.endpoint
+    status.processIdentifier = connection?.processIdentifier
+    status.applicationName = applicationInfo.name
+    status.applicationVersion = applicationInfo.version
+    status.interfaceRevision = applicationInfo.interfaceRevision
+    status.channels = channels.map(\.statusSummary)
+    status.lastError = nil
+    status.lastSuccessAt = now
+    status.updatedAt = now
+  }
+
+  private func recordFailure(_ error: Error) async {
+    let now = Date()
+    status.phase = .failed
+    status.lastError = error.localizedDescription
+    status.lastFailureAt = now
+    status.updatedAt = now
+    Self.logger.error("Bridge sequence failed: \(error.localizedDescription, privacy: .public)")
+  }
 }
 
-private actor WaveLinkJSONRPCTransport {
-  typealias PortProvider = @Sendable () async throws -> UInt16
+// MARK: - Loopback session
+
+/// Owns the WebSocket to the verified Wave Link 3 process: discovery of its
+/// control port, the protocol handshake that proves a port is the control
+/// service, and the socket's lifetime. The socket is kept open briefly after a
+/// sequence so a slider drag reuses one connection, then closed while idle so
+/// a Wave Link restart on a new port is picked up by the next sequence.
+actor WaveLinkLoopbackSession {
+  typealias CandidateProvider = @Sendable () throws -> [WaveLinkEndpointDiscovery.Listener]
+
+  struct Connection: Equatable, Sendable {
+    let endpoint: WaveLinkEndpointDiscovery.Listener
+    let applicationInfo: WaveLinkApplicationInfo
+
+    var description: WaveLinkConnectionDescription {
+      WaveLinkConnectionDescription(
+        endpoint: "127.0.0.1:\(endpoint.port)",
+        processIdentifier: endpoint.pid
+      )
+    }
+  }
 
   private struct RPCErrorPayload: Decodable {
     let code: Int?
     let message: String?
   }
 
-  private let session: URLSession
-  private let portProvider: PortProvider
-  private var socket: URLSessionWebSocketTask?
-  private var nextRequestID = 1
+  private static let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "WaveLinkBridge")
 
-  init(portProvider: @escaping PortProvider) {
+  private let candidateProvider: CandidateProvider
+  private let urlSession: URLSession
+  private let receiveTimeout: Duration
+  private let idleCloseDelay: Duration
+  private var socket: URLSessionWebSocketTask?
+  private var connection: Connection?
+  private var nextRequestID = 1
+  private var activeRequests = 0
+  private var idleCloseTask: Task<Void, Never>?
+  private var connectionGeneration: UInt64 = 0
+
+  init(
+    candidateProvider: @escaping CandidateProvider = { try WaveLinkEndpointDiscovery.liveCandidates() },
+    receiveTimeout: Duration = .seconds(3),
+    idleCloseDelay: Duration = .seconds(2)
+  ) {
     // Only the connect handshake gets a session timeout. A resource lifetime
     // limit would tear the socket down mid-sequence; per-message stalls are
-    // bounded by the receive timeout below instead.
+    // bounded by the receive timeout instead.
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = 2
-    session = URLSession(configuration: configuration)
-    self.portProvider = portProvider
+    urlSession = URLSession(configuration: configuration)
+    self.candidateProvider = candidateProvider
+    self.receiveTimeout = receiveTimeout
+    self.idleCloseDelay = idleCloseDelay
+  }
+
+  var connectionDescription: WaveLinkConnectionDescription? {
+    connection?.description
+  }
+
+  /// Returns the live connection, establishing one when needed. Every
+  /// candidate port must answer `getApplicationInfo` as Wave Link 3 before it
+  /// is accepted; the first that does becomes the connection.
+  @discardableResult
+  func connect() async throws -> Connection {
+    cancelIdleClose()
+    if let connection, socket != nil { return connection }
+    closeSocket(with: .goingAway)
+
+    let candidateProvider = self.candidateProvider
+    let candidates = try await Task.detached(priority: .utility) {
+      try candidateProvider()
+    }.value
+
+    var rejections: [String] = []
+    for candidate in candidates {
+      let socket = openSocket(port: candidate.port)
+      do {
+        let data = try await performRequest(method: "getApplicationInfo", params: nil, on: socket)
+        let info = try JSONDecoder().decode(WaveLinkApplicationInfo.self, from: data)
+        guard info.isSupportedWaveLink3 else {
+          rejections.append("port \(candidate.port) answered as \(info.appID) revision \(info.interfaceRevision)")
+          socket.cancel(with: .normalClosure, reason: nil)
+          continue
+        }
+        self.socket = socket
+        connectionGeneration &+= 1
+        let connection = Connection(endpoint: candidate, applicationInfo: info)
+        self.connection = connection
+        Self.logger.info(
+          "Connected to \(info.name ?? "Wave Link", privacy: .public) \(info.version ?? "", privacy: .public) on 127.0.0.1:\(candidate.port, privacy: .public) (pid \(candidate.pid, privacy: .public))"
+        )
+        return connection
+      } catch {
+        rejections.append("port \(candidate.port): \(error.localizedDescription)")
+        socket.cancel(with: .abnormalClosure, reason: nil)
+      }
+    }
+    let detail =
+      rejections.isEmpty
+      ? "Wave Link 3 has no open control port."
+      : "No Wave Link control port accepted the handshake (\(rejections.joined(separator: "; ")))."
+    Self.logger.error("\(detail, privacy: .public)")
+    throw WaveLinkControlBridgeError.unavailable(detail)
   }
 
   func request(method: String, params: Data?) async throws -> Data {
+    cancelIdleClose()
+    let socket: URLSessionWebSocketTask
+    if let existing = self.socket {
+      socket = existing
+    } else {
+      try await connect()
+      guard let connected = self.socket else {
+        throw WaveLinkControlBridgeError.unavailable("The control connection closed before the request was sent.")
+      }
+      socket = connected
+    }
+    activeRequests += 1
+    defer { activeRequests -= 1 }
     do {
-      return try await performRequest(method: method, params: params)
+      return try await performRequest(method: method, params: params, on: socket)
     } catch {
       // Never keep a socket that produced any failure; the next sequence
-      // reconnects against a freshly verified endpoint.
+      // rediscovers the port, which is what a Wave Link restart requires.
       closeSocket(with: .abnormalClosure)
       throw error
     }
   }
 
-  /// Ends one bridge apply sequence. Wave Link expects short-lived control
-  /// connections, and dropping the socket here keeps an idle Waves from
-  /// pinning a stale connection across Wave Link restarts.
+  /// Ends one sequence. The socket stays open for `idleCloseDelay` so the
+  /// next sequence of a drag reuses it, then closes on its own.
   func endSequence() {
+    cancelIdleClose()
+    guard socket != nil else { return }
+    let generation = connectionGeneration
+    let delay = idleCloseDelay
+    idleCloseTask = Task { [weak self] in
+      try? await Task.sleep(for: delay)
+      guard !Task.isCancelled else { return }
+      await self?.closeIfIdle(generation: generation)
+    }
+  }
+
+  func close() {
+    cancelIdleClose()
     closeSocket(with: .goingAway)
+  }
+
+  private func closeIfIdle(generation: UInt64) {
+    guard !Task.isCancelled, activeRequests == 0, connectionGeneration == generation else { return }
+    closeSocket(with: .goingAway)
+  }
+
+  private func cancelIdleClose() {
+    idleCloseTask?.cancel()
+    idleCloseTask = nil
   }
 
   private func closeSocket(with code: URLSessionWebSocketTask.CloseCode) {
     socket?.cancel(with: code, reason: nil)
     socket = nil
+    connection = nil
   }
 
-  private func performRequest(method: String, params: Data?) async throws -> Data {
-    let socket = try await connectedSocket()
+  private func openSocket(port: UInt16) -> URLSessionWebSocketTask {
+    // Wave Link listens on IPv4 loopback only (its IPv6 listener answers
+    // HTTP 400), and it requires the Stream Deck origin as the credential.
+    var request = URLRequest(url: URL(string: "ws://127.0.0.1:\(port)")!)
+    request.setValue("streamdeck://", forHTTPHeaderField: "Origin")
+    let socket = urlSession.webSocketTask(with: request)
+    socket.resume()
+    return socket
+  }
+
+  private func performRequest(
+    method: String,
+    params: Data?,
+    on socket: URLSessionWebSocketTask
+  ) async throws -> Data {
     let requestID = nextRequestID
     nextRequestID += 1
 
+    // The official plugin sends an explicit null for parameterless calls.
     var payload: [String: Any] = [
       "id": requestID,
       "jsonrpc": "2.0",
       "method": method,
+      "params": NSNull(),
     ]
     if let params {
       payload["params"] = try JSONSerialization.jsonObject(with: params)
@@ -366,6 +437,8 @@ private actor WaveLinkJSONRPCTransport {
         @unknown default:
           throw WaveLinkControlBridgeError.protocolViolation("Unknown WebSocket message type.")
         }
+        // Wave Link pushes notifications (no `id`) on the same socket; skip
+        // anything that is not the reply to this request.
         guard
           let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
           (object["id"] as? NSNumber)?.intValue == requestID
@@ -376,10 +449,10 @@ private actor WaveLinkJSONRPCTransport {
           let errorData = try JSONSerialization.data(withJSONObject: errorObject)
           let errorPayload = try? JSONDecoder().decode(RPCErrorPayload.self, from: errorData)
           let detail = errorPayload?.message ?? "JSON-RPC error \(errorPayload?.code ?? -1)"
-          throw WaveLinkControlBridgeError.unavailable(detail)
+          throw WaveLinkControlBridgeError.unavailable("\(method): \(detail)")
         }
         guard let result = object["result"] else {
-          throw WaveLinkControlBridgeError.protocolViolation("Missing JSON-RPC result.")
+          throw WaveLinkControlBridgeError.protocolViolation("Missing JSON-RPC result for \(method).")
         }
         if result is NSNull { return Data("{}".utf8) }
         return try JSONSerialization.data(withJSONObject: result)
@@ -387,40 +460,27 @@ private actor WaveLinkJSONRPCTransport {
     } catch let error as WaveLinkControlBridgeError {
       throw error
     } catch {
-      throw WaveLinkControlBridgeError.unavailable(error.localizedDescription)
+      throw WaveLinkControlBridgeError.unavailable("\(method): \(error.localizedDescription)")
     }
   }
 
   private func receiveNextMessage(
     from socket: URLSessionWebSocketTask
   ) async throws -> URLSessionWebSocketTask.Message {
-    try await withThrowingTaskGroup(of: URLSessionWebSocketTask.Message.self) { group in
+    let timeout = receiveTimeout
+    return try await withThrowingTaskGroup(of: URLSessionWebSocketTask.Message.self) { group in
       group.addTask {
         try await socket.receive()
       }
       group.addTask {
-        try await Task.sleep(for: .seconds(3))
-        throw WaveLinkControlBridgeError.unavailable("The loopback service timed out.")
+        try await Task.sleep(for: timeout)
+        throw WaveLinkControlBridgeError.unavailable("Wave Link did not answer within \(timeout.components.seconds) seconds.")
       }
       guard let message = try await group.next() else {
-        throw WaveLinkControlBridgeError.unavailable("The loopback service closed unexpectedly.")
+        throw WaveLinkControlBridgeError.unavailable("The control connection closed unexpectedly.")
       }
       group.cancelAll()
       return message
     }
-  }
-
-  private func connectedSocket() async throws -> URLSessionWebSocketTask {
-    if let socket { return socket }
-    let port = try await portProvider()
-    guard let url = URL(string: "ws://127.0.0.1:\(port)") else {
-      throw WaveLinkControlBridgeError.unavailable("Port \(port) is not a valid loopback URL.")
-    }
-    var request = URLRequest(url: url)
-    request.setValue("streamdeck://", forHTTPHeaderField: "Origin")
-    let socket = session.webSocketTask(with: request)
-    socket.resume()
-    self.socket = socket
-    return socket
   }
 }

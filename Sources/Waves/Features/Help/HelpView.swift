@@ -110,7 +110,10 @@ struct HelpView: View {
           "Monitoring only means Waves can see the app but is not currently changing its audio path"
         )
         bullet(
-          "Choose the preferred per-app controller in Settings > Mixer. Compatibility still keeps any verified parallel Wave Link path monitoring only so a Waves level cannot be bypassed"
+          "While Wave Link is mixing, Waves sends volume and mute to each app's own Wave Link software channel instead of adding a second audio route. An app that shares a channel is moved to a free one the first time you change its level"
+        )
+        bullet(
+          "Use Test Connection in Settings > Mixer to see whether Waves can reach Wave Link and how many software channels are free. Boost, EQ, and output routing stay in Wave Link for those apps"
         )
         bullet(
           "With compatibility enabled, Waves never wraps Wave Link's mixed output. Adjust upstream apps inside Wave Link"

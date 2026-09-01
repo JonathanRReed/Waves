@@ -239,3 +239,84 @@ private actor WaveLinkRPCStub {
     }
   }
 }
+
+@Test func waveLinkBridgeRefusesToRelocateAnAppForAutomation() async throws {
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(
+        id: "shared",
+        name: "Voice Apps",
+        type: "Software",
+        level: 1,
+        isMuted: false,
+        apps: [.init(id: "us.zoom.xos"), .init(id: "com.tinyspeck.slackmacgap")]
+      ),
+      .init(id: "empty", name: "Aux 1", type: "Software", level: 1, isMuted: false, apps: []),
+    ]
+  )
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    try await rpc.request(method: method, params: params)
+  })
+
+  await #expect(throws: WaveLinkControlBridgeError.relocationNotPermitted("us.zoom.xos")) {
+    try await bridge.apply(
+      bundleIdentifier: "us.zoom.xos",
+      volume: 0.5,
+      isMuted: true,
+      allowsChannelRelocation: false
+    )
+  }
+  #expect(await rpc.addRequests.isEmpty)
+  #expect(await rpc.setRequests.isEmpty)
+  #expect(await bridge.currentStatus().phase == .failed)
+
+  // A user gesture may move it, and the confirmation says so.
+  let confirmation = try await bridge.apply(
+    bundleIdentifier: "us.zoom.xos",
+    volume: 0.5,
+    isMuted: true,
+    allowsChannelRelocation: true
+  )
+  #expect(confirmation.relocated)
+  #expect(confirmation.channelID == "empty")
+}
+
+@Test func waveLinkBridgeRecordsStatusFromAReadOnlyInspection() async throws {
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(id: "music", name: "Music", type: "Software", level: 0.8, isMuted: false, apps: [.init(id: "com.spotify.client")]),
+      .init(id: "aux", name: "Aux 1", type: "Software", level: 1, isMuted: false, apps: []),
+      .init(id: "mic", name: "Wave:3", type: "Hardware", level: 1, isMuted: false, apps: []),
+    ]
+  )
+  let bridge = WaveLinkControlBridge(
+    request: { method, params in
+      try await rpc.request(method: method, params: params)
+    },
+    describeConnection: {
+      WaveLinkConnectionDescription(endpoint: "127.0.0.1:53832", processIdentifier: 1_366)
+    }
+  )
+
+  #expect(await bridge.currentStatus().phase == .idle)
+  let status = await bridge.inspect()
+  #expect(status.phase == .connected)
+  #expect(status.endpoint == "127.0.0.1:53832")
+  #expect(status.processIdentifier == 1_366)
+  #expect(status.applicationName == "Wave Link 3")
+  #expect(status.interfaceRevision == 1)
+  #expect(status.softwareChannelCount == 2)
+  #expect(status.freeSoftwareChannelCount == 1)
+  #expect(status.channels.map(\.name) == ["Music", "Aux 1", "Wave:3"])
+  #expect(status.summaryLine.contains("2 software channels, 1 free"))
+  // Inspection never mutates.
+  #expect(await rpc.addRequests.isEmpty)
+  #expect(await rpc.setRequests.isEmpty)
+
+  let failing = WaveLinkControlBridge(request: { _, _ in
+    throw WaveLinkControlBridgeError.unavailable("Wave Link 3 is not running.")
+  })
+  let failure = await failing.inspect()
+  #expect(failure.phase == .failed)
+  #expect(failure.lastError?.contains("not running") == true)
+}

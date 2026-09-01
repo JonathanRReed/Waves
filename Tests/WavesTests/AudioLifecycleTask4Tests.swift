@@ -241,7 +241,10 @@ private final class BackendOwnedLifecycleFixture: @unchecked Sendable {
     }
 
     await backend.flagGeometryMismatchForTesting(runtimeID: "lifecycle.app")
-    await backend.updateAudioLevels(at: .milliseconds(number))
+    // Cycles are spaced past the geometry verification window: a mismatch
+    // that follows a clean window is a fresh event that rebuilds at once,
+    // whereas one inside the window counts against the rebuild's attempts.
+    await backend.updateAudioLevels(at: .seconds(number * 2))
     let recovered = await backend.lifecycleDebugSnapshot()
     guard recovered.liveControllers == 1,
       recovered.orphanedControllers == 0,

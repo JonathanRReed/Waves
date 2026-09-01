@@ -830,3 +830,82 @@ private final class RouterConflictFallbackSpy: @unchecked Sendable {
     calledAppIDs.append(app.id)
   }
 }
+
+// MARK: - Verification cost
+
+@Test func routerVerificationSkipsProcessesWhosePublishedBundleIdentifierIsNotTheRouter() {
+  final class VerifierCalls: @unchecked Sendable {
+    var pids: [pid_t] = []
+  }
+  let calls = VerifierCalls()
+  let target = routerTestApp(id: "target", pid: 101)
+  let snapshot = VerifiedRouterObservationSnapshot(
+    processObjects: [
+      .init(id: 1, pid: 101, isRunningOutput: true, bundleIdentifier: "com.example.browser"),
+      .init(id: 2, pid: 150, isRunningOutput: true, bundleIdentifier: "us.zoom.xos"),
+      .init(id: 3, pid: 202, isRunningOutput: true, bundleIdentifier: "com.elgato.WaveLink3"),
+      .init(id: 4, pid: 303, isRunningOutput: true, bundleIdentifier: nil),
+      .init(id: 5, pid: 404, isRunningOutput: false, bundleIdentifier: "com.elgato.WaveLink3"),
+    ],
+    taps: []
+  )
+  let service = VerifiedRouterConflictService(
+    descriptors: [.waveLink3_2_2],
+    snapshotProvider: { snapshot },
+    identityVerifier: { pid, descriptor in
+      calls.pids.append(pid)
+      guard pid == 202 else { return nil }
+      return .init(pid: pid, teamIdentifier: descriptor.teamIdentifier, matchesDesignatedRequirement: true)
+    }
+  )
+
+  let conflict = service.conflict(for: target)
+  #expect(conflict?.kind == .unattributableTapFallback)
+  // Only the process claiming the router's bundle identifier and the process
+  // with no readable identifier were worth a signature check. The browser,
+  // Zoom, and the idle Wave Link copy were skipped on both snapshot passes.
+  #expect(Set(calls.pids) == [202, 303])
+}
+
+@Test func routerVerificationReusesAVerdictForTheSameProcessLifetimeOnly() {
+  final class VerifierCalls: @unchecked Sendable {
+    var count = 0
+  }
+  let calls = VerifierCalls()
+  final class LifetimeBox: @unchecked Sendable {
+    var startTime: UInt64 = 1_000
+  }
+  let lifetime = LifetimeBox()
+  let target = routerTestApp(id: "target", pid: 101)
+  let snapshot = VerifiedRouterObservationSnapshot(
+    processObjects: [
+      .init(id: 1, pid: 101, isRunningOutput: true, bundleIdentifier: "com.example.browser"),
+      .init(id: 3, pid: 202, isRunningOutput: true, bundleIdentifier: "com.elgato.WaveLink3"),
+    ],
+    taps: []
+  )
+  let service = VerifiedRouterConflictService(
+    descriptors: [.waveLink3_2_2],
+    snapshotProvider: { snapshot },
+    identityVerifier: { pid, descriptor in
+      calls.count += 1
+      return .init(pid: pid, teamIdentifier: descriptor.teamIdentifier, matchesDesignatedRequirement: true)
+    },
+    processLifetimeProvider: { pid in
+      AppProcessLifetimeIdentity(pid: pid, startTimeSeconds: lifetime.startTime, startTimeMicroseconds: 0)
+    }
+  )
+
+  #expect(service.conflict(for: target) != nil)
+  #expect(calls.count == 1)
+  for _ in 0..<10 {
+    #expect(service.conflict(for: target) != nil)
+  }
+  #expect(calls.count == 1)
+
+  // A recycled pid with a different start time is a different process and
+  // must be verified afresh.
+  lifetime.startTime = 2_000
+  #expect(service.conflict(for: target) != nil)
+  #expect(calls.count == 2)
+}

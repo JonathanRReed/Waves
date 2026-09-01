@@ -16,12 +16,12 @@ extension WorkspaceAudioControlBackend {
         checks: []
       )
     }
-    // Re-probe real capture authorization so opening Advanced reflects the
+    // Re-probe real capture authorization so opening Diagnostics reflects the
     // current TCC state rather than the result cached at the last refresh.
-    // The probe creates and immediately destroys a private tap with no IO
-    // proc, so it is side-effect-free and cheap.
+    // This is the one periodic-free path that deliberately pays for a fresh
+    // system-wide probe tap; see `refreshCaptureAuthorization(force:)`.
     if reprobeCaptureAuthorization {
-      refreshCaptureAuthorization()
+      refreshCaptureAuthorization(force: true)
     }
     refreshGlobalRouteHealth()
 
@@ -38,42 +38,73 @@ extension WorkspaceAudioControlBackend {
       routeRecoveryStatus = .warning
     }
 
-    return DiagnosticsReport(
-      summary: recoverabilitySummary,
-      checks: [
+    var checks = [
+      DiagnosticsCheck(
+        title: "Audio component",
+        status: snapshot.backendStatus.isAudioComponentInstalled ? .passed : .warning,
+        detail: snapshot.backendStatus.isAudioComponentInstalled
+          ? "Process tap routing is supported on this system."
+          : "Per-app routing needs macOS 14.2 or newer."
+      ),
+      DiagnosticsCheck(
+        title: "Audio capture permission",
+        status: captureAuthorizationStatus,
+        detail: captureAuthorizationDetail
+      ),
+      DiagnosticsCheck(
+        title: "Per-app controller",
+        status: .informational,
+        detail: waveLinkCompatibilityEnabled
+          ? perAppAudioController == .waves
+            ? "Waves is the per-app mixer. While Wave Link is mixing, Waves sends volume and mute through Wave Link channels instead of adding a second audio route."
+            : "Elgato Wave Link owns per-app levels while it is active. Waves only monitors those apps."
+          : "Wave Link compatibility is off. Waves applies no Wave Link-specific route safeguards."
+      ),
+    ]
+    if let bridgeStatus = await waveLinkBridgeStatus(), waveLinkCompatibilityEnabled {
+      checks.append(
         DiagnosticsCheck(
-          title: "Audio component",
-          status: snapshot.backendStatus.isAudioComponentInstalled ? .passed : .warning,
-          detail: snapshot.backendStatus.isAudioComponentInstalled
-            ? "Process tap routing is supported on this system."
-            : "Per-app routing needs macOS 14.2 or newer."
-        ),
-        DiagnosticsCheck(
-          title: "Audio capture permission",
-          status: captureAuthorizationStatus,
-          detail: captureAuthorizationDetail
-        ),
-        DiagnosticsCheck(
-          title: "Per-app controller",
-          status: .informational,
-          detail: waveLinkCompatibilityEnabled
-            ? perAppAudioController == .waves
-              ? "Waves owns routes that Wave Link cannot bypass. Verified Wave Link paths remain monitoring only to prevent duplicate audio."
-              : "Elgato Wave Link owns ordinary per-app routes while it is active. Waves monitors those apps."
-            : "Wave Link compatibility is disabled. Waves applies no Wave Link-specific route safeguards."
-        ),
-        DiagnosticsCheck(
-          title: "Route recovery",
-          status: routeRecoveryStatus,
-          detail: routeRecoveryDetail
-        ),
-        DiagnosticsCheck(
-          title: "Support matrix",
-          status: .informational,
-          detail: snapshot.supportMatrix.coverageSummary
-        ),
-      ]
-    )
+          title: "Wave Link bridge",
+          status: Self.diagnosticsStatus(for: bridgeStatus),
+          detail: Self.diagnosticsDetail(for: bridgeStatus)
+        ))
+    }
+    checks.append(
+      DiagnosticsCheck(
+        title: "Route recovery",
+        status: routeRecoveryStatus,
+        detail: routeRecoveryDetail
+      ))
+    checks.append(
+      DiagnosticsCheck(
+        title: "Support matrix",
+        status: .informational,
+        detail: snapshot.supportMatrix.coverageSummary
+      ))
+    return DiagnosticsReport(summary: recoverabilitySummary, checks: checks)
+  }
+
+  static func diagnosticsStatus(for bridge: WaveLinkBridgeStatus) -> DiagnosticsStatus {
+    switch bridge.phase {
+    case .idle: .informational
+    case .connected: bridge.softwareChannelCount > 0 && bridge.freeSoftwareChannelCount == 0 ? .warning : .passed
+    case .failed: .warning
+    }
+  }
+
+  static func diagnosticsDetail(for bridge: WaveLinkBridgeStatus) -> String {
+    switch bridge.phase {
+    case .idle:
+      return "No Wave Link exchange has happened yet. Use Test Connection in Settings › Mixer to check it now."
+    case .failed:
+      return bridge.summaryLine
+    case .connected:
+      if bridge.softwareChannelCount > 0, bridge.freeSoftwareChannelCount == 0 {
+        return bridge.summaryLine
+          + ". Every software channel holds an app, so only apps that already have their own channel can be controlled from Waves."
+      }
+      return bridge.summaryLine + "."
+    }
   }
 
   private var captureAuthorizationStatus: DiagnosticsStatus {
@@ -120,23 +151,27 @@ extension WorkspaceAudioControlBackend {
   /// Probes audio-capture authorization by creating and immediately destroying
   /// a private global process tap. This codebase has no authoritative
   /// denial-only OSStatus, so every nonzero native status remains `.probeFailed`.
+  ///
+  /// An `.authorized` verdict is sticky unless `force` is set. The probe is a
+  /// *system-wide* tap: coreaudiod has to attach it to every process that is
+  /// rendering and detach it again, which every other audio client on the
+  /// machine observes as a tap-list change. Repeating that on the 8-second
+  /// session refresh for the life of the process — which is exactly what
+  /// happened whenever Waves held no route of its own, such as the whole time
+  /// Wave Link owns per-app audio — is churn that fragile clients (video
+  /// conferencing apps in particular) have no reason to absorb. The grant
+  /// cannot be revoked behind a running app without a relaunch, and a later
+  /// failed tap creation reports its own error, so the cached verdict stays
+  /// truthful. Explicit diagnostics refreshes still force a fresh probe.
   @discardableResult
-  func refreshCaptureAuthorization() -> CaptureAuthorizationResult {
+  func refreshCaptureAuthorization(force: Bool = false) -> CaptureAuthorizationResult {
     guard !isShuttingDown else { return captureAuthorization }
     guard #available(macOS 14.2, *) else {
       captureAuthorization = .unsupported
       return captureAuthorization
     }
 
-    // A live managed route is stronger evidence of the capture grant than this
-    // probe: it *is* a process tap, already created and rendering. Re-probing
-    // behind one meant building and tearing down a system-wide tap against
-    // coreaudiod twice every 8 seconds — the silent session refresh calls
-    // `refresh()` and `diagnosticsReport()`, and both used to probe — for the
-    // entire life of the process.
-    if captureAuthorization == .authorized,
-      controllers.values.contains(where: \.isActive)
-    {
+    if captureAuthorization == .authorized, !force {
       return captureAuthorization
     }
 

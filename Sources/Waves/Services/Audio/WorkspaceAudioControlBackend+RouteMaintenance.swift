@@ -159,10 +159,18 @@ extension WorkspaceAudioControlBackend {
       retainCleanupDegradations(addRouterObservationListeners())
       markRouterObservationDirty()
     }
-    // Most of the app's lifetime has no managed renderers. Avoid rescanning the
-    // entire app snapshot four times per second when there is nothing a router
-    // conflict could suspend.
-    let routerActivity = verifiedRouterActivityProvider?()
+    // The verified-router view reads every Core Audio process object and runs
+    // a Security check on each router candidate. Only the ticks that re-observe
+    // conflicts (after a process- or tap-list change) or run route maintenance
+    // need it, so it is built lazily and at most once per tick rather than four
+    // times a second for the life of the process.
+    var memoizedRouterActivity: VerifiedRouterActivitySnapshot??
+    func routerActivity() -> VerifiedRouterActivitySnapshot? {
+      if let memoized = memoizedRouterActivity { return memoized }
+      let activity = verifiedRouterActivityProvider?()
+      memoizedRouterActivity = .some(activity)
+      return activity
+    }
     let routerReleasedRouteIDs = observeCompetingRouterConflicts(
       at: now,
       routerActivity: routerActivity
@@ -180,7 +188,8 @@ extension WorkspaceAudioControlBackend {
         retryOrphanedControllerDisposals()
         await performRouteMaintenance(
           forceRebuildIDs: routerReleasedRouteIDs,
-          routerActivity: routerActivity
+          routerActivity: routerActivity(),
+          now: now
         )
       }
       return
@@ -194,14 +203,47 @@ extension WorkspaceAudioControlBackend {
     var geometryRecoveryRouteIDs = Set<String>()
 
     for (appID, controller) in controllers {
+      // Close an elapsed verification window before reading this tick's
+      // mismatch flag, so a mismatch that arrives after a clean window is a
+      // fresh event rather than a failure of the previous rebuild.
+      if var recovery = geometryRecoveryByRuntimeID[appID],
+        case .recovered = recovery.advance(to: now)
+      {
+        geometryRecoveryByRuntimeID[appID] = recovery
+      }
       if controller.consumeGeometryMismatch() {
         var recovery = geometryRecoveryByRuntimeID[appID] ?? GeometryRecoveryCoordinator()
-        _ = recovery.signalMismatch(at: now)
+        let action = recovery.signalMismatch(at: now)
         geometryRecoveryByRuntimeID[appID] = recovery
         if let index = appIndexMap[appID] ?? snapshot.apps.firstIndex(where: { $0.id == appID }) {
-          snapshot.apps[index].routeHealthContext = .geometryRecoveryInProgress
-          snapshot.apps[index].notes = "Audio geometry changed. Waves is rebuilding this route asynchronously."
-          snapshot.updatedAt = .now
+          switch action {
+          case .exhausted:
+            // The rebuilt route keeps mismatching. Its tap mutes the app while
+            // the callback renders silence, so keeping it alive would leave the
+            // app inaudible; release it and report the failure instead.
+            if let failed = controllers.removeValue(forKey: appID) {
+              retainCleanupDegradations(disposeController(failed))
+            }
+            controllerGenerationByRuntimeID.removeValue(forKey: appID)
+            staleRouteTicks.removeValue(forKey: snapshot.apps[index].logicalID)
+            lastRenderTickByAppID.removeValue(forKey: snapshot.apps[index].logicalID)
+            geometryRecoveryByRuntimeID.removeValue(forKey: appID)
+            markRouteError(
+              at: index,
+              error: BackendError.managedRouteUnavailable(recovery.exhaustedDetail)
+            )
+            snapshot.apps[index].routeHealthContext = .geometryRecoveryExhausted
+            snapshot.apps[index].appliedVolume = nil
+            snapshot.apps[index].peakLevel = 0
+            snapshot.apps[index].rmsLevel = 0
+            refreshGlobalRouteHealth(latestError: recovery.exhaustedDetail)
+            snapshot.updatedAt = .now
+            continue
+          case .scheduleRecovery, .none, .attempt, .verifying, .recovered:
+            snapshot.apps[index].routeHealthContext = .geometryRecoveryInProgress
+            snapshot.apps[index].notes = "Audio geometry changed. Waves is rebuilding this route asynchronously."
+            snapshot.updatedAt = .now
+          }
         }
       }
       if var recovery = geometryRecoveryByRuntimeID[appID],
@@ -285,7 +327,8 @@ extension WorkspaceAudioControlBackend {
       await performRouteMaintenance(
         forceRebuildIDs: routeIDsNeedingRebuild,
         geometryRecoveryIDs: geometryRecoveryRouteIDs,
-        routerActivity: routerActivity
+        routerActivity: routerActivity(),
+        now: now
       )
     }
   }
@@ -309,10 +352,14 @@ extension WorkspaceAudioControlBackend {
     routerObservationListeners.remove()
   }
 
+  /// `now` is the same clock the level tick used for its debouncers and
+  /// recovery decisions, so a rebuild's verification window is measured on
+  /// the tick clock rather than a second, unrelated one.
   private func performRouteMaintenance(
     forceRebuildIDs: Set<String> = [],
     geometryRecoveryIDs: Set<String> = [],
-    routerActivity: VerifiedRouterActivitySnapshot? = nil
+    routerActivity: VerifiedRouterActivitySnapshot? = nil,
+    now: Duration
   ) async {
     if let routeMaintenanceOverride {
       await routeMaintenanceOverride(forceRebuildIDs, geometryRecoveryIDs)
@@ -321,7 +368,8 @@ extension WorkspaceAudioControlBackend {
     await maintainManagedRoutes(
       forceRebuildIDs: forceRebuildIDs,
       geometryRecoveryIDs: geometryRecoveryIDs,
-      routerActivity: routerActivity
+      routerActivity: routerActivity,
+      now: now
     )
   }
 
@@ -332,7 +380,8 @@ extension WorkspaceAudioControlBackend {
   private func maintainManagedRoutes(
     forceRebuildIDs: Set<String> = [],
     geometryRecoveryIDs: Set<String> = [],
-    routerActivity: VerifiedRouterActivitySnapshot? = nil
+    routerActivity: VerifiedRouterActivitySnapshot? = nil,
+    now: Duration
   ) async {
     guard !isShuttingDown else { return }
     let managedIDs = snapshot.apps
@@ -389,7 +438,7 @@ extension WorkspaceAudioControlBackend {
         if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
           var recovery = geometryRecoveryByRuntimeID[app.id]
         {
-          _ = recovery.finishRecovery(succeeded: true, at: monotonicRouteTime())
+          _ = recovery.finishRecovery(succeeded: true, at: now)
           geometryRecoveryByRuntimeID[app.id] = recovery
         }
         changed = true
@@ -397,7 +446,7 @@ extension WorkspaceAudioControlBackend {
         if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
           var recovery = geometryRecoveryByRuntimeID[app.id]
         {
-          let action = recovery.finishRecovery(succeeded: false, at: monotonicRouteTime())
+          let action = recovery.finishRecovery(succeeded: false, at: now)
           geometryRecoveryByRuntimeID[app.id] = recovery
           if case .exhausted = action {
             let exhaustion = BackendError.managedRouteUnavailable(

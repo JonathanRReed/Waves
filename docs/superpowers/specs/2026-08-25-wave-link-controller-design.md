@@ -37,15 +37,31 @@ Wave Link instead of creating a second Core Audio tap.
 
 The bridge:
 
-- discovers Wave Link's loopback port from `ws-info.json` (Wave Link 3 picks a
-  new port on every launch and publishes it there), falling back to scanning
-  the documented 1884-1893 range;
+- discovers Wave Link's loopback port by asking the kernel (libproc) which TCP
+  ports the code-signature-verified Wave Link 3 process is listening on. Wave
+  Link 3 picks an ephemeral port on every launch (real installs have answered
+  on 50845 and 53832, well outside the 1884-1893 range community clients scan)
+  and the macOS location of its `ws-info.json` is undocumented, so any port a
+  readable `ws-info.json` names is used only to order the candidates;
 - connects only to `ws://127.0.0.1:<port>` through `URLSessionWebSocketTask`,
-  and only after `lsof` proves the port's listener is the signed Wave Link
-  process;
-- uses the `streamdeck://` origin expected by Wave Link;
-- sends JSON-RPC 2.0 requests, one serialized apply sequence at a time, and
-  closes the socket after each sequence;
+  and accepts a candidate only after it answers `getApplicationInfo` as Wave
+  Link 3; the pid whose listener it is has already passed the designated
+  requirement check;
+- uses the `streamdeck://` origin expected by Wave Link, and sends an explicit
+  `"params": null` for parameterless calls as the official plugin does;
+- sends JSON-RPC 2.0 requests, one serialized sequence at a time (a Settings
+  connection test and an apply never interleave), skipping the notifications
+  Wave Link pushes on the same socket; the socket stays open for two seconds
+  after a sequence so a slider drag reuses one connection, then closes while
+  idle so a Wave Link restart on a new port is picked up by rediscovery;
+- moves an app to an empty channel only for a user gesture. Automation
+  (conferencing auto-pause) may adjust an app that already has its own channel
+  and is refused otherwise, because re-routing an app inside Wave Link changes
+  what the stream and monitor mixes hear;
+- records a `WaveLinkBridgeStatus` (endpoint, application info, channel
+  layout, last error) after every sequence, shown in Settings › Mixer with a
+  read-only **Test Connection** action, in Diagnostics, and in the diagnostics
+  export;
 - requires `getApplicationInfo` to return `appID = EWL` and
   `interfaceRevision >= 1` (the value Wave Link 3.0-3.2 report; earlier Wave
   Link generations answer `egwl` with a different protocol and are rejected)

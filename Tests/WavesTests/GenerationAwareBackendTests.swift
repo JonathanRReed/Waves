@@ -700,7 +700,7 @@ import WavesAudioCore
   )
 
   #expect(result.outcome == .unavailable)
-  #expect(result.detail?.contains("Boost, equalizer, and output routing are unavailable") == true)
+  #expect(result.detail?.contains("Boost, EQ, and output routing stay in Wave Link") == true)
   #expect(await bridge.requests.isEmpty)
 }
 

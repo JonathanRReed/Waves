@@ -24,11 +24,14 @@ no account, analytics, or telemetry.
 - **Wave Link coexistence (only while Elgato Wave Link runs).** When Wave Link
   compatibility is enabled and a code-signature-verified Wave Link process is
   routing audio, Waves connects to Wave Link's local control service over a
-  loopback-only WebSocket (`127.0.0.1`) to apply the volume and mute you set,
-  and inspects local listener processes (via `lsof`) solely to confirm that the
-  service belongs to the signed Wave Link app before connecting. This traffic
-  never leaves your Mac, carries only channel volume/mute commands, and happens
-  only in response to your controls.
+  loopback-only WebSocket (`127.0.0.1`) to apply the volume and mute you set.
+  To find that service it asks the kernel which local ports the signed Wave
+  Link process itself is listening on (the same information `lsof` shows), and
+  it connects only to a port that answers as Wave Link. This traffic never
+  leaves your Mac, carries only channel volume/mute commands and a channel
+  listing, and happens only in response to your controls or an explicit
+  connection test in Settings. Diagnostics you copy may include Wave Link's
+  channel names and the bundle identifiers of the apps assigned to them.
 
 ## What Waves stores
 

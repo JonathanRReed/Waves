@@ -72,6 +72,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let staleRouteThresholdTicks = 24
   var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
   var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
+  /// Device-change passes never overlap: a second event that arrives while a
+  /// pass is rebuilding routes is folded into one follow-up pass instead.
+  var isHandlingDeviceChange = false
+  var pendingDeviceChangeSelectors: [AudioObjectPropertySelector]?
+  /// The device UIDs outside Waves's own private aggregates at the last
+  /// inventory pass, so events raised by Waves's own aggregate create/destroy
+  /// can be told apart from real hardware changes.
+  var lastKnownExternalDeviceUIDs: Set<String>?
   let routerObservationListeners: RouterObservationListenerLifecycle
   var defaultOutputDeviceChange = DefaultOutputDeviceChange()
   var outputDeviceReadinessError: String?
@@ -892,6 +900,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   func recoverRoutes() async throws -> AudioSessionSnapshot {
     try ensureAcceptingOperations()
+    // An explicit repair is the one place a fresh authorization verdict is
+    // worth a system-wide probe tap; the periodic refresh trusts the cache.
+    refreshCaptureAuthorization(force: true)
     let managedLogicalIDs = Set(
       snapshot.apps
         .filter {
@@ -938,13 +949,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   func autoRestoreDevice() async throws -> AudioSessionSnapshot {
     try ensureAcceptingOperations()
+    // Only routes that follow the system default were built on the device
+    // that just changed. A route pinned to its own output device keeps its
+    // live tap: rebuilding it would interrupt audio on a device that did not
+    // move, and a pinned device that disappeared is handled by the inventory
+    // reconciliation instead.
     let managedLogicalIDs = Set(
       snapshot.apps
-        .filter { $0.routingState == .managed || controllers[$0.id]?.isActive == true }
+        .filter {
+          $0.targetDeviceUID == nil
+            && ($0.routingState == .managed || controllers[$0.id]?.isActive == true)
+        }
         .map(\.logicalID)
     )
+    let pinnedRuntimeIDs = Set(snapshot.apps.filter { $0.targetDeviceUID != nil }.map(\.id))
 
-    retainCleanupDegradations(disposeControllers(keeping: []))
+    retainCleanupDegradations(disposeControllers(keeping: pinnedRuntimeIDs))
     snapshot = await buildSnapshot(merging: snapshot)
     try ensureAcceptingOperations()
     snapshot.updatedAt = .now
@@ -1357,6 +1377,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           [
             kAudioSubDeviceUIDKey: outputDeviceUID,
             kAudioSubDeviceDriftCompensationKey: false,
+            // Only the sub-device's *output* side belongs in this aggregate.
+            // Without this, a device that also has inputs (USB headsets and
+            // microphones with a headphone jack, audio interfaces, virtual
+            // devices) contributes its input streams next to the tap, the IO
+            // callback sees two input buffers instead of one, every cycle is a
+            // geometry mismatch, the app is silenced, and the device's input
+            // is held open by Waves for no reason.
+            kAudioSubDeviceInputChannelsKey: 0,
           ]
         ],
         kAudioAggregateDeviceTapListKey: [

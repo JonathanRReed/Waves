@@ -78,6 +78,7 @@ enum DiagnosticsExportFormatter {
     apps: [AudioApp],
     availableOutputDeviceCount: Int,
     diagnostics: DiagnosticsReport?,
+    waveLinkBridge: WaveLinkBridgeStatus? = nil,
     persistenceFailureCount: Int,
     lastPersistenceError: String?,
     shutdownResult: AppShutdownResult?,
@@ -124,12 +125,49 @@ enum DiagnosticsExportFormatter {
     lines.append("Failure count this process: \(max(0, persistenceFailureCount))")
     lines.append("Last failure [error text]: \(boundedOptional(lastPersistenceError, maximumLength: 1_000))")
 
+    appendWaveLinkBridge(waveLinkBridge, to: &lines)
     appendShutdown(shutdownResult, to: &lines)
     appendPreviousShutdown(previousShutdown, to: &lines)
     appendApps(apps, to: &lines)
     appendChecks(diagnostics, to: &lines)
 
     return boundedReport(lines)
+  }
+
+  /// What the Wave Link control bridge last saw. Channel names and app
+  /// identifiers come from Wave Link's own listing, so they are labeled like
+  /// the app rows above.
+  static let maximumWaveLinkChannelRows = 16
+
+  private static func appendWaveLinkBridge(
+    _ bridge: WaveLinkBridgeStatus?,
+    to lines: inout [String]
+  ) {
+    lines.append("")
+    lines.append("Wave Link bridge")
+    guard let bridge else {
+      lines.append("State: notAvailable (no bridge in this backend)")
+      return
+    }
+    lines.append("State: \(bridge.phase.rawValue)")
+    lines.append("Endpoint [identifier]: \(boundedOptional(bridge.endpoint, maximumLength: 64))")
+    lines.append("Peer process identifier: \(bridge.processIdentifier.map(String.init) ?? "not available")")
+    lines.append("Application [app name]: \(boundedOptional(bridge.applicationName, maximumLength: 128))")
+    lines.append("Application version: \(boundedOptional(bridge.applicationVersion, maximumLength: 64))")
+    lines.append("Interface revision: \(bridge.interfaceRevision.map(String.init) ?? "not available")")
+    lines.append("Last success: \(bridge.lastSuccessAt.map { ISO8601DateFormatter().string(from: $0) } ?? "never")")
+    lines.append("Last failure: \(bridge.lastFailureAt.map { ISO8601DateFormatter().string(from: $0) } ?? "never")")
+    lines.append("Last error [error text]: \(boundedOptional(bridge.lastError, maximumLength: 1_000))")
+    lines.append("Software channels: \(bridge.softwareChannelCount) (\(bridge.freeSoftwareChannelCount) free)")
+    for channel in bridge.channels.prefix(maximumWaveLinkChannelRows) {
+      let apps = channel.appIdentifiers.isEmpty ? "empty" : channel.appIdentifiers.joined(separator: ", ")
+      lines.append(
+        "  Channel [channel name]: \(bounded(channel.name, maximumLength: 128)) · \(channel.isSoftware ? "software" : "hardware") · level \(String(format: "%.2f", channel.level)) · \(channel.isMuted ? "muted" : "unmuted") · apps [identifier]: \(bounded(apps, maximumLength: 512))"
+      )
+    }
+    if bridge.channels.count > maximumWaveLinkChannelRows {
+      lines.append("  Channel rows omitted by bound: \(bridge.channels.count - maximumWaveLinkChannelRows)")
+    }
   }
 
   /// The *previous* launch's checked shutdown, read back from disk.

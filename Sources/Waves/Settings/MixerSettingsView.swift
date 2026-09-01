@@ -32,6 +32,12 @@ struct MixerSettingsView: View {
         Text(waveLinkControllerDescription)
           .font(.callout)
           .foregroundStyle(.secondary)
+
+        if store.preferences.waveLinkCompatibilityEnabled,
+          store.preferences.perAppAudioController == .waves
+        {
+          WaveLinkBridgeStatusRow()
+        }
       } header: {
         Text("Wave Link")
       } footer: {
@@ -162,10 +168,105 @@ struct MixerSettingsView: View {
     }
     switch store.preferences.perAppAudioController {
     case .waves:
-      return "Waves remains your per-app mixer. While Wave Link is active, Waves controls each app through a dedicated Wave Link software channel so audio is not doubled. Boost, equalizer, and output routing pause for those apps."
+      return "Waves stays your per-app mixer. While Wave Link is mixing, Waves sends each app's volume and mute to its own Wave Link software channel so audio is never doubled. Boost, EQ, and output routing stay in Wave Link for those apps."
     case .waveLink:
       return "Wave Link controls app levels while it is active. Waves monitors affected apps without creating a second route."
     }
   }
 
+}
+
+/// Shows what the Wave Link control bridge last saw and offers a read-only
+/// connection test, so a user can tell "Wave Link is not running" from "the
+/// channel layout leaves no room" without reading logs.
+private struct WaveLinkBridgeStatusRow: View {
+  @Environment(AppStore.self) private var store
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Image(systemName: symbolName)
+          .foregroundStyle(symbolColor)
+          .accessibilityHidden(true)
+          .frame(width: 18)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(title)
+          Text(detail)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        Spacer(minLength: 8)
+        Button {
+          store.testWaveLinkConnection()
+        } label: {
+          if store.isTestingWaveLinkConnection {
+            ProgressView()
+              .controlSize(.small)
+              .frame(width: 96)
+          } else {
+            Text("Test Connection")
+              .frame(width: 96)
+          }
+        }
+        .buttonStyle(.bordered)
+        .disabled(!store.isAudioRunning || store.isTestingWaveLinkConnection)
+        .help("Connects to Wave Link and lists its channels without changing anything.")
+      }
+      if let status = store.waveLinkBridgeStatus, status.phase == .connected, !status.channels.isEmpty {
+        Text(channelLayout(status))
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+    }
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("\(title). \(detail)")
+  }
+
+  private var status: WaveLinkBridgeStatus? { store.waveLinkBridgeStatus }
+
+  private var title: String {
+    switch status?.phase {
+    case .connected: "Wave Link connected"
+    case .failed: "Wave Link not reachable"
+    case .idle, nil: "Wave Link connection"
+    }
+  }
+
+  private var detail: String {
+    guard let status else { return "Not checked yet. Test the connection to see Wave Link's channels." }
+    switch status.phase {
+    case .idle:
+      return "Not checked yet. Test the connection to see Wave Link's channels."
+    case .connected, .failed:
+      return status.summaryLine
+    }
+  }
+
+  private var symbolName: String {
+    switch status?.phase {
+    case .connected: "checkmark.circle.fill"
+    case .failed: "exclamationmark.triangle.fill"
+    case .idle, nil: "link.circle"
+    }
+  }
+
+  private var symbolColor: Color {
+    switch status?.phase {
+    case .connected: .green
+    case .failed: .orange
+    case .idle, nil: .secondary
+    }
+  }
+
+  private func channelLayout(_ status: WaveLinkBridgeStatus) -> String {
+    let software = status.channels.filter(\.isSoftware)
+    guard !software.isEmpty else { return "No software channels reported." }
+    let described = software.map { channel -> String in
+      let apps = channel.appIdentifiers.isEmpty ? "free" : "\(channel.appIdentifiers.count) app\(channel.appIdentifiers.count == 1 ? "" : "s")"
+      return "\(channel.name) (\(apps))"
+    }
+    return "Channels: " + described.joined(separator: ", ")
+  }
 }

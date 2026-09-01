@@ -289,11 +289,36 @@ extension WorkspaceAudioControlBackend {
 
   private func handleDeviceChange(selectors: [AudioObjectPropertySelector]) async {
     guard !isShuttingDown else { return }
+    // macOS commonly raises the default-output change twice in quick
+    // succession (Bluetooth connect, dock, display wake). Two overlapping
+    // passes on this reentrant actor each rebuilt every managed route, so the
+    // second pass replaced and disposed the controllers the first had just
+    // created: twice the tap and aggregate churn, and two dropouts per app.
+    // Fold later events into one follow-up pass instead.
+    if isHandlingDeviceChange {
+      pendingDeviceChangeSelectors = (pendingDeviceChangeSelectors ?? []) + selectors
+      return
+    }
+    isHandlingDeviceChange = true
+    defer { isHandlingDeviceChange = false }
+    var currentSelectors = selectors
+    while true {
+      await performDeviceChangePass(selectors: currentSelectors)
+      guard !isShuttingDown, let pending = pendingDeviceChangeSelectors else { return }
+      pendingDeviceChangeSelectors = nil
+      currentSelectors = pending
+    }
+  }
+
+  private func performDeviceChangePass(selectors: [AudioObjectPropertySelector]) async {
     let currentDefaultUID = try? currentDefaultOutputDeviceUID()
     let defaultOutputChanged = defaultOutputDeviceChange.didChange(
       selectors: selectors,
       currentUID: currentDefaultUID
     )
+    let externalDeviceUIDs = currentExternalDeviceUIDs()
+    let inventoryChanged = externalDeviceUIDs != lastKnownExternalDeviceUIDs
+    lastKnownExternalDeviceUIDs = externalDeviceUIDs
 
     if defaultOutputChanged {
       // Re-tap managed routes only when the effective default output changed.
@@ -309,12 +334,28 @@ extension WorkspaceAudioControlBackend {
         logger.error("Output device change recovery failed: \(error.localizedDescription)")
       }
     } else {
+      // Every Waves route rebuild creates and destroys a private aggregate,
+      // and each of those raises this same inventory event. When nothing
+      // outside Waves changed there is nothing to reconcile and nothing for
+      // the store to refresh; reacting anyway fed the rebuild back into
+      // itself (a pinned route whose device accepts an aggregate but fails to
+      // start could loop without end).
+      guard inventoryChanged else { return }
       await reconcilePinnedRoutesAfterDeviceInventoryChange()
     }
     guard !isShuttingDown else { return }
     // Notify observers (the store) so they can refresh UI state and restore
     // per-device volume presets, regardless of whether restoration succeeded.
     deviceChangeContinuation.yield()
+  }
+
+  /// UIDs of every device that is not one of Waves's own private aggregates.
+  private func currentExternalDeviceUIDs() -> Set<String> {
+    Set(
+      allDeviceIDs()
+        .compactMap(OutputDeviceInventory.deviceUID)
+        .filter { !$0.hasPrefix("com.waves.aggregate.") }
+    )
   }
 
   private func reconcilePinnedRoutesAfterDeviceInventoryChange() async {

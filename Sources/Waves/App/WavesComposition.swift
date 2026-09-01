@@ -13,7 +13,7 @@ struct WavesComposition {
   static let live = makeLive()
 
   static func makeLiveBackend(
-    serviceFactory: () -> VerifiedRouterConflictService = { VerifiedRouterConflictService() },
+    serviceFactory: () -> VerifiedRouterConflictService = { VerifiedRouterConflictService.live() },
     backendFactory: LiveBackendFactory = { conflictProvider, activityProvider in
       WorkspaceAudioControlBackend(
         verifiedRouterConflictProvider: conflictProvider,

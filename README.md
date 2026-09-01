@@ -251,6 +251,7 @@ When switching audio devices:
 
 ### Volume changes not applying
 - In Settings ▸ Mixer, confirm the preferred **Per-app controller**. Compatibility keeps a verified parallel Wave Link path monitor-only in Waves so a displayed level cannot be bypassed
+- With Wave Link 3 running, use **Test Connection** in Settings ▸ Mixer. It reports whether Waves can reach Wave Link and how many software channels are free; an app needs a Wave Link software channel of its own before Waves can set its level, and Waves moves it to a free channel the first time you change its level yourself
 - If your custom Wave Link routing already prevents a parallel monitored copy, disable **Wave Link compatibility** to force Waves control. This also disables duplicate-route safeguards
 - Use Recover Routes from the main window status action, Setup, or Diagnostics to re-establish Waves-managed routing
 - Check the current route and permission details in Diagnostics

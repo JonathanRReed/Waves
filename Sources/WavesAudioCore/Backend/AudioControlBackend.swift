@@ -68,9 +68,23 @@ public protocol AudioControlBackend: AnyObject, Sendable {
 
   /// Stops the backend and reports cleanup confidence.
   func shutdownWithResult() async -> BackendShutdownResult
+
+  /// The Wave Link control bridge's last recorded state, or nil when this
+  /// backend has no bridge. Cheap: reads a cached value, never talks to
+  /// Wave Link.
+  func waveLinkBridgeStatus() async -> WaveLinkBridgeStatus?
+
+  /// Runs a read-only connection test against Wave Link (handshake plus a
+  /// channel listing) and returns the resulting status, or nil when this
+  /// backend has no bridge.
+  func probeWaveLinkBridge() async -> WaveLinkBridgeStatus?
 }
 
 public extension AudioControlBackend {
+  func waveLinkBridgeStatus() async -> WaveLinkBridgeStatus? { nil }
+
+  func probeWaveLinkBridge() async -> WaveLinkBridgeStatus? { nil }
+
   func diagnosticsReport(reprobeCaptureAuthorization: Bool) async -> DiagnosticsReport {
     await diagnosticsReport()
   }

@@ -11,6 +11,13 @@ final class AppStore {
 
   var session: AudioSessionSnapshot {
     didSet {
+      // Most writes touch one field of one row; the roster only changes on a
+      // rebuild. Compare identities positionally before building any sets, so
+      // the common write costs a walk and not two allocations.
+      let rosterUnchanged =
+        oldValue.apps.count == session.apps.count
+        && zip(oldValue.apps, session.apps).allSatisfy { $0.id == $1.id }
+      guard !rosterUnchanged else { return }
       let previousRuntimeIDs = Set(oldValue.apps.map(\.id))
       let currentRuntimeIDs = Set(session.apps.map(\.id))
       if previousRuntimeIDs != currentRuntimeIDs {
@@ -62,6 +69,13 @@ final class AppStore {
   private(set) var requestedWhatsNew = false
   var preferences: UserPreferences
   var diagnostics: DiagnosticsReport?
+  /// Last known state of the Wave Link control bridge, refreshed with the
+  /// silent session refresh and by an explicit connection test.
+  var waveLinkBridgeStatus: WaveLinkBridgeStatus?
+  var isTestingWaveLinkConnection = false
+  var lastLoginItemStatusRead: Date?
+  /// Consecutive Adaptive Mix passes in which every managed app was silent.
+  var adaptiveSilentPasses = 0
   var isRefreshing = false
   var isRecovering = false
   var isLoading = false
@@ -373,12 +387,20 @@ final class AppStore {
   }
 
   var visibleApps: [AudioApp] {
+    sortedApps(visibleAppsUnordered)
+  }
+
+  /// `visibleApps` before sorting, for callers that only test membership or
+  /// scan for a match. The sort is the expensive half (under Activity order it
+  /// ranks every app through the level poll), and most readers on the polling
+  /// paths never look at the order.
+  var visibleAppsUnordered: [AudioApp] {
     // Pin state is authoritative in preferences (so it survives an app quitting
     // and relaunching). Reconcile every app's isPinned here — the single source
     // feeding pinnedApps, liveApps, recentApps, and every view — so the rest of
     // the app can keep reading the familiar `app.isPinned`.
     let pinned = Set(preferences.pinnedAppIDs)
-    let filtered = session.apps
+    return session.apps
       .filter { preferences.showSystemProcesses || $0.category != .system }
       .map { app -> AudioApp in
         guard app.isPinned != pinned.contains(app.logicalID) else { return app }
@@ -386,7 +408,6 @@ final class AppStore {
         reconciled.isPinned = pinned.contains(app.logicalID)
         return reconciled
       }
-    return sortedApps(filtered)
   }
 
   var pinnedApps: [AudioApp] {
@@ -438,13 +459,23 @@ final class AppStore {
   /// (exactly like the visualizer ribbon, which fades to nothing), or they'd keep
   /// asserting playback for the whole linger window after sound has stopped.
   var actuallyLiveApps: [AudioApp] {
-    visibleApps.filter(isLive)
+    visibleAppsUnordered.filter(isLive)
   }
 
   /// Whether anything is producing audio right now (no linger). Cheaper than
   /// `!actuallyLiveApps.isEmpty` — short-circuits without building an array.
   var hasLiveAudio: Bool {
-    visibleApps.contains(where: isLive)
+    visibleAppsUnordered.contains(where: isLive)
+  }
+
+  /// Whether the app is in the lingering Live set right now. Equivalent to
+  /// `isRecentlyLive` for rendering — the level poll folds every currently
+  /// audible app into `recentlyLiveIDs` on the same tick it reads levels — but
+  /// it observes only the linger set, not the level dictionary. Row subtitles
+  /// and the Activity sort use it so a level tick does not invalidate every
+  /// mounted row.
+  func isLingeringLive(_ app: AudioApp) -> Bool {
+    app.routingState == .live || recentlyLiveIDs.contains(app.logicalID)
   }
 
   /// Combined live audio energy (0...1) across every currently-playing app, for
@@ -570,7 +601,7 @@ final class AppStore {
     guard isAudioRunning else { return .setup }
     // What's playing *now*, not the lingering Live list — the glyph must drop
     // back to idle the moment audio actually stops.
-    let apps = visibleApps
+    let apps = visibleAppsUnordered
     if apps.contains(where: isLive) { return .playing }
     if apps.contains(where: \.isMuted) { return .muted }
     return .idle
@@ -925,6 +956,7 @@ final class AppStore {
       apps: visibleApps,
       availableOutputDeviceCount: availableDevices.count,
       diagnostics: diagnostics,
+      waveLinkBridge: waveLinkBridgeStatus,
       persistenceFailureCount: persistenceFailureCount,
       lastPersistenceError: lastPersistenceError,
       shutdownResult: shutdownResult,
@@ -1146,11 +1178,53 @@ final class AppStore {
       guard !Task.isCancelled, store.startupState == .running else { return }
       store.diagnostics = await store.backend.diagnosticsReport()
       store.onboarding.captureAuthorization = await store.backend.captureAuthorizationResult()
+      store.waveLinkBridgeStatus = await store.backend.waveLinkBridgeStatus()
       guard !Task.isCancelled, store.startupState == .running else { return }
       // The live snapshot owns backend truth; mergedSession reapplies only the
       // store's current transaction/slider projection and preferences-owned tags.
       store.session = store.mergedSession(with: snapshot, cached: store.session)
       store.syncOnboarding(using: store.session)
+    }
+  }
+
+  /// Read-only Wave Link connection test from Settings › Mixer: discovers the
+  /// control port, performs the handshake, and lists channels. Never changes a
+  /// level or moves an app.
+  func testWaveLinkConnection() {
+    guard requireAudioRunning(), !isTestingWaveLinkConnection else { return }
+    isTestingWaveLinkConnection = true
+    let started = startOwnedOperation { store in
+      defer { store.isTestingWaveLinkConnection = false }
+      let status = await store.backend.probeWaveLinkBridge()
+      guard !Task.isCancelled, store.startupState == .running else { return }
+      store.waveLinkBridgeStatus = status
+      store.diagnostics = await store.backend.diagnosticsReport(reprobeCaptureAuthorization: false)
+      guard let status else {
+        store.showToast(
+          title: "Wave Link test unavailable",
+          detail: "This audio backend has no Wave Link bridge.",
+          kind: .warning
+        )
+        return
+      }
+      switch status.phase {
+      case .connected:
+        store.showToast(
+          title: "Wave Link connected",
+          detail: status.summaryLine,
+          kind: .success,
+          duration: .seconds(2.4)
+        )
+      case .failed, .idle:
+        store.showToast(
+          title: "Wave Link not reachable",
+          detail: status.lastError ?? "No answer from Wave Link.",
+          kind: .warning
+        )
+      }
+    }
+    if !started {
+      isTestingWaveLinkConnection = false
     }
   }
 
@@ -1421,13 +1495,11 @@ final class AppStore {
       return 0
     }
 
-    // Route through the shared isRecentlyLive (which consults the live-level poll
-    // plus the linger window), so the Activity sort agrees with Live/Recent
-    // membership on one source of truth — otherwise a managed app playing right
-    // now would show in Live but sink to the idle tier here, and a just-silenced
-    // app would jump down a tier the instant it goes quiet, before its row has
-    // even finished lingering in the Live list.
-    if isRecentlyLive(app) {
+    // Rank on the linger set, which the level poll keeps a superset of the
+    // currently audible apps, so the Activity sort agrees with Live/Recent
+    // membership without making every sorted read a dependency of the level
+    // dictionary — otherwise each 300 ms level tick re-sorted the whole list.
+    if isLingeringLive(app) {
       return 1
     }
 
@@ -1529,8 +1601,18 @@ final class AppStore {
   /// `syncOnboarding` pass — so this is also called directly from
   /// `AppDelegate.applicationDidBecomeActive`, which fires every time Waves
   /// regains focus (e.g. right after the user returns from System Settings).
-  func reconcileLoginItemStatus() {
+  func reconcileLoginItemStatus(force: Bool = false) {
     guard startupState != .shuttingDown else { return }
+    // Reading the login item is a synchronous XPC round trip to the
+    // background-task daemon. It is reached from every onboarding sync (each
+    // committed control change, every session refresh), which is far more
+    // often than the value can change; re-read at most every few seconds
+    // unless the caller knows something happened (app activation).
+    let now = Date()
+    if !force, let lastLoginItemStatusRead, now.timeIntervalSince(lastLoginItemStatusRead) < 5 {
+      return
+    }
+    lastLoginItemStatusRead = now
     let status = loginItemService.status
     if loginItemStatus != status {
       loginItemStatus = status

@@ -53,6 +53,20 @@ struct VerifiedRouterProcessObject: Hashable, Sendable {
   let id: AudioObjectID
   let pid: pid_t
   let isRunningOutput: Bool
+  /// The bundle identifier Core Audio publishes for the process, when it has
+  /// one. `nil` means unknown, which keeps the process eligible for the full
+  /// Security.framework check rather than silently skipping it.
+  var bundleIdentifier: String? = nil
+
+  /// Whether the process could possibly be the router `descriptor` describes.
+  /// A process whose published bundle identifier names a different app is
+  /// never that router, so it needs no signature validation at all. The
+  /// designated requirement pins the code-signing identifier to the same
+  /// string, so an unknown bundle identifier still goes through the full check.
+  func mayMatch(_ descriptor: VerifiedRouterDescriptor) -> Bool {
+    guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return true }
+    return bundleIdentifier.caseInsensitiveCompare(descriptor.bundleIdentifier) == .orderedSame
+  }
 }
 
 struct VerifiedRouterTapDescription: Hashable, Sendable {
@@ -142,9 +156,9 @@ struct VerifiedRouterActivitySnapshot: Sendable {
         routerName: router.descriptor.displayName,
         kind: .unattributableTapFallback,
         detail:
-          "Core Audio cannot publicly attribute the system tap list to verified \(router.descriptor.displayName). "
-          + "Because its verified routing process owns active Core Audio output, Waves is monitoring only to avoid "
-          + "duplicate or silent playback until that router releases the path.\(ambiguityDetail)",
+          "\(router.descriptor.displayName) is mixing through its Core Audio output, and Core Audio cannot publicly "
+          + "attribute its taps to individual apps, so Waves is monitoring only rather than risk a second copy of "
+          + "this app's audio. Levels return to Waves when \(router.descriptor.displayName) stops mixing.\(ambiguityDetail)",
         supportsBridgeControl: routers.contains {
           $0.descriptor.bundleIdentifier == VerifiedRouterDescriptor.waveLink3_2_2.bundleIdentifier
         }
@@ -161,19 +175,36 @@ struct VerifiedRouterActivitySnapshot: Sendable {
 final class VerifiedRouterConflictService: @unchecked Sendable {
   typealias SnapshotProvider = @Sendable () -> VerifiedRouterObservationSnapshot
   typealias IdentityVerifier = @Sendable (pid_t, VerifiedRouterDescriptor) -> VerifiedRouterProcessIdentity?
+  /// Resolves a process's start time so a cached verification can be bound to
+  /// one exact process lifetime. Returning `nil` disables caching for that pid.
+  typealias ProcessLifetimeProvider = @Sendable (pid_t) -> AppProcessLifetimeIdentity?
 
   private let descriptors: [VerifiedRouterDescriptor]
   private let snapshotProvider: SnapshotProvider
   private let identityVerifier: IdentityVerifier
+  private let processLifetimeProvider: ProcessLifetimeProvider?
+  private let identityCache = VerifiedRouterIdentityCache()
 
   init(
     descriptors: [VerifiedRouterDescriptor] = VerifiedRouterDescriptor.supported,
     snapshotProvider: @escaping SnapshotProvider = VerifiedRouterObservationSnapshot.live,
-    identityVerifier: @escaping IdentityVerifier = VerifiedRouterProcessIdentity.verifyLive
+    identityVerifier: @escaping IdentityVerifier = VerifiedRouterProcessIdentity.verifyLive,
+    processLifetimeProvider: ProcessLifetimeProvider? = nil
   ) {
     self.descriptors = descriptors.filter(\.hasConstructibleRequirement)
     self.snapshotProvider = snapshotProvider
     self.identityVerifier = identityVerifier
+    self.processLifetimeProvider = processLifetimeProvider
+  }
+
+  /// The production service: live Core Audio snapshots, live Security checks,
+  /// and verification results cached per process lifetime. The activity view is
+  /// rebuilt several times a second, and a code-signature validation costs on
+  /// the order of ten milliseconds per process, so without the cache the
+  /// router check alone could occupy a large share of one core whenever audio
+  /// was playing.
+  static func live() -> VerifiedRouterConflictService {
+    VerifiedRouterConflictService(processLifetimeProvider: RuntimeProcessIdentity.processLifetime)
   }
 
   func conflict(for app: AudioApp) -> VerifiedRouterConflict? {
@@ -214,24 +245,97 @@ final class VerifiedRouterConflictService: @unchecked Sendable {
     constrainedTo initialRouters: [VerifiedRouter] = []
   ) -> [VerifiedRouter] {
     let candidates = snapshot.processObjects.filter(\.isRunningOutput)
+    identityCache.retain(pids: Set(candidates.map(\.pid)))
     var results: [VerifiedRouter] = []
     for descriptor in descriptors {
-      for process in candidates {
-        guard let identity = identityVerifier(process.pid, descriptor) else { continue }
+      for process in candidates where process.mayMatch(descriptor) {
+        let router = VerifiedRouter(descriptor: descriptor, pid: process.pid, processObjectID: process.id)
+        // The confirmation pass only re-checks routers the first pass found;
+        // everything else is skipped before any Security work happens.
+        if !initialRouters.isEmpty, !initialRouters.contains(router) { continue }
+        guard let identity = verifiedIdentity(pid: process.pid, descriptor: descriptor) else { continue }
         guard identity.pid == process.pid,
           identity.teamIdentifier == descriptor.teamIdentifier,
           identity.matchesDesignatedRequirement
         else {
           continue
         }
-        let router = VerifiedRouter(descriptor: descriptor, pid: process.pid, processObjectID: process.id)
-        if !initialRouters.isEmpty, !initialRouters.contains(router) { continue }
         results.append(router)
       }
     }
     return Array(Set(results))
   }
 
+  /// Verifies through the per-lifetime cache when a lifetime is resolvable.
+  /// A pid that cannot be bound to a start time is verified fresh every time,
+  /// so a recycled pid can never inherit a previous process's verdict.
+  private func verifiedIdentity(
+    pid: pid_t,
+    descriptor: VerifiedRouterDescriptor
+  ) -> VerifiedRouterProcessIdentity? {
+    guard let lifetime = processLifetimeProvider?(pid) else {
+      return identityVerifier(pid, descriptor)
+    }
+    let key = VerifiedRouterIdentityCache.Key(pid: pid, descriptorBundleIdentifier: descriptor.bundleIdentifier)
+    if let cached = identityCache.identity(for: key, lifetime: lifetime) {
+      return cached.identity
+    }
+    let identity = identityVerifier(pid, descriptor)
+    identityCache.store(identity, for: key, lifetime: lifetime)
+    return identity
+  }
+
+}
+
+/// Verification verdicts keyed by pid and descriptor, valid for exactly one
+/// process lifetime. Both positive and negative verdicts are kept: a signature
+/// cannot change while the process runs, and re-validating a non-router that
+/// happens to publish the router's bundle identifier would cost just as much.
+final class VerifiedRouterIdentityCache: @unchecked Sendable {
+  struct Key: Hashable, Sendable {
+    let pid: pid_t
+    let descriptorBundleIdentifier: String
+  }
+
+  struct Entry: Sendable {
+    let lifetime: AppProcessLifetimeIdentity
+    let identity: VerifiedRouterProcessIdentity?
+  }
+
+  private let lock = NSLock()
+  private var entries: [Key: Entry] = [:]
+
+  func identity(for key: Key, lifetime: AppProcessLifetimeIdentity) -> Entry? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let entry = entries[key], entry.lifetime == lifetime else { return nil }
+    return entry
+  }
+
+  func store(
+    _ identity: VerifiedRouterProcessIdentity?,
+    for key: Key,
+    lifetime: AppProcessLifetimeIdentity
+  ) {
+    lock.lock()
+    defer { lock.unlock() }
+    entries[key] = Entry(lifetime: lifetime, identity: identity)
+  }
+
+  /// Drops verdicts for processes that no longer run output, so the cache
+  /// tracks the live process list instead of growing for the session.
+  func retain(pids: Set<pid_t>) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !entries.isEmpty else { return }
+    entries = entries.filter { pids.contains($0.key.pid) }
+  }
+
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return entries.count
+  }
 }
 
 struct VerifiedRouter: Hashable, Sendable {
@@ -287,12 +391,33 @@ private extension VerifiedRouterObservationSnapshot {
       else {
         return nil
       }
+      let isRunningOutput = readProcessIsRunningOutput(processObjectID)
       return VerifiedRouterProcessObject(
         id: processObjectID,
         pid: pid,
-        isRunningOutput: readProcessIsRunningOutput(processObjectID)
+        isRunningOutput: isRunningOutput,
+        // Only running-output processes are verification candidates, so only
+        // they need the bundle identifier that lets the service skip them.
+        bundleIdentifier: isRunningOutput ? readProcessBundleID(processObjectID) : nil
       )
     }
+  }
+
+  private static func readProcessBundleID(_ processObjectID: AudioObjectID) -> String? {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioProcessPropertyBundleID,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    let expectedSize = UInt32(MemoryLayout<CFString?>.size)
+    var readSize = expectedSize
+    var rawBundleID: CFString?
+    let status = withUnsafeMutablePointer(to: &rawBundleID) {
+      AudioObjectGetPropertyData(processObjectID, &address, 0, nil, &readSize, $0)
+    }
+    guard status == noErr, readSize == expectedSize, let rawBundleID else { return nil }
+    let bundleID = rawBundleID as String
+    return bundleID.isEmpty ? nil : bundleID
   }
 
   private static func readTaps() -> [VerifiedRouterTapObservation] {

@@ -32,7 +32,7 @@ extension WorkspaceAudioControlBackend {
     suspendManagedRouteForConflict(at: acceptedIndex, conflict: conflict)
     snapshot.apps[acceptedIndex].routeHealthContext = .waveLinkBridge
     snapshot.apps[acceptedIndex].notes =
-      "Waves is controlling this app through Wave Link without creating a second audio route."
+      "Sending this change to Wave Link…"
 
     let generationContext = IntentGenerationContext(
       logicalID: logicalID,
@@ -51,7 +51,7 @@ extension WorkspaceAudioControlBackend {
       || intent.isMuted != previousApp.isMuted
     if dspChangeRequested, !audioChangeRequested {
       snapshot.apps[acceptedIndex].notes =
-        "Boost, equalizer, and output routing are unavailable while Wave Link owns this app's audio. Adjust them in Wave Link, or disable Wave Link compatibility in Settings."
+        "Boost, EQ, and output routing stay in Wave Link while it owns this app's audio. Change them there, or turn off Wave Link compatibility in Settings › Mixer."
       clearStagedIntentIfCurrent(intent, logicalID: logicalID)
       snapshot.updatedAt = .now
       return AppIntentApplyResult(
@@ -82,10 +82,14 @@ extension WorkspaceAudioControlBackend {
       }
 
       try ensureGenerationCurrent(generationContext)
+      // Only a person's own gesture may re-route an app inside Wave Link.
+      // Automation (conferencing auto-pause) can mute an app that already has
+      // its own channel, and is refused honestly otherwise.
       let confirmation = try await waveLinkController.apply(
         bundleIdentifier: bundleIdentifier,
         volume: intent.desiredVolume,
-        isMuted: intent.isMuted
+        isMuted: intent.isMuted,
+        allowsChannelRelocation: intent.reason != .automation
       )
       try ensureGenerationCurrent(generationContext)
 
@@ -116,7 +120,9 @@ extension WorkspaceAudioControlBackend {
       snapshot.apps[currentIndex].hasNoAudioCapability = false
       snapshot.apps[currentIndex].routeHealthContext = .waveLinkBridge
       snapshot.apps[currentIndex].notes =
-        "Controlled through Wave Link channel \(confirmation.channelName). Boost, equalizer, and output routing are paused while Wave Link owns audio."
+        confirmation.relocated
+        ? "Moved to Wave Link channel \(confirmation.channelName) so it can have its own level. Boost, EQ, and output routing stay in Wave Link."
+        : "Volume and mute go through Wave Link channel \(confirmation.channelName). Boost, EQ, and output routing stay in Wave Link."
       if intent.isMuted {
         snapshot.apps[currentIndex].peakLevel = 0
         snapshot.apps[currentIndex].rmsLevel = 0
@@ -163,20 +169,46 @@ extension WorkspaceAudioControlBackend {
         snapshot.apps[currentIndex].appliedVolume = nil
         snapshot.apps[currentIndex].routingState = .monitorOnly
         snapshot.apps[currentIndex].routeHealthContext = .waveLinkBridge
-        snapshot.apps[currentIndex].notes = error.localizedDescription
+        snapshot.apps[currentIndex].notes = Self.waveLinkFailureNote(error, app: previousApp)
       }
+      let detail = Self.waveLinkFailureNote(error, app: previousApp)
       clearStagedIntentIfCurrent(intent, logicalID: logicalID)
       snapshot.updatedAt = .now
-      refreshGlobalRouteHealth(latestError: error.localizedDescription)
+      refreshGlobalRouteHealth(latestError: detail)
       return AppIntentApplyResult(
         appID: intent.appID,
         generation: intent.generation,
         outcome: .failed,
         resultingApp: snapshot.apps.first(where: { $0.logicalID == logicalID }),
         backendStatus: snapshot.backendStatus,
-        detail: error.localizedDescription
+        detail: detail
       )
     }
+  }
+
+  /// The row note for a failed bridge apply. Channel-layout problems name the
+  /// app the way the user knows it rather than by bundle identifier.
+  static func waveLinkFailureNote(_ error: Error, app: AudioApp) -> String {
+    switch error as? WaveLinkControlBridgeError {
+    case .dedicatedChannelRequired:
+      return
+        "Every Wave Link software channel already holds an app, so \(app.displayName) cannot get its own level. Free up an empty software channel in Wave Link, or give \(app.displayName) one of its own, then try again."
+    case .relocationNotPermitted:
+      return
+        "\(app.displayName) shares a Wave Link channel with other apps, so Waves left it alone. Move it to its own Wave Link channel, or change its level here yourself, to control it from Waves."
+    default:
+      return error.localizedDescription
+    }
+  }
+
+  func waveLinkBridgeStatus() async -> WaveLinkBridgeStatus? {
+    guard let waveLinkController else { return nil }
+    return await waveLinkController.currentStatus()
+  }
+
+  func probeWaveLinkBridge() async -> WaveLinkBridgeStatus? {
+    guard let waveLinkController else { return nil }
+    return await waveLinkController.inspect()
   }
 
   /// Resolves the race where the verified router quits while a bridge apply is
@@ -294,7 +326,7 @@ extension WorkspaceAudioControlBackend {
     if shouldControlThroughWaveLink(app, conflict: conflict) {
       snapshot.apps[index].routeHealthContext = .waveLinkBridge
       snapshot.apps[index].notes =
-        "Waves can control this app through Wave Link without creating a second audio route."
+        "Wave Link is mixing this app. Volume and mute from Waves go through its Wave Link channel; boost, EQ, and output routing stay in Wave Link."
     } else {
       snapshot.apps[index].routeHealthContext =
         switch conflict.kind {
@@ -305,18 +337,26 @@ extension WorkspaceAudioControlBackend {
     }
   }
 
+  /// `routerActivity` is evaluated only when a conflict verdict is actually
+  /// needed: on a re-observation tick, or when a debounced activation lands.
+  /// Quiet ticks advance the debouncers without touching Core Audio or
+  /// Security at all.
   func observeCompetingRouterConflicts(
     at now: Duration,
-    routerActivity: VerifiedRouterActivitySnapshot?
+    routerActivity: () -> VerifiedRouterActivitySnapshot?
   ) -> Set<String> {
     var recoveredRouteIDs = Set<String>()
     var changed = false
+    let reobserve = routerObservationGeneration != consumedRouterObservationGeneration
     for index in snapshot.apps.indices {
       let app = snapshot.apps[index]
-      let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity)
       var observation = routerConflictObservationByRuntimeID[app.id] ?? RouterConflictObservationDebouncer()
+      var conflict: VerifiedRouterConflict?
+      var evaluatedConflict = false
       let action: RouterConflictObservationAction
-      if routerObservationGeneration != consumedRouterObservationGeneration {
+      if reobserve {
+        conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity())
+        evaluatedConflict = true
         action = observation.observe(conflictIsActive: conflict != nil, at: now)
       } else {
         action = observation.advance(to: now)
@@ -325,9 +365,11 @@ extension WorkspaceAudioControlBackend {
 
       switch action {
       case .conflictActivated:
-        guard app.routingState == .managed || controllers[app.id] != nil,
-          let conflict
-        else { continue }
+        guard app.routingState == .managed || controllers[app.id] != nil else { continue }
+        if !evaluatedConflict {
+          conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity())
+        }
+        guard let conflict else { continue }
         suspendManagedRouteForConflict(at: index, conflict: conflict)
         changed = true
       case .conflictReleased:
@@ -349,6 +391,15 @@ extension WorkspaceAudioControlBackend {
       }
     }
     consumedRouterObservationGeneration = routerObservationGeneration
+    // Debouncers are keyed by runtime ID, which changes every time an app
+    // relaunches. Drop the ones whose app is gone so the table tracks the live
+    // session instead of accumulating one entry per launch for the process.
+    if routerConflictObservationByRuntimeID.count > snapshot.apps.count {
+      let liveRuntimeIDs = Set(snapshot.apps.map(\.id))
+      routerConflictObservationByRuntimeID = routerConflictObservationByRuntimeID.filter {
+        liveRuntimeIDs.contains($0.key)
+      }
+    }
     if changed { snapshot.updatedAt = .now }
     return recoveredRouteIDs
   }

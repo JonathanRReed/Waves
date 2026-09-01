@@ -90,13 +90,52 @@ import WavesAudioCore
 }
 
 @Test func geometryMismatchCoalescesIntoOneAsynchronousRecovery() {
-  var recovery = GeometryRecoveryCoordinator(maximumAttempts: 3, baseBackoff: .milliseconds(100))
+  var recovery = GeometryRecoveryCoordinator(
+    maximumAttempts: 3,
+    baseBackoff: .milliseconds(100),
+    verificationWindow: .seconds(1)
+  )
 
   #expect(recovery.signalMismatch(at: .zero) == .scheduleRecovery(at: .zero))
   #expect(recovery.signalMismatch(at: .zero) == .none)
   #expect(recovery.beginRecovery(at: .zero) == .attempt(number: 1))
-  #expect(recovery.finishRecovery(succeeded: true, at: .zero) == .recovered)
+  // A successful rebuild is only provisional until the new route has rendered
+  // clean for the whole verification window.
+  #expect(recovery.finishRecovery(succeeded: true, at: .zero) == .verifying)
+  #expect(recovery.health == .recovering)
+  #expect(recovery.isVerifying)
+  #expect(!recovery.hasPendingRecoveryWork)
+  #expect(recovery.advance(to: .milliseconds(999)) == .none)
+  #expect(recovery.advance(to: .seconds(1)) == .recovered)
   #expect(recovery.health == .healthy)
+  #expect(!recovery.isVerifying)
+}
+
+@Test func persistentGeometryMismatchBacksOffAndExhaustsInsteadOfRebuildingForever() {
+  var recovery = GeometryRecoveryCoordinator(
+    maximumAttempts: 3,
+    baseBackoff: .milliseconds(100),
+    verificationWindow: .seconds(1)
+  )
+
+  // Attempt 1 rebuilds immediately; the rebuilt route mismatches again on the
+  // next tick, which used to reset the counter and rebuild at once.
+  #expect(recovery.signalMismatch(at: .zero) == .scheduleRecovery(at: .zero))
+  #expect(recovery.beginRecovery(at: .zero) == .attempt(number: 1))
+  #expect(recovery.finishRecovery(succeeded: true, at: .zero) == .verifying)
+  #expect(recovery.signalMismatch(at: .milliseconds(250)) == .scheduleRecovery(at: .milliseconds(350)))
+  #expect(recovery.beginRecovery(at: .milliseconds(250)) == .none)
+
+  #expect(recovery.beginRecovery(at: .milliseconds(350)) == .attempt(number: 2))
+  #expect(recovery.finishRecovery(succeeded: true, at: .milliseconds(350)) == .verifying)
+  #expect(recovery.signalMismatch(at: .milliseconds(600)) == .scheduleRecovery(at: .milliseconds(800)))
+
+  #expect(recovery.beginRecovery(at: .milliseconds(800)) == .attempt(number: 3))
+  #expect(recovery.finishRecovery(succeeded: true, at: .milliseconds(800)) == .verifying)
+  #expect(recovery.signalMismatch(at: .milliseconds(1_050)) == .exhausted)
+  #expect(recovery.health == .exhausted("Audio route recovery failed after 3 attempts. Refresh the route or restart Waves."))
+  #expect(recovery.signalMismatch(at: .seconds(2)) == .none)
+  #expect(!recovery.hasPendingRecoveryWork)
 }
 
 @Test func geometryRecoveryUsesBoundedBackoffAndPublishesExhaustedHealth() {

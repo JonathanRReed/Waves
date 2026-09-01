@@ -148,18 +148,32 @@ enum AppRuntimeDiscovery {
         bundleID: app.bundleIdentifier,
         displayName: localizedName
       )
-      let iconData = await resolveIconData(
-        logicalID: logicalID,
-        knownIconData: knownIconData,
-        captureRaster: { iconRaster(for: app) },
-        iconEncoder: iconEncoder
+      // Only apps that can become mixer rows need an icon. Helpers, agents,
+      // renderer processes, and nested bundles are captured for process-family
+      // resolution but are rejected by discovery a moment later; rasterizing
+      // and PNG-encoding their icons on every 8-second pass was dozens of
+      // image encodes a minute that were thrown away unread.
+      let bundlePath = app.bundleURL?.path
+      let isManageable = AppDiscoveryPolicy.isManageableApp(
+        named: localizedName,
+        bundleID: app.bundleIdentifier,
+        bundlePath: bundlePath
       )
+      let iconData =
+        isManageable
+        ? await resolveIconData(
+          logicalID: logicalID,
+          knownIconData: knownIconData,
+          captureRaster: { iconRaster(for: app) },
+          iconEncoder: iconEncoder
+        )
+        : nil
       applications.append(
         CapturedApplication(
           pid: app.processIdentifier,
           bundleID: app.bundleIdentifier,
           localizedName: localizedName,
-          bundlePath: app.bundleURL?.path,
+          bundlePath: bundlePath,
           activationPolicy: activationPolicy(for: app.activationPolicy),
           isActive: app.isActive,
           iconTIFFData: iconData,
@@ -185,6 +199,10 @@ enum AppRuntimeDiscovery {
     return await iconEncoder.encode(raster)
   }
 
+  private static func canonicalPath(_ path: String) -> String {
+    URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+  }
+
   /// Pure transformation for detached discovery work. The input is Sendable and
   /// contains every value that would otherwise require AppKit access.
   static func discoverRunningApps(
@@ -196,6 +214,10 @@ enum AppRuntimeDiscovery {
     let runningApps = capture.applications.filter { app in
       app.bundleID != currentBundleID && app.activationPolicy != .prohibited
     }
+    // Canonicalize the audible parent paths once. Each canonicalization is an
+    // lstat per path component; doing it inside the candidate × audible loop
+    // was on the order of a thousand lstats per 8-second pass.
+    let canonicalAudibleParentBundlePaths = Set(audibleParentBundlePaths.map(canonicalPath))
 
     let candidateApps =
       runningApps
@@ -244,10 +266,7 @@ enum AppRuntimeDiscovery {
         let isAudibleByPID = !audiblePIDs.isEmpty && !familyPIDs.isDisjoint(with: audiblePIDs)
         let isAudibleByBundle =
           app.bundlePath.map { bundlePath in
-            audibleParentBundlePaths.contains { candidate in
-              URL(fileURLWithPath: candidate).standardizedFileURL.resolvingSymlinksInPath().path
-                == URL(fileURLWithPath: bundlePath).standardizedFileURL.resolvingSymlinksInPath().path
-            }
+            canonicalAudibleParentBundlePaths.contains(canonicalPath(bundlePath))
           } ?? false
         let isAudible = isAudibleByPID || isAudibleByBundle
         let isFrontmost = familyApps.contains(where: \.isActive)
