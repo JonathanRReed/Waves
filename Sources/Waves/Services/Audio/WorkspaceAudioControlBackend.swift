@@ -1365,6 +1365,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
       let tapUID = try readTapUID(tapID)
       let audioFormatPlan = try readTapFormatPlan(tapID)
+      // The aggregate will carry this device's input streams ahead of the
+      // tap's (a headset's microphone, an interface's inputs). The controller
+      // needs the count to enable only the tap's streams for its IO proc.
+      let subDeviceInputStreamCount = inputStreamCount(forDeviceUID: outputDeviceUID)
       let aggregateDeviceDescription: [String: Any] = [
         kAudioAggregateDeviceNameKey: "Waves-\(app.displayName)",
         kAudioAggregateDeviceUIDKey: "com.waves.aggregate.\(UUID().uuidString)",
@@ -1377,14 +1381,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           [
             kAudioSubDeviceUIDKey: outputDeviceUID,
             kAudioSubDeviceDriftCompensationKey: false,
-            // Only the sub-device's *output* side belongs in this aggregate.
-            // Without this, a device that also has inputs (USB headsets and
-            // microphones with a headphone jack, audio interfaces, virtual
-            // devices) contributes its input streams next to the tap, the IO
-            // callback sees two input buffers instead of one, every cycle is a
-            // geometry mismatch, the app is silenced, and the device's input
-            // is held open by Waves for no reason.
-            kAudioSubDeviceInputChannelsKey: 0,
           ]
         ],
         kAudioAggregateDeviceTapListKey: [
@@ -1415,7 +1411,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         equalizerSettings: equalizerSettings,
         managedAudioEqualizerSettings: managedAudioEqualizerSettings,
         adaptiveGainDB: adaptiveGainDBByAppID[app.logicalID] ?? 0,
-        audioFormatPlan: audioFormatPlan
+        audioFormatPlan: audioFormatPlan,
+        subDeviceInputStreamCount: subDeviceInputStreamCount
       )
 
       controllerOwnsResources = true

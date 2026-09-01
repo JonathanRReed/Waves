@@ -163,6 +163,15 @@ extension WorkspaceAudioControlBackend {
     allDeviceIDs().contains { OutputDeviceInventory.deviceUID($0) == uid }
   }
 
+  /// Input streams the device with `uid` exposes, or 0 when it has none or
+  /// cannot be found. Feeds the tap controller's input stream layout.
+  func inputStreamCount(forDeviceUID uid: String) -> Int {
+    guard let deviceID = allDeviceIDs().first(where: { OutputDeviceInventory.deviceUID($0) == uid }) else {
+      return 0
+    }
+    return OutputDeviceInventory.inputStreamCount(deviceID)
+  }
+
   private func allDeviceIDs() -> [AudioObjectID] {
     OutputDeviceInventory.allDeviceIDs { message in
       logger.warning("\(message, privacy: .public)")

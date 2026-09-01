@@ -875,3 +875,33 @@ private final class CaptureProbeCounter: @unchecked Sendable {
   #expect(RouteLivenessJudgment.isRendering(currentTick: 0, previousTick: 9_999))
   #expect(RouteLivenessJudgment.isRendering(currentTick: 0, previousTick: .max))
 }
+
+// MARK: - Tap input stream layout
+
+@Test func tapInputStreamLayoutEnablesOnlyTheTrailingTapStreamsWhenCountsAgree() {
+  // Output-only device (built-in speakers, Bluetooth output): the tap is the
+  // only input stream, everything is enabled, no offset.
+  let speakers = TapInputStreamLayout(aggregateInputStreamCount: 1, subDeviceInputStreamCount: 0, tapStreamCount: 1)
+  #expect(speakers.tapStreamOffset == 0)
+  #expect(speakers.enabledStreamRange == nil)
+
+  // A headset or virtual device with one input stream: the device's stream
+  // comes first, the tap's after it. Only the tap's stream is enabled.
+  let headset = TapInputStreamLayout(aggregateInputStreamCount: 2, subDeviceInputStreamCount: 1, tapStreamCount: 1)
+  #expect(headset.tapStreamOffset == 1)
+  #expect(headset.enabledStreamRange == 1..<2)
+
+  // An interface with several input streams and a non-interleaved tap.
+  let interface = TapInputStreamLayout(aggregateInputStreamCount: 5, subDeviceInputStreamCount: 3, tapStreamCount: 2)
+  #expect(interface.tapStreamOffset == 3)
+  #expect(interface.enabledStreamRange == 3..<5)
+
+  // Counts that do not add up mean the layout is not understood: enable
+  // everything and let the callback's exact-count check report a mismatch.
+  let unexpected = TapInputStreamLayout(aggregateInputStreamCount: 3, subDeviceInputStreamCount: 1, tapStreamCount: 1)
+  #expect(unexpected.tapStreamOffset == 0)
+  #expect(unexpected.enabledStreamRange == nil)
+  let missingTap = TapInputStreamLayout(aggregateInputStreamCount: 1, subDeviceInputStreamCount: 1, tapStreamCount: 1)
+  #expect(missingTap.tapStreamOffset == 0)
+  #expect(missingTap.enabledStreamRange == nil)
+}

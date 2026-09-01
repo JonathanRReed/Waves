@@ -56,6 +56,16 @@ final class PerAppTapController: @unchecked Sendable {
   private let callbackQueueToken = UUID()
   private var ioProcID: AudioDeviceIOProcID?
   private var didStartIOProc = false
+  /// Input streams the output device itself contributes to the aggregate. An
+  /// aggregate carries every stream of its sub-device in both directions, so a
+  /// device that also records (USB headsets, microphones with a headphone
+  /// jack, audio interfaces, virtual devices) puts its input streams into the
+  /// aggregate ahead of the tap's. Only the tap's streams may feed the IOProc:
+  /// see `TapInputStreamLayout`.
+  private let subDeviceInputStreamCount: Int
+  /// Index of the first tap stream inside the aggregate's input buffer list.
+  /// Written once in `start()` before the IO proc exists, read by the callback.
+  private var tapInputStreamOffset = 0
   private let testingIsActive: Bool
   private let disposeOnce = IdempotentCleanupResult()
   private var retainedCleanupDegradations: [CleanupDegradation] = []
@@ -86,11 +96,13 @@ final class PerAppTapController: @unchecked Sendable {
     managedAudioEqualizerSettings: GlobalEqualizerSettings,
     adaptiveGainDB: Float,
     audioFormatPlan: AudioFormatPlan,
+    subDeviceInputStreamCount: Int = 0,
     teardownNativeCalls: PerAppTapControllerTeardownNativeCalls? = nil,
     testingIsActive: Bool = false
   ) throws {
     self.appID = appID
     self.appName = appName
+    self.subDeviceInputStreamCount = max(0, subDeviceInputStreamCount)
     self.targetProcessFamily = TargetProcessFamily(
       logicalID: logicalID,
       processObjectIDs: targetProcessObjectIDs,
@@ -367,7 +379,18 @@ final class PerAppTapController: @unchecked Sendable {
     }
 
     ioProcID = procID
-    try configureStreamUsage(for: procID)
+    let inputStreamCount = try streamCount(scope: kAudioObjectPropertyScopeInput)
+    let layout = TapInputStreamLayout(
+      aggregateInputStreamCount: Int(inputStreamCount),
+      subDeviceInputStreamCount: subDeviceInputStreamCount,
+      tapStreamCount: audioFormatPlan.isInterleaved ? 1 : audioFormatPlan.channelCount
+    )
+    tapInputStreamOffset = layout.tapStreamOffset
+    try configureStreamUsage(
+      for: procID,
+      scope: kAudioObjectPropertyScopeInput,
+      enabledStreamRange: layout.enabledStreamRange
+    )
     try configureStreamUsage(for: procID, scope: kAudioObjectPropertyScopeOutput)
 
     let startStatus = AudioDeviceStart(aggregateDeviceID, procID)
@@ -390,13 +413,14 @@ final class PerAppTapController: @unchecked Sendable {
     didStartIOProc = true
   }
 
-  private func configureStreamUsage(for procID: AudioDeviceIOProcID) throws {
-    try configureStreamUsage(for: procID, scope: kAudioObjectPropertyScopeInput)
-  }
-
+  /// Enables `enabledStreamRange` for the IO proc (every stream when nil).
+  /// A disabled stream keeps its slot in the callback's buffer list with a
+  /// NULL data pointer, which is how the callback can address the tap's
+  /// buffers by index without ever touching the device's own input.
   private func configureStreamUsage(
     for procID: AudioDeviceIOProcID,
-    scope: AudioObjectPropertyScope
+    scope: AudioObjectPropertyScope,
+    enabledStreamRange: Range<Int>? = nil
   ) throws {
     let streamCount = try streamCount(scope: scope)
     guard streamCount > 0 else { return }
@@ -433,7 +457,7 @@ final class PerAppTapController: @unchecked Sendable {
       .advanced(by: streamsOffset)
       .assumingMemoryBound(to: UInt32.self)
     for index in 0..<Int(streamCount) {
-      streams[index] = 1
+      streams[index] = enabledStreamRange.map { $0.contains(index) ? 1 : 0 } ?? 1
     }
 
     let status = AudioObjectSetPropertyData(
@@ -719,7 +743,13 @@ final class PerAppTapController: @unchecked Sendable {
     let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
     let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
     let expectedBufferCount = audioFormatPlan.isInterleaved ? 1 : audioFormatPlan.channelCount
-    guard inputBuffers.count == expectedBufferCount,
+    // The tap's buffers are the last `expectedBufferCount` entries of the
+    // input list; anything before them belongs to the output device's own
+    // inputs and was left disabled. Requiring the exact total keeps a
+    // misidentified layout a mismatch rather than a silent render of the
+    // wrong stream (the device's microphone, say) to the speakers.
+    let inputOffset = tapInputStreamOffset
+    guard inputBuffers.count == inputOffset + expectedBufferCount,
       outputBuffers.count == expectedBufferCount
     else {
       return false
@@ -727,7 +757,7 @@ final class PerAppTapController: @unchecked Sendable {
 
     var expectedByteCount: Int?
     for index in 0..<expectedBufferCount {
-      let inputBuffer = inputBuffers[index]
+      let inputBuffer = inputBuffers[inputOffset + index]
       let outputBuffer = outputBuffers[index]
       let expectedChannels =
         audioFormatPlan.isInterleaved
@@ -777,6 +807,7 @@ final class PerAppTapController: @unchecked Sendable {
     var finalSum: Float = 0
     var finalSampleCount: UInt32 = 0
     var channelOffset = 0
+    let inputOffset = tapInputStreamOffset
 
     let manualGain = volume * volumeBoost
 
@@ -786,12 +817,12 @@ final class PerAppTapController: @unchecked Sendable {
       let currentChannelOffset = channelOffset
       channelOffset += bufferChannelCount
       guard let outputPointer = outputBuffer.mData else { continue }
-      guard index < inputBuffers.count else {
+      guard inputOffset + index < inputBuffers.count else {
         memset(outputPointer, 0, Int(outputBuffer.mDataByteSize))
         continue
       }
 
-      let inputBuffer = inputBuffers[index]
+      let inputBuffer = inputBuffers[inputOffset + index]
       guard let inputPointer = inputBuffer.mData else {
         memset(outputPointer, 0, Int(outputBuffer.mDataByteSize))
         continue
@@ -896,5 +927,34 @@ final class PerAppTapController: @unchecked Sendable {
     }
 
     callbackQueue.sync {}
+  }
+}
+
+/// Which of an aggregate device's input streams carry the tap.
+///
+/// Core Audio lists a sub-device's streams first and appends the tap's after
+/// them (verified on macOS 27 with a virtual device that has one input
+/// stream: the aggregate reported the device's `micr` stream at index 0 and
+/// the tap's stream, terminal type unknown, at index 1). When the counts add
+/// up, only the trailing tap streams are enabled and the callback addresses
+/// them by offset. When they do not, every stream stays enabled and the
+/// callback's exact-count check reports the mismatch, which the bounded
+/// geometry recovery then handles.
+struct TapInputStreamLayout: Equatable, Sendable {
+  let tapStreamOffset: Int
+  let enabledStreamRange: Range<Int>?
+
+  init(aggregateInputStreamCount: Int, subDeviceInputStreamCount: Int, tapStreamCount: Int) {
+    let tapStreamCount = max(1, tapStreamCount)
+    let subDeviceInputStreamCount = max(0, subDeviceInputStreamCount)
+    if subDeviceInputStreamCount > 0,
+      aggregateInputStreamCount == subDeviceInputStreamCount + tapStreamCount
+    {
+      tapStreamOffset = subDeviceInputStreamCount
+      enabledStreamRange = subDeviceInputStreamCount..<aggregateInputStreamCount
+    } else {
+      tapStreamOffset = 0
+      enabledStreamRange = nil
+    }
   }
 }

@@ -40,6 +40,264 @@ extension WaveLinkControlling {
     try await apply(bundleIdentifier: bundleIdentifier, volume: volume, isMuted: isMuted)
   }
 
+  func inspect() async -> WaveLinkBridgeStatus { .idle }
+
+  func currentStatus() async -> WaveLinkBridgeStatus { .idle }
+}
+
+struct WaveLinkControlConfirmation: Equatable, Sendable {
+  let channelID: String
+  let channelName: String
+  let appliedVolume: Float
+  let isMuted: Bool
+  /// True when this apply moved the app onto its own channel.
+  var relocated: Bool = false
+}
+
+enum WaveLinkControlBridgeError: Error, Equatable, LocalizedError, Sendable {
+  case invalidBundleIdentifier
+  case invalidVolume
+  case unavailable(String)
+  case incompatibleApplication
+  case unverifiedLoopbackPeer
+  case dedicatedChannelRequired(String)
+  case relocationNotPermitted(String)
+  case protocolViolation(String)
+  case readBackMismatch(String)
+
+  var errorDescription: String? {
+    switch self {
+    case .invalidBundleIdentifier:
+      "Wave Link control requires the app's exact bundle identifier."
+    case .invalidVolume:
+      "Wave Link rejected a non-finite or out-of-range volume."
+    case .unavailable(let detail):
+      "Wave Link control is unavailable: \(detail)"
+    case .incompatibleApplication:
+      "The control service that answered is not a compatible Elgato Wave Link 3."
+    case .unverifiedLoopbackPeer:
+      "The running Wave Link is not signed by Elgato, so Waves will not send it commands."
+    case .dedicatedChannelRequired(let appID):
+      "Every Wave Link software channel already holds an app, so \(appID) cannot get its own level. In Wave Link, give it a channel of its own or empty one."
+    case .relocationNotPermitted(let appID):
+      "\(appID) shares a Wave Link channel with other apps. Waves only moves an app to its own Wave Link channel when you change its level yourself."
+    case .protocolViolation(let detail):
+      "Wave Link returned an invalid control response: \(detail)"
+    case .readBackMismatch(let detail):
+      "Wave Link did not confirm the requested app level: \(detail)"
+    }
+  }
+}
+
+struct WaveLinkApplicationInfo: Codable, Equatable, Sendable {
+  let interfaceRevision: Int
+  let appID: String
+  let name: String?
+  var version: String?
+
+  init(interfaceRevision: Int, appID: String, name: String?, version: String? = nil) {
+    self.interfaceRevision = interfaceRevision
+    self.appID = appID
+    self.name = name
+    self.version = version
+  }
+
+  /// Wave Link 3 reset its protocol: `appID` is "EWL" and `interfaceRevision`
+  /// restarted at 1, the value 3.0 through 3.2 report and the gate the
+  /// official Stream Deck plugin applies. Earlier generations answer "egwl"
+  /// with revisions 6-7 and a different method set, and are rejected.
+  var isSupportedWaveLink3: Bool {
+    appID == "EWL" && interfaceRevision >= 1
+  }
+}
+
+struct WaveLinkChannelApp: Codable, Equatable, Sendable {
+  let id: String
+  var name: String?
+
+  init(id: String, name: String? = nil) {
+    self.id = id
+    self.name = name
+  }
+}
+
+struct WaveLinkChannel: Codable, Equatable, Sendable {
+  let id: String
+  let name: String
+  let type: String
+  var level: Float
+  var isMuted: Bool
+  var apps: [WaveLinkChannelApp]
+
+  init(
+    id: String,
+    name: String,
+    type: String,
+    level: Float,
+    isMuted: Bool,
+    apps: [WaveLinkChannelApp]
+  ) {
+    self.id = id
+    self.name = name
+    self.type = type
+    self.level = level
+    self.isMuted = isMuted
+    self.apps = apps
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
+    type = try container.decodeIfPresent(String.self, forKey: .type) ?? ""
+    level = try container.decodeIfPresent(Float.self, forKey: .level) ?? 1
+    isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+    // Hardware channels omit `apps` entirely; software channels list them.
+    apps = try container.decodeIfPresent([WaveLinkChannelApp].self, forKey: .apps) ?? []
+  }
+
+  var isSoftware: Bool {
+    type.caseInsensitiveCompare("software") == .orderedSame
+  }
+
+  func holds(_ bundleIdentifier: String) -> Bool {
+    apps.contains { $0.id.caseInsensitiveCompare(bundleIdentifier) == .orderedSame }
+  }
+
+  var statusSummary: WaveLinkBridgeStatus.ChannelSummary {
+    WaveLinkBridgeStatus.ChannelSummary(
+      id: id,
+      name: name,
+      isSoftware: isSoftware,
+      appIdentifiers: apps.map(\.id),
+      level: level,
+      isMuted: isMuted
+    )
+  }
+}
+
+struct WaveLinkChannelsResponse: Codable, Equatable, Sendable {
+  let channels: [WaveLinkChannel]
+}
+
+/// Where the production session is connected, for status reporting.
+struct WaveLinkConnectionDescription: Equatable, Sendable {
+  let endpoint: String
+  let processIdentifier: pid_t
+}
+
+actor WaveLinkControlBridge: WaveLinkControlling {
+  typealias Request = @Sendable (_ method: String, _ params: Data?) async throws -> Data
+  typealias PeerValidator = @Sendable () async throws -> Void
+  typealias SequenceFinalizer = @Sendable () async -> Void
+  typealias ConnectionDescriber = @Sendable () async -> WaveLinkConnectionDescription?
+
+  private struct AddToChannelRequest: Encodable {
+    let appID: String
+    let channelID: String
+
+    enum CodingKeys: String, CodingKey {
+      case appID = "appId"
+      case channelID = "channelId"
+    }
+  }
+
+  private struct SetChannelRequest: Encodable {
+    let id: String
+    let level: Float
+    let isMuted: Bool
+  }
+
+  private static let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "WaveLinkBridge")
+
+  private let request: Request
+  private let validatePeer: PeerValidator
+  private let finishSequence: SequenceFinalizer
+  private let describeConnection: ConnectionDescriber
+  private let encoder = JSONEncoder()
+  private let decoder = JSONDecoder()
+  private var status: WaveLinkBridgeStatus = .idle
+  /// Tail of the strictly serialized queue of sequences on this bridge, so a
+  /// Settings connection test can never interleave with an in-flight apply on
+  /// the shared control socket.
+  private var sequenceTail: Task<Void, Never>?
+
+  init(
+    request: @escaping Request,
+    validatePeer: @escaping PeerValidator = {},
+    finishSequence: @escaping SequenceFinalizer = {},
+    describeConnection: @escaping ConnectionDescriber = { nil }
+  ) {
+    self.request = request
+    self.validatePeer = validatePeer
+    self.finishSequence = finishSequence
+    self.describeConnection = describeConnection
+  }
+
+  init() {
+    // One session owns discovery, peer verification, the socket, and the
+    // handshake, so the transport destination and the verified peer can never
+    // disagree.
+    let session = WaveLinkLoopbackSession()
+    self.request = { method, params in
+      try await session.request(method: method, params: params)
+    }
+    self.validatePeer = {
+      _ = try await session.connect()
+    }
+    self.finishSequence = {
+      await session.endSequence()
+    }
+    self.describeConnection = {
+      await session.connectionDescription
+    }
+  }
+
+  /// Declared `async` to match the protocol requirement exactly: a synchronous
+  /// actor method with the same name loses overload resolution to the
+  /// protocol extension's default at async call sites, which would hand every
+  /// caller the static idle value instead of the recorded status.
+  func currentStatus() async -> WaveLinkBridgeStatus {
+    status
+  }
+
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool
+  ) async throws -> WaveLinkControlConfirmation {
+    try await apply(
+      bundleIdentifier: bundleIdentifier,
+      volume: volume,
+      isMuted: isMuted,
+      allowsChannelRelocation: true
+    )
+  }
+
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool,
+    allowsChannelRelocation: Bool
+  ) async throws -> WaveLinkControlConfirmation {
+    try await serialized {
+      do {
+        let confirmation = try await self.performApply(
+          bundleIdentifier: bundleIdentifier,
+          volume: volume,
+          isMuted: isMuted,
+          allowsChannelRelocation: allowsChannelRelocation
+        )
+        await self.finishSequence()
+        return confirmation
+      } catch {
+        await self.recordFailure(error)
+        await self.finishSequence()
+        throw error
+      }
+    }
+  }
+
   func inspect() async -> WaveLinkBridgeStatus {
     // The body records its own outcome and never throws, so the sequence
     // itself cannot fail; `try?` only satisfies the serialized signature.

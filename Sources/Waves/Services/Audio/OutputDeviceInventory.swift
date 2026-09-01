@@ -34,6 +34,18 @@ enum OutputDeviceInventory {
     return ids.filter { $0 != .unknown }
   }
 
+  /// Number of input streams the device exposes, or 0 when unreadable.
+  static func inputStreamCount(_ deviceID: AudioObjectID) -> Int {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyStreams,
+      mScope: kAudioObjectPropertyScopeInput,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else { return 0 }
+    return Int(size) / MemoryLayout<AudioObjectID>.size
+  }
+
   static func hasOutputStreams(_ deviceID: AudioObjectID) -> Bool {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioDevicePropertyStreams,

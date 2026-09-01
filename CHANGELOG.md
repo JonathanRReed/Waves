@@ -40,11 +40,13 @@ the app.
 - Explain Wave Link states in plain language in mixer rows, the route badge,
   Settings, and Help, and name the app rather than its bundle identifier when
   no free Wave Link channel is available.
-- Build the per-app aggregate device from the output device's output side
-  only. A device that also has inputs (USB headsets, microphones with a
-  headphone jack, audio interfaces, virtual devices) contributed its input
-  streams next to the tap, every IO cycle was a geometry mismatch, the app
-  was silenced, and Waves held the device's input open.
+- Feed the per-app IO proc only the tap's input stream. An aggregate device
+  carries every stream of its output device, so a device that also records
+  (USB headsets, microphones with a headphone jack, audio interfaces,
+  virtual devices) put its input stream ahead of the tap's; every IO cycle
+  was then a geometry mismatch, the app was silenced, and Waves held the
+  device's input open. The device's own input streams now stay disabled for
+  the IO proc and the callback addresses the tap's buffers by offset.
 - Bound geometry-mismatch recovery. A rebuild now has to render clean for a
   full second before it counts as recovered; a mismatch that returns sooner
   backs off and gives up after three attempts, releasing the tap so the app
