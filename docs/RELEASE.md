@@ -8,10 +8,12 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-Version 1.6.0 build 14 is the latest published release. GitHub published it on
-2026-08-16 from the signed annotated `v1.6.0` tag. The release includes the DMG,
-checksum, notary log, source identity, candidate and publication evidence, and
-dSYM. Later commits on `main` are not part of that published build.
+Version 1.7.0 build 16 is the latest published release. GitHub published it on
+2026-09-01 from the signed annotated `v1.7.0` tag at
+`54ca3109db33ee0e6328188c5ded1fc14e6e6617`. The release includes the DMG,
+checksum, notary log, source identity, candidate and publication evidence,
+both external receipts, and dSYM. Later commits on `main` are not part of that
+published build.
 
 The separately versioned Stream Deck companion at
 `/Users/jonathanreed/Downloads/waves-streamdeck` must pass its Bun typecheck,
