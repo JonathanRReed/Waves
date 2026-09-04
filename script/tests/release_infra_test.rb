@@ -1124,6 +1124,9 @@ class ReleaseInfraTest < Minitest::Test
         results.json
       ]
       assert_equal expected_files, Dir.children(output).sort
+      anchor_path = "#{output}.sha256"
+      assert_equal Digest::SHA256.file(File.join(output, "SHA256SUMS")).hexdigest,
+        File.read(anchor_path).split.first
 
       handoff_manifest = WavesRelease::StrictJSON.load(File.join(output, "handoff.json"))
       assert_equal 1, handoff_manifest.fetch("schemaVersion")
@@ -1150,6 +1153,8 @@ class ReleaseInfraTest < Minitest::Test
         "5887c0c46b824d610016dbfe7e34a1c1e2da2c4bc270555c15221ca5b694face"
       instructions = File.read(File.join(output, "README.md"))
       assert_includes instructions, "results.json"
+      assert_includes instructions, "separate,\n   authenticated channel"
+      assert_includes instructions, "TRUSTED_SHA256SUMS_SHA256"
       assert_includes instructions, "finalize-receipt.rb"
       assert_includes instructions, "remote-elgato-receipt.json"
       assert_includes instructions, "b" * 40
@@ -1202,6 +1207,7 @@ class ReleaseInfraTest < Minitest::Test
       )
 
       finalizer = File.join(output, "finalize-receipt.rb")
+      trusted_checksums_digest = Digest::SHA256.file(File.join(output, "SHA256SUMS")).hexdigest
       results_path = File.join(output, "results.json")
       assert File.executable?(finalizer), "expected a runnable receipt finalizer in the handoff"
       return unless File.executable?(finalizer)
@@ -1225,10 +1231,28 @@ class ReleaseInfraTest < Minitest::Test
         end
       end
 
+      original_checksums = File.binread(File.join(output, "SHA256SUMS"))
+      original_readme = File.binread(File.join(output, "README.md"))
+      File.open(File.join(output, "README.md"), "a") { |file| file << "tampered\n" }
+      replacement = original_checksums.lines.map do |line|
+        line.end_with?("  README.md\n") ? "#{Digest::SHA256.file(File.join(output, "README.md")).hexdigest}  README.md\n" : line
+      end.join
+      File.binwrite(File.join(output, "SHA256SUMS"), replacement)
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ruby", "--disable-gems", finalizer, trusted_checksums_digest,
+        output, results_path, diagnostics, receipt
+      )
+      refute status.success?
+      assert_match(/trusted out-of-band digest/, stderr)
+      refute File.exist?(receipt)
+      File.binwrite(File.join(output, "SHA256SUMS"), original_checksums)
+      File.binwrite(File.join(output, "README.md"), original_readme)
+
       _stdout, stderr, status = Open3.capture3(
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1251,6 +1275,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1267,6 +1292,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1283,6 +1309,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1297,6 +1324,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
