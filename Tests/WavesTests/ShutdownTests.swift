@@ -188,6 +188,64 @@ func productionTerminationCoordinatorTimesOutWithinTwoHundredFiftyMilliseconds()
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
+func timedOutTerminationCancelsAndContainsCancellationIgnoringShutdown() async {
+  let coordinator = AppTerminationCoordinator(timeout: .milliseconds(5))
+  let recorder = TerminationReplyRecorder()
+  let completion = TerminationOutcomeProbe()
+  let lateCompletion = CancellationObservationProbe()
+  let gate = AsyncShutdownGate()
+
+  #expect(
+    coordinator.requestTermination(
+      shutdown: {
+        await gate.wait()
+        await lateCompletion.record(Task.isCancelled)
+        return AppShutdownResult()
+      },
+      report: {
+        recorder.outcomes.append($0)
+        completion.record($0)
+      },
+      reply: { recorder.replies.append($0) }
+    ) == .terminateLater
+  )
+  #expect(
+    coordinator.requestTermination(
+      shutdown: {
+        recorder.unexpectedShutdownStarts += 1
+        return AppShutdownResult()
+      },
+      report: { recorder.outcomes.append($0) },
+      reply: { recorder.replies.append($0) }
+    ) == .terminateLater
+  )
+
+  #expect(await completion.wait() == .timedOut)
+  #expect(coordinator.completedOutcome == .timedOut)
+  #expect(recorder.outcomes == [.timedOut])
+  #expect(recorder.replies == [true])
+
+  await gate.release()
+  #expect(await lateCompletion.wait() == true)
+  #expect(coordinator.completedOutcome == .timedOut)
+  #expect(recorder.outcomes == [.timedOut])
+  #expect(recorder.replies == [true])
+  #expect(recorder.unexpectedShutdownStarts == 0)
+
+  #expect(
+    coordinator.requestTermination(
+      shutdown: {
+        recorder.unexpectedShutdownStarts += 1
+        return AppShutdownResult()
+      },
+      report: { recorder.outcomes.append($0) },
+      reply: { recorder.replies.append($0) }
+    ) == .terminateNow
+  )
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
 func timedOutTerminationPersistsTruthBeforeReplyAndRepliesOnce() async throws {
   let directory = FileManager.default.temporaryDirectory
     .appendingPathComponent("waves-timeout-report-\(UUID().uuidString)", isDirectory: true)
@@ -372,6 +430,26 @@ private actor AsyncShutdownGate {
     let current = waiters
     waiters.removeAll()
     for waiter in current { waiter.resume() }
+  }
+}
+
+private actor CancellationObservationProbe {
+  private var observation: Bool?
+  private var waiters: [CheckedContinuation<Bool, Never>] = []
+
+  func record(_ observation: Bool) {
+    guard self.observation == nil else { return }
+    self.observation = observation
+    let current = waiters
+    waiters.removeAll()
+    for waiter in current { waiter.resume(returning: observation) }
+  }
+
+  func wait() async -> Bool {
+    if let observation { return observation }
+    return await withCheckedContinuation { continuation in
+      waiters.append(continuation)
+    }
   }
 }
 
