@@ -245,6 +245,9 @@ enum AppTerminationTimeoutDecision {
 
     let outcome = await firstOutcome.value()
     timeoutTask.cancel()
+    if case .timedOut = outcome {
+      shutdownTask.cancel()
+    }
     return outcome
   }
 }

@@ -128,6 +128,25 @@ import WavesAudioCore
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
+func terminationTimeoutDecisionOwnsCancellationWithDefaultCallback() async {
+  let gate = AsyncShutdownGate()
+  let lateCompletion = CancellationObservationProbe()
+
+  let outcome = await AppTerminationTimeoutDecision.awaitShutdown(
+    timeout: .milliseconds(5)
+  ) {
+    await gate.wait()
+    await lateCompletion.record(Task.isCancelled)
+    return AppShutdownResult()
+  }
+
+  #expect(outcome == .timedOut)
+  await gate.release()
+  #expect(await lateCompletion.wait() == true)
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
 func terminationCoordinatorRepliesExactlyOnceForEveryOutcome() async {
   await verifyTerminationCoordinator(
     expected: .clean(AppShutdownResult()),
