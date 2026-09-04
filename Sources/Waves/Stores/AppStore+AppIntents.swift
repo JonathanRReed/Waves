@@ -9,6 +9,69 @@ import WavesAudioCore
 // it to the coordinator, then reconcile the backend's result.
 
 extension AppStore {
+  func applyProfileEntries(
+    _ profile: Profile,
+    generation: UInt64,
+    reason: AppRouteIntentReason
+  ) async -> ProfileApplyResult {
+    var rows: [ProfileRowApplyResult] = []
+    rows.reserveCapacity(profile.entries.count)
+    var backendStatus = session.backendStatus
+
+    for (entryIndex, entry) in profile.entries.enumerated() {
+      guard entry.hasLevels else {
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .membershipOnly,
+            resultingApp: nil
+          )
+        )
+        continue
+      }
+      guard session.apps.contains(where: { $0.logicalID == entry.appID || $0.id == entry.appID }) else {
+        rows.append(
+          ProfileRowApplyResult(
+            entryIndex: entryIndex,
+            appID: entry.appID,
+            generation: generation,
+            outcome: .unavailable,
+            resultingApp: nil,
+            detail: "The app is not available in the current audio session."
+          )
+        )
+        continue
+      }
+
+      let intent = completeAppRouteIntent(
+        forAppID: entry.appID,
+        overrides: AppIntentOverrides(
+          desiredVolume: entry.desiredVolume,
+          isMuted: entry.isMuted,
+          volumeBoost: entry.volumeBoost
+        ),
+        generation: generation,
+        reason: reason
+      )
+      let result = await backend.applyAppIntent(intent)
+      backendStatus = result.backendStatus
+      rows.append(
+        ProfileRowApplyResult(
+          entryIndex: entryIndex,
+          appID: entry.appID,
+          generation: generation,
+          outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
+          resultingApp: result.resultingApp,
+          detail: result.detail
+        )
+      )
+    }
+
+    return ProfileApplyResult(rows: rows, backendStatus: backendStatus)
+  }
+
   private func allocateAppIntentGeneration() -> UInt64 {
     appIntentCoordinator.allocateGeneration()
   }

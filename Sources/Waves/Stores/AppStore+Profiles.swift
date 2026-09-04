@@ -15,15 +15,20 @@ extension AppStore {
   /// focus a synthesized profile, or announce themselves as a user apply.
   enum ProfileApplyPurpose: Sendable {
     case userProfile
+    case automation
     case mixReset
     case defaultAtStartup
+
+    var routeIntentReason: AppRouteIntentReason {
+      self == .automation ? .automation : .profileApply
+    }
   }
 
   func applyProfile(_ profile: Profile) {
     applyProfile(profile, purpose: .userProfile)
   }
 
-  private func applyProfile(_ profile: Profile, purpose: ProfileApplyPurpose) {
+  func applyProfile(_ profile: Profile, purpose: ProfileApplyPurpose) {
     guard requireAudioRunning() else { return }
     // Remember the mix as it stands so the user can come back to it when the
     // session ends. Only a deliberate, level-changing apply creates one, and an
@@ -61,8 +66,17 @@ extension AppStore {
 
     let backend = backend
     let task = Task { @MainActor [weak self] in
-      let backendResult = await backend.applyProfileWithResults(backendProfile, generation: generation)
       guard let self else { return }
+      let backendResult: ProfileApplyResult
+      if purpose == .automation {
+        backendResult = await applyProfileEntries(
+          backendProfile,
+          generation: generation,
+          reason: purpose.routeIntentReason
+        )
+      } else {
+        backendResult = await backend.applyProfileWithResults(backendProfile, generation: generation)
+      }
       defer { self.appIntentCoordinator.settleProfileTask(generation: generation) }
       await self.finishProfileApplication(
         profile,
@@ -88,6 +102,7 @@ extension AppStore {
       profile,
       generation: generation,
       excludedAppIDsAtSubmission: excludedAppIDsAtSubmission,
+      reason: purpose.routeIntentReason,
       backendResult: backendResult
     )
 
@@ -137,7 +152,7 @@ extension AppStore {
     syncOnboarding(using: session)
     persistSessionSnapshot()
     switch purpose {
-    case .userProfile:
+    case .userProfile, .automation:
       presentProfileFeedback(
         profile,
         result: result,
@@ -218,6 +233,7 @@ extension AppStore {
     _ profile: Profile,
     generation: UInt64,
     excludedAppIDsAtSubmission: Set<String>,
+    reason: AppRouteIntentReason,
     backendResult: ProfileApplyResult
   ) async -> ProfileApplyResult {
     let rowsByIndex = Dictionary(grouping: backendResult.rows, by: \.entryIndex)
@@ -294,7 +310,7 @@ extension AppStore {
           forAppID: entry.appID,
           overrides: AppIntentOverrides(isExcluded: true, muteSource: .user),
           generation: generation,
-          reason: .profileApply
+          reason: reason
         )
         let repaired = await backend.applyAppIntent(exclusionIntent)
         backendStatus = repaired.backendStatus

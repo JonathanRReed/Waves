@@ -1369,6 +1369,45 @@ func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async th
 }
 
 @MainActor
+@Test func URLProfileAppliesLevelsWithoutGrantingUserRouteAuthority() async {
+  let app = transactionTestApp(
+    id: "automation.profile",
+    desiredVolume: 0.8,
+    isMuted: false,
+    targetDeviceUID: "device.pinned-output"
+  )
+  let profile = Profile(
+    name: "URL mix",
+    entries: [
+      ProfileEntry(appID: app.logicalID, desiredVolume: 0.24, isMuted: true)
+    ]
+  )
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice()
+  )
+  fixture.store.preferences.enableURLScheme = true
+  fixture.store.profiles = [profile]
+
+  fixture.store.handleURLScheme(URL(string: "waves://apply-profile?name=URL%20mix")!)
+  await fixture.store.drainAppIntentTransactions()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  #expect(intents.first?.reason == .automation)
+  #expect(intents.first?.desiredVolume == 0.24)
+  #expect(intents.first?.isMuted == true)
+  #expect(intents.first?.targetDeviceUID == "device.pinned-output")
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.24)
+  #expect(fixture.store.session.apps.first?.isMuted == true)
+  #expect(fixture.store.mixRestorePoint == nil)
+  #expect(fixture.store.activeProfileID == nil)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
 private func assertBaselineState(
   _ store: AppStore,
   app: AudioApp,
