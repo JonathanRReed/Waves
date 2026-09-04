@@ -903,12 +903,11 @@ module WavesRelease
     end
 
     def stage_file!(source:, root:, name: File.basename(source))
-      validate_private_root!(root)
+      validated_root = validate_private_root!(root)
       identity = capture_identity!(path: source)
       raise Error, "staged release artifact must be a regular file" unless identity["type"] == "file"
-      expanded_root = File.expand_path(root)
-      destination = File.expand_path(File.join(expanded_root, name))
-      unless File.basename(name) == name && File.dirname(destination) == expanded_root
+      destination = File.expand_path(File.join(validated_root, name))
+      unless File.basename(name) == name && File.dirname(destination) == validated_root
         raise Error, "private staging destination escapes its root"
       end
       raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
@@ -928,12 +927,11 @@ module WavesRelease
     end
 
     def stage_directory!(source:, root:, name: File.basename(source))
-      validate_private_root!(root)
+      validated_root = validate_private_root!(root)
       identity = capture_identity!(path: source)
       raise Error, "staged release artifact must be a directory" unless identity["type"] == "directory"
-      expanded_root = File.expand_path(root)
-      destination = File.expand_path(File.join(expanded_root, name))
-      unless File.basename(name) == name && File.dirname(destination) == expanded_root
+      destination = File.expand_path(File.join(validated_root, name))
+      unless File.basename(name) == name && File.dirname(destination) == validated_root
         raise Error, "private staging destination escapes its root"
       end
       raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
@@ -1065,11 +1063,12 @@ module WavesRelease
     end
 
     def validate_private_root!(root)
-      stat = File.lstat(root)
-      raise Error, "private release root must not be a symbolic link" if stat.symlink?
+      raise Error, "private release root must not be a symbolic link" if File.lstat(root).symlink?
+      validated_root = File.realpath(root)
+      stat = File.lstat(validated_root)
       raise Error, "private release root must be owned by the current user" unless stat.uid == Process.uid
       raise Error, "private release root must have mode 0700" unless (stat.mode & 0o777) == 0o700
-      true
+      validated_root
     rescue Errno::ENOENT => error
       raise Error, "private release root is unavailable: #{error.message}"
     end

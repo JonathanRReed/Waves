@@ -1520,6 +1520,37 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_private_stage_uses_the_root_that_was_validated_through_symlink_and_parent_components
+    Dir.mktmpdir("waves-private-root-resolution") do |root|
+      base = File.join(root, "base")
+      real = File.join(root, "real")
+      validated_root = File.join(real, "private")
+      lexical_root = File.join(base, "private")
+      FileUtils.mkdir_p([base, File.join(real, "subdir"), validated_root, lexical_root])
+      FileUtils.chmod(0o700, validated_root)
+      FileUtils.chmod(0o777, lexical_root)
+      File.symlink(File.join(real, "subdir"), File.join(base, "link"))
+      spelled_root = File.join(base, "link", "..", "private")
+
+      file_source = File.join(root, "Waves.dmg")
+      directory_source = File.join(root, "Waves.app")
+      File.write(file_source, "dmg")
+      FileUtils.mkdir_p(directory_source)
+      File.write(File.join(directory_source, "Info.plist"), "app")
+
+      staged_file = WavesRelease::PrivateArtifacts.stage_file!(source: file_source, root: spelled_root)
+      staged_directory = WavesRelease::PrivateArtifacts.stage_directory!(
+        source: directory_source,
+        root: spelled_root
+      )
+
+      assert_equal File.join(validated_root, "Waves.dmg"), staged_file
+      assert_equal File.join(validated_root, "Waves.app"), staged_directory
+      refute File.exist?(File.join(lexical_root, "Waves.dmg"))
+      refute File.exist?(File.join(lexical_root, "Waves.app"))
+    end
+  end
+
   def test_derived_artifact_identity_must_match_metadata_and_sealed_evidence
     verifier = WavesRelease::ArtifactEvidence
     assert_respond_to verifier, :verify_identity_facts!
