@@ -32,6 +32,13 @@ struct LaunchPerformanceSample: Equatable, Sendable {
   let elapsed: Duration
 }
 
+struct LaunchTelemetryEvent: Equatable, Sendable {
+  let name: String
+  let elapsedNanoseconds: Int64
+
+  var payload: String { "elapsedNs=\(elapsedNanoseconds)" }
+}
+
 @MainActor
 final class LaunchPerformanceRecorder {
   private struct ControlTransaction: Equatable {
@@ -45,12 +52,16 @@ final class LaunchPerformanceRecorder {
   private let clock = ContinuousClock()
   private let origin: ContinuousClock.Instant
   private let signposter: OSSignposter?
+  private let emitEvent: (LaunchMilestone, LaunchTelemetryEvent) -> Void
   private var samples: [LaunchMilestone: LaunchPerformanceSample] = [:]
   private var launchInterval: OSSignpostIntervalState?
   private var pendingControl: ControlTransaction?
   private var controlInterval: OSSignpostIntervalState?
 
-  init(signpostsEnabled: Bool = true) {
+  init(
+    signpostsEnabled: Bool = true,
+    eventSink: ((LaunchTelemetryEvent) -> Void)? = nil
+  ) {
     origin = clock.now
     let signposter: OSSignposter?
     if signpostsEnabled {
@@ -64,6 +75,19 @@ final class LaunchPerformanceRecorder {
       signposter = nil
     }
     self.signposter = signposter
+    if let eventSink {
+      emitEvent = { _, event in eventSink(event) }
+    } else if let signposter {
+      emitEvent = { milestone, event in
+        Self.emitFixedSignpost(
+          signposter: signposter,
+          for: milestone,
+          elapsedNanoseconds: event.elapsedNanoseconds
+        )
+      }
+    } else {
+      emitEvent = { _, _ in }
+    }
     launchInterval = signposter?.beginInterval("LaunchToRestoredRoutesReady")
   }
 
@@ -128,15 +152,22 @@ final class LaunchPerformanceRecorder {
       elapsed: origin.duration(to: instant)
     )
     samples[milestone] = sample
-    emitFixedSignpost(for: milestone, elapsedNanoseconds: nanoseconds(sample.elapsed))
+    let event = LaunchTelemetryEvent(
+      name: milestone.outputName,
+      elapsedNanoseconds: nanoseconds(sample.elapsed)
+    )
+    emitEvent(milestone, event)
     if milestone == .restoredRoutesReady, let signposter, let launchInterval {
       signposter.endInterval("LaunchToRestoredRoutesReady", launchInterval)
       self.launchInterval = nil
     }
   }
 
-  private func emitFixedSignpost(for milestone: LaunchMilestone, elapsedNanoseconds: Int64) {
-    guard let signposter else { return }
+  private static func emitFixedSignpost(
+    signposter: OSSignposter,
+    for milestone: LaunchMilestone,
+    elapsedNanoseconds: Int64
+  ) {
     switch milestone {
     case .processInit:
       signposter.emitEvent("ProcessInit", "elapsedNs=\(elapsedNanoseconds, privacy: .public)")

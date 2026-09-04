@@ -25,19 +25,34 @@ struct LaunchPerformanceRecorderTests {
 
   @MainActor
   @Test func launchMilestoneOutputContainsOnlyFixedNamesAndDurations() {
-    let recorder = LaunchPerformanceRecorder(signpostsEnabled: false)
-    let privateValues = ["Jonathan's Browser", "com.example.private", "0.731"]
+    var emitted: [LaunchTelemetryEvent] = []
+    let recorder = LaunchPerformanceRecorder(signpostsEnabled: false) {
+      emitted.append($0)
+    }
+    let sentinelAppIDs = ["Jonathan's Browser", "com.example.private"]
 
-    for milestone in LaunchMilestone.allCases {
+    for milestone in LaunchMilestone.allCases
+    where
+      milestone != .firstControlSubmitted && milestone != .firstControlConfirmed
+    {
       recorder.mark(milestone)
     }
+    recorder.controlSubmitted(appID: sentinelAppIDs[0], generation: 731)
+    recorder.controlFinished(appID: sentinelAppIDs[1], generation: 731, confirmed: true)
+    recorder.controlFinished(appID: sentinelAppIDs[0], generation: 731, confirmed: true)
 
-    let output = recorder.snapshotDescription
+    let output = emitted.map { "\($0.name) \($0.payload)" }.joined(separator: "\n")
     for milestone in LaunchMilestone.allCases {
       #expect(output.contains(milestone.outputName))
     }
-    for privateValue in privateValues {
-      #expect(!output.contains(privateValue))
+    #expect(emitted.allSatisfy { $0.payload.hasPrefix("elapsedNs=") })
+    #expect(
+      emitted.allSatisfy {
+        Int64($0.payload.dropFirst("elapsedNs=".count)) != nil
+      }
+    )
+    for sentinelAppID in sentinelAppIDs {
+      #expect(!output.contains(sentinelAppID))
     }
   }
 
