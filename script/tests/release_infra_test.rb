@@ -1530,8 +1530,9 @@ class ReleaseInfraTest < Minitest::Test
     Dir.mktmpdir("waves-elgato-output-replacement") do |root|
       dmg, plugin, manifest, output = elgato_handoff_fixture(root)
       stolen_output = File.join(root, "stolen-owned-output")
+      handoff_singleton = WavesRelease::ElgatoHandoff.singleton_class
       file_singleton = File.singleton_class
-      original_link = File.method(:link)
+      original_publish = WavesRelease::ElgatoHandoff.method(:publish_anchor!)
       original_rename = File.method(:rename)
       replace_output = lambda do |source, destination|
         if destination == "#{output}.sha256" && source.include?(".waves-elgato-anchor-")
@@ -1541,14 +1542,11 @@ class ReleaseInfraTest < Minitest::Test
           raise Errno::ENOSPC, destination
         end
       end
-      file_singleton.send(:define_method, :link) do |source, destination|
+      handoff_singleton.send(:define_method, :publish_anchor!) do |source, destination|
         replace_output.call(source, destination)
-        original_link.call(source, destination)
+        original_publish.call(source, destination)
       end
-      file_singleton.send(:define_method, :rename) do |source, destination|
-        replace_output.call(source, destination)
-        original_rename.call(source, destination)
-      end
+      handoff_singleton.send(:private, :publish_anchor!)
 
       assert_raises(WavesRelease::Error) do
         WavesRelease::ElgatoHandoff.prepare!(
@@ -1565,7 +1563,102 @@ class ReleaseInfraTest < Minitest::Test
       assert File.directory?(stolen_output)
       refute File.exist?("#{output}.sha256")
     ensure
-      file_singleton.send(:define_method, :link, original_link)
+      handoff_singleton.send(:define_method, :publish_anchor!, original_publish)
+      handoff_singleton.send(:private, :publish_anchor!)
+    end
+  end
+
+  def test_elgato_handoff_rechecks_tree_and_anchor_after_final_publication
+    Dir.mktmpdir("waves-elgato-final-publication-mutation") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      handoff_singleton = WavesRelease::ElgatoHandoff.singleton_class
+      file_singleton = File.singleton_class
+      if WavesRelease::ElgatoHandoff.respond_to?(:publish_anchor!, true)
+        original_publish = WavesRelease::ElgatoHandoff.method(:publish_anchor!)
+        handoff_singleton.send(:define_method, :publish_anchor!) do |source, destination|
+          File.open(File.join(output, "README.md"), "a") { |file| file << "final tree mutation\n" }
+          File.open(source, "a") { |file| file << "final anchor mutation\n" }
+          original_publish.call(source, destination)
+        end
+        handoff_singleton.send(:private, :publish_anchor!)
+      else
+        original_link = File.method(:link)
+        file_singleton.send(:define_method, :link) do |source, destination|
+          if destination == "#{output}.sha256"
+            File.open(File.join(output, "README.md"), "a") { |file| file << "final tree mutation\n" }
+            File.open(source, "a") { |file| file << "final anchor mutation\n" }
+          end
+          original_link.call(source, destination)
+        end
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_match(/changed after publication/, error.message)
+      refute File.exist?(output)
+      refute File.exist?("#{output}.sha256")
+      retained_paths = error.message.scan(/retained at ([^;,]+)/).flatten
+      assert retained_paths.any? { |path| File.exist?(path) }
+    ensure
+      if original_publish
+        handoff_singleton.send(:define_method, :publish_anchor!, original_publish)
+        handoff_singleton.send(:private, :publish_anchor!)
+      elsif original_link
+        file_singleton.send(:define_method, :link, original_link)
+      end
+    end
+  end
+
+  def test_elgato_handoff_quarantines_before_deciding_rollback_ownership
+    Dir.mktmpdir("waves-elgato-rollback-check-race") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      stolen_output = File.join(root, "stolen-before-rollback")
+      handoff_singleton = WavesRelease::ElgatoHandoff.singleton_class
+      file_singleton = File.singleton_class
+      original_publish = WavesRelease::ElgatoHandoff.method(:publish_anchor!)
+      original_rename = File.method(:rename)
+      replacement_installed = false
+      handoff_singleton.send(:define_method, :publish_anchor!) do |source, destination|
+        raise Errno::ENOSPC, destination if destination == "#{output}.sha256"
+        original_publish.call(source, destination)
+      end
+      handoff_singleton.send(:private, :publish_anchor!)
+      file_singleton.send(:define_method, :rename) do |source, destination|
+        if source == output && !replacement_installed
+          replacement_installed = true
+          original_rename.call(output, stolen_output)
+          Dir.mkdir(output)
+          File.write(File.join(output, "attacker.txt"), "between-check replacement\n")
+        end
+        original_rename.call(source, destination)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_equal "between-check replacement\n", File.read(File.join(output, "attacker.txt"))
+      assert File.directory?(stolen_output)
+      refute File.exist?("#{output}.sha256")
+    ensure
+      handoff_singleton.send(:define_method, :publish_anchor!, original_publish)
+      handoff_singleton.send(:private, :publish_anchor!)
       file_singleton.send(:define_method, :rename, original_rename)
     end
   end

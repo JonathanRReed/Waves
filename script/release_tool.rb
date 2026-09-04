@@ -1975,6 +1975,14 @@ module WavesRelease
   end
 
   module ElgatoHandoff
+    module AtomicRename
+      extend Fiddle::Importer
+      dlload Fiddle.dlopen(nil)
+      extern "int renameatx_np(int, const char *, int, const char *, unsigned int)"
+    end
+
+    AT_FDCWD = -2
+    RENAME_EXCL = 0x00000004
     ROLLBACK_DMG_SHA256 = "5887c0c46b824d610016dbfe7e34a1c1e2da2c4bc270555c15221ca5b694face"
     PLUGIN_NAME = "com.jonathanreed.waves.streamDeckPlugin"
     CHECK_IDS = %w[
@@ -2168,21 +2176,31 @@ module WavesRelease
             tree_digest!(output_root, metadata) == sealed_tree_digest
           raise Error, "Elgato handoff sealed tree changed during publication"
         end
-        File.link(private_anchor_path, anchor_path)
+        publish_anchor!(private_anchor_path, anchor_path)
+        unless directory_identity!(output_root) == staging_identity &&
+            tree_digest!(output_root, metadata) == sealed_tree_digest &&
+            file_identity!(anchor_path) == anchor_identity &&
+            File.binread(anchor_path) == anchor_contents
+          raise Error, "Elgato handoff tree or anchor changed after publication"
+        end
+        Dir.rmdir(anchor_staging)
         staging = nil
       rescue Exception => error # rubocop:disable Lint/RescueException
-        rollback_error = nil
-        if owned_directory?(output_root, staging_identity) && !File.exist?(staging)
-          begin
-            File.rename(output_root, staging)
-          rescue SystemCallError => rollback
-            rollback_error = rollback
-          end
-        end
-        retained = staging
+        rollback = quarantine_publication!(
+          output_root: output_root,
+          anchor_path: anchor_path,
+          parent: parent,
+          staging_identity: staging_identity,
+          anchor_identity: anchor_identity,
+          anchor_contents: anchor_contents
+        )
+        retained = File.directory?(staging) ? staging : rollback[:owned_output]
         staging = nil
-        detail = rollback_error ? "#{error.message}; publication rollback failed: #{rollback_error.message}" : error.message
-        raise Error, "#{detail}; private staging retained at #{retained}"
+        details = [error.message]
+        details << "private staging retained at #{retained}" if retained
+        details << "private anchor retained at #{rollback[:owned_anchor]}" if rollback[:owned_anchor]
+        details.concat(rollback[:contested])
+        raise Error, details.join("; ")
       end
       output_root
     end
@@ -2495,6 +2513,51 @@ module WavesRelease
       false
     end
     private_class_method :owned_directory?
+
+    def publish_anchor!(source, destination)
+      result = AtomicRename.renameatx_np(AT_FDCWD, source, AT_FDCWD, destination, RENAME_EXCL)
+      return true if result.zero?
+
+      raise SystemCallError.new("exclusive Elgato handoff anchor publication failed", Fiddle.last_error)
+    end
+    private_class_method :publish_anchor!
+
+    def quarantine_publication!(output_root:, anchor_path:, parent:, staging_identity:, anchor_identity:, anchor_contents:)
+      result = {owned_output: nil, owned_anchor: nil, contested: []}
+      [
+        [output_root, "handoff", :directory],
+        [anchor_path, "anchor", :file],
+      ].each do |path, label, type|
+        quarantine_root = Dir.mktmpdir(".waves-elgato-quarantine-", parent)
+        FileUtils.chmod(0o700, quarantine_root)
+        quarantined = File.join(quarantine_root, File.basename(path))
+        begin
+          File.rename(path, quarantined)
+        rescue Errno::ENOENT
+          next
+        end
+        owned = if type == :directory
+          owned_directory?(quarantined, staging_identity)
+        else
+          begin
+            file_identity!(quarantined) == anchor_identity && File.binread(quarantined) == anchor_contents
+          rescue Errno::ENOENT, Error
+            false
+          end
+        end
+        if owned
+          result[type == :directory ? :owned_output : :owned_anchor] = quarantined
+        else
+          begin
+            publish_anchor!(quarantined, path)
+          rescue SystemCallError => restore_error
+            result[:contested] << "contested #{label} rollback retained unowned bytes at #{quarantined}: #{restore_error.message}"
+          end
+        end
+      end
+      result
+    end
+    private_class_method :quarantine_publication!
 
     def tree_digest!(root, metadata)
       digest = Digest::SHA256.new
