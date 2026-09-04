@@ -903,20 +903,20 @@ module WavesRelease
     end
 
     def stage_file!(source:, root:, name: File.basename(source))
-      validate_private_root!(root)
+      root_identity = validate_private_root!(root)
       identity = capture_identity!(path: source)
       raise Error, "staged release artifact must be a regular file" unless identity["type"] == "file"
-      expanded_root = File.expand_path(root)
-      destination = File.expand_path(File.join(expanded_root, name))
-      unless File.basename(name) == name && File.dirname(destination) == expanded_root
-        raise Error, "private staging destination escapes its root"
-      end
+      canonical_root = root_identity.fetch("path")
+      validate_child_name!(name)
+      destination = File.join(canonical_root, name)
       raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
-      File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
-        File.open(destination, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |output|
-          with_stable_identity!(path: source, identity: identity) { IO.copy_stream(input, output) }
-          output.flush
-          output.fsync
+      with_stable_private_root!(identity: root_identity) do
+        File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
+          File.open(destination, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |output|
+            with_stable_identity!(path: source, identity: identity) { IO.copy_stream(input, output) }
+            output.flush
+            output.fsync
+          end
         end
       end
       unless Digest::SHA256.file(destination).hexdigest == Digest::SHA256.file(source).hexdigest
@@ -928,18 +928,18 @@ module WavesRelease
     end
 
     def stage_directory!(source:, root:, name: File.basename(source))
-      validate_private_root!(root)
+      root_identity = validate_private_root!(root)
       identity = capture_identity!(path: source)
       raise Error, "staged release artifact must be a directory" unless identity["type"] == "directory"
-      expanded_root = File.expand_path(root)
-      destination = File.expand_path(File.join(expanded_root, name))
-      unless File.basename(name) == name && File.dirname(destination) == expanded_root
-        raise Error, "private staging destination escapes its root"
-      end
+      canonical_root = root_identity.fetch("path")
+      validate_child_name!(name)
+      destination = File.join(canonical_root, name)
       raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
       expected = tree_digest(source)
-      with_stable_identity!(path: source, identity: identity) do
-        FileUtils.copy_entry(source, destination, true, false, true)
+      with_stable_private_root!(identity: root_identity) do
+        with_stable_identity!(path: source, identity: identity) do
+          FileUtils.copy_entry(source, destination, true, false, true)
+        end
       end
       unless tree_digest(source) == expected && tree_digest(destination) == expected
         raise Error, "private staged artifact changed during verified copy"
@@ -948,23 +948,18 @@ module WavesRelease
     end
 
     def stage_release_artifacts!(source_root:, destination_root:)
-      validate_private_root!(destination_root)
+      root_identity = validate_private_root!(destination_root)
+      canonical_root = root_identity.fetch("path")
       raise Error, "release source dist must not be a symbolic link" if File.symlink?(source_root)
-      stage_directory!(
-        source: File.join(source_root, "Waves.app"),
-        root: destination_root,
-        name: "Waves.app"
-      )
-      stage_directory!(
-        source: File.join(source_root, "Waves.app.dSYM"),
-        root: destination_root,
-        name: "Waves.app.dSYM"
-      )
-      stage_file!(
-        source: File.join(source_root, "Waves.dmg"),
-        root: destination_root,
-        name: "Waves.dmg"
-      )
+      [
+        [:stage_directory!, "Waves.app"],
+        [:stage_directory!, "Waves.app.dSYM"],
+        [:stage_file!, "Waves.dmg"]
+      ].each do |method, name|
+        with_stable_private_root!(identity: root_identity) do
+          public_send(method, source: File.join(source_root, name), root: canonical_root, name: name)
+        end
+      end
       true
     end
 
@@ -995,7 +990,8 @@ module WavesRelease
     end
 
     def publish_release_artifacts!(source_root:, destination_root:)
-      validate_private_root!(source_root)
+      root_identity = validate_private_root!(source_root)
+      source_root = root_identity.fetch("path")
       raise Error, "release destination must not be a symbolic link" if File.symlink?(destination_root)
       FileUtils.mkdir_p(destination_root)
       Dir.mktmpdir(".waves-release-derivatives-", source_root) do |derivative_root|
@@ -1005,16 +1001,18 @@ module WavesRelease
         dsym_archive = File.join(derivative_root, "Waves.app.dSYM.zip")
         dmg_checksum = File.join(derivative_root, "Waves.dmg.sha256")
         dsym_identity = capture_identity!(path: dsym)
-        with_stable_identity!(path: dsym, identity: dsym_identity) do
-          Validation.run(
-            "/usr/bin/ditto",
-            "-c",
-            "-k",
-            "--sequesterRsrc",
-            "--keepParent",
-            dsym,
-            dsym_archive
-          )
+        with_stable_private_root!(identity: root_identity) do
+          with_stable_identity!(path: dsym, identity: dsym_identity) do
+            Validation.run(
+              "/usr/bin/ditto",
+              "-c",
+              "-k",
+              "--sequesterRsrc",
+              "--keepParent",
+              dsym,
+              dsym_archive
+            )
+          end
         end
         archive_identity = capture_identity!(path: dsym_archive)
         raise Error, "derived dSYM archive must be a regular file" unless archive_identity["type"] == "file"
@@ -1029,50 +1027,71 @@ module WavesRelease
           file.fsync
         end
 
-        publish_directory!(
-          source: File.join(source_root, "Waves.app"),
-          destination: File.join(destination_root, "Waves.app")
-        )
-        publish_directory!(
-          source: dsym,
-          destination: File.join(destination_root, "Waves.app.dSYM")
-        )
-        publish_file!(
-          source: dsym_archive,
-          destination: File.join(destination_root, "Waves.app.dSYM.zip")
-        )
-        publish_file!(
-          source: dmg,
-          destination: File.join(destination_root, "Waves.dmg")
-        )
-        publish_file!(
-          source: dmg_checksum,
-          destination: File.join(destination_root, "Waves.dmg.sha256")
-        )
-        publish_file!(
-          source: File.join(source_root, "release-source-identity.json"),
-          destination: File.join(destination_root, "release-source-identity.json")
-        )
+        publications = [
+          [:publish_directory!, File.join(source_root, "Waves.app"), "Waves.app"],
+          [:publish_directory!, dsym, "Waves.app.dSYM"],
+          [:publish_file!, dsym_archive, "Waves.app.dSYM.zip"],
+          [:publish_file!, dmg, "Waves.dmg"],
+          [:publish_file!, dmg_checksum, "Waves.dmg.sha256"],
+          [:publish_file!, File.join(source_root, "release-source-identity.json"), "release-source-identity.json"]
+        ]
+        publications.each do |method, source, name|
+          with_stable_private_root!(identity: root_identity) do
+            public_send(method, source: source, destination: File.join(destination_root, name))
+          end
+        end
         notary_log = File.join(source_root, "notary-log.json")
         if File.exist?(notary_log) || File.symlink?(notary_log)
-          publish_file!(
-            source: notary_log,
-            destination: File.join(destination_root, "notary-log.json")
-          )
+          with_stable_private_root!(identity: root_identity) do
+            publish_file!(source: notary_log, destination: File.join(destination_root, "notary-log.json"))
+          end
         end
       end
       true
     end
 
     def validate_private_root!(root)
-      stat = File.lstat(root)
-      raise Error, "private release root must not be a symbolic link" if stat.symlink?
+      supplied_stat = File.lstat(root)
+      raise Error, "private release root must not be a symbolic link" if supplied_stat.symlink?
+      canonical_root = File.realpath(root)
+      stat = File.lstat(canonical_root)
+      raise Error, "private staging root must be a directory" unless stat.directory?
       raise Error, "private release root must be owned by the current user" unless stat.uid == Process.uid
-      raise Error, "private release root must have mode 0700" unless (stat.mode & 0o777) == 0o700
-      true
+      raise Error, "private staging root permissions must be 0700" unless (stat.mode & 0o077).zero?
+      {"path" => canonical_root, "device" => stat.dev, "inode" => stat.ino, "type" => stat.ftype}
     rescue Errno::ENOENT => error
       raise Error, "private release root is unavailable: #{error.message}"
     end
+
+    def validate_child_name!(name)
+      unless name.is_a?(String) && !name.empty? && name != "." && name != ".." &&
+          File.basename(name) == name && !name.include?(File::SEPARATOR)
+        raise Error, "private staging child name must be one basename; destination escapes its root"
+      end
+
+      true
+    end
+    private_class_method :validate_child_name!
+
+    def with_stable_private_root!(identity:)
+      verify_private_root_identity!(identity)
+      result = yield
+      verify_private_root_identity!(identity)
+      result
+    ensure
+      verify_private_root_identity!(identity) if $!
+    end
+    private_class_method :with_stable_private_root!
+
+    def verify_private_root_identity!(identity)
+      current = validate_private_root!(identity.fetch("path"))
+      raise Error, "private release root identity changed during copy" unless current == identity
+
+      true
+    rescue Error, Errno::ENOENT
+      raise Error, "private release root identity changed during copy"
+    end
+    private_class_method :verify_private_root_identity!
 
     def tree_digest(root)
       digest = Digest::SHA256.new

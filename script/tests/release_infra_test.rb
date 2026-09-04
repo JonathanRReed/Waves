@@ -1686,7 +1686,7 @@ class ReleaseInfraTest < Minitest::Test
         root: "#{private_root}/.",
         name: "Waves.dmg"
       )
-      assert_equal File.join(private_root, "Waves.dmg"), staged
+      assert_equal File.join(File.realpath(private_root), "Waves.dmg"), staged
 
       assert_release_error(/escapes/) do
         WavesRelease::PrivateArtifacts.stage_file!(
@@ -1694,6 +1694,93 @@ class ReleaseInfraTest < Minitest::Test
           root: private_root,
           name: "../escaped.dmg"
         )
+      end
+    end
+  end
+
+  def test_private_root_validation_returns_canonical_identity_for_var_alias
+    Dir.mktmpdir("waves-private-root", "/private/tmp") do |canonical_root|
+      FileUtils.chmod(0o700, canonical_root)
+      aliased_root = canonical_root.sub(%r{\A/private/var/}, "/var/")
+
+      identity = WavesRelease::PrivateArtifacts.validate_private_root!(aliased_root)
+
+      assert_equal canonical_root, identity.fetch("path")
+      stat = File.lstat(canonical_root)
+      assert_equal stat.dev, identity.fetch("device")
+      assert_equal stat.ino, identity.fetch("inode")
+      assert_equal "directory", identity.fetch("type")
+    end
+  end
+
+  def test_private_root_validation_rejects_symlink_non_directory_and_exposed_permissions
+    Dir.mktmpdir("waves-private-root-validation") do |root|
+      private_root = File.join(root, "private")
+      Dir.mkdir(private_root, 0o700)
+      symlink_root = File.join(root, "private-link")
+      File.symlink(private_root, symlink_root)
+      regular_file = File.join(root, "not-a-directory")
+      File.write(regular_file, "bytes")
+
+      assert_release_error(/symbolic link/) do
+        WavesRelease::PrivateArtifacts.validate_private_root!(symlink_root)
+      end
+      assert_release_error(/directory/) do
+        WavesRelease::PrivateArtifacts.validate_private_root!(regular_file)
+      end
+
+      [0o740, 0o704, 0o750, 0o701].each do |mode|
+        FileUtils.chmod(mode, private_root)
+        assert_release_error(/permissions/) do
+          WavesRelease::PrivateArtifacts.validate_private_root!(private_root)
+        end
+      end
+    end
+  end
+
+  def test_private_stage_rejects_replaced_root_during_copy
+    Dir.mktmpdir("waves-private-root-swap") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      displaced_root = File.join(root, "displaced-private")
+      File.binwrite(source, "verified bytes")
+      Dir.mkdir(private_root, 0o700)
+      original_copy_stream = IO.method(:copy_stream)
+      swapped = false
+      swapping_copy = lambda do |input, output, *arguments|
+        unless swapped
+          File.rename(private_root, displaced_root)
+          Dir.mkdir(private_root, 0o700)
+          swapped = true
+        end
+        original_copy_stream.call(input, output, *arguments)
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, swapping_copy) do
+          WavesRelease::PrivateArtifacts.stage_file!(
+            source: source,
+            root: private_root,
+            name: "Waves.dmg"
+          )
+        end
+      end
+      assert_match(/private release root identity changed/, error.message)
+      assert swapped, "the root must be replaced while IO.copy_stream is active"
+    end
+  end
+
+  def test_private_stage_child_name_must_be_one_basename
+    Dir.mktmpdir("waves-private-child") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      File.write(source, "dmg")
+      Dir.mkdir(private_root, 0o700)
+
+      ["../escaped.dmg", "nested/Waves.dmg", ".", ""].each do |name|
+        assert_release_error(/basename|escapes/) do
+          WavesRelease::PrivateArtifacts.stage_file!(source: source, root: private_root, name: name)
+        end
       end
     end
   end
