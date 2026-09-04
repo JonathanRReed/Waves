@@ -2078,7 +2078,10 @@ module WavesRelease
 
       staging = Dir.mktmpdir(".waves-elgato-handoff-", parent)
       FileUtils.chmod(0o700, staging)
-      anchor_created = false
+      anchor_staging = Dir.mktmpdir(".waves-elgato-anchor-", parent)
+      FileUtils.chmod(0o700, anchor_staging)
+      private_anchor_path = File.join(anchor_staging, File.basename(anchor_path))
+      anchor_identity = nil
       begin
         staged_dmg = PrivateArtifacts.stage_file!(
           source: dmg_path,
@@ -2150,17 +2153,34 @@ module WavesRelease
         write_file!(File.join(staging, "results.json"), CanonicalJSON.generate(pending_results(handoff)))
         write_checksums!(staging, metadata)
         checksum_digest = Digest::SHA256.file(File.join(staging, "SHA256SUMS")).hexdigest
-        write_file!(anchor_path, "#{checksum_digest}  #{File.basename(output_root)}/SHA256SUMS\n")
-        anchor_created = true
+        write_file!(private_anchor_path, "#{checksum_digest}  #{File.basename(output_root)}/SHA256SUMS\n")
+        File.open(anchor_staging, File::RDONLY) { |directory| directory.fsync }
+        anchor_identity = file_identity!(private_anchor_path)
         verify!(root: staging, metadata: metadata)
         fsync_tree!(staging, metadata)
+        verify_file_identity!(private_anchor_path, anchor_identity)
         File.rename(staging, output_root)
+        File.link(private_anchor_path, anchor_path)
+        verify_file_identity!(anchor_path, anchor_identity)
+        remove_owned_file!(private_anchor_path, anchor_identity)
+        Dir.rmdir(anchor_staging)
         staging = nil
       rescue Exception => error # rubocop:disable Lint/RescueException
-        FileUtils.rm_f(anchor_path) if anchor_created
+        rollback_error = nil
+        if File.directory?(output_root) && !File.exist?(staging)
+          begin
+            File.rename(output_root, staging)
+          rescue SystemCallError => rollback
+            rollback_error = rollback
+          end
+        end
+        remove_owned_file!(anchor_path, anchor_identity) if anchor_identity
+        remove_owned_file!(private_anchor_path, anchor_identity) if anchor_identity
+        Dir.rmdir(anchor_staging) if File.directory?(anchor_staging) && Dir.empty?(anchor_staging)
         retained = staging
         staging = nil
-        raise Error, "#{error.message}; private staging retained at #{retained}"
+        detail = rollback_error ? "#{error.message}; publication rollback failed: #{rollback_error.message}" : error.message
+        raise Error, "#{detail}; private staging retained at #{retained}"
       end
       output_root
     end
@@ -2450,6 +2470,32 @@ module WavesRelease
       File.open(root, File::RDONLY) { |directory| directory.fsync }
     end
     private_class_method :fsync_tree!
+
+    def file_identity!(path)
+      stat = File.lstat(path)
+      raise Error, "Elgato handoff anchor must be a regular file" unless stat.file?
+
+      [stat.dev, stat.ino]
+    end
+    private_class_method :file_identity!
+
+    def verify_file_identity!(path, identity)
+      raise Error, "Elgato handoff anchor changed before publication" unless file_identity!(path) == identity
+    rescue Errno::ENOENT
+      raise Error, "Elgato handoff anchor changed before publication"
+    end
+    private_class_method :verify_file_identity!
+
+    def remove_owned_file!(path, identity)
+      return unless File.exist?(path) || File.symlink?(path)
+      stat = File.lstat(path)
+      return unless stat.file? && [stat.dev, stat.ino] == identity
+
+      File.unlink(path)
+    rescue Errno::ENOENT
+      nil
+    end
+    private_class_method :remove_owned_file!
 
     def verify_file_hash!(root:, name:, digest:, label:)
       Validation.sha256!(digest, "Elgato handoff #{label} SHA-256")

@@ -1362,7 +1362,7 @@ class ReleaseInfraTest < Minitest::Test
         original = WavesRelease::ElgatoHandoff.method(:write_file!)
         singleton.send(:define_method, :write_file!) do |path, contents|
           original.call(path, contents)
-          next unless path == "#{output}.sha256"
+          next unless contents.end_with?("/SHA256SUMS\n")
 
           staging = Dir.glob(File.join(root, ".waves-elgato-handoff-*")).fetch(0)
           File.open(File.join(staging, name), "ab") { |file| file << "mutated after seal\n" }
@@ -1398,7 +1398,7 @@ class ReleaseInfraTest < Minitest::Test
       singleton = WavesRelease::ElgatoHandoff.singleton_class
       original = WavesRelease::ElgatoHandoff.method(:write_file!)
       singleton.send(:define_method, :write_file!) do |path, contents|
-        raise Errno::ENOSPC, path if path == "#{output}.sha256"
+        raise Errno::ENOSPC, path if contents.end_with?("/SHA256SUMS\n")
 
         original.call(path, contents)
       end
@@ -1423,6 +1423,73 @@ class ReleaseInfraTest < Minitest::Test
     ensure
       singleton.send(:define_method, :write_file!, original)
       singleton.send(:private, :write_file!)
+    end
+  end
+
+  def test_elgato_handoff_does_not_expose_anchor_before_directory_publication
+    Dir.mktmpdir("waves-elgato-anchor-visibility") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      singleton = WavesRelease::ElgatoHandoff.singleton_class
+      original = WavesRelease::ElgatoHandoff.method(:verify!)
+      anchor_was_public_during_verification = nil
+      singleton.send(:define_method, :verify!) do |**arguments|
+        anchor_was_public_during_verification = File.exist?("#{output}.sha256")
+        original.call(**arguments)
+      end
+
+      WavesRelease::ElgatoHandoff.prepare!(
+        manifest_path: manifest,
+        metadata: load_metadata,
+        dmg_path: dmg,
+        plugin_path: plugin,
+        plugin_revision: "b" * 40,
+        templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+        output_root: output
+      )
+      assert_equal false, anchor_was_public_during_verification
+      assert File.directory?(output)
+      assert File.file?("#{output}.sha256")
+    ensure
+      singleton.send(:define_method, :verify!, original)
+    end
+  end
+
+  def test_elgato_handoff_cleanup_does_not_unlink_replaced_anchor
+    Dir.mktmpdir("waves-elgato-anchor-replacement") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      singleton = WavesRelease::ElgatoHandoff.singleton_class
+      original = WavesRelease::ElgatoHandoff.method(:file_identity!)
+      replacement = {}
+      singleton.send(:define_method, :file_identity!) do |path|
+        identity = original.call(path)
+        if replacement.empty?
+          File.unlink(path)
+          File.write(path, "racing replacement\n")
+          replacement[:path] = path
+        end
+        identity
+      end
+      singleton.send(:private, :file_identity!)
+
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_match(/anchor changed before publication/, error.message)
+      refute File.exist?(output)
+      replacement_path = replacement[:path]
+      assert replacement_path && File.file?(replacement_path)
+      assert_equal "racing replacement\n", File.read(replacement_path)
+    ensure
+      singleton.send(:define_method, :file_identity!, original)
+      singleton.send(:private, :file_identity!)
     end
   end
 
