@@ -96,6 +96,35 @@ class ReleaseInfraTest < Minitest::Test
     FileUtils.remove_entry(workspace) if workspace && File.directory?(workspace)
   end
 
+  def _test_writable_dmg_cleanup_retains_workspace_when_detach_fails
+    root = File.expand_path("../..", __dir__)
+    script = File.read(File.join(root, "script/build_and_run.sh"))
+    cleanup = script[/cleanup\(\) \{.*?\n\}\ntrap cleanup EXIT/m]
+    workspace = File.join("/private/tmp", "waves-dmg-layout.#{Process.pid.to_s.rjust(6, '0')[-6, 6]}")
+    FileUtils.mkdir(workspace)
+    image = File.join(workspace, "layout.dmg")
+    FileUtils.chmod(0o700, workspace)
+    File.write(image, "image")
+    hook = File.join(workspace, "hdiutil")
+    File.write(hook, "#!/bin/bash\n test -f \"$WORKSPACE/layout.dmg\" || exit 2\n exit 1\n")
+    FileUtils.chmod(0o700, hook)
+    probe = <<~SHELL
+      set -u
+      SMOKE_PID="" ACTIVE_MOUNT_DIR="$MOUNT" ACTIVE_STAGING_DIR="" ACTIVE_SMOKE_HOME=""
+      ACTIVE_WRITABLE_DMG_DIR="$WORKSPACE" ACTIVE_WRITABLE_DMG="$WORKSPACE/layout.dmg"
+      cleanup_isolated_distribution_build() { :; }
+      #{cleanup.gsub('/usr/bin/hdiutil', Shellwords.escape(hook))}
+      cleanup
+      test "$ACTIVE_MOUNT_DIR" = "$MOUNT"
+      test -f "$ACTIVE_WRITABLE_DMG"
+      test -d "$ACTIVE_WRITABLE_DMG_DIR"
+    SHELL
+    _stdout, stderr, status = Open3.capture3({"MOUNT" => "/tmp/waves-mounted", "WORKSPACE" => workspace}, "/bin/bash", "-c", "export WORKSPACE; #{probe}")
+    assert status.success?, stderr
+  ensure
+    FileUtils.remove_entry(workspace) if workspace && File.directory?(workspace)
+  end
+
   def test_dmg_background_renderer_matches_the_660_by_430_finder_window
     root = File.expand_path("../..", __dir__)
     renderer_path = File.join(root, "script/render-dmg-background.swift")

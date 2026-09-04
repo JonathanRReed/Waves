@@ -572,7 +572,10 @@ cleanup() {
     # remove only a validated workspace created by this invocation.
     case "$ACTIVE_WRITABLE_DMG_DIR" in
       /private/tmp/waves-dmg-layout.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9])
-        if [ -z "$ACTIVE_MOUNT_DIR" ] && [ -d "$ACTIVE_WRITABLE_DMG_DIR" ]; then
+        if [ -z "$ACTIVE_MOUNT_DIR" ] && [ -d "$ACTIVE_WRITABLE_DMG_DIR" ] &&
+           [ ! -L "$ACTIVE_WRITABLE_DMG_DIR" ] &&
+           [ "$(stat -f '%Lp' "$ACTIVE_WRITABLE_DMG_DIR" 2>/dev/null)" = 700 ] &&
+           [ "$ACTIVE_WRITABLE_DMG" = "$ACTIVE_WRITABLE_DMG_DIR/layout.dmg" ]; then
           if [ -n "$(find -P "$ACTIVE_WRITABLE_DMG_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
             rm -rf -- "$ACTIVE_WRITABLE_DMG_DIR"
           else
