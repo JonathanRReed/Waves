@@ -1124,7 +1124,7 @@ module WavesRelease
 
         destination_names = publications.map { |_method, _source, name| name }
         destination_names << "notary-log.json" unless destination_names.include?("notary-log.json")
-        publication_backup = Dir.mktmpdir(".waves-publication-backup-", destination_root)
+        publication_backup = Dir.mktmpdir("waves-publication-backup-")
         FileUtils.chmod(0o700, publication_backup)
         destination_names.each do |name|
           destination = File.join(destination_root, name)
@@ -1132,8 +1132,10 @@ module WavesRelease
           next unless File.exist?(destination)
 
           backup = File.join(publication_backup, name)
-          File.rename(destination, backup)
+          backup_publication_artifact!(destination, backup)
           backed_up_destinations << [destination, backup]
+          FileUtils.rm_rf(destination)
+          raise Error, "could not remove preexisting release destination: #{destination}" if File.exist?(destination) || File.symlink?(destination)
         end
         publications.each do |method, source, name|
           destination = File.join(destination_root, name)
@@ -1156,7 +1158,8 @@ module WavesRelease
       end
       backed_up_destinations.reverse_each do |destination, backup|
         begin
-          File.rename(backup, destination)
+          FileUtils.rm_rf(destination)
+          restore_publication_artifact!(backup, destination)
         rescue Exception => rollback_error # rubocop:disable Lint/RescueException
           rollback_errors << rollback_error
         end
@@ -1167,6 +1170,47 @@ module WavesRelease
       end
       raise
     end
+
+    def backup_publication_artifact!(source, backup)
+      identity = capture_identity!(path: source)
+      expected = publication_artifact_digest(source, identity)
+      with_stable_identity!(path: source, identity: identity) do
+        FileUtils.copy_entry(source, backup, true, false, true)
+      end
+      unless publication_artifact_digest(source, identity) == expected
+        raise Error, "preexisting publication artifact changed during backup"
+      end
+      actual_identity = capture_identity!(path: backup)
+      unless publication_artifact_digest(backup, actual_identity) == expected
+        raise Error, "publication backup does not match preexisting artifact"
+      end
+      true
+    end
+    private_class_method :backup_publication_artifact!
+
+    def restore_publication_artifact!(backup, destination)
+      identity = capture_identity!(path: backup)
+      expected = publication_artifact_digest(backup, identity)
+      with_stable_identity!(path: backup, identity: identity) do
+        FileUtils.copy_entry(backup, destination, true, false, true)
+      end
+      unless publication_artifact_digest(backup, identity) == expected
+        raise Error, "publication backup changed during restoration"
+      end
+      restored_identity = capture_identity!(path: destination)
+      unless publication_artifact_digest(destination, restored_identity) == expected
+        raise Error, "restored publication artifact does not match retained backup"
+      end
+      true
+    end
+    private_class_method :restore_publication_artifact!
+
+    def publication_artifact_digest(path, identity)
+      mode = File.lstat(path).mode & 0o7777
+      digest = identity.fetch("type") == "directory" ? tree_digest(path) : Digest::SHA256.file(path).hexdigest
+      [identity.fetch("type"), mode, digest]
+    end
+    private_class_method :publication_artifact_digest
 
     def validate_private_root!(root)
       supplied_stat = File.lstat(root)

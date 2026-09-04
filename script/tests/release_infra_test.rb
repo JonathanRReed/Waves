@@ -1946,6 +1946,7 @@ class ReleaseInfraTest < Minitest::Test
       File.write(File.join(source, "Waves.dmg"), "new dmg")
       File.write(File.join(source, "release-source-identity.json"), "new identity")
       File.write(File.join(source, "notary-log.json"), "new notary")
+      new_notary_log = File.realpath(File.join(source, "notary-log.json"))
       FileUtils.chmod(0o700, source)
       FileUtils.mkdir_p(File.join(destination, "Waves.app"))
       FileUtils.mkdir_p(File.join(destination, "Waves.app.dSYM"))
@@ -1957,7 +1958,7 @@ class ReleaseInfraTest < Minitest::Test
       old_digest = stage.tree_digest(destination)
       original_copy_stream = IO.method(:copy_stream)
       swapping_copy = lambda do |input, output, *arguments|
-        if input.respond_to?(:path) && File.basename(input.path) == "notary-log.json"
+        if input.respond_to?(:path) && input.path == new_notary_log
           File.rename(source, displaced_source)
           Dir.mkdir(source, 0o700)
         end
@@ -2046,12 +2047,13 @@ class ReleaseInfraTest < Minitest::Test
       File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
       File.write(File.join(source, "Waves.dmg"), "new dmg")
       File.write(File.join(source, "release-source-identity.json"), "new identity")
+      new_source_identity = File.realpath(File.join(source, "release-source-identity.json"))
       FileUtils.chmod(0o700, source)
       FileUtils.mkdir_p(destination)
       File.write(File.join(destination, "notary-log.json"), "stale notary")
       original_copy_stream = IO.method(:copy_stream)
       swapping_copy = lambda do |input, output, *arguments|
-        if input.respond_to?(:path) && File.basename(input.path) == "release-source-identity.json"
+        if input.respond_to?(:path) && input.path == new_source_identity
           File.rename(source, displaced_source)
           Dir.mkdir(source, 0o700)
         end
@@ -2069,7 +2071,7 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def test_publication_backups_stay_inside_destination_filesystem_boundary
+  def test_publication_backups_stay_outside_destination_mount_boundary
     stage = WavesRelease::PrivateArtifacts
     Dir.mktmpdir("waves-publication-mount-boundary") do |root|
       source = File.join(root, "private")
@@ -2084,26 +2086,75 @@ class ReleaseInfraTest < Minitest::Test
       FileUtils.mkdir_p(destination)
       old_dmg = File.join(destination, "Waves.dmg")
       File.write(old_dmg, "old dmg")
-      original_rename = File.method(:rename)
+      original_copy_entry = FileUtils.method(:copy_entry)
       backup_targets = []
       checked_modes = []
-      boundary_rename = lambda do |from, to|
+      boundary_copy = lambda do |from, to, *arguments|
         if from == old_dmg
-          unless to.start_with?("#{destination}/.waves-publication-backup-")
-            raise Errno::EXDEV, "simulated destination mount boundary"
-          end
+          refute to.start_with?("#{destination}/"), "publication backup must never enter the public tree"
           backup_targets << to
           checked_modes << (File.stat(File.dirname(to)).mode & 0o777)
         end
-        original_rename.call(from, to)
+        original_copy_entry.call(from, to, *arguments)
       end
 
-      File.stub(:rename, boundary_rename) do
+      FileUtils.stub(:copy_entry, boundary_copy) do
         assert stage.publish_release_artifacts!(source_root: source, destination_root: destination)
       end
       assert_equal 1, backup_targets.length
       assert_equal [0o700], checked_modes
+      refute File.exist?(backup_targets.first), "successful publication must remove the external backup"
       assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
+    end
+  end
+
+  def test_publication_rollback_failure_never_exposes_backup_residue
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-publication-rollback-failure") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "mounted-destination")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      File.write(File.join(destination, "Waves.dmg"), "old dmg")
+      original_copy_entry = FileUtils.method(:copy_entry)
+      backup_targets = []
+      failing_copy = lambda do |from, to, *arguments|
+        if from == File.join(destination, "Waves.dmg")
+          backup_targets << to
+          original_copy_entry.call(from, to, *arguments)
+        elsif backup_targets.include?(from)
+          raise Errno::EIO, "simulated restore failure"
+        else
+          original_copy_entry.call(from, to, *arguments)
+        end
+      end
+      original_publish = stage.method(:publish_file!)
+      failing_publish = lambda do |**arguments|
+        raise "simulated publication failure" if File.basename(arguments.fetch(:destination)) == "Waves.dmg"
+        original_publish.call(**arguments)
+      end
+
+      error = FileUtils.stub(:copy_entry, failing_copy) do
+        stage.stub(:publish_file!, failing_publish) do
+          assert_raises(WavesRelease::Error) do
+            stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+          end
+        end
+      end
+      assert_match(/rollback failed.*simulated restore failure/, error.message)
+      assert_instance_of RuntimeError, error.cause
+      assert_equal "simulated publication failure", error.cause.message
+      assert_equal 1, backup_targets.length
+      refute backup_targets.first.start_with?("#{destination}/")
+      assert File.exist?(backup_targets.first), "rollback failure must retain external backup evidence"
+      assert Dir.children(destination).all? { |name| !name.start_with?(".waves-") }
+      FileUtils.rm_rf(File.dirname(backup_targets.first))
     end
   end
 
