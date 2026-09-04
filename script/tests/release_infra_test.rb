@@ -1971,7 +1971,7 @@ class ReleaseInfraTest < Minitest::Test
       end
       assert_equal old_digest, stage.tree_digest(destination), "the complete old public set must be restored byte-for-byte"
       assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
-      assert_empty Dir.glob(File.join(root, ".waves-publication-backup-*"))
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
     end
   end
 
@@ -2008,8 +2008,102 @@ class ReleaseInfraTest < Minitest::Test
       )
       refute File.exist?(File.join(destination, "Waves.app/old"))
       refute File.exist?(File.join(destination, "Waves.app.dSYM/old"))
-      assert_empty Dir.glob(File.join(root, ".waves-publication-backup-*"))
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
       assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
+    end
+  end
+
+  def test_successful_publication_removes_stale_notary_when_new_source_has_none
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-stale-notary-removal") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      File.write(File.join(destination, "notary-log.json"), "stale notary")
+
+      assert stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+      refute File.exist?(File.join(destination, "notary-log.json"))
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
+    end
+  end
+
+  def test_failed_publication_restores_stale_optional_notary_without_new_source
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-stale-notary-rollback") do |root|
+      source = File.join(root, "private")
+      displaced_source = File.join(root, "displaced-private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      File.write(File.join(destination, "notary-log.json"), "stale notary")
+      original_copy_stream = IO.method(:copy_stream)
+      swapping_copy = lambda do |input, output, *arguments|
+        if input.respond_to?(:path) && File.basename(input.path) == "release-source-identity.json"
+          File.rename(source, displaced_source)
+          Dir.mkdir(source, 0o700)
+        end
+        original_copy_stream.call(input, output, *arguments)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, swapping_copy) do
+          stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+        end
+      end
+      assert_equal ["notary-log.json"], Dir.children(destination)
+      assert_equal "stale notary", File.read(File.join(destination, "notary-log.json"))
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
+    end
+  end
+
+  def test_publication_backups_stay_inside_destination_filesystem_boundary
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-publication-mount-boundary") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "mounted-destination")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      old_dmg = File.join(destination, "Waves.dmg")
+      File.write(old_dmg, "old dmg")
+      original_rename = File.method(:rename)
+      backup_targets = []
+      checked_modes = []
+      boundary_rename = lambda do |from, to|
+        if from == old_dmg
+          unless to.start_with?("#{destination}/.waves-publication-backup-")
+            raise Errno::EXDEV, "simulated destination mount boundary"
+          end
+          backup_targets << to
+          checked_modes << (File.stat(File.dirname(to)).mode & 0o777)
+        end
+        original_rename.call(from, to)
+      end
+
+      File.stub(:rename, boundary_rename) do
+        assert stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+      end
+      assert_equal 1, backup_targets.length
+      assert_equal [0o700], checked_modes
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
     end
   end
 

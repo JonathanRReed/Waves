@@ -1122,8 +1122,11 @@ module WavesRelease
         notary_log = File.join(source_root, "notary-log.json")
         publications << [:publish_file!, notary_log, "notary-log.json"] if File.exist?(notary_log) || File.symlink?(notary_log)
 
-        publication_backup = Dir.mktmpdir(".waves-publication-backup-", File.dirname(destination_root))
-        publications.each do |_method, _source, name|
+        destination_names = publications.map { |_method, _source, name| name }
+        destination_names << "notary-log.json" unless destination_names.include?("notary-log.json")
+        publication_backup = Dir.mktmpdir(".waves-publication-backup-", destination_root)
+        FileUtils.chmod(0o700, publication_backup)
+        destination_names.each do |name|
           destination = File.join(destination_root, name)
           raise Error, "release destination must not be a symbolic link" if File.symlink?(destination)
           next unless File.exist?(destination)
