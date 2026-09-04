@@ -1,40 +1,49 @@
 # Launch performance measurement
 
-This procedure measures whether a backend-confirmed Waves control change finishes at least 150 ms before the Dock icon settles. A qualifying set contains exactly 30 launches of one executable, at least 29 successful launches, and a nearest-rank p95 of `controlConfirmedNs - dockSettledNs` no greater than `-150000000`.
+This procedure tests whether a backend-confirmed Waves control change finishes at least 150 ms before the Dock icon settles. A set qualifies only when attempts 1 through 30 all have complete, internally consistent evidence. At least 29 controls must finish before Dock settlement. The nearest-rank p95 of `controlConfirmedNs - dockSettledNs` must be no greater than `-150000000`.
 
-## Test fixture
+## Fixed fixture
 
-Use the signed, installed release candidate with normal returning-user preferences. Keep the same Mac, macOS version, display setup, power source, Dock settings, audio route, and foreground app across all 30 runs. Start a real audio app and keep it playing audible material through a route that Waves manages. Record the app name, app version, audio device, Waves route, macOS version, and hardware in the run notes stored beside the JSONL file.
+Use the signed, installed release candidate with normal returning-user preferences. Keep the same Mac, macOS version, display setup, power source, Dock settings, audio route, and foreground app for all 30 attempts. Start a real audio app and play audible material through a route that Waves manages. Record the audio app and version, audio device, Waves route, macOS version, and Mac model beside the result set.
 
-Do not change Dock animation preferences, delete Waves preferences, clear application support data, or use an empty test account. Close Waves before each run. The collector refuses to terminate it because a process with the same name may belong to another app or another Waves build.
+Do not change Dock animation preferences, delete Waves preferences, clear application support data, or use an empty test account. Close Waves yourself before each attempt. The collector will not terminate a process because it cannot safely assume that another process named Waves belongs to this test.
 
-A cold launch means no Waves process is running before `open -na` starts the verified candidate. It does not mean erased user state or a cold operating-system disk cache. Rebooting, purging caches, and changing preferences create a different fixture and need a separate 30-run set.
+A cold launch means no Waves process is running when the collector invokes `open -na` on the verified candidate. It does not mean erased user state or a purged operating-system disk cache. Rebooting, purging caches, or changing preferences creates a different fixture and needs a new set.
 
-## External observations and clocks
+## Evidence sidecar
 
-The internal recorder starts its `ContinuousClock` origin in `WavesApp.init`. Its `ProcessInit`, `MainWindowViewAppeared`, and `FirstControlConfirmed` signposts report nanoseconds elapsed from that origin. `MainWindowViewAppeared` is SwiftUI `onAppear`; it is not a measured first video frame and is not process start.
-
-An external observer must record process start, the first visibly rendered frame, and the end of the final Dock bounce. Use an unedited screen recording or another independently recorded source whose timestamps are expressed as Mach continuous-time nanoseconds. Save an observation JSON file during the launch:
+Start an external recorder before the collector. It must preserve the actual video or other source files and write a new observation sidecar during the attempt. The sidecar records timestamps in the source clock, not invented Mach timestamps:
 
 ```json
 {
-  "clock": "machContinuousTimeNanoseconds",
-  "processStartMachContinuousNs": 104200000000,
-  "firstFrameMachContinuousNs": 104350000000,
-  "dockSettledMachContinuousNs": 104900000000,
-  "processStartEvidenceSHA256": "64 lowercase hexadecimal characters",
-  "firstFrameEvidenceSHA256": "64 lowercase hexadecimal characters",
-  "dockSettledEvidenceSHA256": "64 lowercase hexadecimal characters"
+  "sourceClock": {"name":"video-timescale","ticksPerSecond":60000},
+  "conversionMethod": "linear-interpolation",
+  "syncPairs": [
+    {"sourceTicks":1200,"machContinuousTicks":2631742723521},
+    {"sourceTicks":61200,"machContinuousTicks":2631766723521}
+  ],
+  "processStartSourceTicks":2400,
+  "firstFrameSourceTicks":8400,
+  "dockSettledSourceTicks":48000,
+  "evidenceFiles":["/absolute/path/run-01.mov"]
 }
 ```
 
-The three evidence hashes identify the immutable source files used for those observations. They do not prove that an observer chose the correct frame. Preserve the files and the method or tool that converted frame or process observations to Mach continuous time. A screen recording alone has a media timeline, not a Mach timestamp. Record a synchronization event visible to the capture and timestamped by the external observer so the conversion is reviewable. If that synchronization is absent, the launch cannot qualify.
+Each synchronization pair must come from one event observed on both clocks. Record how the event was produced and identified. Use at least two pairs that bracket every process, frame, and Dock milestone. The collector linearly interpolates source ticks to raw `mach_continuous_time` ticks. It then calls `mach_timebase_info` and converts raw ticks to nanoseconds using `ticks * numerator / denominator`. Raw Mach ticks are not nanoseconds. For example, the timebase measured during development was 125 over 3, but the collector always reads the current host value.
 
-The collector reads unified log output with `--style ndjson --signpost --mach-continuous-time`. It computes the internal origin as the Mach timestamp of the real `ProcessInit` log entry minus that entry's `elapsedNs`. It subtracts this origin from each external Mach timestamp. `FirstControlConfirmed` already uses the internal origin. This conversion puts all four exported milestones on the same scale without treating `onAppear`, a fixed delay, or a fabricated timestamp as external evidence.
+The internal recorder starts its `ContinuousClock` origin in `WavesApp.init`. Its signpost `elapsedNs` fields use that origin. The collector derives the same origin from the PID-bound `ProcessInit` raw Mach timestamp after applying the host timebase. It converts the external process, frame, and Dock observations to that origin. `MainWindowViewAppeared` is only a diagnostic SwiftUI `onAppear` event. It is not process start or an observed first video frame.
 
-## Collect a run
+The collector accepts the native unified-log schema:
 
-Hash the main executable, not the `.app` directory. This value identifies the executable bytes measured by the 30-run set. It is not a hash of resources, signatures, nested frameworks, or the distribution archive.
+```json
+{"eventType":"signpostEvent","signpostType":"event","signpostName":"ProcessInit","eventMessage":"elapsedNs=123456","processID":86122,"processImagePath":"/private/tmp/example/Waves","machTimestamp":2631742727700}
+```
+
+`machTimestamp` contains raw Mach ticks. The log stream also emits a non-JSON filter preamble and a terminal count record. The collector retains both but selects only signpost events whose `processID` and canonical `processImagePath` match the exact process created after `open -na`.
+
+## Run an attempt
+
+Hash the main executable. This hash identifies the executable bytes, not app resources, nested frameworks, signatures, the whole app bundle, or the distribution archive.
 
 ```sh
 APP=/Applications/Waves.app
@@ -50,25 +59,27 @@ script/measure_launch.sh \
   --timeout 30
 ```
 
-Start the external observer before invoking the command. It must write the observation path during that run. The collector verifies version, build, and executable SHA-256 before launch, checks that no process named as the candidate executable is running, starts unified-log capture, and calls `open -na`. It appends one record only after parsing the required real observations and signposts.
+The observation path must not exist before the attempt. The collector first verifies version, build, and executable SHA-256. It refuses a running same-name or exact-path process. It creates `.jsonl.evidence/attempt-N/attempt.json` with `pending` status before starting log collection or launching Waves. This directory is exclusive. An attempt number can never be reused.
 
-Perform one mute or volume change in Waves while the Dock icon is bouncing. The real audio backend must confirm it. Repeat with run identities 1 through 30 under the same fixture.
+The collector waits for the log stream filter preamble before `open -na`, resolves exactly one new PID for the canonical executable path, and binds signposts to that PID and path. Perform one mute or volume change while the Dock icon is bouncing. The real audio backend must emit `FirstControlConfirmed`.
 
-## Failure rules
+On completion, the attempt directory contains the raw unified log, copied observation sidecar, copied source evidence, and `manifest.json`. The manifest records the PID, executable path, host timebase, synchronization pairs, selected signposts, file hashes, and artifact identity. Its SHA-256 appears in the measurement, `attempt.json`, and the append-only evidence index.
 
-Keep every attempted launch in the experiment record. Do not silently retry a failed launch or select 30 successes from a larger set. A timeout, launch failure, malformed observation, missing milestone, missing clock synchronization, absent backend confirmation, changed artifact identity, or observer failure makes the attempt incomplete. Investigate it and restart the full controlled set if you cannot encode an honest complete record for that run.
+On timeout, malformed evidence, log exit, ambiguous PID, or missing event, the collector marks the attempt failed. It retains the raw log, any available observation and source files, a failure manifest, and an index entry. A hard termination may leave `pending` status. Pending and failed attempts are both non-qualifying. Do not delete them or choose 30 successful attempts from a larger pool. Start a new result set if an infrastructure failure invalidates the experiment.
 
-The JSONL analyzer rejects malformed data rather than skipping it:
+## Analyze the set
 
 ```sh
 /usr/bin/ruby script/analyze_launch_measurements.rb \
   .audit/performance/launch-1.7.1-build-19.jsonl
 ```
 
-The schema has exactly one record per run:
+A completed measurement extends the base schema with its manifest hash:
 
 ```json
-{"run":1,"version":"1.7.1","build":19,"artifactSHA256":"...","processStartNs":0,"firstFrameNs":1,"controlConfirmedNs":2,"dockSettledNs":3,"passed":true}
+{"run":1,"version":"1.7.1","build":19,"artifactSHA256":"...","processStartNs":0,"firstFrameNs":1,"controlConfirmedNs":2,"dockSettledNs":3,"passed":true,"attemptManifestSHA256":"..."}
 ```
 
-`passed` means backend confirmation preceded the externally observed Dock settlement. The analyzer reports nearest-rank p50 and p95 for `controlConfirmedNs - dockSettledNs`. Negative values mean confirmation came first. Qualification requires exactly 30 unique run identities, one consistent version, build, and executable hash, at least 29 `passed` values, and p95 no greater than `-150000000` ns.
+The analyzer requires attempt directories 1 through 30 with no extras. It verifies one artifact identity, every manifest hash and index binding, and one measurement for every completed attempt. It derives pass status from `controlConfirmedNs < dockSettledNs` and rejects a conflicting serialized `passed` value. It also rejects non-integer milestones and impossible process, first-frame, control, or Dock ordering.
+
+Failed, pending, missing, malformed, or unindexed attempts cannot qualify. The analyzer never skips them. It reports nearest-rank p50 and p95 for `controlConfirmedNs - dockSettledNs`. Negative values mean backend confirmation came first.

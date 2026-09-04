@@ -11,12 +11,13 @@ COLLECTOR = File.expand_path("../measure_launch.sh", __dir__)
 class LaunchMeasurementTest < Minitest::Test
   SHA = "a" * 64
 
-  def record(run:, margin: 200_000_000, passed: true, sha: SHA)
+  def record(run:, margin: -200_000_000, passed: nil, sha: SHA)
+    passed = margin.negative? if passed.nil?
     {
       run: run, version: "1.7.1", build: 19, artifactSHA256: sha,
       processStartNs: -20_000_000, firstFrameNs: 80_000_000,
       controlConfirmedNs: 300_000_000, dockSettledNs: 300_000_000 - margin,
-      passed: passed
+      passed: passed, attemptManifestSHA256: nil
     }
   end
 
@@ -24,10 +25,40 @@ class LaunchMeasurementTest < Minitest::Test
     File.write(path, records.map { |value| JSON.generate(value) }.join("\n") + "\n")
   end
 
-  def analyze(records)
+  def analyze(records, failed_runs: [], mutate: nil)
     Dir.mktmpdir do |directory|
       path = File.join(directory, "runs.jsonl")
+      evidence_root = "#{path}.evidence"
+      FileUtils.mkdir_p(evidence_root)
+      index_entries = []
+      (1..30).each do |run|
+        attempt_directory = File.join(evidence_root, "attempt-#{run}")
+        FileUtils.mkdir(attempt_directory)
+        source = records.find { |record| record[:run] == run } || record(run: run)
+        identity = { run: run, version: source[:version], build: source[:build], artifactSHA256: source[:artifactSHA256] }
+        if failed_runs.include?(run)
+          raw_log_path = File.join(attempt_directory, "unified-log.ndjson")
+          File.write(raw_log_path, "fixture failed log #{run}\n")
+          manifest_path = File.join(attempt_directory, "manifest.json")
+          File.write(manifest_path, JSON.generate(identity.merge(status: "failed", failure: "fixture failure", rawLogSHA256: Digest::SHA256.file(raw_log_path).hexdigest, sourceEvidence: [])))
+          manifest_sha = Digest::SHA256.file(manifest_path).hexdigest
+          File.write(File.join(attempt_directory, "attempt.json"), JSON.generate(identity.merge(status: "failed", manifestSHA256: manifest_sha)))
+          index_entries << { run: run, status: "failed", artifactSHA256: identity[:artifactSHA256], manifestSHA256: manifest_sha }
+        else
+          raw_log_path = File.join(attempt_directory, "unified-log.ndjson")
+          File.write(raw_log_path, "fixture log #{run}\n")
+          manifest = identity.merge(launchedPID: 1000 + run, rawLogSHA256: Digest::SHA256.file(raw_log_path).hexdigest, sourceEvidence: [])
+          manifest_path = File.join(attempt_directory, "manifest.json")
+          File.write(manifest_path, JSON.generate(manifest))
+          manifest_sha = Digest::SHA256.file(manifest_path).hexdigest
+          source[:attemptManifestSHA256] = manifest_sha if records.include?(source)
+          File.write(File.join(attempt_directory, "attempt.json"), JSON.generate(identity.merge(status: "completed", manifestSHA256: manifest_sha)))
+          index_entries << { run: run, status: "completed", artifactSHA256: identity[:artifactSHA256], manifestSHA256: manifest_sha }
+        end
+      end
+      write_jsonl(File.join(evidence_root, "index.jsonl"), index_entries)
       write_jsonl(path, records)
+      mutate.call(path, evidence_root) if mutate
       stdout, stderr, status = Open3.capture3("/usr/bin/ruby", ANALYZER, path)
       return [stdout, stderr, status]
     end
@@ -45,26 +76,29 @@ class LaunchMeasurementTest < Minitest::Test
   end
 
   def test_nearest_rank_percentiles_and_29_pass_threshold
-    margins = (1..30).map { |value| value * 10_000_000 }
+    margins = (1..30).map { |value| -value * 10_000_000 }
     records = margins.each_with_index.map do |margin, index|
-      record(run: index + 1, margin: margin, passed: index != 0)
+      record(run: index + 1, margin: margin)
     end
     stdout, stderr, status = analyze(records)
     assert status.success?, stderr
     result = JSON.parse(stdout)
-    assert_equal 29, result.fetch("passCount")
-    assert_equal 150_000_000, result.fetch("p50ControlMinusDockNs")
-    assert_equal 290_000_000, result.fetch("p95ControlMinusDockNs")
+    assert_equal 30, result.fetch("passCount")
+    assert_equal(-160_000_000, result.fetch("p50ControlMinusDockNs"))
+    assert_equal(-20_000_000, result.fetch("p95ControlMinusDockNs"))
     assert_equal false, result.fetch("qualified")
 
-    records = (1..30).map { |run| record(run: run, margin: -200_000_000, passed: run != 1) }
+    records = (1..29).map { |run| record(run: run, margin: -200_000_000) }
+    records << record(run: 30, margin: 100_000_000)
     stdout, stderr, status = analyze(records)
     assert status.success?, stderr
     assert_equal true, JSON.parse(stdout).fetch("qualified")
   end
 
   def test_28_passes_do_not_qualify
-    records = (1..30).map { |run| record(run: run, margin: -200_000_000, passed: run > 2) }
+    records = (1..28).map { |run| record(run: run, margin: -200_000_000) }
+    records << record(run: 29, margin: 100_000_000)
+    records << record(run: 30, margin: 100_000_000)
     stdout, stderr, status = analyze(records)
     assert status.success?, stderr
     assert_equal false, JSON.parse(stdout).fetch("qualified")
@@ -100,19 +134,71 @@ class LaunchMeasurementTest < Minitest::Test
   end
 
   def test_malformed_json_duplicate_runs_and_wrong_count_are_rejected
-    stdout, stderr, status = Open3.capture3("/usr/bin/ruby", ANALYZER, stdin_data: "{bad\n")
-    refute status.success?
-    assert_match(/line 1/, stderr)
+    Dir.mktmpdir do |directory|
+      malformed = File.join(directory, "bad.jsonl")
+      File.write(malformed, "{bad\n")
+      _stdout, stderr, status = Open3.capture3("/usr/bin/ruby", ANALYZER, malformed)
+      refute status.success?
+      assert_match(/line 1/, stderr)
+    end
 
     records = (1..29).map { |run| record(run: run) }
     _stdout, stderr, status = analyze(records)
     refute status.success?
-    assert_match(/exactly 30/, stderr)
+    assert_match(/completed but has no measurement/, stderr)
 
     records << record(run: 29)
     _stdout, stderr, status = analyze(records)
     refute status.success?
     assert_match(/run identities/, stderr)
+  end
+
+  def test_failed_or_pending_attempt_cannot_be_retried_or_qualify
+    records = (1..29).map { |run| record(run: run) }
+    stdout, stderr, status = analyze(records, failed_runs: [30])
+    assert status.success?, stderr
+    result = JSON.parse(stdout)
+    assert_equal 30, result.fetch("attemptCount")
+    assert_equal 1, result.fetch("failedOrPendingAttemptCount")
+    assert_equal false, result.fetch("qualified")
+  end
+
+  def test_pass_flag_and_milestone_order_are_validated
+    records = (1..30).map { |run| record(run: run) }
+    records[0][:passed] = false
+    _stdout, stderr, status = analyze(records)
+    refute status.success?
+    assert_match(/passed conflicts/, stderr)
+
+    records = (1..30).map { |run| record(run: run) }
+    records[0][:firstFrameNs] = 400_000_000
+    _stdout, stderr, status = analyze(records)
+    refute status.success?
+    assert_match(/invalid process, frame, control, or Dock ordering/, stderr)
+  end
+
+  def test_manifest_tampering_and_extra_attempt_are_rejected
+    records = (1..30).map { |run| record(run: run) }
+    tamper = lambda do |_path, evidence_root|
+      File.open(File.join(evidence_root, "attempt-1", "manifest.json"), "a") { |file| file.write(" ") }
+    end
+    _stdout, stderr, status = analyze(records, mutate: tamper)
+    refute status.success?
+    assert_match(/manifest hash does not match/, stderr)
+
+    records = (1..30).map { |run| record(run: run) }
+    raw_tamper = lambda do |_path, evidence_root|
+      File.open(File.join(evidence_root, "attempt-1", "unified-log.ndjson"), "a") { |file| file.write("tampered\n") }
+    end
+    _stdout, stderr, status = analyze(records, mutate: raw_tamper)
+    refute status.success?
+    assert_match(/raw log does not match/, stderr)
+
+    records = (1..30).map { |run| record(run: run) }
+    extra = ->(_path, evidence_root) { FileUtils.mkdir(File.join(evidence_root, "attempt-31")) }
+    _stdout, stderr, status = analyze(records, mutate: extra)
+    refute status.success?
+    assert_match(/exactly 1 through 30/, stderr)
   end
 
   def test_collector_cli_rejects_missing_required_arguments_before_launch
@@ -158,34 +244,91 @@ class LaunchMeasurementTest < Minitest::Test
       PLIST
       observation = File.join(directory, "observation.json")
       output = File.join(directory, "runs.jsonl")
+      process_state = File.join(directory, "launched-pid")
+      evidence = File.join(directory, "capture.mov")
+      File.write(evidence, "real fixture source bytes\n")
       fake_log = File.join(directory, "fake-log")
       File.write(fake_log, <<~SH)
         #!/bin/bash
-        echo '{"machContinuousTime":1000,"eventMessage":"ProcessInit elapsedNs=10"}'
-        echo '{"machContinuousTime":1190,"eventMessage":"FirstControlConfirmed elapsedNs=200"}'
+        echo 'Filtering the log data using "subsystem == fixture"'
+        while [[ ! -f "$WAVES_TEST_PROCESS_STATE" ]]; do sleep 0.01; done
+        echo '{"eventType":"signpostEvent","signpostType":"event","signpostName":"ProcessInit","eventMessage":"elapsedNs=999","processID":999,"processImagePath":"#{executable}","machTimestamp":20000000}'
+        echo '{"eventType":"signpostEvent","signpostType":"event","signpostName":"FirstControlConfirmed","eventMessage":"elapsedNs=999","processID":999,"processImagePath":"#{executable}","machTimestamp":21000000}'
+        sleep 0.2
+        echo '{"eventType":"signpostEvent","signpostType":"event","signpostName":"ProcessInit","eventMessage":"elapsedNs=1000","processID":4242,"processImagePath":"#{executable}","machTimestamp":30000000}'
+        echo '{"eventType":"signpostEvent","signpostType":"event","signpostName":"FirstControlConfirmed","eventMessage":"elapsedNs=200000000","processID":4242,"processImagePath":"#{executable}","machTimestamp":34800000}'
         sleep 10
       SH
       fake_open = File.join(directory, "fake-open")
       File.write(fake_open, <<~SH)
         #!/bin/bash
-        printf '%s\n' '{"clock":"machContinuousTimeNanoseconds","processStartMachContinuousNs":900,"firstFrameMachContinuousNs":1100,"dockSettledMachContinuousNs":1390,"processStartEvidenceSHA256":"#{SHA}","firstFrameEvidenceSHA256":"#{SHA}","dockSettledEvidenceSHA256":"#{SHA}"}' > "$WAVES_TEST_OBSERVATION"
+        echo 4242 > "$WAVES_TEST_PROCESS_STATE"
+        printf '%s\n' '{"sourceClock":{"name":"video-frame-clock","ticksPerSecond":1000000},"conversionMethod":"linear-interpolation","syncPairs":[{"sourceTicks":0,"machContinuousTicks":24000000},{"sourceTicks":1000000,"machContinuousTicks":48000000}],"processStartSourceTicks":100000,"firstFrameSourceTicks":300000,"dockSettledSourceTicks":900000,"evidenceFiles":["#{evidence}"]}' > "$WAVES_TEST_OBSERVATION"
       SH
-      FileUtils.chmod(0o755, [fake_log, fake_open])
+      fake_process = File.join(directory, "fake-process")
+      File.write(fake_process, <<~SH)
+        #!/bin/bash
+        [[ -f "$WAVES_TEST_PROCESS_STATE" ]] && cat "$WAVES_TEST_PROCESS_STATE"
+      SH
+      FileUtils.chmod(0o755, [fake_log, fake_open, fake_process])
       sha = Digest::SHA256.file(executable).hexdigest
-      env = { "WAVES_LOG_TOOL" => fake_log, "WAVES_OPEN_TOOL" => fake_open, "WAVES_TEST_OBSERVATION" => observation }
+      env = {
+        "WAVES_LOG_TOOL" => fake_log, "WAVES_OPEN_TOOL" => fake_open,
+        "WAVES_PROCESS_TOOL" => fake_process, "WAVES_TEST_OBSERVATION" => observation,
+        "WAVES_TEST_PROCESS_STATE" => process_state
+      }
       stdout, stderr, status = Open3.capture3(
         env, "/bin/bash", COLLECTOR, "--app", app, "--output", output,
         "--run", "1", "--version", "1.7.1", "--build", "19",
         "--artifact-sha256", sha, "--observation", observation, "--timeout", "2"
       )
       assert status.success?, stderr
-      assert_match(/Appended run 1/, stdout)
+      assert_match(/Appended completed attempt 1/, stdout)
       record = JSON.parse(File.read(output))
-      assert_equal(-90, record.fetch("processStartNs"))
-      assert_equal 110, record.fetch("firstFrameNs")
-      assert_equal 200, record.fetch("controlConfirmedNs")
-      assert_equal 400, record.fetch("dockSettledNs")
+      assert_equal(-149_999_000, record.fetch("processStartNs"))
+      assert_equal 50_001_000, record.fetch("firstFrameNs")
+      assert_equal 200_000_000, record.fetch("controlConfirmedNs")
+      assert_equal 650_001_000, record.fetch("dockSettledNs")
       assert_equal true, record.fetch("passed")
+      attempt_dir = "#{output}.evidence/attempt-1"
+      manifest = JSON.parse(File.read(File.join(attempt_dir, "manifest.json")))
+      assert_equal 4242, manifest.fetch("launchedPID")
+      assert_equal 1_000, manifest.fetch("selectedSignposts").fetch("ProcessInit").first.fetch("elapsedNs")
+      assert_equal Digest::SHA256.file(File.join(attempt_dir, "manifest.json")).hexdigest, record.fetch("attemptManifestSHA256")
+      assert File.exist?(File.join(attempt_dir, "unified-log.ndjson"))
+      assert File.exist?(File.join(attempt_dir, "source-01-capture.mov"))
+
+      FileUtils.rm_f(process_state)
+      failed_observation = File.join(directory, "failed-observation.json")
+      early_log = File.join(directory, "early-log")
+      File.write(early_log, <<~SH)
+        #!/bin/bash
+        echo 'Filtering the log data using "subsystem == fixture"'
+      SH
+      FileUtils.chmod(0o755, early_log)
+      failed_env = env.merge("WAVES_LOG_TOOL" => early_log, "WAVES_TEST_OBSERVATION" => failed_observation)
+      _stdout, stderr, status = Open3.capture3(
+        failed_env, "/bin/bash", COLLECTOR, "--app", app, "--output", output,
+        "--run", "2", "--version", "1.7.1", "--build", "19",
+        "--artifact-sha256", sha, "--observation", failed_observation, "--timeout", "2"
+      )
+      refute status.success?
+      assert_match(/unified-log capture exited/, stderr)
+      failed_dir = "#{output}.evidence/attempt-2"
+      assert_equal "failed", JSON.parse(File.read(File.join(failed_dir, "attempt.json"))).fetch("status")
+      assert File.exist?(File.join(failed_dir, "unified-log.ndjson"))
+      assert File.exist?(File.join(failed_dir, "manifest.json"))
+
+      FileUtils.rm_f(process_state)
+      retry_observation = File.join(directory, "retry-observation.json")
+      retry_env = env.merge("WAVES_TEST_OBSERVATION" => retry_observation)
+      _stdout, stderr, status = Open3.capture3(
+        retry_env, "/bin/bash", COLLECTOR, "--app", app, "--output", output,
+        "--run", "2", "--version", "1.7.1", "--build", "19",
+        "--artifact-sha256", sha, "--observation", retry_observation, "--timeout", "2"
+      )
+      refute status.success?
+      assert_match(/attempt 2 already exists and cannot be reused/, stderr)
     end
   end
 end
