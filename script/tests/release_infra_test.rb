@@ -1767,6 +1767,136 @@ class ReleaseInfraTest < Minitest::Test
       end
       assert_match(/private release root identity changed/, error.message)
       assert swapped, "the root must be replaced while IO.copy_stream is active"
+      refute File.exist?(File.join(private_root, "Waves.dmg"))
+      refute File.exist?(File.join(displaced_root, "Waves.dmg"))
+    end
+  end
+
+  def test_private_directory_stage_rolls_back_when_root_is_replaced_during_copy
+    Dir.mktmpdir("waves-private-directory-swap") do |root|
+      source = File.join(root, "Waves.app")
+      private_root = File.join(root, "private")
+      displaced_root = File.join(root, "displaced-private")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "Info.plist"), "verified app")
+      Dir.mkdir(private_root, 0o700)
+      original_copy_entry = FileUtils.method(:copy_entry)
+      swapped = false
+      swapping_copy = lambda do |from, to, *arguments|
+        if from == source && !swapped
+          File.rename(private_root, displaced_root)
+          Dir.mkdir(private_root, 0o700)
+          swapped = true
+        end
+        original_copy_entry.call(from, to, *arguments)
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        FileUtils.stub(:copy_entry, swapping_copy) do
+          WavesRelease::PrivateArtifacts.stage_directory!(source: source, root: private_root)
+        end
+      end
+      assert_match(/private release root identity changed/, error.message)
+      assert swapped
+      refute File.exist?(File.join(private_root, "Waves.app"))
+      refute File.exist?(File.join(displaced_root, "Waves.app"))
+    end
+  end
+
+  def test_private_release_stage_rolls_back_prior_children_when_root_changes_between_copies
+    Dir.mktmpdir("waves-private-release-swap") do |root|
+      source = File.join(root, "dist")
+      private_root = File.join(root, "private")
+      displaced_root = File.join(root, "displaced-private")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "symbols")
+      File.write(File.join(source, "Waves.dmg"), "dmg")
+      Dir.mkdir(private_root, 0o700)
+      stage = WavesRelease::PrivateArtifacts
+      original = stage.method(:stage_directory!)
+      calls = 0
+      swapping_stage = lambda do |**arguments|
+        result = original.call(**arguments)
+        calls += 1
+        if calls == 1
+          File.rename(private_root, displaced_root)
+          Dir.mkdir(private_root, 0o700)
+        end
+        result
+      end
+
+      assert_raises(WavesRelease::Error) do
+        stage.stub(:stage_directory!, swapping_stage) do
+          stage.stage_release_artifacts!(source_root: source, destination_root: private_root)
+        end
+      end
+      %w[Waves.app Waves.app.dSYM Waves.dmg].each do |name|
+        refute File.exist?(File.join(private_root, name)), "replacement root retained #{name}"
+        refute File.exist?(File.join(displaced_root, name)), "displaced root retained #{name}"
+      end
+    end
+  end
+
+  def test_private_root_compromise_preserves_copy_failure_and_reports_rollback
+    Dir.mktmpdir("waves-private-copy-failure") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      displaced_root = File.join(root, "displaced-private")
+      File.write(source, "dmg")
+      Dir.mkdir(private_root, 0o700)
+      failing_copy = lambda do |_input, _output, *_arguments|
+        File.rename(private_root, displaced_root)
+        Dir.mkdir(private_root, 0o700)
+        raise "copy exploded"
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, failing_copy) do
+          WavesRelease::PrivateArtifacts.stage_file!(source: source, root: private_root)
+        end
+      end
+      assert_match(/cause: RuntimeError: copy exploded/, error.message)
+      assert_match(/rollback succeeded/, error.message)
+      refute File.exist?(File.join(private_root, "Waves.dmg"))
+      refute File.exist?(File.join(displaced_root, "Waves.dmg"))
+    end
+  end
+
+  def test_private_release_publication_removes_partial_public_set_when_source_root_changes
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-private-publication-swap") do |root|
+      source = File.join(root, "private")
+      displaced_source = File.join(root, "displaced-private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "symbols")
+      File.write(File.join(source, "Waves.dmg"), "dmg")
+      File.write(File.join(source, "release-source-identity.json"), "identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      original_copy_stream = IO.method(:copy_stream)
+      swapped = false
+      swapping_copy = lambda do |input, output, *arguments|
+        unless swapped
+          File.rename(source, displaced_source)
+          Dir.mkdir(source, 0o700)
+          swapped = true
+        end
+        original_copy_stream.call(input, output, *arguments)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, swapping_copy) do
+          stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+        end
+      end
+      assert swapped
+      assert_empty Dir.children(destination), "publication must leave no partial public release set"
+      assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
     end
   end
 

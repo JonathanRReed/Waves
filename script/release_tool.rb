@@ -3,6 +3,7 @@
 
 require "digest"
 require "base64"
+require "fiddle/import"
 require "fileutils"
 require "json"
 require "open3"
@@ -848,6 +849,17 @@ module WavesRelease
   end
 
   module PrivateArtifacts
+    module DirectorySyscalls
+      extend Fiddle::Importer
+      dlload Fiddle.dlopen(nil)
+      extern "int openat(int, const char *, int, int)"
+      extern "int mkdirat(int, const char *, int)"
+      extern "int renameat(int, const char *, int, const char *)"
+      extern "int unlinkat(int, const char *, int)"
+    end
+
+    OPEN_WRITE_EXCLUSIVE = File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW
+
     module_function
 
     def capture_identity!(path:)
@@ -909,20 +921,36 @@ module WavesRelease
       canonical_root = root_identity.fetch("path")
       validate_child_name!(name)
       destination = File.join(canonical_root, name)
-      raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
-      with_stable_private_root!(identity: root_identity) do
+      root_handle = open_private_root!(root_identity)
+      parent_handle = File.open(File.dirname(canonical_root), File::RDONLY)
+      temporary = Tempfile.new([".waves-stage-", ".tmp"], File.dirname(canonical_root))
+      temporary.chmod(0o600)
+      installed = false
+      begin
         File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
-          File.open(destination, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |output|
-            with_stable_identity!(path: source, identity: identity) { IO.copy_stream(input, output) }
-            output.flush
-            output.fsync
-          end
+          with_stable_identity!(path: source, identity: identity) { IO.copy_stream(input, temporary) }
         end
+        temporary.flush
+        temporary.fsync
+        with_stable_private_root!(identity: root_identity) do
+          create_exclusive_file_at!(root_handle, name)
+          rename_at!(parent_handle, File.basename(temporary.path), root_handle, name)
+          installed = true
+        end
+        unless Digest::SHA256.file(destination).hexdigest == Digest::SHA256.file(source).hexdigest
+          raise Error, "private staged artifact does not match its verified input"
+        end
+        destination
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        rollback_error = rollback_installed_child(root_handle, parent_handle, name, directory: false) if installed
+        raise transactional_root_error(error, rollback_error) if root_identity_changed?(root_identity)
+        raise Error, "private staging rollback failed: #{rollback_error.message}; cause: #{error.class}: #{error.message}" if rollback_error
+        raise
+      ensure
+        temporary.close! if temporary
+        parent_handle.close
+        root_handle.close
       end
-      unless Digest::SHA256.file(destination).hexdigest == Digest::SHA256.file(source).hexdigest
-        raise Error, "private staged artifact does not match its verified input"
-      end
-      destination
     rescue Errno::ELOOP => error
       raise Error, "release artifact must not traverse a symbolic link: #{error.message}"
     end
@@ -934,31 +962,72 @@ module WavesRelease
       canonical_root = root_identity.fetch("path")
       validate_child_name!(name)
       destination = File.join(canonical_root, name)
-      raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
+      root_handle = open_private_root!(root_identity)
+      parent_handle = File.open(File.dirname(canonical_root), File::RDONLY)
+      temporary = Dir.mktmpdir(".waves-stage-", File.dirname(canonical_root))
+      temporary_handle = File.open(temporary, File::RDONLY)
+      staged = File.join(temporary, name)
+      installed = false
       expected = tree_digest(source)
-      with_stable_private_root!(identity: root_identity) do
+      begin
         with_stable_identity!(path: source, identity: identity) do
-          FileUtils.copy_entry(source, destination, true, false, true)
+          FileUtils.copy_entry(source, staged, true, false, true)
         end
+        with_stable_private_root!(identity: root_identity) do
+          create_exclusive_directory_at!(root_handle, name)
+          rename_at!(temporary_handle, name, root_handle, name)
+          installed = true
+        end
+        unless tree_digest(source) == expected && tree_digest(destination) == expected
+          raise Error, "private staged artifact changed during verified copy"
+        end
+        destination
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        rollback_error = rollback_installed_child(root_handle, temporary_handle, name, directory: true) if installed
+        raise transactional_root_error(error, rollback_error) if root_identity_changed?(root_identity)
+        raise Error, "private staging rollback failed: #{rollback_error.message}; cause: #{error.class}: #{error.message}" if rollback_error
+        raise
+      ensure
+        temporary_handle.close
+        FileUtils.rm_rf(temporary)
+        parent_handle.close
+        root_handle.close
       end
-      unless tree_digest(source) == expected && tree_digest(destination) == expected
-        raise Error, "private staged artifact changed during verified copy"
-      end
-      destination
     end
 
     def stage_release_artifacts!(source_root:, destination_root:)
       root_identity = validate_private_root!(destination_root)
       canonical_root = root_identity.fetch("path")
       raise Error, "release source dist must not be a symbolic link" if File.symlink?(source_root)
-      [
+      root_handle = open_private_root!(root_identity)
+      rollback_directory = Dir.mktmpdir(".waves-stage-rollback-", File.dirname(canonical_root))
+      rollback_handle = File.open(rollback_directory, File::RDONLY)
+      completed = []
+      artifacts = [
         [:stage_directory!, "Waves.app"],
         [:stage_directory!, "Waves.app.dSYM"],
         [:stage_file!, "Waves.dmg"]
-      ].each do |method, name|
-        with_stable_private_root!(identity: root_identity) do
-          public_send(method, source: File.join(source_root, name), root: canonical_root, name: name)
+      ]
+      begin
+        artifacts.each do |method, name|
+          with_stable_private_root!(identity: root_identity) do
+            public_send(method, source: File.join(source_root, name), root: canonical_root, name: name)
+            completed << [name, method == :stage_directory!]
+          end
         end
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        rollback_errors = completed.reverse.each_with_object([]) do |(name, directory), errors|
+          rollback_error = rollback_installed_child(root_handle, rollback_handle, name, directory: directory)
+          errors << rollback_error if rollback_error
+        end
+        unless rollback_errors.empty?
+          raise Error, "private release staging rollback failed: #{rollback_errors.map(&:message).join('; ')}; cause: #{error.class}: #{error.message}"
+        end
+        raise
+      ensure
+        rollback_handle.close
+        FileUtils.rm_rf(rollback_directory)
+        root_handle.close
       end
       true
     end
@@ -994,7 +1063,8 @@ module WavesRelease
       source_root = root_identity.fetch("path")
       raise Error, "release destination must not be a symbolic link" if File.symlink?(destination_root)
       FileUtils.mkdir_p(destination_root)
-      Dir.mktmpdir(".waves-release-derivatives-", source_root) do |derivative_root|
+      created_destinations = []
+      Dir.mktmpdir(".waves-release-derivatives-", File.dirname(source_root)) do |derivative_root|
         FileUtils.chmod(0o700, derivative_root)
         dsym = File.join(source_root, "Waves.app.dSYM")
         dmg = File.join(source_root, "Waves.dmg")
@@ -1036,18 +1106,35 @@ module WavesRelease
           [:publish_file!, File.join(source_root, "release-source-identity.json"), "release-source-identity.json"]
         ]
         publications.each do |method, source, name|
+          destination = File.join(destination_root, name)
+          created_destinations << destination unless File.exist?(destination) || File.symlink?(destination)
           with_stable_private_root!(identity: root_identity) do
-            public_send(method, source: source, destination: File.join(destination_root, name))
+            public_send(method, source: source, destination: destination)
           end
         end
         notary_log = File.join(source_root, "notary-log.json")
         if File.exist?(notary_log) || File.symlink?(notary_log)
+          destination = File.join(destination_root, "notary-log.json")
+          created_destinations << destination unless File.exist?(destination) || File.symlink?(destination)
           with_stable_private_root!(identity: root_identity) do
-            publish_file!(source: notary_log, destination: File.join(destination_root, "notary-log.json"))
+            publish_file!(source: notary_log, destination: destination)
           end
         end
       end
       true
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      rollback_errors = created_destinations.reverse.each_with_object([]) do |path, errors|
+        begin
+          FileUtils.rm_rf(path)
+          errors << Error.new("could not remove #{path}") if File.exist?(path) || File.symlink?(path)
+        rescue Exception => rollback_error # rubocop:disable Lint/RescueException
+          errors << rollback_error
+        end
+      end
+      unless rollback_errors.empty?
+        raise Error, "release publication rollback failed: #{rollback_errors.map(&:message).join('; ')}; cause: #{error.class}: #{error.message}"
+      end
+      raise
     end
 
     def validate_private_root!(root)
@@ -1057,7 +1144,7 @@ module WavesRelease
       stat = File.lstat(canonical_root)
       raise Error, "private staging root must be a directory" unless stat.directory?
       raise Error, "private release root must be owned by the current user" unless stat.uid == Process.uid
-      raise Error, "private staging root permissions must be 0700" unless (stat.mode & 0o077).zero?
+      raise Error, "private staging root must have owner-only permissions" unless (stat.mode & 0o077).zero?
       {"path" => canonical_root, "device" => stat.dev, "inode" => stat.ino, "type" => stat.ftype}
     rescue Errno::ENOENT => error
       raise Error, "private release root is unavailable: #{error.message}"
@@ -1073,13 +1160,73 @@ module WavesRelease
     end
     private_class_method :validate_child_name!
 
+    def open_private_root!(identity)
+      handle = File.open(identity.fetch("path"), File::RDONLY | File::NOFOLLOW)
+      stat = handle.stat
+      unless stat.directory? && stat.dev == identity.fetch("device") && stat.ino == identity.fetch("inode")
+        handle.close
+        raise Error, "private release root identity changed during copy"
+      end
+      handle
+    end
+    private_class_method :open_private_root!
+
+    def create_exclusive_file_at!(directory, name)
+      descriptor = DirectorySyscalls.openat(directory.fileno, name, OPEN_WRITE_EXCLUSIVE, 0o600)
+      raise Error, "private staging destination already exists" if descriptor.negative?
+      IO.for_fd(descriptor).close
+    end
+    private_class_method :create_exclusive_file_at!
+
+    def create_exclusive_directory_at!(directory, name)
+      result = DirectorySyscalls.mkdirat(directory.fileno, name, 0o700)
+      raise Error, "private staging destination already exists" unless result.zero?
+    end
+    private_class_method :create_exclusive_directory_at!
+
+    def rename_at!(from_directory, from_name, to_directory, to_name)
+      return true if DirectorySyscalls.renameat(from_directory.fileno, from_name, to_directory.fileno, to_name).zero?
+      raise SystemCallError.new("identity-bound rename failed", Fiddle.last_error)
+    end
+    private_class_method :rename_at!
+
+    def rollback_installed_child(root_handle, rollback_handle, name, directory:)
+      if directory
+        rename_at!(root_handle, name, rollback_handle, name)
+      else
+        result = DirectorySyscalls.unlinkat(root_handle.fileno, name, 0)
+        raise SystemCallError.new("identity-bound unlink failed", Fiddle.last_error) unless result.zero?
+      end
+      nil
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      error
+    end
+    private_class_method :rollback_installed_child
+
+    def root_identity_changed?(identity)
+      verify_private_root_identity!(identity)
+      false
+    rescue Error
+      true
+    end
+    private_class_method :root_identity_changed?
+
+    def transactional_root_error(error, rollback_error)
+      rollback = rollback_error ? "; rollback failed: #{rollback_error.class}: #{rollback_error.message}" : "; rollback succeeded"
+      Error.new("private release root identity changed during copy; cause: #{error.class}: #{error.message}#{rollback}")
+    end
+    private_class_method :transactional_root_error
+
     def with_stable_private_root!(identity:)
       verify_private_root_identity!(identity)
-      result = yield
+      yield
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      if root_identity_changed?(identity)
+        raise transactional_root_error(error, nil)
+      end
+      raise
+    else
       verify_private_root_identity!(identity)
-      result
-    ensure
-      verify_private_root_identity!(identity) if $!
     end
     private_class_method :with_stable_private_root!
 
