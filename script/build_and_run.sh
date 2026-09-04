@@ -1525,7 +1525,6 @@ create_dmg() {
   rm -rf "$ACTIVE_STAGING_DIR"
   ACTIVE_STAGING_DIR=""
   rm -f "$ACTIVE_WRITABLE_DMG"
-  ACTIVE_WRITABLE_DMG=""
 }
 
 release_check() {

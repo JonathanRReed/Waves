@@ -180,6 +180,9 @@ class ReleaseInfraTest < Minitest::Test
   def test_writable_dmg_cleanup_normal_no_active_mount
     workspace = writable_dmg_workspace
     image = File.join(workspace, "layout.dmg")
+    File.delete(image)
+    assert File.directory?(workspace), "production leaves the empty workspace for EXIT cleanup"
+    refute File.exist?(image), "production removes layout.dmg after conversion"
     _stdout, stderr, status, detach = run_production_cleanup(workspace: workspace, image: image)
     assert status.success?, stderr
     assert_nil detach, "cleanup without an active mount must not invoke hdiutil"
