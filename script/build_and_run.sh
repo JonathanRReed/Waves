@@ -1442,9 +1442,10 @@ create_dmg() {
   # Finder resolves the writable image through its backing-file URL while
   # saving the window layout. Keep that URL short as well as the mount path.
   ACTIVE_WRITABLE_DMG="$(mktemp "/private/tmp/waves-dmg-layout.XXXXXX")"
+  layout_token="${ACTIVE_WRITABLE_DMG##*.}"
   rm -f "$ACTIVE_WRITABLE_DMG"
   ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"
-  layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"
+  layout_volume_name="$APP_NAME Layout $layout_token"
   /usr/bin/hdiutil create \
     -volname "$layout_volume_name" \
     -srcfolder "$ACTIVE_STAGING_DIR" \

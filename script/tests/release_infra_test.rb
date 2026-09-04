@@ -48,7 +48,12 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes build_script, "finder_metadata_attempt"
     assert_includes build_script, '/private/tmp/waves-dmg-layout.XXXXXX'
     assert_includes build_script, '/private/tmp/waves-dmg-mount.XXXXXX'
-    assert_includes build_script, 'layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"'
+    layout_token_assignment = 'layout_token="${ACTIVE_WRITABLE_DMG##*.}"'
+    dmg_suffix_assignment = 'ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"'
+    assert_includes build_script, layout_token_assignment
+    assert_includes build_script, 'layout_volume_name="$APP_NAME Layout $layout_token"'
+    assert_operator build_script.index(layout_token_assignment), :<, build_script.index(dmg_suffix_assignment),
+                    "layout token must be captured before appending the .dmg suffix"
     assert_includes build_script, 'diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME"'
 
     finder_script = File.read(finder_script_path)
