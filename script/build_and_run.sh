@@ -524,6 +524,7 @@ RESOURCE_BUNDLE_NAME="${APP_NAME}_${APP_NAME}.bundle"
 SMOKE_LOG_PATH="${SMOKE_LOG_PATH:-$DIST_DIR/package-smoke.log}"
 ACTIVE_MOUNT_DIR=""
 ACTIVE_STAGING_DIR=""
+ACTIVE_WRITABLE_DMG_DIR=""
 ACTIVE_WRITABLE_DMG=""
 ACTIVE_SMOKE_HOME=""
 SMOKE_PID=""
@@ -568,6 +569,10 @@ cleanup() {
     rm -f "$ACTIVE_WRITABLE_DMG"
   fi
   ACTIVE_WRITABLE_DMG=""
+  if [ -n "$ACTIVE_WRITABLE_DMG_DIR" ]; then
+    rm -rf "$ACTIVE_WRITABLE_DMG_DIR"
+  fi
+  ACTIVE_WRITABLE_DMG_DIR=""
 
   if [ -n "$ACTIVE_SMOKE_HOME" ]; then
     rm -rf "$ACTIVE_SMOKE_HOME"
@@ -1440,10 +1445,10 @@ create_dmg() {
   chmod 644 "$ACTIVE_STAGING_DIR/.background/Waves.png"
 
   # Finder resolves the writable image through its backing-file URL while
-  # saving the window layout. Keep that URL short as well as the mount path.
-  ACTIVE_WRITABLE_DMG="$(mktemp "/private/tmp/waves-dmg-layout.XXXXXX")"
-  rm -f "$ACTIVE_WRITABLE_DMG"
-  ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"
+  # saving the window layout. Keep that URL short as well as the mount path,
+  # while containing the image in an atomically created private directory.
+  ACTIVE_WRITABLE_DMG_DIR="$(mktemp -d "/private/tmp/waves-dmg-layout.XXXXXX")"
+  ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG_DIR/layout.dmg"
   layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"
   /usr/bin/hdiutil create \
     -volname "$layout_volume_name" \
@@ -1502,8 +1507,9 @@ create_dmg() {
 
   rm -rf "$ACTIVE_STAGING_DIR"
   ACTIVE_STAGING_DIR=""
-  rm -f "$ACTIVE_WRITABLE_DMG"
+  rm -rf "$ACTIVE_WRITABLE_DMG_DIR"
   ACTIVE_WRITABLE_DMG=""
+  ACTIVE_WRITABLE_DMG_DIR=""
 }
 
 release_check() {
