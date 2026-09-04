@@ -548,6 +548,21 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_metadata_rejects_malformed_and_noncanonical_release_key_material
+    algorithm, material = RELEASE_PUBLIC_KEY.split.first(2)
+    [
+      ["rsa-sha2-512 #{material}", /publicKey/],
+      ["#{algorithm} #{material}*", /publicKey/],
+      ["#{algorithm} #{material}=", /publicKey/],
+      ["#{algorithm} #{material[0, 12]} #{material[12..-1]}", /publicKey|fingerprint/],
+    ].each do |public_key, message|
+      contents = security_metadata_hash(public_key: public_key)
+      with_metadata(contents) do |path|
+        assert_release_error(message) { WavesRelease::Metadata.load(path) }
+      end
+    end
+  end
+
   def test_candidate_seal_allows_only_remote_elgato_pending_and_derives_ineligibility
     manifest = WavesRelease::Evidence.seal(
       input: evidence_input.merge("publicationEligible" => true),
@@ -3121,6 +3136,33 @@ class ReleaseInfraTest < Minitest::Test
         git(root, "add", ".")
         git(root, "commit", "-m", "docs: divergent history")
         assert_release_error(/tag must equal HEAD/) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        end
+      end
+    end
+  end
+
+  def test_publication_tag_accepts_metadata_loaded_with_a_non_authoritative_multi_word_key_comment
+    with_git_repo do |root|
+      with_ephemeral_ssh_keypair("waves-release-metadata-comment") do |private_key, public_key|
+        algorithm, material = File.read(public_key).split.first(2)
+        metadata_contents = security_metadata_hash(
+          public_key: "#{algorithm} #{material} comment differs from signing key",
+          fingerprint: ssh_fingerprint(public_key)
+        )
+        with_metadata(metadata_contents) do |path|
+          metadata = WavesRelease::Metadata.load(path)
+          revision = git(root, "rev-parse", "HEAD").strip
+          manifest = WavesRelease::Evidence.seal(
+            input: evidence_input(remote: "passed", revision: revision),
+            metadata: metadata,
+            profile: "publication"
+          )
+          json = WavesRelease::CanonicalJSON.generate(manifest)
+          envelope = WavesRelease::TagEnvelope.build(json: json, digest: WavesRelease::CanonicalJSON.sha256(json))
+          git(root, "update-ref", "refs/remotes/origin/main", revision)
+          create_signed_tag(root, RELEASE_TAG, envelope, private_key)
+
           WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
         end
       end

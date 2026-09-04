@@ -106,6 +106,32 @@ module WavesRelease
     end
   end
 
+  module CanonicalSSHKey
+    ALGORITHM = "ssh-ed25519"
+
+    module_function
+
+    def parse!(public_key, context: "SSH public key")
+      match = public_key.is_a?(String) &&
+        public_key.match(/\A(ssh-ed25519) ([A-Za-z0-9+\/]+={0,2})(?: [^\s\r\n][^\r\n]*)?\z/)
+      raise Error, "#{context} is malformed" unless match
+
+      begin
+        key_blob = Base64.strict_decode64(match[2])
+        raise ArgumentError unless Base64.strict_encode64(key_blob) == match[2]
+      rescue ArgumentError
+        raise Error, "#{context} is malformed"
+      end
+
+      {
+        "algorithm" => ALGORITHM,
+        "material" => match[2],
+        "blob" => key_blob,
+        "fingerprint" => "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(key_blob)).delete('=')}",
+      }.freeze
+    end
+  end
+
   module Metadata
     KEYS = %w[
       schemaVersion version build minimumMacOSVersion bundleIdentifier developerID
@@ -162,17 +188,11 @@ module WavesRelease
       %w[principal publicKey fingerprint].each do |field|
         Validation.nonempty_string!(authority[field], "release metadata releaseAuthority.#{field}")
       end
-      key_parts = authority["publicKey"].split
-      unless key_parts.length.between?(2, 3) && key_parts[0] == "ssh-ed25519"
-        raise Error, "release metadata releaseAuthority.publicKey must be an inline ssh-ed25519 public key"
-      end
-      begin
-        key_blob = Base64.strict_decode64(key_parts[1])
-      rescue ArgumentError
-        raise Error, "release metadata releaseAuthority.publicKey is malformed"
-      end
-      derived_fingerprint = "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(key_blob)).delete('=')}"
-      unless authority["fingerprint"] == derived_fingerprint
+      parsed_key = CanonicalSSHKey.parse!(
+        authority["publicKey"],
+        context: "release metadata releaseAuthority.publicKey"
+      )
+      unless authority["fingerprint"] == parsed_key.fetch("fingerprint")
         raise Error, "release metadata releaseAuthority fingerprint does not match the pinned public key"
       end
       issuers = authority["receiptIssuers"]
@@ -1897,26 +1917,15 @@ module WavesRelease
       )
       principal = authority.fetch("principal")
       raise Error, "publication tag principal must be #{PRINCIPAL}" unless principal == PRINCIPAL
-      public_key = authority.fetch("publicKey")
-      match = public_key.match(/\A(ssh-ed25519) ([A-Za-z0-9+\/]+={0,2})(?: [^\r\n]*)?\z/)
-      unless match
-        raise Error, "pinned release key is malformed"
-      end
-      begin
-        key_material = Base64.strict_decode64(match[2])
-        raise ArgumentError unless Base64.strict_encode64(key_material) == match[2]
-
-        fingerprint = "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(key_material)).delete('=')}"
-      rescue ArgumentError
-        raise Error, "pinned release key is malformed"
-      end
+      parsed_key = CanonicalSSHKey.parse!(authority.fetch("publicKey"), context: "pinned release key")
+      fingerprint = parsed_key.fetch("fingerprint")
       unless fingerprint == authority.fetch("fingerprint")
         raise Error, "pinned release key fingerprint does not match canonical metadata"
       end
 
       Tempfile.create("waves-allowed-signers") do |file|
         file.chmod(0o600)
-        file.write("#{principal} #{match[1]} #{match[2]}\n")
+        file.write("#{principal} #{parsed_key.fetch('algorithm')} #{parsed_key.fetch('material')}\n")
         file.flush
         stdout, stderr, status = GitPolicy.run(
           "-c",
