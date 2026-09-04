@@ -1493,6 +1493,83 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_elgato_handoff_rechecks_sealed_tree_after_directory_rename
+    Dir.mktmpdir("waves-elgato-rename-mutation") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      singleton = File.singleton_class
+      original = File.method(:rename)
+      singleton.send(:define_method, :rename) do |source, destination|
+        if destination == output && File.basename(source).start_with?(".waves-elgato-handoff-")
+          File.open(File.join(source, "README.md"), "a") { |file| file << "rename seam mutation\n" }
+        end
+        original.call(source, destination)
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_match(/sealed tree changed during publication/, error.message)
+      refute File.exist?(output)
+      refute File.exist?("#{output}.sha256")
+      retained = error.message[/retained at (.+)\z/, 1]
+      assert retained && File.directory?(retained)
+    ensure
+      singleton.send(:define_method, :rename, original)
+    end
+  end
+
+  def test_elgato_handoff_rollback_does_not_move_an_output_replacement
+    Dir.mktmpdir("waves-elgato-output-replacement") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      stolen_output = File.join(root, "stolen-owned-output")
+      file_singleton = File.singleton_class
+      original_link = File.method(:link)
+      original_rename = File.method(:rename)
+      replace_output = lambda do |source, destination|
+        if destination == "#{output}.sha256" && source.include?(".waves-elgato-anchor-")
+          original_rename.call(output, stolen_output)
+          Dir.mkdir(output)
+          File.write(File.join(output, "attacker.txt"), "unowned replacement\n")
+          raise Errno::ENOSPC, destination
+        end
+      end
+      file_singleton.send(:define_method, :link) do |source, destination|
+        replace_output.call(source, destination)
+        original_link.call(source, destination)
+      end
+      file_singleton.send(:define_method, :rename) do |source, destination|
+        replace_output.call(source, destination)
+        original_rename.call(source, destination)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_equal "unowned replacement\n", File.read(File.join(output, "attacker.txt"))
+      assert File.directory?(stolen_output)
+      refute File.exist?("#{output}.sha256")
+    ensure
+      file_singleton.send(:define_method, :link, original_link)
+      file_singleton.send(:define_method, :rename, original_rename)
+    end
+  end
+
   def elgato_handoff_fixture(root)
     dmg = File.join(root, "Waves.dmg")
     plugin = File.join(root, "com.jonathanreed.waves.streamDeckPlugin")

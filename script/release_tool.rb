@@ -2078,6 +2078,7 @@ module WavesRelease
 
       staging = Dir.mktmpdir(".waves-elgato-handoff-", parent)
       FileUtils.chmod(0o700, staging)
+      staging_identity = directory_identity!(staging)
       anchor_staging = Dir.mktmpdir(".waves-elgato-anchor-", parent)
       FileUtils.chmod(0o700, anchor_staging)
       private_anchor_path = File.join(anchor_staging, File.basename(anchor_path))
@@ -2153,30 +2154,31 @@ module WavesRelease
         write_file!(File.join(staging, "results.json"), CanonicalJSON.generate(pending_results(handoff)))
         write_checksums!(staging, metadata)
         checksum_digest = Digest::SHA256.file(File.join(staging, "SHA256SUMS")).hexdigest
-        write_file!(private_anchor_path, "#{checksum_digest}  #{File.basename(output_root)}/SHA256SUMS\n")
+        anchor_contents = "#{checksum_digest}  #{File.basename(output_root)}/SHA256SUMS\n"
+        write_file!(private_anchor_path, anchor_contents)
         File.open(anchor_staging, File::RDONLY) { |directory| directory.fsync }
         anchor_identity = file_identity!(private_anchor_path)
         verify!(root: staging, metadata: metadata)
         fsync_tree!(staging, metadata)
+        sealed_tree_digest = tree_digest!(staging, metadata)
         verify_file_identity!(private_anchor_path, anchor_identity)
+        raise Error, "Elgato handoff anchor content changed before publication" unless File.binread(private_anchor_path) == anchor_contents
         File.rename(staging, output_root)
+        unless directory_identity!(output_root) == staging_identity &&
+            tree_digest!(output_root, metadata) == sealed_tree_digest
+          raise Error, "Elgato handoff sealed tree changed during publication"
+        end
         File.link(private_anchor_path, anchor_path)
-        verify_file_identity!(anchor_path, anchor_identity)
-        remove_owned_file!(private_anchor_path, anchor_identity)
-        Dir.rmdir(anchor_staging)
         staging = nil
       rescue Exception => error # rubocop:disable Lint/RescueException
         rollback_error = nil
-        if File.directory?(output_root) && !File.exist?(staging)
+        if owned_directory?(output_root, staging_identity) && !File.exist?(staging)
           begin
             File.rename(output_root, staging)
           rescue SystemCallError => rollback
             rollback_error = rollback
           end
         end
-        remove_owned_file!(anchor_path, anchor_identity) if anchor_identity
-        remove_owned_file!(private_anchor_path, anchor_identity) if anchor_identity
-        Dir.rmdir(anchor_staging) if File.directory?(anchor_staging) && Dir.empty?(anchor_staging)
         retained = staging
         staging = nil
         detail = rollback_error ? "#{error.message}; publication rollback failed: #{rollback_error.message}" : error.message
@@ -2479,23 +2481,44 @@ module WavesRelease
     end
     private_class_method :file_identity!
 
+    def directory_identity!(path)
+      stat = File.lstat(path)
+      raise Error, "Elgato handoff root changed during publication" unless stat.directory?
+
+      [stat.dev, stat.ino]
+    end
+    private_class_method :directory_identity!
+
+    def owned_directory?(path, identity)
+      directory_identity!(path) == identity
+    rescue Errno::ENOENT, Error
+      false
+    end
+    private_class_method :owned_directory?
+
+    def tree_digest!(root, metadata)
+      digest = Digest::SHA256.new
+      names = Dir.children(root).sort
+      raise Error, "Elgato handoff file set changed during publication" unless names == files(metadata)
+      names.each do |name|
+        path = File.join(root, name)
+        stat = File.lstat(path)
+        raise Error, "Elgato handoff entry changed during publication: #{name}" unless stat.file?
+        digest << name << "\0" << (stat.mode & 0o777).to_s(8) << "\0"
+        digest << Digest::SHA256.file(path).digest
+      end
+      digest.hexdigest
+    rescue Errno::ENOENT => error
+      raise Error, "Elgato handoff sealed tree changed during publication: #{error.message}"
+    end
+    private_class_method :tree_digest!
+
     def verify_file_identity!(path, identity)
       raise Error, "Elgato handoff anchor changed before publication" unless file_identity!(path) == identity
     rescue Errno::ENOENT
       raise Error, "Elgato handoff anchor changed before publication"
     end
     private_class_method :verify_file_identity!
-
-    def remove_owned_file!(path, identity)
-      return unless File.exist?(path) || File.symlink?(path)
-      stat = File.lstat(path)
-      return unless stat.file? && [stat.dev, stat.ino] == identity
-
-      File.unlink(path)
-    rescue Errno::ENOENT
-      nil
-    end
-    private_class_method :remove_owned_file!
 
     def verify_file_hash!(root:, name:, digest:, label:)
       Validation.sha256!(digest, "Elgato handoff #{label} SHA-256")
