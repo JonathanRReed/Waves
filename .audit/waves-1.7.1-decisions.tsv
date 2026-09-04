@@ -1,0 +1,5 @@
+ts	phase	decision	why	evidence	result
+2026-09-04T18:25:48Z	scope	target Waves 1.7.1 build 19	public build 16 exists and an unpublished build 18 is installed on the hardware host	release/metadata.json, GitHub v1.7.0, Mac mini inventory	approved
+2026-09-04T18:25:48Z	integration	use one release branch and adjudicate every PR	several PRs overlap or preserve incomplete fixes	docs/superpowers/specs/2026-09-04-waves-1.7.1-release-design.md	open
+2026-09-04T18:25:48Z	hardware	use the connected Mac mini as the no-waiver Elgato gate	Wave Link 3.2.2 and Stream Deck 7.5.0 are running with a physical Stream Deck Plus	Codex task 01a06d9e-6bd2-71d1-8984-11145d8d22c4	ready
+2026-09-04T18:25:48Z	baseline	accept the branch base for planning	all existing Swift tests passed on the exact origin/main base	swift test at d2ac715	626 passed
