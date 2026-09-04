@@ -376,12 +376,14 @@ func controlServerCapsOneProcessAndRemovesSocketOnShutdown() async throws {
   for wouldBlock in [EAGAIN, EWOULDBLOCK] {
     var calls = 0
     let proved = ControlServer.runListenerSelfProofAcceptLoop(
-      beforeDeadline: { true },
+      remainingAttempts: 4,
+      expectedNonce: Data([0x57]),
       acceptOne: {
         calls += 1
         return (-1, wouldBlock)
       },
-      peerMatchesProof: { _ in false },
+      peerIsTrusted: { _ in false },
+      readNonce: { _ in nil },
       close: { _ in Issue.record("would-block must not produce a descriptor") }
     )
     #expect(!proved)
@@ -389,17 +391,15 @@ func controlServerCapsOneProcessAndRemovesSocketOnShutdown() async throws {
   }
 
   var interruptCalls = 0
-  var deadlineChecks = 0
   let provedAfterInterruptions = ControlServer.runListenerSelfProofAcceptLoop(
-    beforeDeadline: {
-      deadlineChecks += 1
-      return deadlineChecks <= 4
-    },
+    remainingAttempts: 4,
+    expectedNonce: Data([0x57]),
     acceptOne: {
       interruptCalls += 1
       return (-1, EINTR)
     },
-    peerMatchesProof: { _ in false },
+    peerIsTrusted: { _ in false },
+    readNonce: { _ in nil },
     close: { _ in Issue.record("EINTR must not produce a descriptor") }
   )
   #expect(!provedAfterInterruptions)
@@ -408,13 +408,42 @@ func controlServerCapsOneProcessAndRemovesSocketOnShutdown() async throws {
   var offered = [Int32(40), 41]
   var closed: [Int32] = []
   let provedMatchingDescriptor = ControlServer.runListenerSelfProofAcceptLoop(
-    beforeDeadline: { true },
+    remainingAttempts: 4,
+    expectedNonce: Data([0x57]),
     acceptOne: { (offered.removeFirst(), 0) },
-    peerMatchesProof: { $0 == 41 },
+    peerIsTrusted: { _ in true },
+    readNonce: { $0 == 41 ? Data([0x57]) : Data([0x58]) },
     close: { closed.append($0) }
   )
   #expect(provedMatchingDescriptor)
   #expect(closed == [40, 41])
+}
+
+@Test func listenerSelfProofRequiresCompletedNonblockingConnect() {
+  #expect(
+    ControlServer.nonblockingConnectCompleted(
+      connectResult: -1,
+      connectError: EINPROGRESS,
+      readinessEvents: 0,
+      socketError: 0
+    ) == false
+  )
+  #expect(
+    ControlServer.nonblockingConnectCompleted(
+      connectResult: -1,
+      connectError: EINPROGRESS,
+      readinessEvents: Int16(POLLOUT),
+      socketError: 0
+    )
+  )
+  #expect(
+    ControlServer.nonblockingConnectCompleted(
+      connectResult: -1,
+      connectError: EINPROGRESS,
+      readinessEvents: Int16(POLLOUT),
+      socketError: ECONNREFUSED
+    ) == false
+  )
 }
 
 @MainActor
@@ -434,10 +463,11 @@ func saturatedControlListenerSelfProofFinishesWithinItsStartupBudget() async thr
     handler: ControlCommandHandler(store: store),
     filesystemHooks: ControlServerFilesystemHooks(
       afterStagingBind: { stagingLeaf in
-        backlogClients = fillUnixSocketBacklog(
+        let pressure = fillUnixSocketBacklog(
           path: directory.appendingPathComponent(stagingLeaf).path
         )
-        #expect(!backlogClients.isEmpty)
+        backlogClients = pressure.clients
+        #expect(pressure.reachedBacklogPressure)
       }
     )
   )
@@ -452,6 +482,11 @@ func saturatedControlListenerSelfProofFinishesWithinItsStartupBudget() async thr
   let elapsed = started.duration(to: clock.now)
   #expect(elapsed < .milliseconds(250))
   server.stop()
+
+  var mainActorHeartbeat = false
+  Task { @MainActor in mainActorHeartbeat = true }
+  await Task.yield()
+  #expect(mainActorHeartbeat)
 }
 
 @Test func malformedAndOverLimitFramesShareABoundedPredecodeAdmissionBudget() {
@@ -960,9 +995,11 @@ private func makePrivateSocketTestDirectory(prefix: String) throws -> URL {
   return directory
 }
 
-private func fillUnixSocketBacklog(path: String) -> [Int32] {
+private func fillUnixSocketBacklog(
+  path: String
+) -> (clients: [Int32], reachedBacklogPressure: Bool) {
   var clients: [Int32] = []
-  for _ in 0..<128 {
+  for _ in 0..<512 {
     let client = socket(AF_UNIX, SOCK_STREAM, 0)
     guard client >= 0 else { break }
     let flags = fcntl(client, F_GETFL, 0)
@@ -982,14 +1019,36 @@ private func fillUnixSocketBacklog(path: String) -> [Int32] {
         socklen_t(raw.count)
       )
     }
-    if result == 0 || errno == EINPROGRESS {
+    if result == 0 {
       clients.append(client)
+    } else if errno == EAGAIN || errno == EWOULDBLOCK {
+      _ = Darwin.close(client)
+      return (clients, true)
+    } else if errno == EINPROGRESS {
+      var readiness = pollfd(fd: client, events: Int16(POLLOUT), revents: 0)
+      if poll(&readiness, 1, 0) == 0 {
+        clients.append(client)
+        return (clients, true)
+      }
+      var socketError: Int32 = 0
+      var length = socklen_t(MemoryLayout<Int32>.size)
+      if getsockopt(client, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0,
+        socketError == 0
+      {
+        clients.append(client)
+      } else if socketError == EAGAIN || socketError == EWOULDBLOCK {
+        _ = Darwin.close(client)
+        return (clients, true)
+      } else {
+        _ = Darwin.close(client)
+        return (clients, clients.count >= ControlServer.maximumConnections)
+      }
     } else {
       _ = Darwin.close(client)
-      break
+      return (clients, clients.count >= ControlServer.maximumConnections)
     }
   }
-  return clients
+  return (clients, false)
 }
 
 private struct ControlSocketFixture {
