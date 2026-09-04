@@ -925,6 +925,7 @@ module WavesRelease
       parent_handle = File.open(File.dirname(canonical_root), File::RDONLY)
       temporary = Tempfile.new([".waves-stage-", ".tmp"], File.dirname(canonical_root))
       temporary.chmod(0o600)
+      placeholder_created = false
       installed = false
       begin
         File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
@@ -934,6 +935,7 @@ module WavesRelease
         temporary.fsync
         with_stable_private_root!(identity: root_identity) do
           create_exclusive_file_at!(root_handle, name)
+          placeholder_created = true
           rename_at!(parent_handle, File.basename(temporary.path), root_handle, name)
           installed = true
         end
@@ -942,7 +944,11 @@ module WavesRelease
         end
         destination
       rescue Exception => error # rubocop:disable Lint/RescueException
-        rollback_error = rollback_installed_child(root_handle, parent_handle, name, directory: false) if installed
+        rollback_error = if installed
+          rollback_installed_child(root_handle, parent_handle, name, directory: false)
+        elsif placeholder_created
+          rollback_placeholder(root_handle, name, directory: false)
+        end
         raise transactional_root_error(error, rollback_error) if root_identity_changed?(root_identity)
         raise Error, "private staging rollback failed: #{rollback_error.message}; cause: #{error.class}: #{error.message}" if rollback_error
         raise
@@ -967,6 +973,7 @@ module WavesRelease
       temporary = Dir.mktmpdir(".waves-stage-", File.dirname(canonical_root))
       temporary_handle = File.open(temporary, File::RDONLY)
       staged = File.join(temporary, name)
+      placeholder_created = false
       installed = false
       expected = tree_digest(source)
       begin
@@ -975,6 +982,7 @@ module WavesRelease
         end
         with_stable_private_root!(identity: root_identity) do
           create_exclusive_directory_at!(root_handle, name)
+          placeholder_created = true
           rename_at!(temporary_handle, name, root_handle, name)
           installed = true
         end
@@ -983,7 +991,11 @@ module WavesRelease
         end
         destination
       rescue Exception => error # rubocop:disable Lint/RescueException
-        rollback_error = rollback_installed_child(root_handle, temporary_handle, name, directory: true) if installed
+        rollback_error = if installed
+          rollback_installed_child(root_handle, temporary_handle, name, directory: true)
+        elsif placeholder_created
+          rollback_placeholder(root_handle, name, directory: true)
+        end
         raise transactional_root_error(error, rollback_error) if root_identity_changed?(root_identity)
         raise Error, "private staging rollback failed: #{rollback_error.message}; cause: #{error.class}: #{error.message}" if rollback_error
         raise
@@ -1064,6 +1076,8 @@ module WavesRelease
       raise Error, "release destination must not be a symbolic link" if File.symlink?(destination_root)
       FileUtils.mkdir_p(destination_root)
       created_destinations = []
+      backed_up_destinations = []
+      publication_backup = nil
       Dir.mktmpdir(".waves-release-derivatives-", File.dirname(source_root)) do |derivative_root|
         FileUtils.chmod(0o700, derivative_root)
         dsym = File.join(source_root, "Waves.app.dSYM")
@@ -1105,22 +1119,28 @@ module WavesRelease
           [:publish_file!, dmg_checksum, "Waves.dmg.sha256"],
           [:publish_file!, File.join(source_root, "release-source-identity.json"), "release-source-identity.json"]
         ]
+        notary_log = File.join(source_root, "notary-log.json")
+        publications << [:publish_file!, notary_log, "notary-log.json"] if File.exist?(notary_log) || File.symlink?(notary_log)
+
+        publication_backup = Dir.mktmpdir(".waves-publication-backup-", File.dirname(destination_root))
+        publications.each do |_method, _source, name|
+          destination = File.join(destination_root, name)
+          raise Error, "release destination must not be a symbolic link" if File.symlink?(destination)
+          next unless File.exist?(destination)
+
+          backup = File.join(publication_backup, name)
+          File.rename(destination, backup)
+          backed_up_destinations << [destination, backup]
+        end
         publications.each do |method, source, name|
           destination = File.join(destination_root, name)
-          created_destinations << destination unless File.exist?(destination) || File.symlink?(destination)
+          created_destinations << destination
           with_stable_private_root!(identity: root_identity) do
             public_send(method, source: source, destination: destination)
           end
         end
-        notary_log = File.join(source_root, "notary-log.json")
-        if File.exist?(notary_log) || File.symlink?(notary_log)
-          destination = File.join(destination_root, "notary-log.json")
-          created_destinations << destination unless File.exist?(destination) || File.symlink?(destination)
-          with_stable_private_root!(identity: root_identity) do
-            publish_file!(source: notary_log, destination: destination)
-          end
-        end
       end
+      FileUtils.rm_rf(publication_backup)
       true
     rescue Exception => error # rubocop:disable Lint/RescueException
       rollback_errors = created_destinations.reverse.each_with_object([]) do |path, errors|
@@ -1131,6 +1151,14 @@ module WavesRelease
           errors << rollback_error
         end
       end
+      backed_up_destinations.reverse_each do |destination, backup|
+        begin
+          File.rename(backup, destination)
+        rescue Exception => rollback_error # rubocop:disable Lint/RescueException
+          rollback_errors << rollback_error
+        end
+      end
+      FileUtils.rm_rf(publication_backup) if publication_backup && rollback_errors.empty?
       unless rollback_errors.empty?
         raise Error, "release publication rollback failed: #{rollback_errors.map(&:message).join('; ')}; cause: #{error.class}: #{error.message}"
       end
@@ -1202,6 +1230,16 @@ module WavesRelease
       error
     end
     private_class_method :rollback_installed_child
+
+    def rollback_placeholder(root_handle, name, directory:)
+      flags = directory ? 0x0080 : 0
+      result = DirectorySyscalls.unlinkat(root_handle.fileno, name, flags)
+      raise SystemCallError.new("identity-bound placeholder removal failed", Fiddle.last_error) unless result.zero?
+      nil
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      error
+    end
+    private_class_method :rollback_placeholder
 
     def root_identity_changed?(identity)
       verify_private_root_identity!(identity)

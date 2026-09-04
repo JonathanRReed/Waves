@@ -1803,6 +1803,39 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_private_file_stage_removes_placeholder_when_identity_bound_rename_fails
+    Dir.mktmpdir("waves-private-file-rename-failure") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      File.write(source, "dmg")
+      Dir.mkdir(private_root, 0o700)
+
+      assert_raises(SystemCallError) do
+        WavesRelease::PrivateArtifacts::DirectorySyscalls.stub(:renameat, -1) do
+          WavesRelease::PrivateArtifacts.stage_file!(source: source, root: private_root)
+        end
+      end
+      refute File.exist?(File.join(private_root, "Waves.dmg")), "failed rename must not leave a file placeholder"
+    end
+  end
+
+  def test_private_directory_stage_removes_placeholder_when_identity_bound_rename_fails
+    Dir.mktmpdir("waves-private-directory-rename-failure") do |root|
+      source = File.join(root, "Waves.app")
+      private_root = File.join(root, "private")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "Info.plist"), "app")
+      Dir.mkdir(private_root, 0o700)
+
+      assert_raises(SystemCallError) do
+        WavesRelease::PrivateArtifacts::DirectorySyscalls.stub(:renameat, -1) do
+          WavesRelease::PrivateArtifacts.stage_directory!(source: source, root: private_root)
+        end
+      end
+      refute File.exist?(File.join(private_root, "Waves.app")), "failed rename must not leave a directory placeholder"
+    end
+  end
+
   def test_private_release_stage_rolls_back_prior_children_when_root_changes_between_copies
     Dir.mktmpdir("waves-private-release-swap") do |root|
       source = File.join(root, "dist")
@@ -1896,6 +1929,86 @@ class ReleaseInfraTest < Minitest::Test
       end
       assert swapped
       assert_empty Dir.children(destination), "publication must leave no partial public release set"
+      assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
+    end
+  end
+
+  def test_private_release_publication_restores_complete_preexisting_set_after_late_root_change
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-private-publication-restore") do |root|
+      source = File.join(root, "private")
+      displaced_source = File.join(root, "displaced-private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      File.write(File.join(source, "notary-log.json"), "new notary")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(File.join(destination, "Waves.app"))
+      FileUtils.mkdir_p(File.join(destination, "Waves.app.dSYM"))
+      File.write(File.join(destination, "Waves.app/old"), "old app")
+      File.write(File.join(destination, "Waves.app.dSYM/old"), "old symbols")
+      %w[Waves.app.dSYM.zip Waves.dmg Waves.dmg.sha256 release-source-identity.json notary-log.json].each do |name|
+        File.write(File.join(destination, name), "old #{name}")
+      end
+      old_digest = stage.tree_digest(destination)
+      original_copy_stream = IO.method(:copy_stream)
+      swapping_copy = lambda do |input, output, *arguments|
+        if input.respond_to?(:path) && File.basename(input.path) == "notary-log.json"
+          File.rename(source, displaced_source)
+          Dir.mkdir(source, 0o700)
+        end
+        original_copy_stream.call(input, output, *arguments)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, swapping_copy) do
+          stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+        end
+      end
+      assert_equal old_digest, stage.tree_digest(destination), "the complete old public set must be restored byte-for-byte"
+      assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
+      assert_empty Dir.glob(File.join(root, ".waves-publication-backup-*"))
+    end
+  end
+
+  def test_successful_private_release_publication_replaces_full_set_and_removes_backups
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-private-publication-success") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      File.write(File.join(source, "notary-log.json"), "new notary")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(File.join(destination, "Waves.app"))
+      FileUtils.mkdir_p(File.join(destination, "Waves.app.dSYM"))
+      File.write(File.join(destination, "Waves.app/old"), "old app")
+      File.write(File.join(destination, "Waves.app.dSYM/old"), "old symbols")
+      %w[Waves.app.dSYM.zip Waves.dmg Waves.dmg.sha256 release-source-identity.json notary-log.json].each do |name|
+        File.write(File.join(destination, name), "old #{name}")
+      end
+
+      assert stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+      assert_equal "new app", File.read(File.join(destination, "Waves.app/Info.plist"))
+      assert_equal "new symbols", File.read(File.join(destination, "Waves.app.dSYM/Waves"))
+      assert_equal "new dmg", File.read(File.join(destination, "Waves.dmg"))
+      assert_equal "new identity", File.read(File.join(destination, "release-source-identity.json"))
+      assert_equal "new notary", File.read(File.join(destination, "notary-log.json"))
+      assert_equal(
+        %w[Waves.app Waves.app.dSYM Waves.app.dSYM.zip Waves.dmg Waves.dmg.sha256 notary-log.json release-source-identity.json],
+        Dir.children(destination).sort
+      )
+      refute File.exist?(File.join(destination, "Waves.app/old"))
+      refute File.exist?(File.join(destination, "Waves.app.dSYM/old"))
+      assert_empty Dir.glob(File.join(root, ".waves-publication-backup-*"))
       assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
     end
   end
