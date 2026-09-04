@@ -19,17 +19,50 @@ Start an external recorder before the collector. It must preserve the actual vid
   "sourceClock": {"name":"video-timescale","ticksPerSecond":60000},
   "conversionMethod": "linear-interpolation",
   "syncPairs": [
-    {"sourceTicks":1200,"machContinuousTicks":2631742723521},
-    {"sourceTicks":61200,"machContinuousTicks":2631766723521}
+    {
+      "eventID":"sync-start",
+      "sourceTicks":1200,
+      "machContinuousTicks":2631742723521,
+      "sourceEvidenceFile":"/absolute/path/run-01.mov",
+      "sourceEvidenceLocator":"frame 72, visible marker sync-start",
+      "machEvidenceFile":"/absolute/path/run-01-sync.jsonl",
+      "machEvidenceLocator":"line 1",
+      "machCaptureCommand":"/usr/bin/ruby sync-marker.rb sync-start run-01-sync.jsonl",
+      "sourceUncertaintyTicks":1,
+      "machUncertaintyTicks":240000
+    },
+    {
+      "eventID":"sync-end",
+      "sourceTicks":61200,
+      "machContinuousTicks":2631766723521,
+      "sourceEvidenceFile":"/absolute/path/run-01.mov",
+      "sourceEvidenceLocator":"frame 3672, visible marker sync-end",
+      "machEvidenceFile":"/absolute/path/run-01-sync.jsonl",
+      "machEvidenceLocator":"line 2",
+      "machCaptureCommand":"/usr/bin/ruby sync-marker.rb sync-end run-01-sync.jsonl",
+      "sourceUncertaintyTicks":1,
+      "machUncertaintyTicks":240000
+    }
   ],
   "processStartSourceTicks":2400,
   "firstFrameSourceTicks":8400,
   "dockSettledSourceTicks":48000,
-  "evidenceFiles":["/absolute/path/run-01.mov"]
+  "evidenceFiles":["/absolute/path/run-01.mov","/absolute/path/run-01-sync.jsonl","/absolute/path/sync-marker.rb"]
 }
 ```
 
-Each synchronization pair must come from one event observed on both clocks. Record how the event was produced and identified. Use at least two pairs that bracket every process, frame, and Dock milestone. The collector linearly interpolates source ticks to raw `mach_continuous_time` ticks. It then calls `mach_timebase_info` and converts raw ticks to nanoseconds using `ticks * numerator / denominator`. Raw Mach ticks are not nanoseconds. For example, the timebase measured during development was 125 over 3, but the collector always reads the current host value.
+Each pair must name one event observed on both clocks. `sourceEvidenceFile` must be the retained recording, and `sourceEvidenceLocator` must identify the frame or timestamp where the event is visible. `machEvidenceFile` must contain a JSONL object with the same `eventID` and `machContinuousTicks`; `machEvidenceLocator` identifies that line. Both files must appear in `evidenceFiles`. Event IDs must be unique.
+
+Record the exact helper command in `machCaptureCommand` and retain its source. One workable helper calls `mach_continuous_time`, presents the same event ID in the captured window, flushes that presentation, calls `mach_continuous_time` again, and appends the midpoint tick plus the half-span to the JSONL file. Invoke it once near each end of the recording:
+
+```sh
+/usr/bin/ruby sync-marker.rb sync-start run-01-sync.jsonl
+/usr/bin/ruby sync-marker.rb sync-end run-01-sync.jsonl
+```
+
+`sourceUncertaintyTicks` records the frame-selection bound in the source clock. `machUncertaintyTicks` must include the helper's measured call span plus a conservative bound for presenting the marker. Zero is valid only when the acquisition method can prove zero uncertainty. The collector retains these declared bounds in the manifest. It can verify file membership and the matching Mach JSONL record. It cannot prove that the named video frame shows the claimed event or that the declared uncertainty is adequate. A reviewer must inspect those annotations and the retained files.
+
+Use at least two pairs that bracket every process, frame, and Dock milestone. The collector checks the rate of every adjacent pair against the declared source-clock rate and rejects an interval that differs by more than one percent. It linearly interpolates source ticks to raw `mach_continuous_time` ticks, then calls `mach_timebase_info` and converts raw ticks to nanoseconds using `ticks * numerator / denominator`. Raw Mach ticks are not nanoseconds. For example, the timebase measured during development was 125 over 3, but the collector always reads the current host value.
 
 The internal recorder starts its `ContinuousClock` origin in `WavesApp.init`. Its signpost `elapsedNs` fields use that origin. The collector derives the same origin from the PID-bound `ProcessInit` raw Mach timestamp after applying the host timebase. It converts the external process, frame, and Dock observations to that origin. `MainWindowViewAppeared` is only a diagnostic SwiftUI `onAppear` event. It is not process start or an observed first video frame.
 
@@ -63,7 +96,7 @@ The observation path must not exist before the attempt. The collector first veri
 
 The collector waits for the log stream filter preamble before `open -na`, resolves exactly one new PID for the canonical executable path, and binds signposts to that PID and path. Perform one mute or volume change while the Dock icon is bouncing. The real audio backend must emit `FirstControlConfirmed`.
 
-On completion, the attempt directory contains the raw unified log, copied observation sidecar, copied source evidence, and `manifest.json`. The manifest records the PID, executable path, host timebase, synchronization pairs, selected signposts, file hashes, and artifact identity. Its SHA-256 appears in the measurement, `attempt.json`, and the append-only evidence index.
+On completion, the attempt directory contains the raw unified log, copied observation sidecar, copied source evidence, and `manifest.json`. The manifest records the PID, executable path, host timebase, synchronization event bindings, per-pair uncertainty, adjacent-pair drift, selected signposts, file hashes, and artifact identity. Its SHA-256 appears in the measurement, `attempt.json`, and the append-only evidence index.
 
 On timeout, malformed evidence, log exit, ambiguous PID, or missing event, the collector marks the attempt failed. It retains the raw log, any available observation and source files, a failure manifest, and an index entry. A hard termination may leave `pending` status. Pending and failed attempts are both non-qualifying. Do not delete them or choose 30 successful attempts from a larger pool. Start a new result set if an infrastructure failure invalidates the experiment.
 

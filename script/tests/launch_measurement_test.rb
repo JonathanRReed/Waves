@@ -246,7 +246,9 @@ class LaunchMeasurementTest < Minitest::Test
       output = File.join(directory, "runs.jsonl")
       process_state = File.join(directory, "launched-pid")
       evidence = File.join(directory, "capture.mov")
+      mach_evidence = File.join(directory, "sync-events.jsonl")
       File.write(evidence, "real fixture source bytes\n")
+      File.write(mach_evidence, "{\"eventID\":\"sync-start\",\"machContinuousTicks\":24000000}\n{\"eventID\":\"sync-middle\",\"machContinuousTicks\":38000000}\n{\"eventID\":\"sync-end\",\"machContinuousTicks\":48000000}\n")
       fake_log = File.join(directory, "fake-log")
       File.write(fake_log, <<~SH)
         #!/bin/bash
@@ -263,7 +265,7 @@ class LaunchMeasurementTest < Minitest::Test
       File.write(fake_open, <<~SH)
         #!/bin/bash
         echo 4242 > "$WAVES_TEST_PROCESS_STATE"
-        printf '%s\n' '{"sourceClock":{"name":"video-frame-clock","ticksPerSecond":1000000},"conversionMethod":"linear-interpolation","syncPairs":[{"sourceTicks":0,"machContinuousTicks":24000000},{"sourceTicks":1000000,"machContinuousTicks":48000000}],"processStartSourceTicks":100000,"firstFrameSourceTicks":300000,"dockSettledSourceTicks":900000,"evidenceFiles":["#{evidence}"]}' > "$WAVES_TEST_OBSERVATION"
+        printf '%s\n' '{"sourceClock":{"name":"video-frame-clock","ticksPerSecond":1000000},"conversionMethod":"linear-interpolation","syncPairs":[{"eventID":"sync-start","sourceTicks":0,"machContinuousTicks":24000000,"sourceEvidenceFile":"#{evidence}","sourceEvidenceLocator":"frame 0","machEvidenceFile":"#{mach_evidence}","machEvidenceLocator":"line 1","machCaptureCommand":"./capture-sync-marker --event sync-start","sourceUncertaintyTicks":1,"machUncertaintyTicks":100},{"eventID":"sync-end","sourceTicks":1000000,"machContinuousTicks":48000000,"sourceEvidenceFile":"#{evidence}","sourceEvidenceLocator":"frame 60","machEvidenceFile":"#{mach_evidence}","machEvidenceLocator":"line 2","machCaptureCommand":"./capture-sync-marker --event sync-end","sourceUncertaintyTicks":1,"machUncertaintyTicks":100}],"processStartSourceTicks":100000,"firstFrameSourceTicks":300000,"dockSettledSourceTicks":900000,"evidenceFiles":["#{evidence}","#{mach_evidence}"]}' > "$WAVES_TEST_OBSERVATION"
       SH
       fake_process = File.join(directory, "fake-process")
       File.write(fake_process, <<~SH)
@@ -294,9 +296,66 @@ class LaunchMeasurementTest < Minitest::Test
       manifest = JSON.parse(File.read(File.join(attempt_dir, "manifest.json")))
       assert_equal 4242, manifest.fetch("launchedPID")
       assert_equal 1_000, manifest.fetch("selectedSignposts").fetch("ProcessInit").first.fetch("elapsedNs")
+      assert_equal "source-01-capture.mov", manifest.fetch("syncPairs").first.fetch("sourceEvidenceFile")
+      assert_equal "source-02-sync-events.jsonl", manifest.fetch("syncPairs").first.fetch("machEvidenceFile")
+      assert_equal 100, manifest.fetch("syncPairs").first.fetch("machUncertaintyTicks")
       assert_equal Digest::SHA256.file(File.join(attempt_dir, "manifest.json")).hexdigest, record.fetch("attemptManifestSHA256")
       assert File.exist?(File.join(attempt_dir, "unified-log.ndjson"))
       assert File.exist?(File.join(attempt_dir, "source-01-capture.mov"))
+
+      bound_pair = lambda do |event_id, source_ticks, mach_ticks, locator|
+        {
+          eventID: event_id, sourceTicks: source_ticks, machContinuousTicks: mach_ticks,
+          sourceEvidenceFile: evidence, sourceEvidenceLocator: locator,
+          machEvidenceFile: mach_evidence, machEvidenceLocator: "event #{event_id}",
+          machCaptureCommand: "./capture-sync-marker --event #{event_id}",
+          sourceUncertaintyTicks: 1, machUncertaintyTicks: 100
+        }
+      end
+      sidecar = {
+        sourceClock: { name: "video-frame-clock", ticksPerSecond: 1_000_000 },
+        conversionMethod: "linear-interpolation",
+        syncPairs: [bound_pair.call("sync-start", 0, 24_000_000, "frame 0"), bound_pair.call("sync-end", 1_000_000, 48_000_000, "frame 60")],
+        processStartSourceTicks: 100_000, firstFrameSourceTicks: 300_000, dockSettledSourceTicks: 900_000,
+        evidenceFiles: [evidence, mach_evidence]
+      }
+      template_open = File.join(directory, "template-open")
+      File.write(template_open, <<~SH)
+        #!/bin/bash
+        echo 4242 > "$WAVES_TEST_PROCESS_STATE"
+        cp "$WAVES_TEST_SIDECAR_TEMPLATE" "$WAVES_TEST_OBSERVATION"
+      SH
+      FileUtils.chmod(0o755, template_open)
+
+      FileUtils.rm_f(process_state)
+      missing_template = File.join(directory, "missing-binding-template.json")
+      missing_sidecar = Marshal.load(Marshal.dump(sidecar))
+      missing_sidecar[:syncPairs][0].delete(:machCaptureCommand)
+      File.write(missing_template, JSON.generate(missing_sidecar))
+      missing_observation = File.join(directory, "missing-binding-observation.json")
+      missing_env = env.merge("WAVES_OPEN_TOOL" => template_open, "WAVES_TEST_OBSERVATION" => missing_observation, "WAVES_TEST_SIDECAR_TEMPLATE" => missing_template)
+      _stdout, stderr, status = Open3.capture3(
+        missing_env, "/bin/bash", COLLECTOR, "--app", app, "--output", output,
+        "--run", "3", "--version", "1.7.1", "--build", "19",
+        "--artifact-sha256", sha, "--observation", missing_observation, "--timeout", "2"
+      )
+      refute status.success?
+      assert_match(/missing binding fields: machCaptureCommand/, stderr)
+
+      FileUtils.rm_f(process_state)
+      drift_template = File.join(directory, "adjacent-drift-template.json")
+      drift_sidecar = Marshal.load(Marshal.dump(sidecar))
+      drift_sidecar[:syncPairs].insert(1, bound_pair.call("sync-middle", 500_000, 38_000_000, "frame 30"))
+      File.write(drift_template, JSON.generate(drift_sidecar))
+      drift_observation = File.join(directory, "adjacent-drift-observation.json")
+      drift_env = env.merge("WAVES_OPEN_TOOL" => template_open, "WAVES_TEST_OBSERVATION" => drift_observation, "WAVES_TEST_SIDECAR_TEMPLATE" => drift_template)
+      _stdout, stderr, status = Open3.capture3(
+        drift_env, "/bin/bash", COLLECTOR, "--app", app, "--output", output,
+        "--run", "4", "--version", "1.7.1", "--build", "19",
+        "--artifact-sha256", sha, "--observation", drift_observation, "--timeout", "2"
+      )
+      refute status.success?
+      assert_match(/adjacent source-to-Mach calibration/, stderr)
 
       FileUtils.rm_f(process_state)
       failed_observation = File.join(directory, "failed-observation.json")

@@ -236,6 +236,31 @@ log_pid=""
   abort_run.call("sync pairs must bracket every external milestone") unless milestone_keys.all? { |key| observation[key].between?(min_source, max_source) }
   files = observation["evidenceFiles"]
   abort_run.call("evidenceFiles must name at least one source file") unless files.is_a?(Array) && !files.empty? && files.all? { |path| path.is_a?(String) && File.file?(path) }
+  evidence_paths = files.map { |path| File.realpath(path) }
+  pair_keys = %w[eventID sourceEvidenceFile sourceEvidenceLocator machEvidenceFile machEvidenceLocator machCaptureCommand sourceUncertaintyTicks machUncertaintyTicks]
+  pairs.each do |pair|
+    absent = pair_keys.reject { |key| pair.key?(key) }
+    abort_run.call("sync pair is missing binding fields: #{absent.join(", ")}") unless absent.empty?
+    %w[eventID sourceEvidenceLocator machEvidenceLocator machCaptureCommand].each do |key|
+      abort_run.call("sync pair #{key} must be a non-empty string") unless pair[key].is_a?(String) && !pair[key].strip.empty?
+    end
+    %w[sourceUncertaintyTicks machUncertaintyTicks].each do |key|
+      abort_run.call("sync pair #{key} must be a non-negative integer") unless pair[key].is_a?(Integer) && pair[key] >= 0
+    end
+    %w[sourceEvidenceFile machEvidenceFile].each do |key|
+      abort_run.call("sync pair #{key} must name a retained evidence file") unless pair[key].is_a?(String) && File.file?(pair[key]) && evidence_paths.include?(File.realpath(pair[key]))
+    end
+    mach_match = File.foreach(pair["machEvidenceFile"]).any? do |line|
+      begin
+        item = JSON.parse(line)
+        item["eventID"] == pair["eventID"] && item["machContinuousTicks"] == pair["machContinuousTicks"]
+      rescue JSON::ParserError
+        false
+      end
+    end
+    abort_run.call("sync pair #{pair["eventID"]} has no matching Mach evidence record") unless mach_match
+  end
+  abort_run.call("sync pair eventID values must be unique") unless pairs.map { |pair| pair["eventID"] }.uniq.length == pairs.length
 
   launched_pid = Integer(pid_text)
   selected = Hash.new { |hash, key| hash[key] = [] }
@@ -260,12 +285,14 @@ log_pid=""
   abort_run.call("mach_timebase_info failed") unless function.call(pointer).zero?
   numerator, denominator = pointer[0, 8].unpack("L2")
   abort_run.call("invalid Mach timebase") unless numerator.positive? && denominator.positive?
-  source_delta = pairs.last["sourceTicks"] - pairs.first["sourceTicks"]
-  mach_delta = pairs.last["machContinuousTicks"] - pairs.first["machContinuousTicks"]
-  source_seconds = Rational(source_delta, clock["ticksPerSecond"])
-  mach_seconds = Rational(mach_delta * numerator, denominator * 1_000_000_000)
-  drift = ((source_seconds - mach_seconds).abs / source_seconds).to_f
-  abort_run.call("source clock and Mach calibration differ by more than one percent") if drift > 0.01
+  adjacent_drifts = pairs.each_cons(2).map do |left, right|
+    source_delta = right["sourceTicks"] - left["sourceTicks"]
+    mach_delta = right["machContinuousTicks"] - left["machContinuousTicks"]
+    source_seconds = Rational(source_delta, clock["ticksPerSecond"])
+    mach_seconds = Rational(mach_delta * numerator, denominator * 1_000_000_000)
+    ((source_seconds - mach_seconds).abs / source_seconds).to_f
+  end
+  abort_run.call("an adjacent source-to-Mach calibration differs by more than one percent") if adjacent_drifts.any? { |drift| drift > 0.01 }
   ticks_to_ns = ->(ticks) { (Rational(ticks * numerator, denominator)).round }
   source_to_mach = lambda do |source_ticks|
     left, right = pairs.each_cons(2).find { |a, b| source_ticks.between?(a["sourceTicks"], b["sourceTicks"]) }
@@ -284,6 +311,13 @@ log_pid=""
     FileUtils.cp(source, destination, preserve: true)
     { "file" => File.basename(destination), "sha256" => Digest::SHA256.file(destination).hexdigest, "bytes" => File.size(destination) }
   end
+  retained_name_by_path = files.each_with_index.to_h { |source, index| [File.realpath(source), copied_sources[index]["file"]] }
+  retained_pairs = pairs.map do |pair|
+    pair.merge(
+      "sourceEvidenceFile" => retained_name_by_path.fetch(File.realpath(pair["sourceEvidenceFile"])),
+      "machEvidenceFile" => retained_name_by_path.fetch(File.realpath(pair["machEvidenceFile"]))
+    )
+  end
   observation_copy = File.join(attempt_dir, "observation.json")
   FileUtils.cp(observation_path, observation_copy, preserve: true)
   run = Integer(run_text); build = Integer(build_text)
@@ -292,7 +326,7 @@ log_pid=""
     launchedPID: launched_pid, processImagePath: File.realpath(image_path),
     machTimebaseNumerator: numerator, machTimebaseDenominator: denominator,
     sourceClock: clock, clockConversionMethod: "linear-interpolation then mach ticks times numerator divided by denominator",
-    syncPairs: pairs, calibrationRelativeDrift: drift, selectedSignposts: selected, sourceEvidence: copied_sources,
+    syncPairs: retained_pairs, calibrationAdjacentRelativeDrift: adjacent_drifts, selectedSignposts: selected, sourceEvidence: copied_sources,
     observationSHA256: Digest::SHA256.file(observation_copy).hexdigest,
     rawLogSHA256: Digest::SHA256.file(log_path).hexdigest
   }
