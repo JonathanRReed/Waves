@@ -47,6 +47,8 @@ LOG_SUBSYSTEM="com.jonathanreed.Waves"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CALLER_ROOT_DIR="$ROOT_DIR"
 ACTIVE_ISOLATION_ROOT=""
+ACTIVE_WRITABLE_DMG_DIR=""
+ACTIVE_WRITABLE_DMG=""
 RELEASE_TOOL="$ROOT_DIR/script/release_tool.rb"
 CALLER_RELEASE_TOOL="$RELEASE_TOOL"
 RELEASE_GIT="$ROOT_DIR/script/release_git"
@@ -564,9 +566,26 @@ cleanup() {
   fi
   ACTIVE_STAGING_DIR=""
 
-  if [ -n "$ACTIVE_WRITABLE_DMG" ]; then
-    rm -f "$ACTIVE_WRITABLE_DMG"
+  if [ -n "$ACTIVE_WRITABLE_DMG_DIR" ]; then
+    # The writable image lives in this private workspace. Detach first, then
+    # remove only a validated workspace created by this invocation.
+    if [ -n "$ACTIVE_MOUNT_DIR" ]; then
+      /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null 2>&1 || true
+      ACTIVE_MOUNT_DIR=""
+    fi
+    case "$ACTIVE_WRITABLE_DMG_DIR" in
+      /private/tmp/waves-dmg-layout.*)
+        if [ -d "$ACTIVE_WRITABLE_DMG_DIR" ]; then
+          if [ -n "$(find -P "$ACTIVE_WRITABLE_DMG_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+            rm -rf -- "$ACTIVE_WRITABLE_DMG_DIR"
+          else
+            rmdir -- "$ACTIVE_WRITABLE_DMG_DIR" 2>/dev/null || true
+          fi
+        fi
+        ;;
+    esac
   fi
+  ACTIVE_WRITABLE_DMG_DIR=""
   ACTIVE_WRITABLE_DMG=""
 
   if [ -n "$ACTIVE_SMOKE_HOME" ]; then
@@ -1441,10 +1460,11 @@ create_dmg() {
 
   # Finder resolves the writable image through its backing-file URL while
   # saving the window layout. Keep that URL short as well as the mount path.
-  ACTIVE_WRITABLE_DMG="$(mktemp "/private/tmp/waves-dmg-layout.XXXXXX")"
-  rm -f "$ACTIVE_WRITABLE_DMG"
-  ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"
-  layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"
+  ACTIVE_WRITABLE_DMG_DIR="$(mktemp -d "/private/tmp/waves-dmg-layout.XXXXXX")"
+  chmod 700 "$ACTIVE_WRITABLE_DMG_DIR"
+  ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG_DIR/layout.dmg"
+  layout_token="${ACTIVE_WRITABLE_DMG_DIR##*.}"
+  layout_volume_name="$APP_NAME Layout $layout_token"
   /usr/bin/hdiutil create \
     -volname "$layout_volume_name" \
     -srcfolder "$ACTIVE_STAGING_DIR" \

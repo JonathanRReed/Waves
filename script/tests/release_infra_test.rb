@@ -46,9 +46,10 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes build_script, ".background"
     assert_includes build_script, ".DS_Store"
     assert_includes build_script, "finder_metadata_attempt"
-    assert_includes build_script, '/private/tmp/waves-dmg-layout.XXXXXX'
+    assert_match(/ACTIVE_WRITABLE_DMG_DIR=.*mktemp -d.*waves-dmg-layout\.XXXXXX.*\n\s+chmod 700.*ACTIVE_WRITABLE_DMG_DIR.*\n\s+ACTIVE_WRITABLE_DMG=.*layout\.dmg/, build_script)
     assert_includes build_script, '/private/tmp/waves-dmg-mount.XXXXXX'
-    assert_includes build_script, 'layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"'
+    assert_includes build_script, 'layout_token="${ACTIVE_WRITABLE_DMG_DIR##*.}"'
+    assert_includes build_script, 'layout_volume_name="$APP_NAME Layout $layout_token"'
     assert_includes build_script, 'diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME"'
 
     finder_script = File.read(finder_script_path)
@@ -64,6 +65,34 @@ class ReleaseInfraTest < Minitest::Test
                     'set position of item ".background" of targetFolder to {590, 80}'
     refute_includes finder_script,
                     'file "Waves.png" of folder ".background" of targetFolder'
+  end
+
+  def test_writable_dmg_workspace_is_private_unique_and_removed_on_failure
+    root = File.expand_path("../..", __dir__)
+    script = File.read(File.join(root, "script/build_and_run.sh"))
+    workspace_root = Dir.mktmpdir("waves-dmg-workspace-test")
+    probe = <<~SHELL
+      set -euo pipefail
+      ACTIVE_WRITABLE_DMG_DIR="$(mktemp -d "#{workspace_root}/waves-dmg-layout.XXXXXX")"
+      chmod 700 "$ACTIVE_WRITABLE_DMG_DIR"
+      ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG_DIR/layout.dmg"
+      layout_token="${ACTIVE_WRITABLE_DMG_DIR##*.}"
+      layout_volume_name="Waves Layout $layout_token"
+      test "$(stat -f '%Lp' "$ACTIVE_WRITABLE_DMG_DIR")" = 700
+      test "$ACTIVE_WRITABLE_DMG" = "$ACTIVE_WRITABLE_DMG_DIR/layout.dmg"
+      test "$layout_volume_name" = "Waves Layout ${ACTIVE_WRITABLE_DMG_DIR##*.}"
+      touch "$ACTIVE_WRITABLE_DMG"
+      case "$ACTIVE_WRITABLE_DMG_DIR" in
+        /private/tmp/waves-dmg-layout.*|#{workspace_root}/waves-dmg-layout.*) rm -rf -- "$ACTIVE_WRITABLE_DMG_DIR" ;;
+        *) exit 1 ;;
+      esac
+      test ! -e "$ACTIVE_WRITABLE_DMG_DIR"
+    SHELL
+    _stdout, stderr, status = Open3.capture3("/bin/bash", "-c", probe)
+    assert status.success?, stderr
+    assert_match(/ACTIVE_WRITABLE_DMG_DIR/, script)
+  ensure
+    FileUtils.remove_entry(workspace_root) if workspace_root && File.directory?(workspace_root)
   end
 
   def test_dmg_background_renderer_matches_the_660_by_430_finder_window
