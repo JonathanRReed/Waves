@@ -1302,6 +1302,9 @@ class ReleaseInfraTest < Minitest::Test
         results.json
       ]
       assert_equal expected_files, Dir.children(output).sort
+      anchor_path = "#{output}.sha256"
+      assert_equal Digest::SHA256.file(File.join(output, "SHA256SUMS")).hexdigest,
+        File.read(anchor_path).split.first
 
       handoff_manifest = WavesRelease::StrictJSON.load(File.join(output, "handoff.json"))
       assert_equal 1, handoff_manifest.fetch("schemaVersion")
@@ -1344,6 +1347,106 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_elgato_handoff_rejects_staged_byte_mutation_before_publication
+    mutations = {
+      "DMG" => HANDOFF_DMG_NAME,
+      "plugin" => "com.jonathanreed.waves.streamDeckPlugin",
+      "manifest" => "release-evidence.candidate.json",
+      "static kit" => "README.md",
+    }
+
+    mutations.each do |label, name|
+      Dir.mktmpdir("waves-elgato-mutation") do |root|
+        dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+        singleton = WavesRelease::ElgatoHandoff.singleton_class
+        original = WavesRelease::ElgatoHandoff.method(:write_file!)
+        singleton.send(:define_method, :write_file!) do |path, contents|
+          original.call(path, contents)
+          next unless path == "#{output}.sha256"
+
+          staging = Dir.glob(File.join(root, ".waves-elgato-handoff-*")).fetch(0)
+          File.open(File.join(staging, name), "ab") { |file| file << "mutated after seal\n" }
+        end
+        singleton.send(:private, :write_file!)
+
+        error = assert_raises(WavesRelease::Error, "expected #{label} mutation to fail closed") do
+          WavesRelease::ElgatoHandoff.prepare!(
+            manifest_path: manifest,
+            metadata: load_metadata,
+            dmg_path: dmg,
+            plugin_path: plugin,
+            plugin_revision: "b" * 40,
+            templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+            output_root: output
+          )
+        end
+        assert_match(/retained at/, error.message)
+        refute File.exist?(output), "#{label} mutation must not publish the handoff"
+        refute File.exist?("#{output}.sha256"), "#{label} mutation must not leave a partial anchor"
+        retained = error.message[/retained at (.+)\z/, 1]
+        assert retained && File.directory?(retained), "#{label} failure must retain private staging"
+      ensure
+        singleton.send(:define_method, :write_file!, original)
+        singleton.send(:private, :write_file!)
+      end
+    end
+  end
+
+  def test_elgato_handoff_anchor_failure_retains_private_staging_without_publication
+    Dir.mktmpdir("waves-elgato-anchor-failure") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      singleton = WavesRelease::ElgatoHandoff.singleton_class
+      original = WavesRelease::ElgatoHandoff.method(:write_file!)
+      singleton.send(:define_method, :write_file!) do |path, contents|
+        raise Errno::ENOSPC, path if path == "#{output}.sha256"
+
+        original.call(path, contents)
+      end
+      singleton.send(:private, :write_file!)
+
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_match(/retained at/, error.message)
+      refute File.exist?(output)
+      refute File.exist?("#{output}.sha256")
+      retained = error.message[/retained at (.+)\z/, 1]
+      assert retained && File.directory?(retained)
+    ensure
+      singleton.send(:define_method, :write_file!, original)
+      singleton.send(:private, :write_file!)
+    end
+  end
+
+  def elgato_handoff_fixture(root)
+    dmg = File.join(root, "Waves.dmg")
+    plugin = File.join(root, "com.jonathanreed.waves.streamDeckPlugin")
+    manifest = File.join(root, "release-evidence.candidate.json")
+    output = File.join(root, HANDOFF_NAME)
+    File.write(dmg, "signed candidate dmg bytes\n")
+    File.write(plugin, "stream deck package bytes\n")
+    input = evidence_input
+    dmg_hash = Digest::SHA256.file(dmg).hexdigest
+    input.fetch("package").fetch("hashes")["dmg"] = dmg_hash
+    input.fetch("package").fetch("notarization")["artifactSHA256"] = dmg_hash
+    input.fetch("externalReceipts").fetch("securityScan")["artifactSHA256"] = dmg_hash
+    WavesRelease::Evidence.write!(
+      input: input,
+      metadata: load_metadata,
+      profile: "candidate",
+      output: manifest
+    )
+    [dmg, plugin, manifest, output]
+  end
+
   def test_elgato_handoff_finalizer_requires_every_result_and_binds_returned_diagnostics
     handoff = WavesRelease.const_defined?(:ElgatoHandoff) ? WavesRelease::ElgatoHandoff : nil
     refute_nil handoff, "expected deterministic Elgato handoff assembly"
@@ -1380,6 +1483,7 @@ class ReleaseInfraTest < Minitest::Test
       )
 
       finalizer = File.join(output, "finalize-receipt.rb")
+      trusted_checksums_digest = Digest::SHA256.file(File.join(output, "SHA256SUMS")).hexdigest
       results_path = File.join(output, "results.json")
       assert File.executable?(finalizer), "expected a runnable receipt finalizer in the handoff"
       return unless File.executable?(finalizer)
@@ -1403,10 +1507,32 @@ class ReleaseInfraTest < Minitest::Test
         end
       end
 
+      original_checksums = File.binread(File.join(output, "SHA256SUMS"))
+      original_readme = File.binread(File.join(output, "README.md"))
+      File.open(File.join(output, "README.md"), "a") { |file| file << "tampered\n" }
+      replacement = original_checksums.lines.map do |line|
+        if line.end_with?("  README.md\n")
+          "#{Digest::SHA256.file(File.join(output, 'README.md')).hexdigest}  README.md\n"
+        else
+          line
+        end
+      end.join
+      File.binwrite(File.join(output, "SHA256SUMS"), replacement)
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ruby", "--disable-gems", finalizer, trusted_checksums_digest,
+        output, results_path, diagnostics, receipt
+      )
+      refute status.success?
+      assert_match(/trusted out-of-band digest/, stderr)
+      refute File.exist?(receipt)
+      File.binwrite(File.join(output, "SHA256SUMS"), original_checksums)
+      File.binwrite(File.join(output, "README.md"), original_readme)
+
       _stdout, stderr, status = Open3.capture3(
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1429,6 +1555,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1445,6 +1572,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1461,6 +1589,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1475,6 +1604,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,

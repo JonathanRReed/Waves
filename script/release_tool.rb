@@ -2061,6 +2061,8 @@ module WavesRelease
       Validation.revision!(plugin_revision, "Stream Deck plugin source revision")
       raise Error, "Stream Deck plugin package must use the canonical filename" unless File.basename(plugin_path) == PLUGIN_NAME
       raise Error, "Elgato handoff destination already exists" if File.exist?(output_root) || File.symlink?(output_root)
+      anchor_path = "#{output_root}.sha256"
+      raise Error, "Elgato handoff checksum anchor already exists" if File.exist?(anchor_path) || File.symlink?(anchor_path)
 
       manifest = Evidence.verify_file!(
         path: manifest_path,
@@ -2076,6 +2078,7 @@ module WavesRelease
 
       staging = Dir.mktmpdir(".waves-elgato-handoff-", parent)
       FileUtils.chmod(0o700, staging)
+      anchor_created = false
       begin
         staged_dmg = PrivateArtifacts.stage_file!(
           source: dmg_path,
@@ -2146,11 +2149,18 @@ module WavesRelease
         write_file!(File.join(staging, "ROLLBACK.md"), rollback(handoff))
         write_file!(File.join(staging, "results.json"), CanonicalJSON.generate(pending_results(handoff)))
         write_checksums!(staging, metadata)
+        checksum_digest = Digest::SHA256.file(File.join(staging, "SHA256SUMS")).hexdigest
+        write_file!(anchor_path, "#{checksum_digest}  #{File.basename(output_root)}/SHA256SUMS\n")
+        anchor_created = true
         verify!(root: staging, metadata: metadata)
+        fsync_tree!(staging, metadata)
         File.rename(staging, output_root)
         staging = nil
-      ensure
-        FileUtils.rm_rf(staging) if staging && File.exist?(staging)
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        FileUtils.rm_f(anchor_path) if anchor_created
+        retained = staging
+        staging = nil
+        raise Error, "#{error.message}; private staging retained at #{retained}"
       end
       output_root
     end
@@ -2252,7 +2262,9 @@ module WavesRelease
 
         Stream Deck plugin SHA-256: `#{handoff.dig('artifacts', 'streamDeckPlugin', 'sha256')}`
 
-        1. Run `/usr/bin/shasum -a 256 -c SHA256SUMS` in this folder.
+        1. Obtain the SHA-256 of `SHA256SUMS` from the maintainer through a separate,
+           authenticated channel. Do not use a digest delivered with this folder. Verify it,
+           then run `/usr/bin/shasum -a 256 -c SHA256SUMS` in this folder.
         2. Open `#{handoff.dig('artifacts', 'dmg', 'name')}` and drag Waves to Applications.
         3. Open `#{PLUGIN_NAME}` to install the companion.
         4. Follow `TEST-CHECKLIST.md` in order and record every pass or failure.
@@ -2263,7 +2275,7 @@ module WavesRelease
         7. If every group passed, create the return receipt with:
 
            ```bash
-           ./finalize-receipt.rb "$PWD" "$PWD/results.json" \\
+           ./finalize-receipt.rb TRUSTED_SHA256SUMS_SHA256 "$PWD" "$PWD/results.json" \\
              /ABSOLUTE/PATH/TO/DIAGNOSTICS \\
              /ABSOLUTE/PATH/TO/RETURN/remote-elgato-receipt.json
            ```
@@ -2430,6 +2442,14 @@ module WavesRelease
       true
     end
     private_class_method :verify_checksums!
+
+    def fsync_tree!(root, metadata)
+      files(metadata).each do |name|
+        File.open(File.join(root, name), File::RDONLY | File::NOFOLLOW) { |file| file.fsync }
+      end
+      File.open(root, File::RDONLY) { |directory| directory.fsync }
+    end
+    private_class_method :fsync_tree!
 
     def verify_file_hash!(root:, name:, digest:, label:)
       Validation.sha256!(digest, "Elgato handoff #{label} SHA-256")

@@ -58,10 +58,10 @@ module WavesElgatoReceipt
   module_function
 
   def run(arguments)
-    handoff_root, results_path, diagnostics_root, output_path = arguments
+    trusted_checksums_digest, handoff_root, results_path, diagnostics_root, output_path = arguments
     unless output_path
       raise Error,
-        "usage: finalize-receipt.rb HANDOFF_ROOT RESULTS_JSON DIAGNOSTICS_ROOT OUTPUT_JSON"
+        "usage: finalize-receipt.rb TRUSTED_SHA256SUMS_SHA256 HANDOFF_ROOT RESULTS_JSON DIAGNOSTICS_ROOT OUTPUT_JSON"
     end
     raise Error, "receipt output already exists" if File.exist?(output_path) || File.symlink?(output_path)
     raise Error, "receipt digest output already exists" if File.exist?("#{output_path}.sha256") || File.symlink?("#{output_path}.sha256")
@@ -69,7 +69,7 @@ module WavesElgatoReceipt
     root = verified_directory!(handoff_root, "handoff root")
     handoff = strict_json!(safe_file!(root, "handoff.json"), "handoff manifest")
     validate_handoff!(handoff)
-    verify_immutable_files!(root, handoff)
+    verify_immutable_files!(root, handoff, trusted_checksums_digest)
     results = strict_json!(results_path, "remote test results")
     validate_results!(results, handoff)
     diagnostics_digest = verify_diagnostics!(diagnostics_root, root)
@@ -133,8 +133,12 @@ module WavesElgatoReceipt
     end
   end
 
-  def verify_immutable_files!(root, handoff)
+  def verify_immutable_files!(root, handoff, trusted_checksums_digest)
     checksum_path = safe_file!(root, "SHA256SUMS")
+    sha256!(trusted_checksums_digest, "trusted handoff checksum digest")
+    unless Digest::SHA256.file(checksum_path).hexdigest == trusted_checksums_digest
+      raise Error, "handoff checksum file does not match the trusted out-of-band digest"
+    end
     checksums = File.readlines(checksum_path, chomp: true).to_h do |line|
       match = line.match(/\A([0-9a-f]{64})  ([^\/\n]+)\z/)
       raise Error, "handoff checksum file is malformed" unless match
