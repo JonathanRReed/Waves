@@ -322,14 +322,17 @@ extension AppStore {
       // Even if shutdown began while backend.start() was suspended, record the
       // successful native start so the checked shutdown path tears it back down.
       hasStartedAudioBackend = true
+      LaunchPerformanceRecorder.active?.mark(.backendStarted)
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       await backend.setManagedAudioEqualizer(preferences.managedAudioEqualizer)
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       let built = await backend.currentSnapshot()
+      LaunchPerformanceRecorder.active?.mark(.snapshotReady)
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       session = mergedSession(with: built, cached: warmSnapshot)
       cleanupStaleEntries()
       await reapplyRestoredAudioState()
+      LaunchPerformanceRecorder.active?.mark(.restoredRoutesReady)
       if preferences.adaptiveMixMode.usesSpeechFocus,
         preferences.autoPauseMusicForConferencing
       {

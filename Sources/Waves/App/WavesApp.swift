@@ -27,11 +27,22 @@ struct WavesApp: App {
   @State private var renderActivity: RenderActivityMonitor
 
   init() {
-    self.init(composition: .live)
+    self.init(
+      composition: .live,
+      performanceRecorder: LaunchPerformanceRecorder.activateLive()
+    )
   }
 
   init(composition: WavesComposition) {
+    self.init(composition: composition, performanceRecorder: nil)
+  }
+
+  private init(
+    composition: WavesComposition,
+    performanceRecorder: LaunchPerformanceRecorder?
+  ) {
     let store = composition.makeStore()
+    performanceRecorder?.mark(.storeReady)
     _store = State(initialValue: store)
 
     // Suspend the backend level poll whenever no Waves window is on screen.

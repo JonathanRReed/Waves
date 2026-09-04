@@ -115,7 +115,8 @@ extension AppStore {
     reason: AppRouteIntentReason,
     persistencePolicy: AppIntentPersistencePolicy,
     feedbackPolicy: AppIntentFeedbackPolicy,
-    optimistic: Bool
+    optimistic: Bool,
+    performanceRecorder: LaunchPerformanceRecorder? = LaunchPerformanceRecorder.active
   ) -> Task<AppIntentApplyResult, Never> {
     guard startupState != .shuttingDown else {
       let result = AppIntentApplyResult(
@@ -138,6 +139,15 @@ extension AppStore {
       reason: reason,
       optimistic: optimistic
     )
+    let isEligibleLaunchControl =
+      reason == .userEdit
+      && (overrides.desiredVolume != nil || overrides.isMuted != nil)
+    if isEligibleLaunchControl {
+      performanceRecorder?.controlSubmitted(
+        appID: start.intent.appID,
+        generation: start.intent.generation
+      )
+    }
     if let projection = start.projection {
       applyOptimisticProjection(projection, toAppID: appID)
     }
@@ -153,7 +163,8 @@ extension AppStore {
         backendResult: backendResult,
         persistencePolicy: persistencePolicy,
         deviceIDAtSubmission: deviceIDAtSubmission,
-        feedbackPolicy: feedbackPolicy
+        feedbackPolicy: feedbackPolicy,
+        performanceRecorder: performanceRecorder
       )
     }
     appIntentCoordinator.registerAppTask(task, for: start)
@@ -183,7 +194,8 @@ extension AppStore {
     backendResult: AppIntentApplyResult,
     persistencePolicy: AppIntentPersistencePolicy,
     deviceIDAtSubmission: String?,
-    feedbackPolicy: AppIntentFeedbackPolicy
+    feedbackPolicy: AppIntentFeedbackPolicy,
+    performanceRecorder: LaunchPerformanceRecorder?
   ) async -> AppIntentApplyResult {
     let intent = start.intent
     let appID = intent.appID
@@ -192,6 +204,11 @@ extension AppStore {
       backendGeneration: backendResult.generation
     ) {
     case .stale:
+      performanceRecorder?.controlFinished(
+        appID: appID,
+        generation: intent.generation,
+        confirmed: false
+      )
       return AppIntentApplyResult(
         appID: appID,
         generation: intent.generation,
@@ -201,6 +218,11 @@ extension AppStore {
         detail: "A newer AppStore transaction superseded this result."
       )
     case .backendGenerationMismatch:
+      performanceRecorder?.controlFinished(
+        appID: appID,
+        generation: intent.generation,
+        confirmed: false
+      )
       let confirmedSnapshot = await backend.currentSnapshot()
       if appIntentCoordinator.isCurrent(intent.generation, for: appID) {
         session = mergedSession(with: confirmedSnapshot, cached: session)
@@ -218,6 +240,18 @@ extension AppStore {
     case .current:
       break
     }
+
+    let confirmedControl =
+      backendResult.outcome == .applied
+      && backendResult.resultingApp.map { resultingApp in
+        (intent.desiredVolume == resultingApp.desiredVolume)
+          && (intent.isMuted == resultingApp.isMuted)
+      } == true
+    performanceRecorder?.controlFinished(
+      appID: appID,
+      generation: intent.generation,
+      confirmed: confirmedControl
+    )
 
     // A transaction that persists nothing — a slider nudge mid-drag, an
     // automation step, a startup restore row — is transient: the committing
