@@ -556,10 +556,11 @@ cleanup() {
   SMOKE_PID=""
 
   if [ -n "$ACTIVE_MOUNT_DIR" ]; then
-    /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null 2>&1 || true
-    rm -rf "$ACTIVE_MOUNT_DIR"
+    if /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null 2>&1; then
+      rm -rf -- "$ACTIVE_MOUNT_DIR"
+      ACTIVE_MOUNT_DIR=""
+    fi
   fi
-  ACTIVE_MOUNT_DIR=""
 
   if [ -n "$ACTIVE_STAGING_DIR" ]; then
     rm -rf "$ACTIVE_STAGING_DIR"
@@ -569,13 +570,9 @@ cleanup() {
   if [ -n "$ACTIVE_WRITABLE_DMG_DIR" ]; then
     # The writable image lives in this private workspace. Detach first, then
     # remove only a validated workspace created by this invocation.
-    if [ -n "$ACTIVE_MOUNT_DIR" ]; then
-      /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null 2>&1 || true
-      ACTIVE_MOUNT_DIR=""
-    fi
     case "$ACTIVE_WRITABLE_DMG_DIR" in
-      /private/tmp/waves-dmg-layout.*)
-        if [ -d "$ACTIVE_WRITABLE_DMG_DIR" ]; then
+      /private/tmp/waves-dmg-layout.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9])
+        if [ -z "$ACTIVE_MOUNT_DIR" ] && [ -d "$ACTIVE_WRITABLE_DMG_DIR" ]; then
           if [ -n "$(find -P "$ACTIVE_WRITABLE_DMG_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
             rm -rf -- "$ACTIVE_WRITABLE_DMG_DIR"
           else

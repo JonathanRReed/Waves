@@ -70,29 +70,30 @@ class ReleaseInfraTest < Minitest::Test
   def test_writable_dmg_workspace_is_private_unique_and_removed_on_failure
     root = File.expand_path("../..", __dir__)
     script = File.read(File.join(root, "script/build_and_run.sh"))
-    workspace_root = Dir.mktmpdir("waves-dmg-workspace-test")
+    cleanup = script[/cleanup\(\) \{.*?\n\}\ntrap cleanup EXIT/m]
+    refute_nil cleanup, "production cleanup function must be available"
+    workspace = File.join("/private/tmp", "waves-dmg-layout.#{Process.pid.to_s.rjust(6, '0')[-6, 6]}")
+    FileUtils.rm_rf(workspace)
+    FileUtils.mkdir(workspace)
+    image = File.join(workspace, "layout.dmg")
+    FileUtils.chmod(0o700, workspace)
+    File.write(image, "image")
+    hook = File.join(workspace, "hdiutil")
+    File.write(hook, "#!/bin/bash\nexit ${HDIUTIL_FAIL:-0}\n")
+    FileUtils.chmod(0o700, hook)
     probe = <<~SHELL
       set -euo pipefail
-      ACTIVE_WRITABLE_DMG_DIR="$(mktemp -d "#{workspace_root}/waves-dmg-layout.XXXXXX")"
-      chmod 700 "$ACTIVE_WRITABLE_DMG_DIR"
-      ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG_DIR/layout.dmg"
-      layout_token="${ACTIVE_WRITABLE_DMG_DIR##*.}"
-      layout_volume_name="Waves Layout $layout_token"
-      test "$(stat -f '%Lp' "$ACTIVE_WRITABLE_DMG_DIR")" = 700
-      test "$ACTIVE_WRITABLE_DMG" = "$ACTIVE_WRITABLE_DMG_DIR/layout.dmg"
-      test "$layout_volume_name" = "Waves Layout ${ACTIVE_WRITABLE_DMG_DIR##*.}"
-      touch "$ACTIVE_WRITABLE_DMG"
-      case "$ACTIVE_WRITABLE_DMG_DIR" in
-        /private/tmp/waves-dmg-layout.*|#{workspace_root}/waves-dmg-layout.*) rm -rf -- "$ACTIVE_WRITABLE_DMG_DIR" ;;
-        *) exit 1 ;;
-      esac
-      test ! -e "$ACTIVE_WRITABLE_DMG_DIR"
+      SMOKE_PID="" ACTIVE_MOUNT_DIR="$MOUNT" ACTIVE_STAGING_DIR="" ACTIVE_SMOKE_HOME=""
+      ACTIVE_WRITABLE_DMG_DIR="$WORKSPACE" ACTIVE_WRITABLE_DMG="$WORKSPACE/layout.dmg"
+      cleanup_isolated_distribution_build() { :; }
+      #{cleanup.gsub('/usr/bin/hdiutil', Shellwords.escape(hook))}
+      cleanup
     SHELL
-    _stdout, stderr, status = Open3.capture3("/bin/bash", "-c", probe)
+    _stdout, stderr, status = Open3.capture3({"MOUNT" => "/tmp/waves-mounted", "WORKSPACE" => workspace}, "/bin/bash", "-c", probe)
     assert status.success?, stderr
-    assert_match(/ACTIVE_WRITABLE_DMG_DIR/, script)
+    refute File.exist?(workspace), "successful production cleanup should remove workspace"
   ensure
-    FileUtils.remove_entry(workspace_root) if workspace_root && File.directory?(workspace_root)
+    FileUtils.remove_entry(workspace) if workspace && File.directory?(workspace)
   end
 
   def test_dmg_background_renderer_matches_the_660_by_430_finder_window
