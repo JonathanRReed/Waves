@@ -6,8 +6,9 @@
   Half-Bounce-qualified, signed, hardware-verified, publication-ready release,
   then complete the authorized public release pipeline.
 - Current completion claim: Planning and baseline tranche only.
-- Observable result for the active tranche: Approved design, task contract, and
-  decision trail committed on `codex/waves-1.7.1` after a passing baseline test.
+- Observable result for the active tranche: Approved design, task contract,
+  durable baseline receipts, and decision trail committed on
+  `codex/waves-1.7.1` after a passing baseline test.
 
 ## Current state
 
@@ -23,7 +24,8 @@
   Stream Deck Plus.
 - Desired endpoint: One exact 1.7.1 build 19 artifact published consistently
   after every code, security, performance, trust, and hardware gate passes.
-- Last verified checkpoint: `swift test` passed 626 tests on the branch base.
+- Last verified checkpoint: `swift test` passed 626 tests on the branch base;
+  the durable receipt is `.audit/evidence/2026-09-04-planning-baseline.md`.
 
 ## Priority scope
 
@@ -41,9 +43,10 @@
 
 ## Evidence available
 
-- Direct receipts: Clean `origin/main` at `d2ac715`; 626 passing baseline tests;
-  GitHub, appcast, and Homebrew publish 1.7.0 build 16; Mac mini inventory proves
-  the Elgato environment; private `waves-streamdeck` repository exists.
+- Direct receipts: `.audit/evidence/2026-09-04-planning-baseline.md` records the
+  exact branch base, passing 626-test run, public release state, and companion
+  repository check. `.audit/evidence/2026-09-04-mac-mini-inventory.md` records
+  the remote Elgato environment and source-state boundary.
 - Prior claims or stale evidence: Existing PR descriptions and earlier release
   receipts remain proposals or historical evidence until revalidated.
 - Inferences: Build 19 is the first safe public build after known unpublished
@@ -55,10 +58,10 @@
 
 | Gate | Required now | Required evidence | Status | Direct receipt |
 |---|---|---|---|---|
-| Functionality | Yes | Focused tests, 626-test suite or higher, full quality gate | Baseline passed | `swift test`, 626 passed |
+| Functionality | Yes | Focused tests, 626-test suite or higher, full quality gate | Baseline passed | `.audit/evidence/2026-09-04-planning-baseline.md` |
 | UX and accessibility | Yes | Hosted/rendered tests and real installed-app interaction | Not run | |
 | Runtime and performance | Yes | Baseline/candidate matrix, callback stress, soak, 30 launch recordings | Not run | |
-| Data and provenance | Yes | Exact revisions, hashes, canonical metadata, evidence receipts | Partial | Branch base and public release inspected |
+| Data and provenance | Yes | Exact revisions, hashes, canonical metadata, evidence receipts | Partial | `.audit/evidence/2026-09-04-planning-baseline.md` |
 | Security and privacy | Yes | Deep scan, finding dispositions, final receipt, secret/dependency checks | Not run | |
 | Packaging and trust | Yes | Signed/notarized/stapled candidate, Gatekeeper, universal app and dSYM | Not run | |
 | Deployment and release | Yes | Mac mini receipt, exact tag, GitHub, appcast, site, Homebrew, public hashes | Not run | |
@@ -82,7 +85,8 @@
 - Scope: Record the approved design and establish the verified branch baseline.
 - Observable state change: Planning artifacts committed on the release branch.
 - Checks and receipts required before closure: Complete design self-review,
-  `git diff --check`, baseline test receipt, and clean commit.
+  cross-model review, `git diff --check`, durable baseline receipts, and clean
+  commits.
 - One next tranche: Write the implementation plan and begin baseline security
   and performance measurement.
 
