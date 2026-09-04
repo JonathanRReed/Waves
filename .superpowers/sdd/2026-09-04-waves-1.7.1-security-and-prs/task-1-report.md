@@ -17,3 +17,40 @@ Each was wrapped with a 120-second Perl alarm, redirected to a temporary output 
 The inventory remains ten open PRs, #29 and #34 through #42. The prior receipt contains each head SHA, security property, GitHub checks, and disposition. PR #29 directly resolves Sparkle 2.9.5 in `Package.resolved`. GitHub shared quality gate failures remain #34, #37, #39, #40, and #41.
 
 Self-review: the receipt now distinguishes direct GitHub evidence, the passing base run, and the diagnosed local runner blocker. The remaining concern is that isolated PR Swift and Ruby tests cannot execute reliably on this host. A future run needs a stable SwiftPM runner and a Ruby process timeout utility or an equivalent shell-level watchdog.
+
+## Recovery run
+
+The detached worktree commands completed without watchdog wrappers:
+
+```text
+#34 /usr/bin/ruby script/tests/release_infra_test.rb --name '/^test_publication_tag_requires_annotated_exact_matching_tag_and_origin_main$/'
+PR: exit 0, 1 run, 9 assertions. origin/main: exit 0, 0 runs.
+
+#35 /usr/bin/ruby script/tests/release_infra_test.rb --name '/^(test_elgato_handoff_prepares_an_exact_candidate_bound_test_kit|test_elgato_handoff_finalizer_requires_every_result_and_binds_returned_diagnostics)$/'
+PR: exit 0, 2 runs, 82 assertions. origin/main: exit 0, 2 runs, 77 assertions.
+
+#36 swift test --scratch-path /tmp/waves-pr-36-scratch --filter terminationTimeoutDecisionWaitsForSlowCleanupBeforeReturning
+PR: exit 0, 1 test passed. origin/main with /tmp/waves-main-36-scratch: exit 0, 0 tests.
+
+#37 swift test --scratch-path /tmp/waves-pr-37-scratch --filter 'URLVolumeAutomationPreservesItsUntrustedOrigin|URLAutomationCannotInvokeTheWaveLinkBridge'
+PR: exit 0, 2 tests passed. origin/main with /tmp/waves-main-36-scratch: exit 0, 0 tests.
+
+#38 /usr/bin/ruby script/tests/release_infra_test.rb --name '/^test_dmg_builder_configures_and_verifies_premium_finder_layout$/'
+PR: exit 0, 1 run, 44 assertions. origin/main: exit 0, 1 run, 40 assertions.
+
+#39 /usr/bin/ruby script/tests/release_infra_test.rb --name '/^test_dmg_builder_configures_and_verifies_premium_finder_layout$/'
+PR: exit 0, 1 run, 43 assertions. origin/main: exit 0, 1 run, 40 assertions.
+
+#40 swift test --scratch-path /tmp/waves-pr-40-scratch --filter controlServerRequiresPublicListenerSelfProof
+PR: exit 0, 1 test passed. origin/main with /tmp/waves-main-36-scratch: exit 0, 1 test passed.
+
+#41 /usr/bin/ruby script/tests/release_infra_test.rb --name '/^test_private_stage_uses_the_root_that_was_validated_through_symlink_and_parent_components$/'
+PR: exit 1, 1 run, 1 assertion, 1 failure. Expected /var/folders/.../real/private/Waves.dmg; actual /private/var/folders/.../real/private/Waves.dmg. origin/main exact filter: exit 0, 0 runs.
+
+#42 /usr/bin/ruby script/tests/release_infra_test.rb --name '/^test_publication_tag_rejects_a_self_asserted_release_authority$/'
+PR: exit 0, 1 run, 6 assertions. origin/main exact filter: exit 0, 0 runs.
+```
+
+Each PR used `git worktree add --detach /tmp/waves-pr-N origin/pr/N`. The base used a separate detached `/tmp/waves-main` worktree at `d2ac715`. Only one detached worktree existed at a time, and all were removed after use.
+
+Self-review: the updated receipt replaces each inconclusive PR 34 through 42 result with direct command output. PR 40 remains a coverage gap because it changes only production code and the existing self-proof test passes before and after the change. PR 41 is a direct focused-test failure, not a runner failure. Swift compilation emitted intermittent `DecodingError.dataCorrupted` diagnostics but finished with exit 0 and the recorded test results. No production or test source changed.
