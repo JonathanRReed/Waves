@@ -113,17 +113,24 @@ import WavesAudioCore
 }
 
 @MainActor
-@Test func terminationTimeoutDecisionReturnsWithoutWaitingForSlowCleanup() async {
+@Test func terminationTimeoutDecisionWaitsForSlowCleanupBeforeReturning() async {
   let gate = AsyncShutdownGate()
-  let outcome = await AppTerminationTimeoutDecision.awaitShutdown(
-    timeout: .milliseconds(5)
-  ) {
-    await gate.wait()
-    return AppShutdownResult()
+  let probe = TerminationOutcomeProbe()
+  let decision = Task { @MainActor in
+    let outcome = await AppTerminationTimeoutDecision.awaitShutdown(
+      timeout: .milliseconds(5)
+    ) {
+      await gate.wait()
+      return AppShutdownResult()
+    }
+    probe.record(outcome)
   }
 
-  #expect(outcome == .timedOut)
+  try? await Task.sleep(for: .milliseconds(20))
+  #expect(probe.current == nil)
   await gate.release()
+  await decision.value
+  #expect(probe.current == .timedOut)
 }
 
 @MainActor
@@ -145,6 +152,10 @@ func terminationCoordinatorRepliesExactlyOnceForEveryOutcome() async {
   }
 
   let timeoutGate = AsyncShutdownGate()
+  Task {
+    try? await Task.sleep(for: .milliseconds(20))
+    await timeoutGate.release()
+  }
   await verifyTerminationCoordinator(
     expected: .timedOut,
     timeout: .milliseconds(5)
@@ -152,12 +163,11 @@ func terminationCoordinatorRepliesExactlyOnceForEveryOutcome() async {
     await timeoutGate.wait()
     return AppShutdownResult()
   }
-  await timeoutGate.release()
 }
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
-func productionTerminationCoordinatorTimesOutWithinTwoHundredFiftyMilliseconds() async {
+func productionTerminationCoordinatorDoesNotReplyBeforeCleanupAfterTimeout() async {
   #expect(AppTerminationCoordinator.productionTimeout == .milliseconds(250))
   let coordinator = AppTerminationCoordinator()
   let recorder = TerminationReplyRecorder()
@@ -178,12 +188,15 @@ func productionTerminationCoordinatorTimesOutWithinTwoHundredFiftyMilliseconds()
     ) == .terminateLater
   )
 
+  try? await Task.sleep(for: .milliseconds(300))
+  #expect(completion.current == nil)
+  #expect(recorder.replies.isEmpty)
+  await gate.release()
   #expect(await completion.wait() == .timedOut)
 
   #expect(coordinator.completedOutcome == .timedOut)
   #expect(recorder.outcomes == [.timedOut])
   #expect(recorder.replies == [true])
-  await gate.release()
 }
 
 @MainActor
@@ -216,12 +229,15 @@ func timedOutTerminationPersistsTruthBeforeReplyAndRepliesOnce() async throws {
     ) == .terminateLater
   )
 
+  try? await Task.sleep(for: .milliseconds(20))
+  #expect(completion.current == nil)
+  #expect(replyCount == 0)
+  await gate.release()
   #expect(await completion.wait() == .timedOut)
 
   #expect(coordinator.completedOutcome == .timedOut)
   #expect(replyCount == 1)
   #expect(reportSeenAtReply?.completion == "timedOut")
-  await gate.release()
   await Task.yield()
   #expect(replyCount == 1)
 }
@@ -729,6 +745,10 @@ private final class TerminationOutcomeProbe: @unchecked Sendable {
       id: UUID,
       continuation: CheckedContinuation<AppTerminationOutcome?, Never>
     )?
+
+  var current: AppTerminationOutcome? {
+    lock.withLock { outcome }
+  }
 
   func record(_ outcome: AppTerminationOutcome) {
     let continuation = lock.withLock { () -> CheckedContinuation<AppTerminationOutcome?, Never>? in

@@ -226,11 +226,12 @@ enum AppTerminationTimeoutDecision {
   ) async -> AppTerminationOutcome {
     let firstOutcome = FirstTerminationOutcome()
 
-    Task { @MainActor in
+    let shutdownTask = Task { @MainActor in
       let result = await operation()
       await firstOutcome.resolve(
         result.completion == .clean ? .clean(result) : .degraded(result)
       )
+      return result
     }
     Task {
       do {
@@ -241,7 +242,13 @@ enum AppTerminationTimeoutDecision {
       await firstOutcome.resolve(.timedOut)
     }
 
-    return await firstOutcome.value()
+    let outcome = await firstOutcome.value()
+    if outcome == .timedOut {
+      // A timeout is diagnostic only. AppKit must not be allowed to terminate
+      // the process while Core Audio teardown is still in flight.
+      _ = await shutdownTask.value
+    }
+    return outcome
   }
 }
 
