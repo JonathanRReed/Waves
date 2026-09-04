@@ -446,6 +446,20 @@ func controlServerCapsOneProcessAndRemovesSocketOnShutdown() async throws {
   )
 }
 
+@Test func backlogPressureRequiresTheConfiguredQueueCapacityFirst() {
+  #expect(!backlogPressureIsProven(confirmedConnections: 0))
+  #expect(
+    !backlogPressureIsProven(
+      confirmedConnections: ControlServer.maximumConnections - 1
+    )
+  )
+  #expect(
+    backlogPressureIsProven(
+      confirmedConnections: ControlServer.maximumConnections
+    )
+  )
+}
+
 @MainActor
 @Test(.timeLimit(.minutes(1)))
 func saturatedControlListenerSelfProofFinishesWithinItsStartupBudget() async throws {
@@ -467,6 +481,7 @@ func saturatedControlListenerSelfProofFinishesWithinItsStartupBudget() async thr
           path: directory.appendingPathComponent(stagingLeaf).path
         )
         backlogClients = pressure.clients
+        #expect(backlogClients.count >= ControlServer.maximumConnections)
         #expect(pressure.reachedBacklogPressure)
       }
     )
@@ -1023,12 +1038,21 @@ private func fillUnixSocketBacklog(
       clients.append(client)
     } else if errno == EAGAIN || errno == EWOULDBLOCK {
       _ = Darwin.close(client)
-      return (clients, true)
+      return (clients, backlogPressureIsProven(confirmedConnections: clients.count))
     } else if errno == EINPROGRESS {
       var readiness = pollfd(fd: client, events: Int16(POLLOUT), revents: 0)
-      if poll(&readiness, 1, 0) == 0 {
+      var readinessResult = poll(&readiness, 1, 0)
+      if backlogPressureIsProven(confirmedConnections: clients.count), readinessResult == 0
+      {
         clients.append(client)
         return (clients, true)
+      }
+      if readinessResult == 0 {
+        readinessResult = poll(&readiness, 1, 100)
+      }
+      guard readinessResult > 0, readiness.revents & Int16(POLLOUT) != 0 else {
+        _ = Darwin.close(client)
+        return (clients, false)
       }
       var socketError: Int32 = 0
       var length = socklen_t(MemoryLayout<Int32>.size)
@@ -1038,17 +1062,21 @@ private func fillUnixSocketBacklog(
         clients.append(client)
       } else if socketError == EAGAIN || socketError == EWOULDBLOCK {
         _ = Darwin.close(client)
-        return (clients, true)
+        return (clients, backlogPressureIsProven(confirmedConnections: clients.count))
       } else {
         _ = Darwin.close(client)
-        return (clients, clients.count >= ControlServer.maximumConnections)
+        return (clients, backlogPressureIsProven(confirmedConnections: clients.count))
       }
     } else {
       _ = Darwin.close(client)
-      return (clients, clients.count >= ControlServer.maximumConnections)
+      return (clients, backlogPressureIsProven(confirmedConnections: clients.count))
     }
   }
   return (clients, false)
+}
+
+private func backlogPressureIsProven(confirmedConnections: Int) -> Bool {
+  confirmedConnections >= ControlServer.maximumConnections
 }
 
 private struct ControlSocketFixture {
