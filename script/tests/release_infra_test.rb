@@ -46,7 +46,10 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes build_script, ".background"
     assert_includes build_script, ".DS_Store"
     assert_includes build_script, "finder_metadata_attempt"
-    assert_includes build_script, '/private/tmp/waves-dmg-layout.XXXXXX'
+    assert_includes build_script,
+                    'ACTIVE_WRITABLE_DMG_DIR="$(mktemp -d "/private/tmp/waves-dmg-layout.XXXXXX")"'
+    assert_includes build_script, 'ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG_DIR/layout.dmg"'
+    refute_includes build_script, 'ACTIVE_WRITABLE_DMG="$ACTIVE_WRITABLE_DMG.dmg"'
     assert_includes build_script, '/private/tmp/waves-dmg-mount.XXXXXX'
     assert_includes build_script, 'layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"'
     assert_includes build_script, 'diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME"'
