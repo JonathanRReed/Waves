@@ -13,6 +13,18 @@ require "yaml"
 module WavesRelease
   class Error < StandardError; end
 
+  module ReleaseAuthority
+    PRINCIPAL = "waves-commit-signing"
+    PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJaVZPTQXnIIPdGksw4PmO3yBLuqEkd+qE4SALWpFpQ waves-commit-signing"
+    FINGERPRINT = "SHA256:53uCiv5rg7roncACotblHKo4OvHAsvYw/+x/5pU0mCQ"
+
+    PINNED = {
+      "principal" => PRINCIPAL,
+      "publicKey" => PUBLIC_KEY,
+      "fingerprint" => FINGERPRINT,
+    }.freeze
+  end
+
   module Validation
     module_function
 
@@ -1634,7 +1646,7 @@ module WavesRelease
   end
 
   module TagAuthority
-    PRINCIPAL = "waves-commit-signing"
+    PRINCIPAL = ReleaseAuthority::PRINCIPAL
 
     module_function
 
@@ -1646,7 +1658,10 @@ module WavesRelease
       )
       principal = authority.fetch("principal")
       raise Error, "publication tag principal must be #{PRINCIPAL}" unless principal == PRINCIPAL
-      public_key = authority.fetch("publicKey")
+      unless authority == ReleaseAuthority::PINNED
+        raise Error, "publication tag authority does not match the immutable release authority"
+      end
+      public_key = ReleaseAuthority::PUBLIC_KEY
       parts = public_key.split
       unless parts.length.between?(2, 3) && parts.first == "ssh-ed25519"
         raise Error, "pinned release key is malformed"
