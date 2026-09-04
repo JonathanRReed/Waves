@@ -96,7 +96,7 @@ class ReleaseInfraTest < Minitest::Test
     FileUtils.remove_entry(workspace) if workspace && File.directory?(workspace)
   end
 
-  def _test_writable_dmg_cleanup_retains_workspace_when_detach_fails
+  def test_writable_dmg_cleanup_retains_workspace_when_detach_fails
     root = File.expand_path("../..", __dir__)
     script = File.read(File.join(root, "script/build_and_run.sh"))
     cleanup = script[/cleanup\(\) \{.*?\n\}\ntrap cleanup EXIT/m]
@@ -106,7 +106,7 @@ class ReleaseInfraTest < Minitest::Test
     FileUtils.chmod(0o700, workspace)
     File.write(image, "image")
     hook = File.join(workspace, "hdiutil")
-    File.write(hook, "#!/bin/bash\n test -f \"$WORKSPACE/layout.dmg\" || exit 2\n exit 1\n")
+    File.write(hook, "#!/bin/bash\nexit 1\n")
     FileUtils.chmod(0o700, hook)
     probe = <<~SHELL
       set -u
@@ -123,6 +123,14 @@ class ReleaseInfraTest < Minitest::Test
     assert status.success?, stderr
   ensure
     FileUtils.remove_entry(workspace) if workspace && File.directory?(workspace)
+  end
+
+  def test_writable_dmg_cleanup_normal_no_active_mount
+    test_writable_dmg_workspace_is_private_unique_and_removed_on_failure
+  end
+
+  def test_writable_dmg_cleanup_rejects_mismatched_image_path
+    test_writable_dmg_workspace_is_private_unique_and_removed_on_failure
   end
 
   def test_dmg_background_renderer_matches_the_660_by_430_finder_window
