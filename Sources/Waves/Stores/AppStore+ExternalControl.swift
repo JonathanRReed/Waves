@@ -633,7 +633,7 @@ extension AppStore {
         return
       }
       setDesiredVolume(volume, for: app)
-      commitDesiredVolume(for: app)
+      commitDesiredVolume(for: app, reason: .urlAutomation)
 
     case let .setMuted(appID, isMuted):
       guard let app = session.apps.first(matchingAppKey: appID) else {
@@ -652,7 +652,7 @@ extension AppStore {
         )
         return
       }
-      setMuted(isMuted, for: app)
+      setMuted(isMuted, for: app, reason: .urlAutomation)
 
     case let .applyProfile(profileName):
       guard

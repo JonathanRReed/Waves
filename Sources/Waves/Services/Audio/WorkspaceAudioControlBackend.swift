@@ -485,7 +485,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       for: snapshot.apps[acceptedIndex],
       routerActivity: routerActivity
     ) {
-      if shouldControlThroughWaveLink(snapshot.apps[acceptedIndex], conflict: conflict) {
+      if intent.reason != .urlAutomation,
+        shouldControlThroughWaveLink(snapshot.apps[acceptedIndex], conflict: conflict)
+      {
         return await applyIntentThroughWaveLink(
           intent,
           logicalID: logicalID,

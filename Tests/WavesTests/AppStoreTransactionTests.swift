@@ -1350,6 +1350,29 @@ func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async th
 }
 
 @MainActor
+@Test func URLVolumeAutomationPreservesItsUntrustedOrigin() async {
+  let app = transactionTestApp(id: "automation.url")
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice()
+  )
+  fixture.store.preferences.enableURLScheme = true
+
+  fixture.store.handleURLScheme(
+    URL(string: "waves://set-volume?app=automation.url&volume=0.42")!
+  )
+  await fixture.store.drainAppIntentTransactions()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  #expect(intents.first?.desiredVolume == 0.42)
+  #expect(intents.first?.reason == .urlAutomation)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
 @Test func disabledURLAutomationNeverInvokesTheAppStoreParser() async {
   let fixture = makeTransactionFixture(
     apps: [transactionTestApp(id: "automation.disabled")],
