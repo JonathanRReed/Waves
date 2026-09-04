@@ -579,7 +579,10 @@ extension AppStore {
     appIntentCoordinator.registerVolumeDebounce(task, token: token, appID: appID)
   }
 
-  func commitDesiredVolume(for app: AudioApp) {
+  func commitDesiredVolume(
+    for app: AudioApp,
+    reason: AppRouteIntentReason = .userEdit
+  ) {
     guard requireAudioRunning() else { return }
     guard !isExcluded(app) else { return }
     let appID = app.logicalID
@@ -593,7 +596,7 @@ extension AppStore {
     startAppIntentTransaction(
       forAppID: appID,
       overrides: AppIntentOverrides(desiredVolume: target),
-      reason: .userEdit,
+      reason: reason,
       persistencePolicy: .acceptedUserIntent(updateDevicePreset: true),
       feedbackPolicy: .directControl(
         successTitle: "Managed route active",
@@ -609,14 +612,18 @@ extension AppStore {
     appIntentCoordinator.retainAppState(in: currentAppIDs)
   }
 
-  func setMuted(_ isMuted: Bool, for app: AudioApp) {
+  func setMuted(
+    _ isMuted: Bool,
+    for app: AudioApp,
+    reason: AppRouteIntentReason = .userEdit
+  ) {
     guard requireAudioRunning() else { return }
     guard !isExcluded(app) else { return }
     appIntentCoordinator.releaseAutomaticMute(for: app.logicalID)
     startAppIntentTransaction(
       forAppID: app.logicalID,
       overrides: AppIntentOverrides(isMuted: isMuted, muteSource: .user),
-      reason: .userEdit,
+      reason: reason,
       persistencePolicy: .acceptedUserIntent(updateDevicePreset: true),
       feedbackPolicy: .directControl(
         successTitle: isMuted ? "App muted" : "App unmuted",

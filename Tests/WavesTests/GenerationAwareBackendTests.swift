@@ -320,6 +320,51 @@ import WavesAudioCore
   #expect(MixerRouteControlPolicy(app: handedOffApp).allowsAudioControl == false)
 }
 
+@Test func URLAutomationCannotInvokeTheWaveLinkBridge() async {
+  let app = AudioApp(
+    id: "runtime.browser",
+    logicalID: "com.example.browser",
+    pid: 101,
+    bundleID: "com.example.browser",
+    displayName: "Browser",
+    category: .media,
+    desiredVolume: 1,
+    appliedVolume: 1,
+    routingState: .managed,
+    compatibility: .supported
+  )
+  let bridge = WaveLinkControllerSpy()
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
+      )
+    },
+    waveLinkController: bridge
+  )
+
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: app.logicalID,
+      desiredVolume: 0,
+      isMuted: true,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .urlAutomation
+    )
+  )
+
+  #expect(result.outcome == .unsupported)
+  #expect(await bridge.requests.isEmpty)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+}
+
 @Test func waveLinkBridgeFailureNeverFallsBackToAWavesRenderer() async {
   let app = AudioApp(
     id: "runtime.browser",

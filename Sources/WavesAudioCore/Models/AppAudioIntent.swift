@@ -67,6 +67,7 @@ public enum AppRouteIntentReason: Hashable, Sendable {
   case devicePresetRestore
   case profileApply
   case automation
+  case urlAutomation
   case deviceChange
   case routeRecovery
 }
