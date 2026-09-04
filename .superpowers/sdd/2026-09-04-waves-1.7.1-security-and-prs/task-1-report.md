@@ -54,3 +54,30 @@ PR: exit 0, 1 run, 6 assertions. origin/main exact filter: exit 0, 0 runs.
 Each PR used `git worktree add --detach /tmp/waves-pr-N origin/pr/N`. The base used a separate detached `/tmp/waves-main` worktree at `d2ac715`. Only one detached worktree existed at a time, and all were removed after use.
 
 Self-review: the updated receipt replaces each inconclusive PR 34 through 42 result with direct command output. PR 40 remains a coverage gap because it changes only production code and the existing self-proof test passes before and after the change. PR 41 is a direct focused-test failure, not a runner failure. Swift compilation emitted intermittent `DecodingError.dataCorrupted` diagnostics but finished with exit 0 and the recorded test results. No production or test source changed.
+
+## Review fix round 1
+
+Fresh inventory command:
+
+```text
+gh pr list --state open --limit 100 --json number,title,headRefOid,mergeStateStatus,statusCheckRollup,url
+```
+
+Exit 0. It returned ten open PRs. The receipt now records each exact title and adds a separate mergeability column. Mergeability is CLEAN for PRs 29, 35, 36, 38, and 42. It is UNSTABLE for PRs 34, 37, 39, 40, and 41.
+
+Full current-branch checks:
+
+```text
+swift test
+/usr/bin/ruby script/tests/release_infra_test.rb
+```
+
+`swift test` exited 0. The incremental build completed in 19.17 seconds, then 626 tests passed in 27.690 seconds. The final output contained no warnings or failures. The Ruby suite exited 0 after 398.408857 seconds with 73 runs, 735 assertions, 0 failures, 0 errors, and 0 skips.
+
+Final receipt check:
+
+```text
+git diff --check && test "$(rg -c '^\| #[0-9]+' .audit/evidence/2026-09-04-pr-adjudication-baseline.md)" -eq "$(gh pr list --state open --limit 100 --json number --jq length)"
+```
+
+Exit 0. The receipt has ten PR rows, matching ten open PRs. Self-review found all six required inventory fields for every row: number, title, head SHA, checks, mergeability, and security property. The remaining PR-specific concerns are unchanged. PR 40 lacks direct non-blocking-connect coverage, and PR 41's focused test fails on the `/var` versus `/private/var` path assertion.

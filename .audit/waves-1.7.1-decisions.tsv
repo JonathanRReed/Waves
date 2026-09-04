@@ -27,3 +27,13 @@ ts	phase	decision	why	evidence	result
 2026-09-04T19:17:44Z	pr-baseline-correction	#40 listener self-proof non-blocking connect	existing self-proof test passed 1/1 on PR and base, but no test covers the new non-blocking-connect property	isolated PR and origin/main worktrees	coverage gap, shared gate blocks
 2026-09-04T19:17:44Z	pr-baseline-correction	#41 canonical staging root binding	PR test failed 1/1: expected /var path, actual /private/var path; base filter ran 0 tests	isolated PR and origin/main worktrees	focused failure, shared gate blocks
 2026-09-04T19:17:44Z	pr-baseline-correction	#42 publication tag authority	exact PR test passed 1 run and 6 assertions; base filter ran 0 tests	isolated PR and origin/main worktrees	focused pass, candidate
+2026-09-04T19:35:00Z	pr-inventory-correction	#29 title and mergeability	chore(deps): bump github.com/sparkle-project/sparkle from 2.9.4 to 2.9.5	fresh gh pr list	CLEAN
+2026-09-04T19:35:00Z	pr-inventory-correction	#34 title and mergeability	fix: restore publication branch provenance	fresh gh pr list	UNSTABLE
+2026-09-04T19:35:00Z	pr-inventory-correction	#35 title and mergeability	Authenticate Elgato handoff checksums out of band	fresh gh pr list	CLEAN
+2026-09-04T19:35:00Z	pr-inventory-correction	#36 title and mergeability	Wait for shutdown task to complete before replying to termination (prevent stranded Core Audio taps)	fresh gh pr list	CLEAN
+2026-09-04T19:35:00Z	pr-inventory-correction	#37 title and mergeability	Block URL-originated automation from invoking Wave Link routing	fresh gh pr list	UNSTABLE
+2026-09-04T19:35:00Z	pr-inventory-correction	#38 title and mergeability	Secure writable DMG temporary path by using an atomically created private directory	fresh gh pr list	CLEAN
+2026-09-04T19:35:00Z	pr-inventory-correction	#39 title and mergeability	fix: preserve unique DMG layout volume token	fresh gh pr list	UNSTABLE
+2026-09-04T19:35:00Z	pr-inventory-correction	#40 title and mergeability	control: make listener self-proof connect non-blocking	fresh gh pr list	UNSTABLE
+2026-09-04T19:35:00Z	pr-inventory-correction	#41 title and mergeability	Bind private staging to validated canonical root to prevent symlink escape	fresh gh pr list	UNSTABLE
+2026-09-04T19:35:00Z	pr-inventory-correction	#42 title and mergeability	Pin publication tag release authority	fresh gh pr list	CLEAN
