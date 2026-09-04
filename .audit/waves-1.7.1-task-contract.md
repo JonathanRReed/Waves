@@ -5,10 +5,10 @@
 - Terminal objective: Finish Waves 1.7.1 build 19 as a secure, measured,
   Half-Bounce-qualified, signed, hardware-verified, publication-ready release,
   then complete the authorized public release pipeline.
-- Current completion claim: Planning and baseline tranche only.
-- Observable result for the active tranche: Approved design, task contract,
-  durable baseline receipts, and decision trail committed on
-  `codex/waves-1.7.1` after a passing baseline test.
+- Current completion claim: Design and executable implementation plans only.
+- Observable result for the active tranche: Every approved security, PR,
+  performance, Half Bounce, hardware, trust, and publication requirement is
+  mapped to a testable task with a receipt and commit boundary.
 
 ## Current state
 
@@ -82,13 +82,16 @@
 
 ## Active bounded vertical tranche
 
-- Scope: Record the approved design and establish the verified branch baseline.
-- Observable state change: Planning artifacts committed on the release branch.
-- Checks and receipts required before closure: Complete design self-review,
-  cross-model review, `git diff --check`, durable baseline receipts, and clean
-  commits.
-- One next tranche: Write the implementation plan and begin baseline security
-  and performance measurement.
+- Scope: Freeze the current PR inventory and reproduce its security properties
+  against the release branch before changing production code.
+- Observable state change: A durable adjudication matrix records every open PR,
+  exact head SHA, current checks, reproduction result, and integrated
+  disposition.
+- Checks and receipts required before closure: Fresh GitHub inventory, isolated
+  branch-test runs, one receipt row and one append-only decision row per PR,
+  `git diff --check`, and a clean receipt commit.
+- One next tranche: Implement URL automation provenance and the bounded control
+  listener proof with focused failing tests.
 
 ## Instruction changes
 
