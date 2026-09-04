@@ -2060,6 +2060,17 @@ class ReleaseInfraTest < Minitest::Test
 
         WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
 
+        File.write(File.join(root, "origin-next.txt"), "origin next\n")
+        git(root, "add", ".")
+        git(root, "commit", "-m", "docs: origin next")
+        origin_next = git(root, "rev-parse", "HEAD").strip
+        git(root, "reset", "--hard", revision)
+        git(root, "update-ref", "refs/remotes/origin/main", origin_next)
+        assert_release_error(%r{origin/main}) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        end
+        git(root, "update-ref", "refs/remotes/origin/main", revision)
+
         git(root, "tag", "-d", RELEASE_TAG)
         git(root, "tag", RELEASE_TAG)
         assert_release_error(/annotated/) do
