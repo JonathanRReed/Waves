@@ -1670,12 +1670,9 @@ module WavesRelease
       )
       tag_revision = GitPolicy.run("rev-list", "-n", "1", tag, chdir: root).strip
       head_revision = GitPolicy.run("rev-parse", "HEAD", chdir: root).strip
-      _, _, ancestry_status = GitPolicy.run(
-        "merge-base", "--is-ancestor", tag_revision, head_revision, chdir: root, allow_failure: true
-      )
-      unless ancestry_status.success?
-        raise Error, "publication tag #{tag} must name a revision that is an ancestor of HEAD"
-      end
+      raise Error, "publication tag #{tag} does not name HEAD" unless tag_revision == head_revision
+      origin_main = GitPolicy.run("rev-parse", "refs/remotes/origin/main", chdir: root).strip
+      raise Error, "publication tag #{tag} does not name exact origin/main" unless tag_revision == origin_main
       annotation = GitPolicy.run("for-each-ref", "refs/tags/#{tag}", "--format=%(contents)", chdir: root)
       annotation = annotation.sub(/\n-----BEGIN SSH SIGNATURE-----.*\z/m, "\n")
       annotation = annotation.sub(/\n+\z/, "\n")
