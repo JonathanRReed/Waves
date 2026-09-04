@@ -58,6 +58,7 @@ final class ControlServer {
   nonisolated static let maximumConnectionsPerProcess = 4
   nonisolated static let maximumAcceptAttemptsPerEvent = 16
   nonisolated static let maximumSubscribersPerProcess = 2
+  private nonisolated static let listenerSelfProofBudget = Duration.milliseconds(100)
 
   // nonisolated: the accept/read paths log from the I/O queue, and Logger is
   // Sendable, so requiring main-actor isolation here would trap at runtime.
@@ -402,9 +403,15 @@ final class ControlServer {
     leafName: String,
     identity: ControlSocketIdentity
   ) -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: listenerSelfProofBudget)
+    guard drainListenerSelfProofBacklog(listener: listener, deadline: deadline) else {
+      return false
+    }
+
     let client = socket(AF_UNIX, SOCK_STREAM, 0)
     guard client >= 0 else { return false }
     defer { _ = Darwin.close(client) }
+    guard setNonBlocking(client) else { return false }
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
@@ -418,29 +425,73 @@ final class ControlServer {
         socklen_t(raw.count)
       )
     }
-    guard connected == 0 else { return false }
+    guard connected == 0 || errno == EINPROGRESS else { return false }
 
-    let accepted: Int32
-    while true {
-      let candidate = accept(listener, nil, nil)
-      if candidate >= 0 {
-        accepted = candidate
-        break
-      }
-      if errno != EINTR { return false }
-    }
-    defer { _ = Darwin.close(accepted) }
-
-    guard
-      let peer = peerIdentity(accepted),
-      peer.uid == getuid(),
-      peer.processID == getpid()
-    else { return false }
+    let provedPeer = runListenerSelfProofAcceptLoop(
+      beforeDeadline: { ContinuousClock.now < deadline },
+      acceptOne: {
+        let candidate = accept(listener, nil, nil)
+        return (candidate, candidate >= 0 ? 0 : errno)
+      },
+      peerMatchesProof: { descriptor in
+        guard let peer = peerIdentity(descriptor) else { return false }
+        return peer.uid == getuid() && peer.processID == getpid()
+      },
+      close: { _ = Darwin.close($0) }
+    )
+    guard provedPeer else { return false }
     return ControlSocketFilesystem.socketIdentityMatches(
       parentDescriptor: parentDescriptor,
       leafName: leafName,
       identity: identity
     )
+  }
+
+  /// Clears only a bounded batch of verified same-user entries before creating
+  /// the proof connection. That makes the next matching PID the connection
+  /// created above, rather than an older same-process backlog entry.
+  private nonisolated static func drainListenerSelfProofBacklog(
+    listener: Int32,
+    deadline: ContinuousClock.Instant
+  ) -> Bool {
+    var attempts = 0
+    while ContinuousClock.now < deadline, attempts < maximumAcceptAttemptsPerEvent {
+      let candidate = accept(listener, nil, nil)
+      if candidate >= 0 {
+        attempts += 1
+        defer { _ = Darwin.close(candidate) }
+        guard let peer = peerIdentity(candidate), peer.uid == getuid() else { return false }
+      } else if errno == EAGAIN || errno == EWOULDBLOCK {
+        return true
+      } else if errno != EINTR {
+        return false
+      }
+    }
+    return false
+  }
+
+  /// Bounded syscall loop for listener self-proof. Every descriptor is closed,
+  /// including verified backlog entries and the descriptor that proves the
+  /// connection, because none belongs to the public connection lifecycle.
+  nonisolated static func runListenerSelfProofAcceptLoop(
+    beforeDeadline: () -> Bool,
+    acceptOne: () -> (descriptor: Int32, error: Int32),
+    peerMatchesProof: (Int32) -> Bool,
+    close: (Int32) -> Void
+  ) -> Bool {
+    while beforeDeadline() {
+      let result = acceptOne()
+      if result.descriptor >= 0 {
+        let matches = peerMatchesProof(result.descriptor)
+        close(result.descriptor)
+        if matches { return true }
+      } else if result.error == EAGAIN || result.error == EWOULDBLOCK {
+        return false
+      } else if result.error != EINTR {
+        return false
+      }
+    }
+    return false
   }
 
   /// Runs on `ioQueue`. Drains the accept backlog, rejecting anything that
