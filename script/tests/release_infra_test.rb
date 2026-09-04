@@ -5,6 +5,7 @@ require "base64"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "securerandom"
 require "shellwords"
 require "tmpdir"
 
@@ -30,6 +31,72 @@ class ReleaseInfraTest < Minitest::Test
   RELEASE_FINGERPRINT = "SHA256:53uCiv5rg7roncACotblHKo4OvHAsvYw/+x/5pU0mCQ"
   SPARKLE_ACCOUNT = "com.jonathanreed.Waves"
   SPARKLE_PUBLIC_KEY = "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
+
+  def production_cleanup
+    root = File.expand_path("../..", __dir__)
+    script = File.read(File.join(root, "script/build_and_run.sh"))
+    cleanup = script[/cleanup\(\) \{.*?\n\}\ntrap cleanup EXIT/m]
+    refute_nil cleanup, "production cleanup function must be available"
+    cleanup
+  end
+
+  def writable_dmg_workspace
+    loop do
+      path = File.join("/private/tmp", "waves-dmg-layout.#{SecureRandom.alphanumeric(6)}")
+      next if File.exist?(path) || File.symlink?(path)
+
+      Dir.mkdir(path, 0o700)
+      File.write(File.join(path, "layout.dmg"), "layout-image-bytes")
+      return path
+    end
+  end
+
+  def remove_created_path(path)
+    return unless path && (File.exist?(path) || File.symlink?(path))
+
+    FileUtils.remove_entry(path)
+  end
+
+  def run_production_cleanup(workspace:, image:, mount: "", detach_status: 0)
+    Dir.mktmpdir("waves-cleanup-hook") do |hook_dir|
+      hook = File.join(hook_dir, "hdiutil")
+      log = File.join(hook_dir, "detach.log")
+      File.write(hook, <<~BASH)
+        #!/bin/bash
+        test -f "$EXPECTED_IMAGE" || exit 90
+        printf '%s\n' "$*" > "$DETACH_LOG"
+        exit "$DETACH_STATUS"
+      BASH
+      FileUtils.chmod(0o700, hook)
+      cleanup = production_cleanup.gsub("/usr/bin/hdiutil", Shellwords.escape(hook))
+      probe = <<~BASH
+        set -u
+        SMOKE_PID="" ACTIVE_MOUNT_DIR="$MOUNT" ACTIVE_STAGING_DIR="" ACTIVE_SMOKE_HOME=""
+        ACTIVE_WRITABLE_DMG_DIR="$WORKSPACE" ACTIVE_WRITABLE_DMG="$IMAGE"
+        cleanup_isolated_distribution_build() { :; }
+        #{cleanup}
+        cleanup
+        printf 'mount=%s\ndir=%s\nimage=%s\n' \
+          "$ACTIVE_MOUNT_DIR" "$ACTIVE_WRITABLE_DMG_DIR" "$ACTIVE_WRITABLE_DMG"
+        if [ -f "$IMAGE" ]; then
+          printf 'bytes='
+          /usr/bin/base64 < "$IMAGE"
+        fi
+      BASH
+      stdout, stderr, status = Open3.capture3(
+        {
+          "WORKSPACE" => workspace,
+          "IMAGE" => image,
+          "MOUNT" => mount,
+          "EXPECTED_IMAGE" => File.join(workspace, "layout.dmg"),
+          "DETACH_LOG" => log,
+          "DETACH_STATUS" => detach_status.to_s
+        },
+        "/bin/bash", "-c", probe
+      )
+      [stdout, stderr, status, File.exist?(log) ? File.read(log) : nil]
+    end
+  end
 
   def test_dmg_builder_configures_and_verifies_premium_finder_layout
     root = File.expand_path("../..", __dir__)
@@ -67,70 +134,111 @@ class ReleaseInfraTest < Minitest::Test
                     'file "Waves.png" of folder ".background" of targetFolder'
   end
 
-  def test_writable_dmg_workspace_is_private_unique_and_removed_on_failure
+  def test_writable_dmg_workspace_is_private_and_layout_volume_uses_unique_token
     root = File.expand_path("../..", __dir__)
     script = File.read(File.join(root, "script/build_and_run.sh"))
-    cleanup = script[/cleanup\(\) \{.*?\n\}\ntrap cleanup EXIT/m]
-    refute_nil cleanup, "production cleanup function must be available"
-    workspace = File.join("/private/tmp", "waves-dmg-layout.#{Process.pid.to_s.rjust(6, '0')[-6, 6]}")
-    FileUtils.rm_rf(workspace)
-    FileUtils.mkdir(workspace)
-    image = File.join(workspace, "layout.dmg")
-    FileUtils.chmod(0o700, workspace)
-    File.write(image, "image")
-    hook = File.join(workspace, "hdiutil")
-    File.write(hook, "#!/bin/bash\nexit ${HDIUTIL_FAIL:-0}\n")
-    FileUtils.chmod(0o700, hook)
-    probe = <<~SHELL
-      set -euo pipefail
-      SMOKE_PID="" ACTIVE_MOUNT_DIR="$MOUNT" ACTIVE_STAGING_DIR="" ACTIVE_SMOKE_HOME=""
-      ACTIVE_WRITABLE_DMG_DIR="$WORKSPACE" ACTIVE_WRITABLE_DMG="$WORKSPACE/layout.dmg"
-      cleanup_isolated_distribution_build() { :; }
-      #{cleanup.gsub('/usr/bin/hdiutil', Shellwords.escape(hook))}
-      cleanup
-    SHELL
-    _stdout, stderr, status = Open3.capture3({"MOUNT" => "/tmp/waves-mounted", "WORKSPACE" => workspace}, "/bin/bash", "-c", probe)
+    setup = script[/ACTIVE_WRITABLE_DMG_DIR="\$\(mktemp -d .*?layout_volume_name="\$APP_NAME Layout \$layout_token"/m]
+    refute_nil setup, "writable DMG setup must remain executable as one production block"
+    stdout, stderr, status = Open3.capture3(
+      {"APP_NAME" => "Waves"},
+      "/bin/bash", "-c",
+      "set -eu; #{setup}; : > \"$ACTIVE_WRITABLE_DMG\"; " \
+      "printf '%s\\n%s\\n%s\\n' \"$ACTIVE_WRITABLE_DMG_DIR\" \"$ACTIVE_WRITABLE_DMG\" \"$layout_volume_name\""
+    )
     assert status.success?, stderr
-    refute File.exist?(workspace), "successful production cleanup should remove workspace"
+    workspace, image, volume = stdout.lines.map(&:chomp)
+    token = File.basename(workspace).delete_prefix("waves-dmg-layout.")
+    assert_match(%r{\A/private/tmp/waves-dmg-layout\.[A-Za-z0-9]{6}\z}, workspace)
+    assert_equal 0o700, File.stat(workspace).mode & 0o777
+    assert_equal File.join(workspace, "layout.dmg"), image
+    assert File.file?(image)
+    assert_equal "Waves Layout #{token}", volume
   ensure
-    FileUtils.remove_entry(workspace) if workspace && File.directory?(workspace)
+    remove_created_path(workspace)
   end
 
   def test_writable_dmg_cleanup_retains_workspace_when_detach_fails
-    root = File.expand_path("../..", __dir__)
-    script = File.read(File.join(root, "script/build_and_run.sh"))
-    cleanup = script[/cleanup\(\) \{.*?\n\}\ntrap cleanup EXIT/m]
-    workspace = File.join("/private/tmp", "waves-dmg-layout.#{Process.pid.to_s.rjust(6, '0')[-6, 6]}")
-    FileUtils.mkdir(workspace)
+    workspace = writable_dmg_workspace
     image = File.join(workspace, "layout.dmg")
-    FileUtils.chmod(0o700, workspace)
-    File.write(image, "image")
-    hook = File.join(workspace, "hdiutil")
-    File.write(hook, "#!/bin/bash\nexit 1\n")
-    FileUtils.chmod(0o700, hook)
-    probe = <<~SHELL
-      set -u
-      SMOKE_PID="" ACTIVE_MOUNT_DIR="$MOUNT" ACTIVE_STAGING_DIR="" ACTIVE_SMOKE_HOME=""
-      ACTIVE_WRITABLE_DMG_DIR="$WORKSPACE" ACTIVE_WRITABLE_DMG="$WORKSPACE/layout.dmg"
-      cleanup_isolated_distribution_build() { :; }
-      #{cleanup.gsub('/usr/bin/hdiutil', Shellwords.escape(hook))}
-      cleanup
-      test "$ACTIVE_MOUNT_DIR" = "$MOUNT"
-      test -f "$ACTIVE_WRITABLE_DMG"
-      test -d "$ACTIVE_WRITABLE_DMG_DIR"
-    SHELL
-    _stdout, stderr, status = Open3.capture3({"MOUNT" => "/tmp/waves-mounted", "WORKSPACE" => workspace}, "/bin/bash", "-c", "export WORKSPACE; #{probe}")
+    mount = "/private/tmp/waves-dmg-mount.failure"
+    stdout, stderr, status, detach = run_production_cleanup(
+      workspace: workspace, image: image, mount: mount, detach_status: 1
+    )
     assert status.success?, stderr
+    assert_equal "detach #{mount} -quiet\n", detach
+    assert_includes stdout, "mount=#{mount}\n"
+    assert_includes stdout, "dir=#{workspace}\n"
+    assert_includes stdout, "image=#{image}\n"
+    encoded = ["layout-image-bytes"].pack("m0")
+    assert_includes stdout, "bytes=#{encoded}\n"
+    assert File.directory?(workspace)
+    assert_equal "layout-image-bytes", File.binread(image)
   ensure
-    FileUtils.remove_entry(workspace) if workspace && File.directory?(workspace)
+    remove_created_path(workspace)
   end
 
   def test_writable_dmg_cleanup_normal_no_active_mount
-    test_writable_dmg_workspace_is_private_unique_and_removed_on_failure
+    workspace = writable_dmg_workspace
+    image = File.join(workspace, "layout.dmg")
+    _stdout, stderr, status, detach = run_production_cleanup(workspace: workspace, image: image)
+    assert status.success?, stderr
+    assert_nil detach, "cleanup without an active mount must not invoke hdiutil"
+    refute File.exist?(workspace), "normal cleanup must remove the exact workspace"
+  ensure
+    remove_created_path(workspace)
   end
 
-  def test_writable_dmg_cleanup_rejects_mismatched_image_path
-    test_writable_dmg_workspace_is_private_unique_and_removed_on_failure
+  def test_writable_dmg_cleanup_detaches_before_removing_layout_failure_workspace
+    workspace = writable_dmg_workspace
+    image = File.join(workspace, "layout.dmg")
+    _stdout, stderr, status, detach = run_production_cleanup(
+      workspace: workspace, image: image, mount: "/private/tmp/waves-dmg-mount.success"
+    )
+    assert status.success?, stderr
+    assert_equal "detach /private/tmp/waves-dmg-mount.success -quiet\n", detach
+    refute File.exist?(workspace), "successful detach must be followed by workspace removal"
+  ensure
+    remove_created_path(workspace)
+  end
+
+  def test_writable_dmg_cleanup_rejects_unsafe_workspace_targets
+    sentinels = []
+
+    valid_target = writable_dmg_workspace
+    symlink = File.join("/private/tmp", "waves-dmg-layout.#{SecureRandom.alphanumeric(6)}")
+    File.symlink(valid_target, symlink)
+    sentinels << [symlink, File.join(symlink, "layout.dmg")]
+
+    wrong_mode = writable_dmg_workspace
+    FileUtils.chmod(0o755, wrong_mode)
+    sentinels << [wrong_mode, File.join(wrong_mode, "layout.dmg")]
+
+    malformed = File.join("/private/tmp", "waves-dmg-layout.#{SecureRandom.alphanumeric(5)}")
+    Dir.mkdir(malformed, 0o700)
+    File.write(File.join(malformed, "layout.dmg"), "layout-image-bytes")
+    sentinels << [malformed, File.join(malformed, "layout.dmg")]
+
+    mismatch = writable_dmg_workspace
+    sentinels << [mismatch, File.join(mismatch, "other.dmg")]
+
+    broad_sentinel = writable_dmg_workspace
+    sentinels << ["", ""]
+    sentinels << ["/private/tmp", File.join(broad_sentinel, "layout.dmg")]
+
+    sentinels.each do |workspace, image|
+      _stdout, stderr, status, = run_production_cleanup(workspace: workspace, image: image)
+      assert status.success?, "#{workspace.inspect}: #{stderr}"
+    end
+    assert File.symlink?(symlink), "symlink target must remain untouched"
+    assert_equal "layout-image-bytes", File.binread(File.join(valid_target, "layout.dmg"))
+    assert_equal "layout-image-bytes", File.binread(File.join(wrong_mode, "layout.dmg"))
+    assert_equal "layout-image-bytes", File.binread(File.join(malformed, "layout.dmg"))
+    assert_equal "layout-image-bytes", File.binread(File.join(mismatch, "layout.dmg"))
+    assert_equal "layout-image-bytes", File.binread(File.join(broad_sentinel, "layout.dmg"))
+  ensure
+    [symlink, valid_target, wrong_mode, malformed, mismatch, broad_sentinel].each do |path|
+      remove_created_path(path)
+    end
   end
 
   def test_dmg_background_renderer_matches_the_660_by_430_finder_window

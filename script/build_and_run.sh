@@ -585,8 +585,10 @@ cleanup() {
         ;;
     esac
   fi
-  ACTIVE_WRITABLE_DMG_DIR=""
-  ACTIVE_WRITABLE_DMG=""
+  if [ -z "$ACTIVE_MOUNT_DIR" ]; then
+    ACTIVE_WRITABLE_DMG_DIR=""
+    ACTIVE_WRITABLE_DMG=""
+  fi
 
   if [ -n "$ACTIVE_SMOKE_HOME" ]; then
     rm -rf "$ACTIVE_SMOKE_HOME"
