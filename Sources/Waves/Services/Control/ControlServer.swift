@@ -405,6 +405,11 @@ final class ControlServer {
     let client = socket(AF_UNIX, SOCK_STREAM, 0)
     guard client >= 0 else { return false }
     defer { _ = Darwin.close(client) }
+    // The public leaf is reachable before this proof runs, so another local
+    // client can fill the listener backlog. Never let the proof's connect wait
+    // for backlog space on the main actor; a failed immediate connect makes
+    // startup fail closed instead.
+    guard setNonBlocking(client) else { return false }
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
