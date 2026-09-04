@@ -1672,6 +1672,8 @@ module WavesRelease
       Validation.revision!(plugin_revision, "Stream Deck plugin source revision")
       raise Error, "Stream Deck plugin package must use the canonical filename" unless File.basename(plugin_path) == PLUGIN_NAME
       raise Error, "Elgato handoff destination already exists" if File.exist?(output_root) || File.symlink?(output_root)
+      anchor_path = "#{output_root}.sha256"
+      raise Error, "Elgato handoff checksum anchor already exists" if File.exist?(anchor_path) || File.symlink?(anchor_path)
 
       manifest = Evidence.verify_file!(
         path: manifest_path,
@@ -1760,6 +1762,8 @@ module WavesRelease
         verify!(root: staging, metadata: metadata)
         File.rename(staging, output_root)
         staging = nil
+        checksum_digest = Digest::SHA256.file(File.join(output_root, "SHA256SUMS")).hexdigest
+        write_file!(anchor_path, "#{checksum_digest}  #{File.basename(output_root)}/SHA256SUMS\n")
       ensure
         FileUtils.rm_rf(staging) if staging && File.exist?(staging)
       end
@@ -1858,7 +1862,9 @@ module WavesRelease
 
         Stream Deck plugin SHA-256: `#{handoff.dig('artifacts', 'streamDeckPlugin', 'sha256')}`
 
-        1. Run `/usr/bin/shasum -a 256 -c SHA256SUMS` in this folder.
+        1. Obtain the SHA-256 of `SHA256SUMS` from the maintainer through a separate,
+           authenticated channel. Do not use a digest delivered with this folder. Verify it,
+           then run `/usr/bin/shasum -a 256 -c SHA256SUMS` in this folder.
         2. Open `#{handoff.dig('artifacts', 'dmg', 'name')}` and drag Waves to Applications.
         3. Open `#{PLUGIN_NAME}` to install the companion.
         4. Follow `TEST-CHECKLIST.md` in order and record every pass or failure.
@@ -1869,7 +1875,7 @@ module WavesRelease
         7. If every group passed, create the return receipt with:
 
            ```bash
-           ./finalize-receipt.rb "$PWD" "$PWD/results.json" \\
+           ./finalize-receipt.rb TRUSTED_SHA256SUMS_SHA256 "$PWD" "$PWD/results.json" \\
              /ABSOLUTE/PATH/TO/DIAGNOSTICS \\
              /ABSOLUTE/PATH/TO/RETURN/remote-elgato-receipt.json
            ```

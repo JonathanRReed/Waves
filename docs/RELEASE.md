@@ -279,7 +279,11 @@ diagnostic collector, rollback guide, pending result record, and receipt
 finalizer, verifies the exact handoff file set, then publishes the completed
 directory atomically. It does not sign, notarize, tag, push, upload, or publish.
 
-The remote tester verifies `SHA256SUMS`, installs the included DMG and plugin,
+Preparation also writes `Waves-1.5.0-13-Elgato-Handoff.sha256` beside the kit.
+Send the digest in that file to the tester through a separate authenticated
+channel; never place it in or deliver it together with the handoff directory.
+The remote tester first compares that trusted digest with the SHA-256 of the
+kit's `SHA256SUMS`, then verifies `SHA256SUMS`, installs the included DMG and plugin,
 runs every checklist group, records each result in `results.json`, collects the
 bounded diagnostics, and runs the included `finalize-receipt.rb`. The returned
 receipt is accepted only when every required result passes and the receipt is

@@ -68,3 +68,5 @@ WAVES_RELEASE_EVIDENCE="$CANDIDATE_EVIDENCE" \
   "$CANDIDATE_EVIDENCE" "$PLUGIN_PACKAGE" "$PLUGIN_REVISION" "$OUTPUT_DIRECTORY"
 /usr/bin/ruby --disable-gems "$ROOT_DIR/script/release_tool.rb" elgato-handoff verify \
   "$OUTPUT_DIRECTORY"
+printf 'Handoff checksum anchor (send through a separate authenticated channel):\n'
+/bin/cat -- "$OUTPUT_DIRECTORY.sha256"

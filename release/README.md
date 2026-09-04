@@ -75,6 +75,9 @@ mutable result record, and a finalizer that emits a canonical remote receipt
 only after every result passes. Preparing a kit does not close `ELG-001`; the
 final signed candidate must still be delivered and its returned physical
 hardware evidence reviewed before publication.
+The assembler emits a checksum-anchor sidecar outside the kit; its digest must
+be delivered to the tester over a separate authenticated channel before any
+bundled instruction or executable is trusted.
 
 Sparkle publication uses the explicit account `com.jonathanreed.Waves`, derives
 its public key through the exact isolated Sparkle tool, requires equality with
