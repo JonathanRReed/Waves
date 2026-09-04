@@ -3060,7 +3060,7 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def test_publication_tag_requires_an_annotated_version_tag_on_the_current_history
+  def test_publication_tag_requires_an_annotated_version_tag_at_head_and_origin_main
     with_git_repo do |root|
       with_ephemeral_ssh_keypair("waves-release-publication") do |private_key, public_key|
         metadata = security_metadata_hash(
@@ -3093,14 +3093,34 @@ class ReleaseInfraTest < Minitest::Test
         git(root, "commit", "-m", "docs: next")
         git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "HEAD").strip)
 
-        WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        assert_release_error(/tag must equal HEAD/) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        end
 
+        git(root, "tag", "-d", RELEASE_TAG)
+        revision = git(root, "rev-parse", "HEAD").strip
+        manifest = WavesRelease::Evidence.seal(
+          input: evidence_input(remote: "passed", revision: revision),
+          metadata: metadata,
+          profile: "publication"
+        )
+        json = WavesRelease::CanonicalJSON.generate(manifest)
+        envelope = WavesRelease::TagEnvelope.build(json: json, digest: WavesRelease::CanonicalJSON.sha256(json))
+        create_signed_tag(root, RELEASE_TAG, envelope, private_key)
+        git(root, "update-ref", "refs/remotes/origin/main", "#{revision}^")
+
+        assert_release_error(/source must equal origin\/main/) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        end
+
+        git(root, "update-ref", "refs/remotes/origin/main", revision)
+        WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
         git(root, "checkout", "--orphan", "diverged")
         git(root, "rm", "-rf", ".")
         File.write(File.join(root, "diverged.txt"), "diverged\n")
         git(root, "add", ".")
         git(root, "commit", "-m", "docs: divergent history")
-        assert_release_error(/ancestor of HEAD/) do
+        assert_release_error(/tag must equal HEAD/) do
           WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
         end
       end
@@ -3147,6 +3167,62 @@ class ReleaseInfraTest < Minitest::Test
           result = authority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
           assert_equal RELEASE_PRINCIPAL, result.fetch("principal")
           assert_equal expected.fetch("fingerprint"), result.fetch("fingerprint")
+        end
+      end
+    end
+  end
+
+  def test_tag_authority_ignores_optional_key_comment_but_not_key_material
+    with_git_repo do |root|
+      with_ephemeral_ssh_keypair("waves-release-correct") do |correct_private, correct_public|
+        with_ephemeral_ssh_keypair("waves-release-wrong") do |_wrong_private, wrong_public|
+          correct_algorithm, correct_material = File.read(correct_public).split.first(2)
+          _wrong_algorithm, wrong_material = File.read(wrong_public).split.first(2)
+          expected = {
+            "principal" => RELEASE_PRINCIPAL,
+            "publicKey" => "#{correct_algorithm} #{correct_material} metadata comment differs",
+            "fingerprint" => ssh_fingerprint(correct_public),
+          }
+          create_signed_tag(root, RELEASE_TAG, "trusted evidence\n", correct_private)
+
+          result = WavesRelease::TagAuthority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
+          assert_equal expected.fetch("fingerprint"), result.fetch("fingerprint")
+
+          assert_release_error(/fingerprint|pinned release key|signature/) do
+            WavesRelease::TagAuthority.verify!(
+              root: root,
+              tag: RELEASE_TAG,
+              authority: expected.merge("publicKey" => "#{correct_algorithm} #{wrong_material} metadata comment differs")
+            )
+          end
+        end
+      end
+    end
+  end
+
+  def test_tag_authority_rejects_fingerprint_and_principal_mismatches
+    with_git_repo do |root|
+      with_ephemeral_ssh_keypair("waves-release-authority") do |private_key, public_key|
+        expected = {
+          "principal" => RELEASE_PRINCIPAL,
+          "publicKey" => File.read(public_key).strip,
+          "fingerprint" => ssh_fingerprint(public_key),
+        }
+        create_signed_tag(root, RELEASE_TAG, "trusted evidence\n", private_key)
+
+        assert_release_error(/fingerprint/) do
+          WavesRelease::TagAuthority.verify!(
+            root: root,
+            tag: RELEASE_TAG,
+            authority: expected.merge("fingerprint" => "SHA256:#{'A' * 43}")
+          )
+        end
+        assert_release_error(/principal/) do
+          WavesRelease::TagAuthority.verify!(
+            root: root,
+            tag: RELEASE_TAG,
+            authority: expected.merge("principal" => "untrusted-release")
+          )
         end
       end
     end

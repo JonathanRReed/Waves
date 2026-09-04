@@ -1898,12 +1898,15 @@ module WavesRelease
       principal = authority.fetch("principal")
       raise Error, "publication tag principal must be #{PRINCIPAL}" unless principal == PRINCIPAL
       public_key = authority.fetch("publicKey")
-      parts = public_key.split
-      unless parts.length.between?(2, 3) && parts.first == "ssh-ed25519"
+      match = public_key.match(/\A(ssh-ed25519) ([A-Za-z0-9+\/]+={0,2})(?: [^\r\n]*)?\z/)
+      unless match
         raise Error, "pinned release key is malformed"
       end
       begin
-        fingerprint = "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(Base64.strict_decode64(parts[1]))).delete('=')}"
+        key_material = Base64.strict_decode64(match[2])
+        raise ArgumentError unless Base64.strict_encode64(key_material) == match[2]
+
+        fingerprint = "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(key_material)).delete('=')}"
       rescue ArgumentError
         raise Error, "pinned release key is malformed"
       end
@@ -1913,7 +1916,7 @@ module WavesRelease
 
       Tempfile.create("waves-allowed-signers") do |file|
         file.chmod(0o600)
-        file.write("#{principal} #{parts.first} #{parts[1]}\n")
+        file.write("#{principal} #{match[1]} #{match[2]}\n")
         file.flush
         stdout, stderr, status = GitPolicy.run(
           "-c",
@@ -1954,12 +1957,9 @@ module WavesRelease
       )
       tag_revision = GitPolicy.run("rev-list", "-n", "1", tag, chdir: root).strip
       head_revision = GitPolicy.run("rev-parse", "HEAD", chdir: root).strip
-      _, _, ancestry_status = GitPolicy.run(
-        "merge-base", "--is-ancestor", tag_revision, head_revision, chdir: root, allow_failure: true
-      )
-      unless ancestry_status.success?
-        raise Error, "publication tag #{tag} must name a revision that is an ancestor of HEAD"
-      end
+      origin_revision = GitPolicy.run("rev-parse", "origin/main", chdir: root).strip
+      raise Error, "publication tag must equal HEAD" unless tag_revision == head_revision
+      raise Error, "publication source must equal origin/main" unless head_revision == origin_revision
       annotation = GitPolicy.run("for-each-ref", "refs/tags/#{tag}", "--format=%(contents)", chdir: root)
       annotation = annotation.sub(/\n-----BEGIN SSH SIGNATURE-----.*\z/m, "\n")
       annotation = annotation.sub(/\n+\z/, "\n")
