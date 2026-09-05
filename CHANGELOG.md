@@ -6,10 +6,13 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.7.1]
+## [1.7.1] - 2026-09-05
 
-Waves 1.7.1 build 19 is in development. These notes cover implemented changes,
-not a published or hardware-qualified release.
+Waves 1.7.1 build 19 is a maintenance release: security repairs from the
+September 5 source scan, Wave Link bridge hardening, Sparkle 2.9.6, and
+release-tooling fixes. The release owner deferred exhaustive performance
+benchmarks and the physical Elgato hardware pass for this release; the
+Wave Link control path remains fail-closed and covered by loopback tests.
 
 ### Changed
 - Updated Sparkle to 2.9.6, which contains upstream security fixes. Testing did
