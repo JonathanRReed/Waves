@@ -181,20 +181,27 @@ import Testing
   }
 }
 
-@Test func waveLinkSessionUsesOneDeadlineAcrossUnmatchedNotifications() async throws {
+@Test(.timeLimit(.minutes(1)))
+func waveLinkSessionUsesOneDeadlineAcrossUnmatchedNotifications() async throws {
   let server = try TestJSONRPCServer(
-    getChannelsBehavior: .notificationsThenReply(count: 17, payloadBytes: 0, intervalMicroseconds: 50_000)
+    handshakeDelayMicroseconds: 300_000,
+    getChannelsBehavior: .notificationsThenReply(count: 40, payloadBytes: 0, intervalMicroseconds: 250_000)
   )
   defer { server.close() }
-  let session = makeTestWaveLinkSession(server: server, receiveTimeout: .milliseconds(150))
+  // Use the normal three-second budget for setup too. The delayed handshake
+  // must succeed before the notification stream exercises the request deadline.
+  let session = makeTestWaveLinkSession(server: server)
   try await session.connect()
-  let started = ContinuousClock.now
 
-  await #expect(throws: WaveLinkControlBridgeError.self) {
+  // The matching reply follows nearly ten seconds of notifications. Restarting
+  // the deadline after each message would accept it; the one-request budget must not.
+  await #expect(
+    throws: WaveLinkControlBridgeError.unavailable("Wave Link did not answer within the request time limit.")
+  ) {
     try await session.request(method: "getChannels", params: nil)
   }
+  #expect(server.receivedMethods == ["getApplicationInfo", "getChannels"])
   #expect(await session.connectionDescription == nil)
-  #expect(started.duration(to: ContinuousClock.now) < .milliseconds(600))
 }
 
 @Test func waveLinkSessionRejectsMoreThan64MessagesForOneRequest() async throws {
@@ -351,6 +358,7 @@ private final class TestJSONRPCServer: @unchecked Sendable {
   var receivedMethods: [String] { lock.withLock { recordedMethods } }
   var lastOrigin: String? { lock.withLock { recordedOrigin } }
   private let applicationInfo: String
+  private let handshakeDelayMicroseconds: useconds_t
   private let getChannelsBehavior: GetChannelsBehavior
   private let listener: Int32
   private let queue = DispatchQueue(label: "waves.tests.wavelink-server")
@@ -363,6 +371,7 @@ private final class TestJSONRPCServer: @unchecked Sendable {
 
   init(
     applicationInfo: String = #"{"appID":"EWL","interfaceRevision":1,"name":"Elgato Wave Link","version":"3.2.2"}"#,
+    handshakeDelayMicroseconds: useconds_t = 0,
     getChannelsBehavior: GetChannelsBehavior = .notificationsThenReply(
       count: 1,
       payloadBytes: 0,
@@ -370,6 +379,7 @@ private final class TestJSONRPCServer: @unchecked Sendable {
     )
   ) throws {
     self.applicationInfo = applicationInfo
+    self.handshakeDelayMicroseconds = handshakeDelayMicroseconds
     self.getChannelsBehavior = getChannelsBehavior
     let tcp = try TestTCPListener()
     listener = tcp.socketDescriptorForServer
@@ -465,6 +475,7 @@ private final class TestJSONRPCServer: @unchecked Sendable {
       }
     }
     guard let key else { return }
+    if handshakeDelayMicroseconds > 0 { usleep(handshakeDelayMicroseconds) }
     let accept = TestWebSocketFraming.acceptKey(for: key)
     let response =
       "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"

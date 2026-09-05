@@ -78,7 +78,7 @@ func controlConnectionQueuesPartialWritesAndDisconnectsOverflow() async throws {
 
 @MainActor
 @Test(.timeLimit(.minutes(1)))
-func controlConnectionTimesOutWithoutHandshakeButRetainsSubscriber() async throws {
+func controlConnectionTimesOutWithoutHandshake() async throws {
   let fixture = await ControlSocketFixture.make(
     timeouts: ControlConnectionTimeouts(handshake: .milliseconds(40), idle: .milliseconds(40)))
   defer { fixture.stop() }
@@ -90,16 +90,38 @@ func controlConnectionTimesOutWithoutHandshakeButRetainsSubscriber() async throw
   #expect(await fixture.connectionCounts.wait(for: 1, after: unhandshakenMarker))
   #expect(await fixture.connectionCounts.wait(for: 0, after: unhandshakenMarker))
   #expect(fixture.server.connectionCount == 0)
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func controlConnectionRetainsSubscriberPastIdleDeadlineAfterDelayedHandshake() async throws {
+  let store = await makeControlStoreFixture()
+  store.preferences.enableExternalControl = true
+  let handler = ControlCommandHandler(store: store)
+  // Subscription persistence is independent of the short handshake-expiry test.
+  // Delay the real handler to cover setup that takes longer than its old 40 ms budget.
+  let fixture = await ControlSocketFixture.make(
+    timeouts: ControlConnectionTimeouts(handshake: .seconds(30), idle: .seconds(1)),
+    requestHandler: { request, session in
+      if request.cmd == .hello { try? await Task.sleep(for: .milliseconds(200)) }
+      return await handler.handle(request, session: session)
+    })
+  defer { fixture.stop() }
+  try fixture.server.start()
 
   let subscriberMarker = fixture.connectionCounts.mark()
   let subscriber = try ControlSocketClient(path: fixture.url.path)
   defer { subscriber.close() }
   try subscriber.write("{\"id\":1,\"cmd\":\"hello\",\"protocol\":1}\n{\"id\":2,\"cmd\":\"subscribe\"}\n")
-  _ = try await subscriber.readLine()
-  _ = try await subscriber.readLine()
+  #expect((try await subscriber.readLine()).contains(#""ok":true"#))
+  #expect((try await subscriber.readLine()).contains(#""ok":true"#))
   #expect(await fixture.connectionCounts.wait(for: 1, after: subscriberMarker))
-  try? await Task.sleep(for: .milliseconds(120))
+  try await Task.sleep(for: .milliseconds(1_500))
   #expect(fixture.server.connectionCount == 1)
+  try subscriber.write("{\"id\":3,\"cmd\":\"list-apps\"}\n")
+  let response = try await subscriber.readLine()
+  #expect(response.contains(#""id":3"#))
+  #expect(response.contains(#""ok":true"#))
 }
 
 @MainActor
