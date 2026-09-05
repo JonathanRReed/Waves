@@ -3,6 +3,7 @@
 
 require "digest"
 require "base64"
+require "date"
 require "fiddle/import"
 require "fileutils"
 require "json"
@@ -137,6 +138,8 @@ module WavesRelease
       schemaVersion version build minimumMacOSVersion bundleIdentifier developerID
       releaseAuthority sparkle
     ].freeze
+    OPTIONAL_KEYS = %w[benchmarkDeferral].freeze
+    BENCHMARK_DEFERRAL_KEYS = %w[version build approvedOn reason].freeze
     DEVELOPER_ID_KEYS = %w[identity teamIdentifier designatedRequirement].freeze
     RELEASE_AUTHORITY_KEYS = %w[principal publicKey fingerprint receiptIssuers].freeze
     RECEIPT_ISSUER_KEYS = %w[securityScan remoteElgato].freeze
@@ -148,7 +151,11 @@ module WavesRelease
       raise Error, "release metadata not found at #{path}" unless File.file?(path)
 
       value = StrictJSON.parse(File.read(path), context: path)
-      Validation.exact_keys!(value, KEYS, "release metadata")
+      Validation.hash!(value, "release metadata")
+      unknown = value.keys - KEYS - OPTIONAL_KEYS
+      missing = KEYS - value.keys
+      raise Error, "release metadata has unknown key(s): #{unknown.join(', ')}" unless unknown.empty?
+      raise Error, "release metadata is missing key(s): #{missing.join(', ')}" unless missing.empty?
       raise Error, "release metadata schemaVersion must be integer 1" unless value["schemaVersion"] == 1
 
       version = value["version"]
@@ -212,6 +219,26 @@ module WavesRelease
       end
       unless public_key_bytes.bytesize == 32 && Base64.strict_encode64(public_key_bytes) == sparkle["publicEDKey"]
         raise Error, "release metadata sparkle.publicEDKey must encode exactly 32 bytes"
+      end
+
+      if value.key?("benchmarkDeferral")
+        deferral = value["benchmarkDeferral"]
+        Validation.exact_keys!(deferral, BENCHMARK_DEFERRAL_KEYS, "release metadata benchmarkDeferral")
+        unless deferral["version"] == version
+          raise Error, "release metadata benchmarkDeferral.version must match release version"
+        end
+        unless deferral["build"] == build
+          raise Error, "release metadata benchmarkDeferral.build must match release build"
+        end
+        begin
+          approved_on = Date.iso8601(deferral["approvedOn"])
+        rescue ArgumentError, TypeError
+          raise Error, "release metadata benchmarkDeferral.approvedOn must be a canonical YYYY-MM-DD date"
+        end
+        unless approved_on.iso8601 == deferral["approvedOn"]
+          raise Error, "release metadata benchmarkDeferral.approvedOn must be a canonical YYYY-MM-DD date"
+        end
+        Validation.nonempty_string!(deferral["reason"], "release metadata benchmarkDeferral.reason")
       end
 
       value.freeze
@@ -296,7 +323,7 @@ module WavesRelease
       validate_source!(manifest["source"], expected_revision)
       validate_toolchain!(manifest["toolchain"])
       validate_tests!(manifest["tests"])
-      validate_performance!(manifest["performance"])
+      validate_performance!(manifest["performance"], metadata)
       validate_platforms!(manifest["platforms"])
       validate_package!(manifest["package"], metadata)
       validate_gates!(manifest["gates"], profile)
@@ -368,10 +395,21 @@ module WavesRelease
       end
     end
 
-    def validate_performance!(performance)
+    def validate_performance!(performance, metadata)
       Validation.exact_keys!(performance, REQUIRED_PERFORMANCE, "performance evidence")
       performance.each do |name, metric|
         Validation.exact_keys!(metric, %w[baseline candidate regressionPercent status approvedJustification], "performance.#{name}")
+        if metric["status"] == "deferred"
+          %w[baseline candidate regressionPercent].each do |field|
+            raise Error, "performance.#{name}.#{field} must be null when deferred" unless metric[field].nil?
+          end
+          deferral = metadata["benchmarkDeferral"]
+          raise Error, "performance.#{name} benchmark deferral is not authorized by release metadata" unless deferral
+          unless metric["approvedJustification"] == deferral["reason"]
+            raise Error, "performance.#{name}.approvedJustification must match the approved justification"
+          end
+          next
+        end
         %w[baseline candidate regressionPercent].each do |field|
           raise Error, "performance.#{name}.#{field} must be numeric" unless metric[field].is_a?(Numeric)
         end

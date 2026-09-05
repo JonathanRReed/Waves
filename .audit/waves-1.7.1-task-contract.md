@@ -2,8 +2,8 @@
 
 ## Objective and completion boundary
 
-- Terminal objective: Finish Waves 1.7.1 build 19 as a secure, measured,
-  Half-Bounce-qualified, signed, hardware-verified, publication-ready release,
+- Terminal objective: Finish Waves 1.7.1 build 19 as a secure, practically tested,
+  signed, hardware-verified, publication-ready maintenance release,
   then complete the authorized public release pipeline.
 - Current completion claim: Reviewed PR security repairs, launch measurement
   tooling, a Sparkle 2.9.6 dependency update, and source metadata for 1.7.1
@@ -38,13 +38,56 @@
 ## Priority scope
 
 1. Adjudicate every open PR and complete the deep security repair.
-2. Measure and improve the whole app, including honest Half Bounce qualification.
+2. Verify practical audio controls, regressions and stability without expanding
+   the maintenance release into exhaustive benchmark work.
 3. Build, sign, verify on Mac mini, and complete every public release surface.
+
+## Current resumption, September 5
+
+This section supersedes older prerequisite status below. Jonathan explicitly
+deferred Half Bounce qualification and exhaustive benchmarks for this release.
+Security, practical audio/regression testing, stability checks, signing,
+notarization, hardware verification and publication provenance remain required.
+
+- Jonathan renewed execution approval and selected YouTube in Helium for
+  practical audio testing. No audio-source decision is outstanding.
+- Mac mini Codex usage is available again. Its selected standalone CLI was
+  updated from 0.133.0 to 0.153.4 after reproducing an incompatible
+  `app-server --stdio` invocation. The updated executable passed the managed
+  read-only worker-profile check. The prior installation remains recoverable.
+- A fresh user-authorized deep scan started against clean exact revision
+  3f70ce7. Its original coordinator call is retained on Mac mini. No successful
+  completion or findings report has been received yet.
+- Hosted full CI passed at 3f70ce7, including 639 Swift tests and three TSan
+  scenarios. Do not repeat the completed CI wait.
+- The installed baseline and application-source-equivalent 1.7.1 development
+  package passed practical Helium volume, mute and unmute checks. The
+  development build also emitted a PID/path-bound backend confirmation.
+  See `.audit/evidence/2026-09-05-waves-audio-smoke.md` for exact scope.
+- Profiling produced failed and partial captures. Those results are not passing
+  measurements. Jonathan then answered "Defer benchmarks and finish the
+  maintenance release" to the explicit release-scope question. Half Bounce,
+  the exhaustive scenario matrix and the two-hour benchmarking plan are
+  deferred for 1.7.1 build 19. No performance improvement will be claimed.
+  Basic active/idle stability checks and practical audio controls remain required.
+- The release-bound benchmark deferral passed independent spec and code review.
+  The controller's focused check passed seven tests with 35 assertions. The
+  implementation's full release-infrastructure run passed 114 tests with
+  1,031 assertions. All non-benchmark release requirements remain enforced.
+- Signing preflight found the pinned Developer ID identity. The existing
+  `waves-notary` profile could read notarization history. The trusted Command
+  Line Tools root, Swift compiler and macOS 26.5 SDK passed the release
+  toolchain validator, and a SwiftUI State typecheck passed under that SDK.
+  No administrator, credential or global toolchain change was needed.
+- Source remains based on pushed 3f70ce7. Current edits are the scoped benchmark
+  policy, its tests and documentation, this contract, and the audio smoke
+  receipt. No app source, merge, final candidate, tag or publication changed.
 
 ## Deferred, external, and out of scope
 
-- Deferred: Public X posting waits for Jonathan's approval of final media and
-  copy.
+- Deferred: Half Bounce qualification, exhaustive performance benchmarks and
+  their associated media for 1.7.1, by Jonathan's explicit September 5 decision.
+  Public X posting still requires approval of final media and copy.
 - External blockers: The local security invocation remains blocked under the
   unmanaged permission profile. The existing Mac mini audit task reports an
   account usage limit until September 11 and did not start a scan. No scan ID
@@ -73,7 +116,7 @@
 |---|---|---|---|---|
 | Functionality | Yes | Focused tests, full Swift suite, full quality gate | Hosted full gate passed at 4c9176d; newer collector tooling requires fresh CI | `.audit/evidence/2026-09-04-waves-1.7.1-premerge-gates.md` |
 | UX and accessibility | Yes | Hosted/rendered tests and real installed-app interaction | Hosted and five rendered tests passed; installed-app interaction pending | `.audit/evidence/2026-09-04-waves-1.7.1-premerge-gates.md` |
-| Runtime and performance | Yes | Baseline/candidate matrix, callback stress, soak, 30 launch recordings | Collector reviewed and native recording verified; actual app qualification pending | `.audit/evidence/2026-09-04-waves-1.7.1-runtime-audit.md` |
+| Runtime and performance | Practical checks only | Candidate audio controls and active/idle stability smoke; no fabricated benchmark results | Baseline and development control smoke passed; candidate stability pending; exhaustive benchmarks and Half Bounce explicitly deferred | `.audit/evidence/2026-09-05-waves-audio-smoke.md` |
 | Data and provenance | Yes | Exact revisions, hashes, canonical metadata, evidence receipts | Partial | `.audit/evidence/2026-09-04-planning-baseline.md` |
 | Security and privacy | Yes | Deep scan, finding dispositions, final receipt, secret/dependency checks | Targeted repairs reviewed; dependency updated; deep scan blocked | `.audit/evidence/2026-09-04-sparkle-dependency-review.md` |
 | Packaging and trust | Yes | Signed/notarized/stapled candidate, Gatekeeper, universal app and dSYM | Universal ad hoc app, matching dSYM, DMG and package smoke passed; public trust checks pending | `.audit/evidence/2026-09-04-waves-1.7.1-premerge-gates.md` |

@@ -32,6 +32,8 @@ class ReleaseInfraTest < Minitest::Test
   RELEASE_FINGERPRINT = "SHA256:53uCiv5rg7roncACotblHKo4OvHAsvYw/+x/5pU0mCQ"
   SPARKLE_ACCOUNT = "com.jonathanreed.Waves"
   SPARKLE_PUBLIC_KEY = "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
+  BENCHMARK_DEFERRAL_REASON =
+    "Maintenance release 1.7.1 defers exhaustive benchmarks while retaining active and idle stability smoke checks."
 
   def production_cleanup
     root = File.expand_path("../..", __dir__)
@@ -482,6 +484,27 @@ class ReleaseInfraTest < Minitest::Test
     }
   end
 
+  def deferred_performance_metric(reason: BENCHMARK_DEFERRAL_REASON)
+    {
+      "baseline" => nil,
+      "candidate" => nil,
+      "regressionPercent" => nil,
+      "status" => "deferred",
+      "approvedJustification" => reason,
+    }
+  end
+
+  def benchmark_deferral_metadata_hash
+    metadata_hash.merge(
+      "benchmarkDeferral" => {
+        "version" => VERSION,
+        "build" => BUILD,
+        "approvedOn" => "2026-09-05",
+        "reason" => BENCHMARK_DEFERRAL_REASON,
+      }
+    )
+  end
+
   def required_gates
     %w[
       localQA securityScan sanitizer routeLifecycleStress socketStress
@@ -525,6 +548,20 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal DESIGNATED_REQUIREMENT, metadata.dig("developerID", "designatedRequirement")
   end
 
+  def test_tracked_metadata_authorizes_only_the_approved_current_release_benchmark_deferral
+    metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
+
+    assert_equal(
+      {
+        "version" => VERSION,
+        "build" => BUILD,
+        "approvedOn" => "2026-09-05",
+        "reason" => BENCHMARK_DEFERRAL_REASON,
+      },
+      metadata.fetch("benchmarkDeferral")
+    )
+  end
+
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
     future = metadata_hash.merge("version" => "1.7.1", "build" => 16)
     with_metadata(future) do |path|
@@ -561,6 +598,84 @@ class ReleaseInfraTest < Minitest::Test
       with_metadata(contents) do |path|
         assert_release_error(message) { WavesRelease::Metadata.load(path) }
       end
+    end
+  end
+
+  def test_metadata_rejects_malformed_or_unbound_benchmark_deferral_policy
+    valid = benchmark_deferral_metadata_hash
+    cases = [
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("version" => "1.7.2")), /version/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("build" => BUILD + 1)), /build/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("approvedOn" => "2026-9-5")), /approvedOn/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("reason" => "")), /reason/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("scope" => "securityScan")), /unknown key/],
+    ]
+
+    cases.each do |contents, message|
+      with_metadata(contents) do |path|
+        assert_release_error(message) { WavesRelease::Metadata.load(path) }
+      end
+    end
+  end
+
+  def test_evidence_accepts_approved_current_release_benchmark_deferral
+    metadata = benchmark_deferral_metadata_hash
+    input = evidence_input
+    input["performance"] = input.fetch("performance").transform_values { deferred_performance_metric }
+
+    manifest = WavesRelease::Evidence.seal(input: input, metadata: metadata, profile: "candidate")
+
+    assert_equal ["deferred"], manifest.fetch("performance").values.map { |metric| metric.fetch("status") }.uniq
+  end
+
+  def test_evidence_rejects_deferred_benchmarks_without_canonical_approval
+    input = evidence_input
+    input["performance"] = input.fetch("performance").transform_values { deferred_performance_metric }
+
+    assert_release_error(/not authorized/) do
+      WavesRelease::Evidence.seal(input: input, metadata: metadata_hash, profile: "candidate")
+    end
+  end
+
+  def test_evidence_rejects_numeric_values_or_unapproved_reason_for_a_deferred_metric
+    metadata = benchmark_deferral_metadata_hash
+    numeric = evidence_input
+    numeric.fetch("performance")["launchTime"] = deferred_performance_metric.merge("baseline" => 100.0)
+    assert_release_error(/must be null/) do
+      WavesRelease::Evidence.seal(input: numeric, metadata: metadata, profile: "candidate")
+    end
+
+    wrong_reason = evidence_input
+    wrong_reason.fetch("performance")["launchTime"] = deferred_performance_metric(reason: "Caller supplied reason")
+    assert_release_error(/approved justification/) do
+      WavesRelease::Evidence.seal(input: wrong_reason, metadata: metadata, profile: "candidate")
+    end
+  end
+
+  def test_evidence_keeps_measured_performance_validation_when_deferral_is_approved
+    metadata = benchmark_deferral_metadata_hash
+    WavesRelease::Evidence.seal(input: evidence_input, metadata: metadata, profile: "candidate")
+
+    invalid = evidence_input
+    invalid.fetch("performance").fetch("launchTime")["regressionPercent"] = 4.0
+    assert_release_error(/does not match/) do
+      WavesRelease::Evidence.seal(input: invalid, metadata: metadata, profile: "candidate")
+    end
+  end
+
+  def test_benchmark_deferral_does_not_defer_security_or_hardware_gates
+    metadata = benchmark_deferral_metadata_hash
+
+    security = evidence_input
+    security.fetch("gates").fetch("securityScan")["status"] = "deferred"
+    assert_release_error(/securityScan/) do
+      WavesRelease::Evidence.seal(input: security, metadata: metadata, profile: "candidate")
+    end
+
+    hardware = evidence_input
+    hardware.fetch("platforms").fetch("goldenGateNative")["status"] = "deferred"
+    assert_release_error(/goldenGateNative/) do
+      WavesRelease::Evidence.seal(input: hardware, metadata: metadata, profile: "candidate")
     end
   end
 

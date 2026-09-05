@@ -47,6 +47,20 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
+For the 1.7.1 build 19 maintenance release, canonical metadata records Jonathan's
+September 5 approval to defer the exhaustive benchmarks. Represent each deferred
+`launchTime`, `idleCPU`, `steadyMemory`, or `activeMixing` record with status
+`deferred`, null `baseline`, `candidate`, and `regressionPercent` values, and the
+exact approved reason from metadata as `approvedJustification`. Do not invent
+measurements. A deferred record is not a passing benchmark or a performance
+improvement. The policy is bound to version 1.7.1 build 19, so a version or build
+change must remove it or replace it with a new explicit approval.
+
+This deferral does not change any release gate. Active and idle stability smoke
+checks, security, tests, platform and physical Elgato checks, signing,
+notarization, Gatekeeper, provenance, artifact validation, and publication
+receipts remain required.
+
 ## Protected command environment
 
 Execute `script/release-gate.sh`, `script/build_and_run.sh`,
