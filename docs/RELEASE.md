@@ -8,16 +8,15 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-Version 1.7.0 build 16 is the latest published release. GitHub published it on
-2026-09-01 from the signed annotated `v1.7.0` tag at
-`54ca3109db33ee0e6328188c5ded1fc14e6e6617`. The release includes the DMG,
+Version 1.7.1 build 19 is the latest published release. GitHub published it on
+2026-09-05 from the signed annotated `v1.7.1` tag at
+`2055c7a72a58af85a933e39f1e781ec2b330c571`. The release includes the DMG,
 checksum, notary log, source identity, candidate and publication evidence,
-both external receipts, and dSYM. Later commits on `main` are not part of that
-published build.
-
-Version 1.7.1 build 19 is in development. Its changelog heading and repository
-cask template track the candidate metadata, but no 1.7.1 artifact, checksum,
-tag, appcast entry, or Homebrew cask has been published.
+both external receipts, and dSYM. The site appcast, download page, and the
+Homebrew tap point at that DMG. The release owner deferred exhaustive
+benchmarks and the physical Elgato hardware pass for this release; that
+follow-up is bound to 1.7.1 and does not carry forward. Later commits on `main`
+are not part of that published build.
 
 The separately versioned Stream Deck companion at
 `/Users/jonathanreed/Downloads/waves-streamdeck` must pass its Bun typecheck,

@@ -146,6 +146,31 @@ files uncommitted. Claude resumed the thread from the rollout and this contract.
   is Jonathan's decision; findings 1 and 2 need his explicit trust-model answer.
   No tag, GitHub Release, appcast, website or Homebrew change was made.
 
+## Publication, September 5
+
+Jonathan approved publishing with the hardware pass deferred ("the issue of
+testing I can do later"). Claude completed the documented pipeline:
+
+- PR #43 merged as `2055c7a` after the hosted gate passed on its head; the
+  hosted gate then passed again on `main` (run 33994946401: 669 ordinary tests,
+  5 rendered, 3 Thread Sanitizer scenarios).
+- Rebuilt, signed and notarized from clean `2055c7a`: stapled DMG SHA-256
+  `5e5b07ca3e338b68e7ef69082eba834fef2fa673560dfaed1badba749b0cdb4c`,
+  notarization job `30ba2fd4-3a1f-4ee7-933d-3bf94dfd4420` accepted.
+- Evidence: one 300-second isolated-home idle soak, an x86_64 launch under
+  Rosetta, the companion's typecheck, tests, validation and packaging at
+  `4e16fe5`, and receipts bound to the DMG. The security receipt transcribes
+  scan `bedd5c5b` and the dispositions; `remote-elgato-approval.json` records
+  Jonathan's deferral as the release-owner approval, the same mechanism 1.7.0
+  used. Candidate and publication gates passed; the signed `v1.7.1` tag embeds
+  the sealed manifest.
+- Published: GitHub Release `v1.7.1` with nine assets (downloaded bytes match
+  the sealed DMG), the signed appcast entry over those bytes, the site with
+  its overhaul plus the 1.7.1 facts deployed to waves.jonathanrreed.com, and
+  the Homebrew tap cask at 1.7.1 with the published checksum.
+- Not done: live Wave Link 3 and Stream Deck verification on the Mac mini, and
+  fresh benchmarks. Both remain open follow-ups for this release.
+
 ## Deferred, external, and out of scope
 
 - Deferred: Half Bounce qualification, exhaustive performance benchmarks and
