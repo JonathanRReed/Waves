@@ -130,6 +130,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let liveRuntimeIdentityProvider: RuntimeIdentityProvider
   let processObjectTranslator: ProcessObjectTranslator?
   let captureAuthorizationProbe: CaptureAuthorizationProbe?
+  let applicationCaptureProvider: (@Sendable () async -> AppRuntimeDiscovery.Capture)?
+  let processLifetimeLiveness: @Sendable (AppProcessLifetimeIdentity) -> Bool
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
@@ -159,6 +161,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.liveRuntimeIdentityProvider = RuntimeProcessIdentity.captureLive
     self.processObjectTranslator = nil
     self.captureAuthorizationProbe = nil
+    self.applicationCaptureProvider = nil
+    self.processLifetimeLiveness = RuntimeProcessIdentity.mayStillBeRunning
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
     )
@@ -184,7 +188,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     runtimeIdentityProvider: @escaping RuntimeIdentityProvider = RuntimeProcessIdentityCache.shared.identity,
     liveRuntimeIdentityProvider: @escaping RuntimeIdentityProvider = RuntimeProcessIdentity.captureLive,
     processObjectTranslator: ProcessObjectTranslator? = nil,
-    captureAuthorizationProbe: CaptureAuthorizationProbe? = nil
+    captureAuthorizationProbe: CaptureAuthorizationProbe? = nil,
+    applicationCaptureProvider: (@Sendable () async -> AppRuntimeDiscovery.Capture)? = nil,
+    processLifetimeLiveness: @escaping @Sendable (AppProcessLifetimeIdentity) -> Bool = RuntimeProcessIdentity.mayStillBeRunning
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     self.deviceChangeEvents = stream
@@ -207,6 +213,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.liveRuntimeIdentityProvider = liveRuntimeIdentityProvider
     self.processObjectTranslator = processObjectTranslator
     self.captureAuthorizationProbe = captureAuthorizationProbe
+    self.applicationCaptureProvider = applicationCaptureProvider
+    self.processLifetimeLiveness = processLifetimeLiveness
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: routerObservationNativeCalls
         ?? .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
@@ -467,6 +475,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }
 
+    // Exclusion is the user's explicit capture opt-out. Discovery and URL
+    // commands cannot create it, and a collision must not prevent that opt-out.
     if intent.isExcluded {
       excludeApp(at: acceptedIndex)
       clearStagedIntentIfCurrent(intent, logicalID: logicalID)
@@ -478,6 +488,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         outcome: .excluded,
         resultingApp: snapshot.apps[acceptedIndex],
         backendStatus: snapshot.backendStatus
+      )
+    }
+
+    if snapshot.apps[acceptedIndex].hasAmbiguousIdentity {
+      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .unsupported,
+        resultingApp: snapshot.apps[acceptedIndex],
+        backendStatus: snapshot.backendStatus,
+        detail: AppRuntimeDiscovery.identityCollisionNote
       )
     }
 
@@ -1448,16 +1470,25 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let knownIcons = (previousSnapshot?.apps ?? []).reduce(into: [String: Data]()) { result, app in
       if let data = app.iconTIFFData { result[app.logicalID] = data }
     }
-    let discoveryCapture = await AppRuntimeDiscovery.captureRunningApplications(
-      currentBundleID: currentBundleID,
-      knownIconData: knownIcons
-    )
-    let runningApps = await Task.detached { [currentBundleID, audible, discoveryCapture] in
+    let discoveryCapture: AppRuntimeDiscovery.Capture
+    if let applicationCaptureProvider {
+      discoveryCapture = await applicationCaptureProvider()
+    } else {
+      discoveryCapture = await AppRuntimeDiscovery.captureRunningApplications(
+        currentBundleID: currentBundleID,
+        knownIconData: knownIcons
+      )
+    }
+    let incumbentIdentities = (previousSnapshot?.apps ?? []).reduce(into: [String: AppRuntimeIdentity]()) { result, app in
+      result[app.logicalID] = app.runtimeIdentity
+    }
+    let runningApps = await Task.detached { [currentBundleID, audible, discoveryCapture, incumbentIdentities] in
       AppRuntimeDiscovery.discoverRunningApps(
         from: discoveryCapture,
         currentBundleID: currentBundleID,
         audiblePIDs: audible.pids,
-        audibleParentBundlePaths: audible.parentBundlePaths
+        audibleParentBundlePaths: audible.parentBundlePaths,
+        incumbentIdentities: incumbentIdentities
       )
     }.value
     guard !isShuttingDown else { return snapshot }
@@ -1469,17 +1500,39 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         return candidate
       }
 
+      let liveController = controllers[previous.id].flatMap { $0.isActive ? $0 : nil }
+      let conflictsWithLiveOwner: Bool
+      if let liveController, let owner = previous.runtimeIdentity {
+        let sameFamily =
+          candidate.runtimeIdentity.map {
+            AppDiscoveryPolicy.runtimeFamilyMatches(target: owner, candidate: $0)
+          } ?? false
+        var ownerLifetimes = liveController.targetProcessFamily.processLifetimeIdentities
+        ownerLifetimes.insert(owner.lifetime)
+        conflictsWithLiveOwner = !sameFamily && ownerLifetimes.contains(where: processLifetimeLiveness)
+      } else {
+        conflictsWithLiveOwner = false
+      }
+      if liveController != nil && (candidate.hasAmbiguousIdentity || conflictsWithLiveOwner) {
+        var retained = previous
+        retained.hasAmbiguousIdentity = true
+        retained.routingState = .error
+        retained.notes = AppRuntimeDiscovery.identityCollisionNote
+        retained.routeHealthContext = nil
+        return retained
+      }
+
       var app = candidate
       app.desiredVolume = previous.desiredVolume
-      app.appliedVolume = previous.appliedVolume ?? previous.desiredVolume
+      app.appliedVolume = candidate.hasAmbiguousIdentity ? nil : previous.appliedVolume ?? previous.desiredVolume
       app.isMuted = previous.isMuted
       app.isPinned = previous.isPinned
       app.compatibility = previous.compatibility
       app.volumeBoost = previous.volumeBoost
       app.muteSource = previous.muteSource
       app.targetDeviceUID = previous.targetDeviceUID
-      app.routeHealthContext = previous.routeHealthContext
-      if previous.routeHealthContext != nil {
+      app.routeHealthContext = candidate.hasAmbiguousIdentity ? nil : previous.routeHealthContext
+      if app.routeHealthContext != nil {
         app.routingState = previous.routingState
         app.notes = previous.notes
       }
@@ -1490,7 +1543,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // But if the fresh candidate shows the app currently audible (.live), the
       // app is plainly playing again — let that clear a stale, transient error
       // rather than pinning the row/global health to error indefinitely.
-      if previous.routingState == .error && candidate.routingState != .live {
+      if previous.routingState == .error && !previous.hasAmbiguousIdentity
+        && !candidate.hasAmbiguousIdentity && candidate.routingState != .live
+      {
         app.routingState = .error
         app.notes = previous.notes
         app.hasNoAudioCapability = previous.hasNoAudioCapability
@@ -1523,6 +1578,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     for index in mergedApps.indices {
+      if mergedApps[index].hasAmbiguousIdentity { continue }
       if !supportsPerAppRouting {
         mergedApps[index].routingState = RoutingState.monitorOnly
         mergedApps[index].notes = "Per-app route requires macOS 14.2+"

@@ -24,7 +24,7 @@ let package = Package(
       url: "https://github.com/swiftlang/swift-testing.git",
       revision: "18c42c19cac3fafd61cab1156d4088664b7424ae"  // swift-6.0.3-RELEASE
     ),
-    .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.8.0"),
+    .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.6"),
   ],
   targets: [
     .executableTarget(

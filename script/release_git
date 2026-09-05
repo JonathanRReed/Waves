@@ -28,6 +28,7 @@ export PATH LC_ALL LANG HOME TMPDIR GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM \
   GIT_TERMINAL_PROMPT GCM_INTERACTIVE GIT_ASKPASS SSH_ASKPASS GIT_SSH_COMMAND
 
 exec /usr/bin/git \
+  --no-replace-objects \
   -c core.fsmonitor=false \
   -c gpg.ssh.program=/usr/bin/ssh-keygen \
   "$@"

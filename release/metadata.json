@@ -1,9 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "1.7.0",
-  "build": 16,
+  "version": "1.7.1",
+  "build": 19,
   "minimumMacOSVersion": "14.2",
   "bundleIdentifier": "com.jonathanreed.Waves",
+  "benchmarkDeferral": {
+    "version": "1.7.1",
+    "build": 19,
+    "approvedOn": "2026-09-05",
+    "reason": "Maintenance release 1.7.1 defers exhaustive benchmarks while retaining active and idle stability smoke checks."
+  },
   "developerID": {
     "identity": "Developer ID Application: Jonathan Reed (AJ9VWBRNZN)",
     "teamIdentifier": "AJ9VWBRNZN",

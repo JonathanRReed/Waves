@@ -31,6 +31,292 @@ import WavesAudioCore
   #expect(apps.first?.iconTIFFData == Data([1]))
 }
 
+@Test func appRuntimeDiscoveryDoesNotAuthorizeConflictingBundleIdentifiers() {
+  let bundleID = "com.example.player"
+  let applications = [
+    collisionApplication(pid: 42, path: "/Applications/Player.app", team: "PLAYERTEAM", active: false),
+    collisionApplication(pid: 84, path: "/Applications/Spoof.app", team: "OTHERTEAM", active: true),
+  ]
+  let apps = AppRuntimeDiscovery.discoverRunningApps(
+    from: .init(applications: applications),
+    currentBundleID: "com.example.waves",
+    audiblePIDs: [42, 84],
+    audibleParentBundlePaths: []
+  )
+
+  #expect(apps.count == 1)
+  #expect(apps.first?.logicalID == bundleID)
+  #expect(apps.first?.runtimeIdentity == nil)
+  #expect(apps.first?.pid == nil)
+  #expect(apps.first?.appliedVolume == nil)
+  #expect(apps.first?.routingState == .error)
+  #expect(apps.first?.notes?.contains("Multiple running apps") == true)
+}
+
+private func collisionApplication(
+  pid: Int32, path: String, team: String?, active: Bool, hasIdentity: Bool = true, codeDirectoryHash: Data? = nil
+) -> AppRuntimeDiscovery.CapturedApplication {
+  AppRuntimeDiscovery.CapturedApplication(
+    pid: pid,
+    bundleID: "com.example.player",
+    localizedName: "Player",
+    bundlePath: path,
+    activationPolicy: .regular,
+    isActive: active,
+    iconTIFFData: nil,
+    runtimeIdentity: hasIdentity
+      ? testRuntimeIdentity(
+        pid: pid, outerBundlePath: path, signingIdentifier: "com.example.player", teamIdentifier: team,
+        codeDirectoryHash: codeDirectoryHash
+      )
+      : nil
+  )
+}
+
+@Test(arguments: ["same-team", "ad-hoc", "missing-identity"])
+func appRuntimeDiscoveryRejectsOtherAmbiguousPrincipals(kind: String) {
+  let team: String? = kind == "ad-hoc" ? nil : "PLAYERTEAM"
+  let applications = [
+    collisionApplication(pid: 42, path: "/Applications/Player.app", team: team, active: false),
+    collisionApplication(
+      pid: 84, path: "/Applications/Other.app", team: team, active: true, hasIdentity: kind != "missing-identity"
+    ),
+  ]
+  let apps = AppRuntimeDiscovery.discoverRunningApps(
+    from: .init(applications: applications), currentBundleID: nil, audiblePIDs: [], audibleParentBundlePaths: []
+  )
+  #expect(apps.first?.hasAmbiguousIdentity == true)
+  #expect(apps.first?.runtimeIdentity == nil)
+}
+
+@Test func appRuntimeDiscoveryRetainsAnIncumbentWithinOneVerifiedFamily() throws {
+  let original = collisionApplication(pid: 42, path: "/Applications/Player.app", team: "PLAYERTEAM", active: false)
+  let anotherInstance = collisionApplication(pid: 84, path: "/Applications/Player.app", team: "PLAYERTEAM", active: true)
+  let identity = try #require(original.runtimeIdentity)
+  let apps = AppRuntimeDiscovery.discoverRunningApps(
+    from: .init(applications: [original, anotherInstance]),
+    currentBundleID: nil,
+    audiblePIDs: [42, 84],
+    audibleParentBundlePaths: [],
+    incumbentIdentities: ["com.example.player": identity]
+  )
+  #expect(apps.first?.hasAmbiguousIdentity == false)
+  #expect(apps.first?.runtimeIdentity == identity)
+  #expect(apps.first?.pid == 42)
+}
+
+@Test(arguments: ["concurrent", "missing-identity", "incumbent-omitted"])
+func appIdentityCollisionRetainsTheManagedController(kind: String) async throws {
+  let original = collisionApplication(pid: 42, path: "/Applications/Player.app", team: "PLAYERTEAM", active: false)
+  let observedOriginal = collisionApplication(
+    pid: 42, path: "/Applications/Player.app", team: "PLAYERTEAM", active: false, hasIdentity: kind != "missing-identity"
+  )
+  let spoof = collisionApplication(pid: 84, path: "/Applications/Spoof.app", team: "OTHERTEAM", active: true)
+  let fixture = try collisionBackendFixture(applications: kind == "incumbent-omitted" ? [spoof] : [observedOriginal, spoof])
+  let refreshed = try await fixture.backend.refresh()
+  let retained = try #require(refreshed.apps.first)
+  #expect(retained.runtimeIdentity == original.runtimeIdentity)
+  #expect(retained.pid == 42)
+  #expect(retained.logicalID == "com.example.player")
+  #expect(retained.desiredVolume == 0.27)
+  #expect(retained.isMuted)
+  #expect(retained.hasAmbiguousIdentity)
+  #expect(await fixture.backend.controllers[retained.id] === fixture.controller)
+  #expect(fixture.controller.isActive)
+
+  let rejected = await fixture.backend.applyAppIntent(collisionIntent(generation: 1))
+  #expect(rejected.outcome == .unsupported)
+  await fixture.backend.reattachRoutes(forLogicalIDs: [retained.logicalID])
+  #expect(fixture.events.values.isEmpty)
+  #expect(fixture.controller.isActive)
+
+  await fixture.capture.replace([original])
+  let restored = try await fixture.backend.refresh().apps.first
+  #expect(restored?.hasAmbiguousIdentity == false)
+  #expect(restored?.runtimeIdentity == original.runtimeIdentity)
+  #expect(restored?.isMuted == true)
+  #expect(restored?.desiredVolume == 0.27)
+  #expect(restored?.routingState == .managed)
+  let accepted = await fixture.backend.applyAppIntent(collisionIntent(generation: 2))
+  #expect(accepted.outcome == .applied || accepted.outcome == .noChange)
+  #expect(fixture.events.values.isEmpty)
+  _ = await fixture.backend.shutdownWithResult()
+}
+
+@Test func appIdentityCollisionBlocksWaveLinkBeforeSendingCommands() async throws {
+  let applications = [
+    collisionApplication(pid: 42, path: "/Applications/Player.app", team: "PLAYERTEAM", active: false),
+    collisionApplication(pid: 84, path: "/Applications/Spoof.app", team: "OTHERTEAM", active: true),
+  ]
+  let fixture = try collisionBackendFixture(applications: applications, useWaveLink: true)
+  _ = try await fixture.backend.refresh()
+  let result = await fixture.backend.applyAppIntent(collisionIntent(generation: 1))
+  #expect(result.outcome == .unsupported)
+  #expect(await fixture.waveLink.calls == 0)
+  #expect(fixture.events.values.isEmpty)
+  #expect(fixture.controller.isActive)
+  _ = await fixture.backend.shutdownWithResult()
+}
+
+@Test func appIdentityCollisionStillHonorsExplicitCaptureExclusion() async throws {
+  let applications = [
+    collisionApplication(pid: 42, path: "/Applications/Player.app", team: "PLAYERTEAM", active: false),
+    collisionApplication(pid: 84, path: "/Applications/Spoof.app", team: "OTHERTEAM", active: true),
+  ]
+  let fixture = try collisionBackendFixture(applications: applications)
+  _ = try await fixture.backend.refresh()
+  let exclusion = AppRouteIntent(
+    appID: "com.example.player", desiredVolume: 0.27, isMuted: true, volumeBoost: 1,
+    equalizerSettings: EqualizerSettings(), targetDeviceUID: nil, generation: 1, reason: .userEdit, isExcluded: true
+  )
+  let result = await fixture.backend.applyAppIntent(exclusion)
+  #expect(result.outcome == .excluded)
+  #expect(!fixture.controller.isActive)
+  #expect(await fixture.backend.controllers.isEmpty)
+  #expect(fixture.events.values.contains("unmute-original"))
+  #expect(await fixture.waveLink.calls == 0)
+  _ = await fixture.backend.shutdownWithResult()
+}
+
+@Test(arguments: [true, false])
+func appIdentityReplacementWaitsForTheOriginalLifetimeToEnd(ownerIsAlive: Bool) async throws {
+  let replacement = collisionApplication(
+    pid: 84, path: "/Applications/Player.app", team: nil, active: true, codeDirectoryHash: Data([2])
+  )
+  let fixture = try collisionBackendFixture(
+    applications: [replacement], incumbentTeam: nil, ownerIsAlive: ownerIsAlive, allowReplacement: true
+  )
+  let refreshed = try await fixture.backend.refresh()
+  #expect(refreshed.apps.first?.hasAmbiguousIdentity == ownerIsAlive)
+  #expect(refreshed.apps.first?.pid == (ownerIsAlive ? 42 : 84))
+  let result = await fixture.backend.applyAppIntent(collisionIntent(generation: 1))
+  if ownerIsAlive {
+    #expect(result.outcome == .unsupported)
+    #expect(fixture.controller.isActive)
+    #expect(fixture.events.values.isEmpty)
+  } else {
+    #expect(result.outcome == .applied)
+    #expect(result.resultingApp?.runtimeIdentity == replacement.runtimeIdentity)
+    #expect(!fixture.controller.isActive)
+    #expect(fixture.events.values.contains("replacement"))
+  }
+  _ = await fixture.backend.shutdownWithResult()
+}
+
+@Test func appIdentityAmbiguityDoesNotPersistAcrossProcessLifetimes() throws {
+  let app = AudioApp(id: "com.example.player", displayName: "Player", category: .media, hasAmbiguousIdentity: true)
+  let data = try JSONEncoder().encode(app)
+  let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+  #expect(object["hasAmbiguousIdentity"] == nil)
+  let decoded = try JSONDecoder().decode(AudioApp.self, from: data)
+  #expect(!decoded.hasAmbiguousIdentity)
+  #expect(decoded.logicalID == app.logicalID)
+}
+
+@Test func runtimeProcessLivenessChecksTheKernelLifetimeRatherThanOnlyThePID() throws {
+  let current = try #require(RuntimeProcessIdentity.processLifetime(pid: getpid()))
+  #expect(RuntimeProcessIdentity.mayStillBeRunning(current))
+  let differentLifetime = AppProcessLifetimeIdentity(
+    pid: current.pid, startTimeSeconds: current.startTimeSeconds + 1, startTimeMicroseconds: current.startTimeMicroseconds
+  )
+  #expect(!RuntimeProcessIdentity.mayStillBeRunning(differentLifetime))
+  #expect(!RuntimeProcessIdentity.mayStillBeRunning(.init(pid: -1, startTimeSeconds: 0, startTimeMicroseconds: 0)))
+}
+
+private func collisionIntent(generation: UInt64) -> AppRouteIntent {
+  AppRouteIntent(
+    appID: "com.example.player", desiredVolume: 1, isMuted: false, volumeBoost: 1,
+    equalizerSettings: EqualizerSettings(), targetDeviceUID: nil, generation: generation, reason: .userEdit
+  )
+}
+
+private func collisionBackendFixture(
+  applications: [AppRuntimeDiscovery.CapturedApplication], useWaveLink: Bool = false,
+  incumbentTeam: String? = "PLAYERTEAM", ownerIsAlive: Bool = true, allowReplacement: Bool = false
+) throws -> (
+  backend: WorkspaceAudioControlBackend, controller: PerAppTapController, capture: CollisionCapture,
+  events: CollisionControllerEvents, waveLink: CollisionWaveLinkController
+) {
+  let original = collisionApplication(pid: 42, path: "/Applications/Player.app", team: incumbentTeam, active: false)
+  let app = AudioApp(
+    id: "com.example.player", pid: 42, bundleID: "com.example.player", displayName: "Player", category: .media,
+    isActive: true, desiredVolume: 0.27, appliedVolume: 0, isMuted: true, routingState: .managed,
+    compatibility: .supported, runtimeIdentity: original.runtimeIdentity
+  )
+  let capture = CollisionCapture(applications)
+  let events = CollisionControllerEvents()
+  let waveLink = CollisionWaveLinkController()
+  let controller = try PerAppTapController.testingController(
+    appID: app.id, targetProcessObjectIDs: [11],
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: {
+        events.record("unmute-original"); return 0
+      },
+      stopIOProc: {
+        events.record("stop-original"); return 0
+      },
+      restoreTapMuting: { return 0 }
+    )
+  )
+  controller.apply(volume: 0.27, volumeBoost: 1, muted: true)
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: AudioSessionSnapshot(
+      apps: [app], currentDevice: nil, recentDeviceIDs: [], supportMatrix: SupportMatrix(entries: []),
+      backendStatus: BackendStatus(isAudioComponentInstalled: true, hasRequiredPermissions: true, isRouteRecoveryHealthy: true)
+    ),
+    captureAuthorization: .authorized,
+    verifiedRouterConflictProvider: { _ in
+      useWaveLink
+        ? VerifiedRouterConflict(
+          routerName: "Elgato Wave Link", kind: .unattributableTapFallback, detail: "Fixture router", supportsBridgeControl: true
+        ) : nil
+    },
+    waveLinkController: waveLink,
+    testingControllers: [controller],
+    controllerFactory: { app, processObjectIDs, _, _, _ in
+      events.record("replacement")
+      if allowReplacement {
+        return try PerAppTapController.testingController(
+          appID: app.id, targetProcessObjectIDs: processObjectIDs,
+          teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+            makeOriginalAudioAudible: { 0 }, stopIOProc: { 0 }, restoreTapMuting: { 0 }
+          )
+        )
+      }
+      throw BackendError.managedRouteUnavailable("Unexpected replacement controller")
+    },
+    processObjectIDResolver: { $0.pid == 42 ? [11] : [22] },
+    captureAuthorizationProbe: { .authorized },
+    applicationCaptureProvider: { await capture.read() },
+    processLifetimeLiveness: { _ in ownerIsAlive }
+  )
+  return (backend, controller, capture, events, waveLink)
+}
+
+private actor CollisionCapture {
+  private var applications: [AppRuntimeDiscovery.CapturedApplication]
+  init(_ applications: [AppRuntimeDiscovery.CapturedApplication]) { self.applications = applications }
+  func read() -> AppRuntimeDiscovery.Capture { .init(applications: applications) }
+  func replace(_ applications: [AppRuntimeDiscovery.CapturedApplication]) { self.applications = applications }
+}
+
+private final class CollisionControllerEvents: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recorded: [String] = []
+  var values: [String] { lock.withLock { recorded } }
+  func record(_ value: String) { lock.withLock { recorded.append(value) } }
+}
+
+private actor CollisionWaveLinkController: WaveLinkControlling {
+  private(set) var calls = 0
+  func apply(bundleIdentifier: String, volume: Float, isMuted: Bool) -> WaveLinkControlConfirmation {
+    calls += 1
+    return WaveLinkControlConfirmation(
+      channelID: "fixture", channelName: "Fixture", appliedVolume: volume, isMuted: isMuted, relocated: false
+    )
+  }
+}
+
 @Test func appRuntimeDiscoveryDoesNotTrustASpoofedBundleFamily() {
   let target = AppRuntimeDiscovery.CapturedApplication(
     pid: 42,
@@ -358,7 +644,8 @@ private func testRuntimeIdentity(
   startTimeSeconds: UInt64 = 100,
   outerBundlePath: String,
   signingIdentifier: String,
-  teamIdentifier: String? = nil
+  teamIdentifier: String? = nil,
+  codeDirectoryHash: Data? = nil
 ) -> AppRuntimeIdentity {
   AppRuntimeIdentity(
     lifetime: AppProcessLifetimeIdentity(
@@ -372,7 +659,7 @@ private func testRuntimeIdentity(
       identifier: signingIdentifier,
       teamIdentifier: teamIdentifier,
       designatedRequirement: "identifier \"\(signingIdentifier)\"",
-      codeDirectoryHash: Data(signingIdentifier.utf8)
+      codeDirectoryHash: codeDirectoryHash ?? Data(signingIdentifier.utf8)
     )
   )
 }

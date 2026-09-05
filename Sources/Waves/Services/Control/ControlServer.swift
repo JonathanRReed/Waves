@@ -402,9 +402,14 @@ final class ControlServer {
     leafName: String,
     identity: ControlSocketIdentity
   ) -> Bool {
+    guard let remainingAttempts = drainListenerSelfProofBacklog(listener: listener) else {
+      return false
+    }
+
     let client = socket(AF_UNIX, SOCK_STREAM, 0)
     guard client >= 0 else { return false }
     defer { _ = Darwin.close(client) }
+    guard setNonBlocking(client) else { return false }
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
@@ -418,29 +423,122 @@ final class ControlServer {
         socklen_t(raw.count)
       )
     }
-    guard connected == 0 else { return false }
-
-    let accepted: Int32
-    while true {
-      let candidate = accept(listener, nil, nil)
-      if candidate >= 0 {
-        accepted = candidate
-        break
-      }
-      if errno != EINTR { return false }
-    }
-    defer { _ = Darwin.close(accepted) }
-
+    let connectError = connected == 0 ? 0 : errno
+    var readiness = pollfd(fd: client, events: Int16(POLLOUT), revents: 0)
+    let readinessResult = poll(&readiness, 1, 0)
+    var socketError: Int32 = 0
+    var socketErrorLength = socklen_t(MemoryLayout<Int32>.size)
     guard
-      let peer = peerIdentity(accepted),
-      peer.uid == getuid(),
-      peer.processID == getpid()
+      readinessResult >= 0,
+      getsockopt(client, SOL_SOCKET, SO_ERROR, &socketError, &socketErrorLength) == 0,
+      nonblockingConnectCompleted(
+        connectResult: connected,
+        connectError: connectError,
+        readinessEvents: readiness.revents,
+        socketError: socketError
+      )
     else { return false }
+
+    var nonceBytes = [UInt8](repeating: 0, count: 32)
+    nonceBytes.withUnsafeMutableBytes { bytes in
+      arc4random_buf(bytes.baseAddress!, bytes.count)
+    }
+    let nonce = Data(nonceBytes)
+    let sent = nonce.withUnsafeBytes { bytes in
+      Darwin.send(client, bytes.baseAddress!, bytes.count, MSG_DONTWAIT)
+    }
+    guard sent == nonce.count else { return false }
+
+    let provedPeer = runListenerSelfProofAcceptLoop(
+      remainingAttempts: remainingAttempts,
+      expectedNonce: nonce,
+      acceptOne: {
+        let candidate = accept(listener, nil, nil)
+        return (candidate, candidate >= 0 ? 0 : errno)
+      },
+      peerIsTrusted: { descriptor in
+        guard let peer = peerIdentity(descriptor) else { return false }
+        return peer.uid == getuid() && peer.processID == getpid()
+      },
+      readNonce: { descriptor in
+        var received = [UInt8](repeating: 0, count: nonce.count)
+        let count = received.withUnsafeMutableBytes { bytes in
+          Darwin.recv(descriptor, bytes.baseAddress!, bytes.count, MSG_DONTWAIT)
+        }
+        guard count == received.count else { return nil }
+        return Data(received)
+      },
+      close: { _ = Darwin.close($0) }
+    )
+    guard provedPeer else { return false }
     return ControlSocketFilesystem.socketIdentityMatches(
       parentDescriptor: parentDescriptor,
       leafName: leafName,
       identity: identity
     )
+  }
+
+  /// Clears only a bounded batch of verified same-user entries before creating
+  /// the proof connection. The later nonce match distinguishes the proof client
+  /// from any same-process connection that races in after this drain.
+  private nonisolated static func drainListenerSelfProofBacklog(
+    listener: Int32
+  ) -> Int? {
+    var remainingAttempts = maximumAcceptAttemptsPerEvent
+    while remainingAttempts > 0 {
+      remainingAttempts -= 1
+      let candidate = accept(listener, nil, nil)
+      if candidate >= 0 {
+        defer { _ = Darwin.close(candidate) }
+        guard let peer = peerIdentity(candidate), peer.uid == getuid() else { return nil }
+      } else if errno == EAGAIN || errno == EWOULDBLOCK {
+        return remainingAttempts
+      } else if errno != EINTR {
+        return nil
+      }
+    }
+    return nil
+  }
+
+  /// Bounded syscall loop for listener self-proof. Every descriptor is closed,
+  /// including verified backlog entries and the descriptor that proves the
+  /// connection, because none belongs to the public connection lifecycle.
+  nonisolated static func runListenerSelfProofAcceptLoop(
+    remainingAttempts: Int,
+    expectedNonce: Data,
+    acceptOne: () -> (descriptor: Int32, error: Int32),
+    peerIsTrusted: (Int32) -> Bool,
+    readNonce: (Int32) -> Data?,
+    close: (Int32) -> Void
+  ) -> Bool {
+    var remainingAttempts = max(0, remainingAttempts)
+    while remainingAttempts > 0 {
+      remainingAttempts -= 1
+      let result = acceptOne()
+      if result.descriptor >= 0 {
+        let matches =
+          peerIsTrusted(result.descriptor)
+          && readNonce(result.descriptor) == expectedNonce
+        close(result.descriptor)
+        if matches { return true }
+      } else if result.error == EAGAIN || result.error == EWOULDBLOCK {
+        return false
+      } else if result.error != EINTR {
+        return false
+      }
+    }
+    return false
+  }
+
+  nonisolated static func nonblockingConnectCompleted(
+    connectResult: Int32,
+    connectError: Int32,
+    readinessEvents: Int16,
+    socketError: Int32
+  ) -> Bool {
+    if connectResult == 0 { return socketError == 0 }
+    guard connectError == EINPROGRESS else { return false }
+    return readinessEvents & Int16(POLLOUT) != 0 && socketError == 0
   }
 
   /// Runs on `ioQueue`. Drains the accept backlog, rejecting anything that

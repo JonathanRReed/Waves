@@ -11,6 +11,9 @@ import WavesAudioCore
 
 extension WorkspaceAudioControlBackend {
   func resolveProcessTarget(for app: AudioApp) throws -> ResolvedProcessTarget {
+    guard !app.hasAmbiguousIdentity else {
+      throw BackendError.managedRouteUnavailable(AppRuntimeDiscovery.identityCollisionNote)
+    }
     if let processTargetResolver {
       return try processTargetResolver(app)
     }

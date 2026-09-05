@@ -1243,6 +1243,53 @@ func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async th
 }
 
 @MainActor
+@Test(arguments: [true, false])
+func rejectedURLMutePreservesAutomaticResume(isMuted: Bool) async {
+  let app = transactionTestApp(id: "automation.rejected-url")
+  let fixture = makeTransactionFixture(
+    apps: [app], device: transactionTestDevice(), outcomes: [.applied, .failed, .applied]
+  )
+  fixture.store.preferences.enableURLScheme = true
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: true)
+  #expect(fixture.store.appIntentCoordinator.ownsAutomaticMute(for: app.logicalID))
+
+  fixture.store.handleURLScheme(URL(string: "waves://mute?app=\(app.logicalID)&muted=\(isMuted)")!)
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.session.apps.first?.isMuted == true)
+  #expect(fixture.store.session.apps.first?.muteSource == .autoConferencing)
+  #expect(fixture.store.appIntentCoordinator.ownsAutomaticMute(for: app.logicalID))
+
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: false)
+  #expect(fixture.store.session.apps.first?.isMuted == false)
+  #expect(await fixture.backend.recordedIntents().count == 3)
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test(arguments: [true, false])
+func acceptedURLMuteReplacesAutomaticMuteOwnership(isMuted: Bool) async {
+  let app = transactionTestApp(id: "automation.accepted-url")
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
+  fixture.store.preferences.enableURLScheme = true
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: true)
+  #expect(fixture.store.appIntentCoordinator.ownsAutomaticMute(for: app.logicalID))
+
+  fixture.store.handleURLScheme(URL(string: "waves://mute?app=\(app.logicalID)&muted=\(isMuted)")!)
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.session.apps.first?.isMuted == isMuted)
+  #expect(fixture.store.session.apps.first?.muteSource == .user)
+  #expect(!fixture.store.appIntentCoordinator.ownsAutomaticMute(for: app.logicalID))
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.isMuted == isMuted)
+
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: false)
+  #expect(fixture.store.session.apps.first?.isMuted == isMuted)
+  #expect(await fixture.backend.recordedIntents().count == 2)
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
 @Test func failedAutomaticMuteLeavesBackendAndUITruthful() async {
   let app = transactionTestApp(id: "automation.failed")
   let device = transactionTestDevice()
@@ -1366,6 +1413,199 @@ func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async th
 
   _ = await fixture.store.shutdown()
   #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func URLProfileAppliesLevelsWithoutGrantingUserRouteAuthority() async {
+  let app = transactionTestApp(
+    id: "automation.profile",
+    desiredVolume: 0.8,
+    isMuted: false,
+    targetDeviceUID: "device.pinned-output"
+  )
+  let profile = Profile(
+    name: "URL mix",
+    entries: [
+      ProfileEntry(appID: app.logicalID, desiredVolume: 0.24, isMuted: true)
+    ]
+  )
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice()
+  )
+  fixture.store.preferences.enableURLScheme = true
+  fixture.store.profiles = [profile]
+
+  fixture.store.handleURLScheme(URL(string: "waves://apply-profile?name=URL%20mix")!)
+  await fixture.store.drainAppIntentTransactions()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  #expect(intents.first?.reason == .automation)
+  #expect(intents.first?.desiredVolume == 0.24)
+  #expect(intents.first?.isMuted == true)
+  #expect(intents.first?.targetDeviceUID == "device.pinned-output")
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.24)
+  #expect(fixture.store.session.apps.first?.isMuted == true)
+  #expect(fixture.store.mixRestorePoint == nil)
+  #expect(fixture.store.activeProfileID == nil)
+
+  _ = await fixture.store.shutdown()
+  #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func URLProfileUsesWaveLinkWithoutRelocatingSharedApps() async {
+  let dedicated = transactionTestApp(
+    id: "automation.dedicated",
+    desiredVolume: 0.8,
+    isMuted: false
+  )
+  let shared = transactionTestApp(
+    id: "automation.shared",
+    desiredVolume: 0.7,
+    isMuted: false
+  )
+  let device = transactionTestDevice()
+  let snapshot = transactionSnapshot(apps: [dedicated, shared], device: device)
+  let waveLink = URLProfileWaveLinkController(sharedAppID: shared.logicalID)
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: snapshot,
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
+      )
+    },
+    waveLinkController: waveLink
+  )
+  let profile = Profile(
+    name: "Wave Link URL mix",
+    entries: [
+      ProfileEntry(appID: dedicated.logicalID, desiredVolume: 0.24, isMuted: true),
+      ProfileEntry(appID: shared.logicalID, desiredVolume: 0.31, isMuted: true),
+    ]
+  )
+  let preferencesStore = TransactionPreferencesStore()
+  preferencesStore.value.hasCompletedPrivacySetup = true
+  preferencesStore.value.urlSchemeAutomationAcknowledged = true
+  preferencesStore.value.enableURLScheme = true
+  preferencesStore.value.appAudioIntentMigrationVersion = 1
+  let profilesStore = TransactionProfilesStore()
+  profilesStore.value = [profile]
+  let sessionStore = TransactionSessionStore()
+  sessionStore.value = snapshot
+  let store = AppStore(
+    backend: backend,
+    preferencesStore: preferencesStore,
+    profileStore: profilesStore,
+    sessionStore: sessionStore,
+    loginItemService: TransactionLoginItemService(),
+    deviceVolumePresetsStore: TransactionDevicePresetsStore(),
+    initialStartupState: .running
+  )
+
+  store.handleURLScheme(URL(string: "waves://apply-profile?name=Wave%20Link%20URL%20mix")!)
+  await store.drainAppIntentTransactions()
+
+  let current = store.session.apps
+  #expect(current.first { $0.logicalID == dedicated.logicalID }?.desiredVolume == 0.24)
+  #expect(current.first { $0.logicalID == dedicated.logicalID }?.isMuted == true)
+  #expect(current.first { $0.logicalID == shared.logicalID }?.desiredVolume == 0.7)
+  #expect(current.first { $0.logicalID == shared.logicalID }?.isMuted == false)
+  #expect(store.lastProfileApplyResult?.rows.map(\.outcome) == [.applied, .failed])
+  #expect(await waveLink.requests.map(\.allowsChannelRelocation) == [false, false])
+  #expect(await waveLink.moveRequests.isEmpty)
+
+  _ = await store.shutdown()
+  #expect(store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test(arguments: ["set-volume", "mute", "unmute"])
+func URLLevelCommandsUseWaveLinkWithoutRelocatingSharedApps(command: String) async {
+  let initiallyMuted = command == "unmute"
+  let dedicated = transactionTestApp(
+    id: "automation.dedicated", desiredVolume: 0.8, isMuted: initiallyMuted
+  )
+  let shared = transactionTestApp(
+    id: "automation.shared", desiredVolume: 0.7, isMuted: initiallyMuted
+  )
+  let device = transactionTestDevice()
+  let snapshot = transactionSnapshot(apps: [dedicated, shared], device: device)
+  let waveLink = URLProfileWaveLinkController(sharedAppID: shared.logicalID)
+  let backend = WorkspaceAudioControlBackend(
+    testingSnapshot: snapshot,
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
+      )
+    },
+    waveLinkController: waveLink
+  )
+  let preferencesStore = TransactionPreferencesStore()
+  preferencesStore.value.hasCompletedPrivacySetup = true
+  preferencesStore.value.urlSchemeAutomationAcknowledged = true
+  preferencesStore.value.enableURLScheme = true
+  preferencesStore.value.appAudioIntentMigrationVersion = 1
+  let sessionStore = TransactionSessionStore()
+  sessionStore.value = snapshot
+  let store = AppStore(
+    backend: backend,
+    preferencesStore: preferencesStore,
+    profileStore: TransactionProfilesStore(),
+    sessionStore: sessionStore,
+    loginItemService: TransactionLoginItemService(),
+    deviceVolumePresetsStore: TransactionDevicePresetsStore(),
+    initialStartupState: .running
+  )
+
+  for app in [dedicated, shared] {
+    let url =
+      command == "set-volume"
+      ? "waves://set-volume?app=\(app.logicalID)&volume=0.24"
+      : "waves://mute?app=\(app.logicalID)&muted=\(command == "mute")"
+    store.handleURLScheme(URL(string: url)!)
+    #expect(!store.appIntentCoordinator.hasPendingVolumeTargets())
+    await store.drainAppIntentTransactions()
+  }
+
+  let current = store.session.apps
+  #expect(current.first { $0.logicalID == dedicated.logicalID }?.desiredVolume == (command == "set-volume" ? 0.24 : 0.8))
+  #expect(current.first { $0.logicalID == dedicated.logicalID }?.isMuted == (command == "mute"))
+  #expect(current.first { $0.logicalID == shared.logicalID }?.desiredVolume == 0.7)
+  #expect(current.first { $0.logicalID == shared.logicalID }?.isMuted == initiallyMuted)
+  #expect(await waveLink.requests.map(\.allowsChannelRelocation) == [false, false])
+  #expect(await waveLink.moveRequests.isEmpty)
+
+  let dedicatedIntent = store.preferences.appAudioIntents[dedicated.logicalID]
+  #expect(dedicatedIntent?.desiredVolume == (command == "set-volume" ? 0.24 : 0.8))
+  #expect(dedicatedIntent?.isMuted == (command == "mute"))
+  let dedicatedPreset = store.deviceVolumePresets.getVolumeSettings(for: dedicated.logicalID, deviceID: device.id)
+  #expect(dedicatedPreset?.desiredVolume == (command == "set-volume" ? 0.24 : 0.8))
+  #expect(dedicatedPreset?.isMuted == (command == "mute"))
+  #expect(!store.appIntentCoordinator.hasPendingVolumeTargets())
+
+  if command == "set-volume" {
+    store.setDesiredVolume(0.24, for: shared)
+    store.commitDesiredVolume(for: shared)
+  } else {
+    store.setMuted(command == "mute", for: shared)
+  }
+  await store.drainAppIntentTransactions()
+  let manuallyControlled = store.session.apps.first { $0.logicalID == shared.logicalID }
+  #expect(manuallyControlled?.desiredVolume == (command == "set-volume" ? 0.24 : 0.7))
+  #expect(manuallyControlled?.isMuted == (command == "mute"))
+  #expect(await waveLink.requests.last?.allowsChannelRelocation == true)
+  #expect(await waveLink.moveRequests == [shared.logicalID])
+
+  _ = await store.shutdown()
+  #expect(store.lifecycleSnapshot.isIdle)
 }
 
 @MainActor
@@ -2259,6 +2499,65 @@ private enum TransactionTestError: LocalizedError {
   case writeFailed
 
   var errorDescription: String? { "Injected write failure" }
+}
+
+private actor URLProfileWaveLinkController: WaveLinkControlling {
+  struct Request: Equatable, Sendable {
+    let bundleIdentifier: String
+    let volume: Float
+    let isMuted: Bool
+    let allowsChannelRelocation: Bool
+  }
+
+  private(set) var requests: [Request] = []
+  private(set) var moveRequests: [String] = []
+  private let sharedAppID: String
+
+  init(sharedAppID: String) {
+    self.sharedAppID = sharedAppID
+  }
+
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool
+  ) throws -> WaveLinkControlConfirmation {
+    try apply(
+      bundleIdentifier: bundleIdentifier,
+      volume: volume,
+      isMuted: isMuted,
+      allowsChannelRelocation: true
+    )
+  }
+
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool,
+    allowsChannelRelocation: Bool
+  ) throws -> WaveLinkControlConfirmation {
+    requests.append(
+      Request(
+        bundleIdentifier: bundleIdentifier,
+        volume: volume,
+        isMuted: isMuted,
+        allowsChannelRelocation: allowsChannelRelocation
+      )
+    )
+    if bundleIdentifier == sharedAppID {
+      guard allowsChannelRelocation else {
+        throw WaveLinkControlBridgeError.relocationNotPermitted(bundleIdentifier)
+      }
+      moveRequests.append(bundleIdentifier)
+    }
+    return WaveLinkControlConfirmation(
+      channelID: bundleIdentifier == sharedAppID ? "relocated" : "dedicated",
+      channelName: bundleIdentifier == sharedAppID ? "Relocated" : "Dedicated",
+      appliedVolume: volume,
+      isMuted: isMuted,
+      relocated: bundleIdentifier == sharedAppID
+    )
+  }
 }
 
 private final class TransactionPreferencesStore: PreferencesPersisting, @unchecked Sendable {

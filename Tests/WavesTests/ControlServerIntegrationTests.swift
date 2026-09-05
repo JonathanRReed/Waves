@@ -372,6 +372,138 @@ func controlServerCapsOneProcessAndRemovesSocketOnShutdown() async throws {
   #expect(closed == [12, 13])
 }
 
+@Test func listenerSelfProofStopsOnWouldBlockAndABoundedRunOfInterruptions() {
+  for wouldBlock in [EAGAIN, EWOULDBLOCK] {
+    var calls = 0
+    let proved = ControlServer.runListenerSelfProofAcceptLoop(
+      remainingAttempts: 4,
+      expectedNonce: Data([0x57]),
+      acceptOne: {
+        calls += 1
+        return (-1, wouldBlock)
+      },
+      peerIsTrusted: { _ in false },
+      readNonce: { _ in nil },
+      close: { _ in Issue.record("would-block must not produce a descriptor") }
+    )
+    #expect(!proved)
+    #expect(calls == 1)
+  }
+
+  var interruptCalls = 0
+  let provedAfterInterruptions = ControlServer.runListenerSelfProofAcceptLoop(
+    remainingAttempts: 4,
+    expectedNonce: Data([0x57]),
+    acceptOne: {
+      interruptCalls += 1
+      return (-1, EINTR)
+    },
+    peerIsTrusted: { _ in false },
+    readNonce: { _ in nil },
+    close: { _ in Issue.record("EINTR must not produce a descriptor") }
+  )
+  #expect(!provedAfterInterruptions)
+  #expect(interruptCalls == 4)
+
+  var offered = [Int32(40), 41]
+  var closed: [Int32] = []
+  let provedMatchingDescriptor = ControlServer.runListenerSelfProofAcceptLoop(
+    remainingAttempts: 4,
+    expectedNonce: Data([0x57]),
+    acceptOne: { (offered.removeFirst(), 0) },
+    peerIsTrusted: { _ in true },
+    readNonce: { $0 == 41 ? Data([0x57]) : Data([0x58]) },
+    close: { closed.append($0) }
+  )
+  #expect(provedMatchingDescriptor)
+  #expect(closed == [40, 41])
+}
+
+@Test func listenerSelfProofRequiresCompletedNonblockingConnect() {
+  #expect(
+    ControlServer.nonblockingConnectCompleted(
+      connectResult: -1,
+      connectError: EINPROGRESS,
+      readinessEvents: 0,
+      socketError: 0
+    ) == false
+  )
+  #expect(
+    ControlServer.nonblockingConnectCompleted(
+      connectResult: -1,
+      connectError: EINPROGRESS,
+      readinessEvents: Int16(POLLOUT),
+      socketError: 0
+    )
+  )
+  #expect(
+    ControlServer.nonblockingConnectCompleted(
+      connectResult: -1,
+      connectError: EINPROGRESS,
+      readinessEvents: Int16(POLLOUT),
+      socketError: ECONNREFUSED
+    ) == false
+  )
+}
+
+@Test func backlogPressureRequiresTheConfiguredQueueCapacityFirst() {
+  #expect(!backlogPressureIsProven(confirmedConnections: 0))
+  #expect(
+    !backlogPressureIsProven(
+      confirmedConnections: ControlServer.maximumConnections - 1
+    )
+  )
+  #expect(
+    backlogPressureIsProven(
+      confirmedConnections: ControlServer.maximumConnections
+    )
+  )
+}
+
+@MainActor
+@Test(.timeLimit(.minutes(1)))
+func saturatedControlListenerSelfProofFinishesWithinItsStartupBudget() async throws {
+  var backlogClients: [Int32] = []
+  let directory = try makePrivateSocketTestDirectory(prefix: "wvbacklog")
+  let url = directory.appendingPathComponent("control.sock")
+  defer {
+    backlogClients.forEach { _ = Darwin.close($0) }
+    try? FileManager.default.removeItem(at: directory)
+  }
+
+  let store = await makeControlStoreFixture()
+  let server = ControlServer(
+    url: url,
+    handler: ControlCommandHandler(store: store),
+    filesystemHooks: ControlServerFilesystemHooks(
+      afterStagingBind: { stagingLeaf in
+        let pressure = fillUnixSocketBacklog(
+          path: directory.appendingPathComponent(stagingLeaf).path
+        )
+        backlogClients = pressure.clients
+        #expect(backlogClients.count >= ControlServer.maximumConnections)
+        #expect(pressure.reachedBacklogPressure)
+      }
+    )
+  )
+
+  let clock = ContinuousClock()
+  let started = clock.now
+  do {
+    try server.start()
+  } catch {
+    #expect(error as? ControlServerError == .listenerVerificationFailed)
+  }
+  let elapsed = started.duration(to: clock.now)
+  #expect(elapsed < .milliseconds(250))
+  server.stop()
+
+  var mainActorHeartbeat = false
+  Task { @MainActor in mainActorHeartbeat = true }
+  await Task.yield()
+  #expect(mainActorHeartbeat)
+}
+
 @Test func malformedAndOverLimitFramesShareABoundedPredecodeAdmissionBudget() {
   var admission = ControlInboundAdmission(
     frameBurst: 1,
@@ -876,6 +1008,74 @@ private func makePrivateSocketTestDirectory(prefix: String) throws -> URL {
     ofItemAtPath: directory.path
   )
   return directory
+}
+
+private func fillUnixSocketBacklog(
+  path: String
+) -> (clients: [Int32], reachedBacklogPressure: Bool) {
+  var clients: [Int32] = []
+  for _ in 0..<512 {
+    let client = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard client >= 0 else { break }
+    let flags = fcntl(client, F_GETFL, 0)
+    guard flags >= 0, fcntl(client, F_SETFL, flags | O_NONBLOCK) == 0 else {
+      _ = Darwin.close(client)
+      break
+    }
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    _ = path.withCString { source in
+      strncpy(&address.sun_path.0, source, MemoryLayout.size(ofValue: address.sun_path) - 1)
+    }
+    let result = withUnsafeBytes(of: &address) { raw in
+      connect(
+        client,
+        raw.baseAddress!.assumingMemoryBound(to: sockaddr.self),
+        socklen_t(raw.count)
+      )
+    }
+    if result == 0 {
+      clients.append(client)
+    } else if errno == EAGAIN || errno == EWOULDBLOCK {
+      _ = Darwin.close(client)
+      return (clients, backlogPressureIsProven(confirmedConnections: clients.count))
+    } else if errno == EINPROGRESS {
+      var readiness = pollfd(fd: client, events: Int16(POLLOUT), revents: 0)
+      var readinessResult = poll(&readiness, 1, 0)
+      if backlogPressureIsProven(confirmedConnections: clients.count), readinessResult == 0 {
+        clients.append(client)
+        return (clients, true)
+      }
+      if readinessResult == 0 {
+        readinessResult = poll(&readiness, 1, 100)
+      }
+      guard readinessResult > 0, readiness.revents & Int16(POLLOUT) != 0 else {
+        _ = Darwin.close(client)
+        return (clients, false)
+      }
+      var socketError: Int32 = 0
+      var length = socklen_t(MemoryLayout<Int32>.size)
+      if getsockopt(client, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0,
+        socketError == 0
+      {
+        clients.append(client)
+      } else if socketError == EAGAIN || socketError == EWOULDBLOCK {
+        _ = Darwin.close(client)
+        return (clients, backlogPressureIsProven(confirmedConnections: clients.count))
+      } else {
+        _ = Darwin.close(client)
+        return (clients, backlogPressureIsProven(confirmedConnections: clients.count))
+      }
+    } else {
+      _ = Darwin.close(client)
+      return (clients, backlogPressureIsProven(confirmedConnections: clients.count))
+    }
+  }
+  return (clients, false)
+}
+
+private func backlogPressureIsProven(confirmedConnections: Int) -> Bool {
+  confirmedConnections >= ControlServer.maximumConnections
 }
 
 private struct ControlSocketFixture {
