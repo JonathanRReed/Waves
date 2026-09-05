@@ -6,6 +6,28 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.1]
+
+Waves 1.7.1 build 19 is in development. These notes cover implemented changes,
+not a published or hardware-qualified release.
+
+### Changed
+- Updated Sparkle to 2.9.6, which contains upstream security fixes. Testing did
+  not reproduce exploitability in Waves.
+- Added privacy-safe launch milestones and a repeatable comparison harness for
+  measuring startup. No startup improvement is claimed before the measurements
+  are complete.
+- Bound the release evidence, signed tag, external Elgato receipt, and published
+  files more tightly to their source revision and release authority.
+
+### Fixed
+- Preserve URL automation route provenance and reject changes that Wave Link
+  owns instead of reporting them as Waves changes.
+- Bound the local control listener's self-check and backlog handling so a stalled
+  or saturated check cannot hold shutdown work indefinitely.
+- Stage DMG and publication work in private directories, retain failed DMG
+  workspaces when detach fails, and publish completed files transactionally.
+
 ## [1.7.0] - 2026-09-01
 
 Waves 1.7.0 build 16 is about running well next to Elgato Wave Link and being

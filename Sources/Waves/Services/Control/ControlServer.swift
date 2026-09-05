@@ -516,7 +516,8 @@ final class ControlServer {
       remainingAttempts -= 1
       let result = acceptOne()
       if result.descriptor >= 0 {
-        let matches = peerIsTrusted(result.descriptor)
+        let matches =
+          peerIsTrusted(result.descriptor)
           && readNonce(result.descriptor) == expectedNonce
         close(result.descriptor)
         if matches { return true }

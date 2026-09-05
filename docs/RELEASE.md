@@ -15,6 +15,10 @@ checksum, notary log, source identity, candidate and publication evidence,
 both external receipts, and dSYM. Later commits on `main` are not part of that
 published build.
 
+Version 1.7.1 build 19 is in development. Its changelog heading and repository
+cask template track the candidate metadata, but no 1.7.1 artifact, checksum,
+tag, appcast entry, or Homebrew cask has been published.
+
 The separately versioned Stream Deck companion at
 `/Users/jonathanreed/Downloads/waves-streamdeck` must pass its Bun typecheck,
 unit tests, validator, package build, and live packaged-Waves socket test over
@@ -277,7 +281,7 @@ that checkout's exact lowercase revision. The output directory must not exist.
   /ABSOLUTE/PATH/TO/dist/release-evidence.candidate.json \
   /ABSOLUTE/PATH/TO/com.jonathanreed.waves.streamDeckPlugin \
   PLUGIN_40_CHARACTER_REVISION \
-  /ABSOLUTE/PATH/TO/Waves-1.6.0-14-Elgato-Handoff
+  /ABSOLUTE/PATH/TO/Waves-1.7.1-19-Elgato-Handoff
 ```
 
 The command reruns the complete candidate gate, privately snapshots and
@@ -451,11 +455,12 @@ which is a separate repository from the `Casks/waves.rb` template in this one.
 Updating only the template updates nobody: the tap sat on 1.3.0 for the whole
 1.4.0 release, so every `brew install` served a two-releases-old build.
 
-In the tap's `Casks/waves.rb`, set `version` and `sha256` — the checksum of the
-**published** DMG, from the asset you downloaded back:
+After GitHub publishes the DMG and you download it back, update the tap's
+`Casks/waves.rb` with the published version and checksum:
 
 ```bash
-cut -d ' ' -f 1 /tmp/waves-release/Waves.dmg.sha256
+published_sha="$(shasum -a 256 /tmp/waves-release/Waves.dmg | cut -d ' ' -f 1)"
+/usr/bin/ruby -e 'path = ARGV.fetch(0); version = ARGV.fetch(1); sha = ARGV.fetch(2); text = File.read(path); text.sub!(/^  version ".*"$/, "  version \"#{version}\"") or abort "version line missing"; text.sub!(/^  sha256 ".*"$/, "  sha256 \"#{sha}\"") or abort "sha256 line missing"; File.write(path, text)' ../homebrew-tap/Casks/waves.rb 1.7.1 "$published_sha"
 ```
 
 Then confirm it parses and the checksum is the one users will fetch:

@@ -1042,8 +1042,7 @@ private func fillUnixSocketBacklog(
     } else if errno == EINPROGRESS {
       var readiness = pollfd(fd: client, events: Int16(POLLOUT), revents: 0)
       var readinessResult = poll(&readiness, 1, 0)
-      if backlogPressureIsProven(confirmedConnections: clients.count), readinessResult == 0
-      {
+      if backlogPressureIsProven(confirmedConnections: clients.count), readinessResult == 0 {
         clients.append(client)
         return (clients, true)
       }

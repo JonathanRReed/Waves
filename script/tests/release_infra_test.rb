@@ -12,8 +12,8 @@ require "tmpdir"
 require_relative "../release_tool"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.7.0"
-  BUILD = 16
+  VERSION = "1.7.1"
+  BUILD = 19
   RELEASE_TAG = "v#{VERSION}"
   HANDOFF_NAME = "Waves-#{VERSION}-#{BUILD}-Elgato-Handoff"
   HANDOFF_DMG_NAME = "Waves-#{VERSION}-#{BUILD}.dmg"
@@ -3613,6 +3613,9 @@ class ReleaseInfraTest < Minitest::Test
       %w[
         .github/workflows/ci.yml
         .github/workflows/release.yml
+        Casks/waves.rb
+        CHANGELOG.md
+        release/metadata.json
         script/release_tool.rb
         script/release_environment.sh
         script/release_git
@@ -3633,6 +3636,9 @@ class ReleaseInfraTest < Minitest::Test
         "add",
         ".github/workflows/ci.yml",
         ".github/workflows/release.yml",
+        "Casks/waves.rb",
+        "CHANGELOG.md",
+        "release/metadata.json",
         "script/release_tool.rb",
         "script/release_environment.sh",
         "script/release-gate.sh",
