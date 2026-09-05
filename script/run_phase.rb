@@ -20,13 +20,17 @@ deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
 pid = nil
 interrupted_signal = nil
 
+def signal_process_group(signal, pid)
+  Process.kill(signal, -pid)
+rescue Errno::ESRCH
+  nil
+rescue Errno::EPERM
+  warn "Warning: permission denied sending #{signal} to phase process group #{pid}."
+end
+
 forward_signal = lambda do |signal|
   interrupted_signal ||= signal
-  begin
-    Process.kill(signal, -pid) if pid
-  rescue Errno::ESRCH
-    nil
-  end
+  signal_process_group(signal, pid) if pid
 end
 
 %w[INT TERM HUP].each do |signal|
@@ -38,48 +42,39 @@ def process_group_alive?(pid)
   true
 rescue Errno::ESRCH
   false
+rescue Errno::EPERM
+  # Permission denial cannot prove that the group has gone away.
+  true
 end
 
 def terminate_group(pid, status = nil)
-  begin
-    Process.kill("TERM", -pid)
-  rescue Errno::ESRCH
-    nil
-  end
   reaped = !status.nil?
-  group_alive = true
-  grace_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2.0
-  loop do
-    unless reaped
-      begin
-        waited = Process.waitpid2(pid, Process::WNOHANG)
-        if waited
-          status = waited[1]
+  %w[TERM KILL].each do |signal|
+    signal_process_group(signal, pid)
+    grace_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2.0
+    loop do
+      unless reaped
+        begin
+          reaped = true if Process.waitpid2(pid, Process::WNOHANG)
+        rescue Errno::ECHILD
           reaped = true
         end
-      rescue Errno::ECHILD
-        reaped = true
       end
+      return true unless process_group_alive?(pid)
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= grace_deadline
+
+      sleep 0.05
     end
-    group_alive = process_group_alive?(pid)
-    break unless group_alive
-    break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= grace_deadline
-
-    sleep 0.05
   end
+  # Never block in waitpid after a denied signal or claim the group is gone
+  # merely because its leader exited. The caller must report incomplete cleanup.
+  false
+end
 
-  begin
-    Process.kill("KILL", -pid) if group_alive
-  rescue Errno::ESRCH
-    nil
-  end
-  return status if reaped
+def cleanup_description(terminated, pid)
+  return "its process group was terminated." if terminated
 
-  begin
-    Process.waitpid2(pid)[1]
-  rescue Errno::ECHILD
-    nil
-  end
+  "cleanup is incomplete for process group #{pid}; manual inspection is required."
 end
 
 puts "==> #{label} (deadline: #{timeout}s)"
@@ -100,14 +95,14 @@ loop do
   end
 
   if interrupted_signal
-    terminate_group(pid, waited && waited[1])
-    warn "Error: phase #{label.inspect} was interrupted by #{interrupted_signal}."
+    terminated = terminate_group(pid, waited && waited[1])
+    warn "Error: phase #{label.inspect} was interrupted by #{interrupted_signal}; #{cleanup_description(terminated, pid)}"
     exit 128 + Signal.list.fetch(interrupted_signal)
   end
 
   if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
-    terminate_group(pid)
-    warn "Error: phase #{label.inspect} timed out after #{timeout} seconds; its process group was terminated."
+    terminated = terminate_group(pid)
+    warn "Error: phase #{label.inspect} timed out after #{timeout} seconds; #{cleanup_description(terminated, pid)}"
     exit 124
   end
 

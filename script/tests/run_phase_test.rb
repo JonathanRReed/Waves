@@ -64,7 +64,97 @@ class RunPhaseTest < Minitest::Test
     assert_equal 23, status.exitstatus
   end
 
+  def test_timeout_reports_incomplete_cleanup_when_group_signals_are_denied
+    assert_permission_denial_is_bounded(mode: "all", interrupt: false)
+  end
+
+  def test_interruption_reports_incomplete_cleanup_when_group_signals_are_denied
+    assert_permission_denial_is_bounded(mode: "all", interrupt: true)
+  end
+
+  def test_permission_denied_probe_does_not_skip_kill_escalation
+    assert_permission_denial_is_bounded(mode: "probe", interrupt: false)
+  end
+
+  def test_denied_term_still_allows_verified_kill_cleanup
+    assert_permission_denial_is_bounded(mode: "term", interrupt: false)
+  end
+
   private
+
+  def assert_permission_denial_is_bounded(mode:, interrupt:)
+    Dir.mktmpdir("waves-phase-permission") do |directory|
+      child_path = File.join(directory, "child.pid")
+      child_pid = nil
+      # Inject only the kernel error at the wrapper's group-signal boundary.
+      # The real owned child remains killable by the test's positive PID cleanup.
+      launcher = <<~RUBY
+        mode = ARGV.shift
+        Process.singleton_class.prepend(Module.new do
+          define_method(:kill) do |signal, *pids|
+            denied = mode == "all" || (mode == "probe" && signal == 0) ||
+              (mode == "term" && signal == "TERM")
+            raise Errno::EPERM, "injected group permission denial" if denied && pids.any? { |pid| pid < 0 }
+            super(signal, *pids)
+          end
+        end)
+        load ARGV.shift
+      RUBY
+      child = <<~RUBY
+        STDOUT.reopen(File::NULL, "w")
+        STDERR.reopen(File::NULL, "w")
+        Signal.trap("TERM", "IGNORE")
+        File.write(ARGV.fetch(0), Process.pid.to_s)
+        sleep 30
+      RUBY
+      begin
+        Open3.popen3(
+          RbConfig.ruby, "-e", launcher, mode,
+          File.expand_path("../run_phase.rb", __dir__),
+          interrupt ? "30" : "1", "permission fixture",
+          RbConfig.ruby, "-e", child, child_path
+        ) do |stdin, stdout, stderr, waiter|
+          stdin.close
+          Timeout.timeout(10) do
+            sleep 0.01 until File.file?(child_path) && !File.read(child_path).empty?
+            child_pid = Integer(File.read(child_path))
+            Process.kill("TERM", waiter.pid) if interrupt
+            output = stdout.read
+            errors = stderr.read
+            status = waiter.value
+            assert_equal(interrupt ? 143 : 124, status.exitstatus, "#{output} #{errors}")
+            assert_match(interrupt ? /interrupted by TERM/ : /timed out/, errors)
+            refute_match(/injected group permission denial/, errors, "kernel exception escaped the runner")
+            if mode == "term"
+              assert_match(/process group was terminated/, errors)
+              refute process_alive?(child_pid), "KILL did not stop the owned child"
+            else
+              assert_match(/cleanup is incomplete/, errors)
+              refute_match(/process group was terminated/, errors)
+              if mode == "probe"
+                refute process_alive?(child_pid), "an uninspectable group skipped KILL escalation"
+              end
+            end
+          end
+        ensure
+          if waiter.alive?
+            begin
+              Process.kill("KILL", waiter.pid)
+              waiter.join(2)
+            rescue Errno::ESRCH
+              nil
+            end
+          end
+        end
+      ensure
+        begin
+          Process.kill("KILL", child_pid) if child_pid && process_alive?(child_pid)
+        rescue Errno::ESRCH
+          nil
+        end
+      end
+    end
+  end
 
   def assert_resistant_descendant_is_stopped(interrupt:)
     Dir.mktmpdir("waves-phase-leader-exit") do |directory|
