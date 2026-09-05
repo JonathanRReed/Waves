@@ -116,6 +116,7 @@ extension AppStore {
     persistencePolicy: AppIntentPersistencePolicy,
     feedbackPolicy: AppIntentFeedbackPolicy,
     optimistic: Bool,
+    releasesAutomaticMuteOnAcceptance: Bool = false,
     performanceRecorder: LaunchPerformanceRecorder? = LaunchPerformanceRecorder.active
   ) -> Task<AppIntentApplyResult, Never> {
     guard startupState != .shuttingDown else {
@@ -164,6 +165,7 @@ extension AppStore {
         persistencePolicy: persistencePolicy,
         deviceIDAtSubmission: deviceIDAtSubmission,
         feedbackPolicy: feedbackPolicy,
+        releasesAutomaticMuteOnAcceptance: releasesAutomaticMuteOnAcceptance,
         performanceRecorder: performanceRecorder
       )
     }
@@ -195,6 +197,7 @@ extension AppStore {
     persistencePolicy: AppIntentPersistencePolicy,
     deviceIDAtSubmission: String?,
     feedbackPolicy: AppIntentFeedbackPolicy,
+    releasesAutomaticMuteOnAcceptance: Bool,
     performanceRecorder: LaunchPerformanceRecorder?
   ) async -> AppIntentApplyResult {
     let intent = start.intent
@@ -271,6 +274,9 @@ extension AppStore {
 
     let persistenceResult: AcceptedIntentPersistenceResult
     if backendResult.outcome == .applied || backendResult.outcome == .noChange {
+      if releasesAutomaticMuteOnAcceptance {
+        appIntentCoordinator.releaseAutomaticMute(for: appID)
+      }
       appIntentCoordinator.recordConfirmedEqualizer(intent.equalizerSettings, for: appID)
       persistenceResult = await persistAcceptedAppIntent(
         intent,
@@ -676,21 +682,27 @@ extension AppStore {
     appIntentCoordinator.registerVolumeDebounce(task, token: token, appID: appID)
   }
 
-  func commitDesiredVolume(for app: AudioApp) {
+  func commitDesiredVolume(
+    _ immediateValue: Float? = nil,
+    for app: AudioApp,
+    reason: AppRouteIntentReason = .userEdit
+  ) {
     guard requireAudioRunning() else { return }
     guard !isExcluded(app) else { return }
     let appID = app.logicalID
     // The drag is over; no in-flight nudge should land after the commit and
     // reinstate an intermediate value.
     appIntentCoordinator.cancelVolumeDebounce(for: appID)
+    let pendingValue = appIntentCoordinator.takePendingVolume(for: appID)
     let target =
-      appIntentCoordinator.takePendingVolume(for: appID)
+      immediateValue.map { max(0, min(1, $0)) }
+      ?? pendingValue
       ?? session.apps.first(matchingAppKey: appID)?.desiredVolume
       ?? app.desiredVolume
     startAppIntentTransaction(
       forAppID: appID,
       overrides: AppIntentOverrides(desiredVolume: target),
-      reason: .userEdit,
+      reason: reason,
       persistencePolicy: .acceptedUserIntent(updateDevicePreset: true),
       feedbackPolicy: .directControl(
         successTitle: "Managed route active",
@@ -706,21 +718,28 @@ extension AppStore {
     appIntentCoordinator.retainAppState(in: currentAppIDs)
   }
 
-  func setMuted(_ isMuted: Bool, for app: AudioApp) {
+  func setMuted(
+    _ isMuted: Bool,
+    for app: AudioApp,
+    reason: AppRouteIntentReason = .userEdit
+  ) {
     guard requireAudioRunning() else { return }
     guard !isExcluded(app) else { return }
-    appIntentCoordinator.releaseAutomaticMute(for: app.logicalID)
+    if reason != .automation {
+      appIntentCoordinator.releaseAutomaticMute(for: app.logicalID)
+    }
     startAppIntentTransaction(
       forAppID: app.logicalID,
       overrides: AppIntentOverrides(isMuted: isMuted, muteSource: .user),
-      reason: .userEdit,
+      reason: reason,
       persistencePolicy: .acceptedUserIntent(updateDevicePreset: true),
       feedbackPolicy: .directControl(
         successTitle: isMuted ? "App muted" : "App unmuted",
         successDetail: app.displayName,
         failureTitle: "Mute toggle failed"
       ),
-      optimistic: true
+      optimistic: reason != .automation,
+      releasesAutomaticMuteOnAcceptance: reason == .automation
     )
   }
 

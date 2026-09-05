@@ -88,6 +88,9 @@ struct AppIconEncoder: Sendable {
 }
 
 enum AppRuntimeDiscovery {
+  static let identityCollisionNote =
+    "Multiple running apps claim this identifier. Close the duplicate before changing audio controls."
+
   enum ActivationPolicy: Sendable {
     case regular
     case accessory
@@ -209,7 +212,8 @@ enum AppRuntimeDiscovery {
     from capture: Capture,
     currentBundleID: String?,
     audiblePIDs: Set<pid_t>,
-    audibleParentBundlePaths: Set<String>
+    audibleParentBundlePaths: Set<String>,
+    incumbentIdentities: [String: AppRuntimeIdentity] = [:]
   ) -> [AudioApp] {
     let runningApps = capture.applications.filter { app in
       app.bundleID != currentBundleID && app.activationPolicy != .prohibited
@@ -236,21 +240,35 @@ enum AppRuntimeDiscovery {
         $0.localizedName.localizedCaseInsensitiveCompare($1.localizedName) == .orderedAscending
       }
 
-    var representativesByLogicalID: [String: CapturedApplication] = [:]
-    for app in candidateApps {
-      let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: app.bundleID, displayName: app.localizedName)
-      if let existing = representativesByLogicalID[logicalID] {
-        representativesByLogicalID[logicalID] = AppRuntimeDiscovery.preferredRepresentative(current: existing, candidate: app)
-      } else {
-        representativesByLogicalID[logicalID] = app
+    let groups = Dictionary(grouping: candidateApps) { app in
+      AppDiscoveryPolicy.logicalAppID(bundleID: app.bundleID, displayName: app.localizedName)
+    }
+    let representatives = groups.compactMap { logicalID, candidates -> (app: CapturedApplication, ambiguous: Bool)? in
+      guard let first = candidates.first else { return nil }
+      let incumbent = incumbentIdentities[logicalID].flatMap { identity in
+        candidates.first { $0.runtimeIdentity == identity && $0.pid == identity.lifetime.pid }
       }
+      let preferred =
+        incumbent
+        ?? candidates.dropFirst().reduce(first) {
+          preferredRepresentative(current: $0, candidate: $1)
+        }
+      let ambiguous =
+        candidates.count > 1
+        && candidates.contains { candidate in
+          guard let target = preferred.runtimeIdentity, let identity = candidate.runtimeIdentity else { return true }
+          return !AppDiscoveryPolicy.runtimeFamilyMatches(target: target, candidate: identity)
+        }
+      return (preferred, ambiguous)
     }
 
-    return representativesByLogicalID.values
+    return
+      representatives
       .sorted {
-        $0.localizedName.localizedCaseInsensitiveCompare($1.localizedName) == .orderedAscending
+        $0.app.localizedName.localizedCaseInsensitiveCompare($1.app.localizedName) == .orderedAscending
       }
-      .map { app in
+      .map { representative in
+        let app = representative.app
         let bundleID = app.bundleID
         let name = app.localizedName
         let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: bundleID, displayName: name)
@@ -275,7 +293,7 @@ enum AppRuntimeDiscovery {
         return AudioApp(
           id: logicalID,
           logicalID: logicalID,
-          pid: pid,
+          pid: representative.ambiguous ? nil : pid,
           bundleID: bundleID,
           displayName: name,
           iconName: AppDiscoveryPolicy.iconName(for: category),
@@ -285,14 +303,15 @@ enum AppRuntimeDiscovery {
           peakLevel: 0,
           rmsLevel: 0,
           desiredVolume: 1,
-          appliedVolume: 1,
+          appliedVolume: representative.ambiguous ? nil : 1,
           isMuted: false,
           isPinned: false,
-          routingState: routeState,
+          routingState: representative.ambiguous ? .error : routeState,
           compatibility: .supported,
-          notes: nil,
+          notes: representative.ambiguous ? identityCollisionNote : nil,
           volumeBoost: 1.0,
-          runtimeIdentity: app.runtimeIdentity
+          runtimeIdentity: representative.ambiguous ? nil : app.runtimeIdentity,
+          hasAmbiguousIdentity: representative.ambiguous
         )
       }
   }

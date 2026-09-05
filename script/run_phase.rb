@@ -33,25 +33,48 @@ end
   Signal.trap(signal) { forward_signal.call(signal) }
 end
 
-def terminate_group(pid)
-  Process.kill("TERM", -pid)
+def process_group_alive?(pid)
+  Process.kill(0, -pid)
+  true
 rescue Errno::ESRCH
-  nil
-ensure
+  false
+end
+
+def terminate_group(pid, status = nil)
+  begin
+    Process.kill("TERM", -pid)
+  rescue Errno::ESRCH
+    nil
+  end
+  reaped = !status.nil?
+  group_alive = true
   grace_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2.0
   loop do
-    waited = Process.waitpid2(pid, Process::WNOHANG)
-    return waited[1] if waited
+    unless reaped
+      begin
+        waited = Process.waitpid2(pid, Process::WNOHANG)
+        if waited
+          status = waited[1]
+          reaped = true
+        end
+      rescue Errno::ECHILD
+        reaped = true
+      end
+    end
+    group_alive = process_group_alive?(pid)
+    break unless group_alive
     break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= grace_deadline
 
     sleep 0.05
   end
 
   begin
-    Process.kill("KILL", -pid)
+    Process.kill("KILL", -pid) if group_alive
   rescue Errno::ESRCH
     nil
   end
+  return status if reaped
+
   begin
     Process.waitpid2(pid)[1]
   rescue Errno::ECHILD
@@ -71,13 +94,13 @@ end
 
 loop do
   waited = Process.waitpid2(pid, Process::WNOHANG)
-  if waited
+  if waited && !interrupted_signal
     status = waited[1]
     exit(status.exitstatus || 128 + (status.termsig || 0))
   end
 
   if interrupted_signal
-    terminate_group(pid)
+    terminate_group(pid, waited && waited[1])
     warn "Error: phase #{label.inspect} was interrupted by #{interrupted_signal}."
     exit 128 + Signal.list.fetch(interrupted_signal)
   end

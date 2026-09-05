@@ -15,6 +15,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   /// Live-only process authority. It is intentionally omitted from Codable
   /// state because a process lifetime can never survive relaunch.
   public let runtimeIdentity: AppRuntimeIdentity?
+  /// Live discovery conflict, never restored from saved session data.
+  public var hasAmbiguousIdentity: Bool
 
   public var isActive: Bool
   public var peakLevel: Float
@@ -69,7 +71,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     muteSource: MuteSource = .user,
     targetDeviceUID: String? = nil,
     routeHealthContext: RouteHealthContext? = nil,
-    runtimeIdentity: AppRuntimeIdentity? = nil
+    runtimeIdentity: AppRuntimeIdentity? = nil,
+    hasAmbiguousIdentity: Bool = false
   ) {
     // Validate string lengths to prevent excessive memory usage
     self.id = String(id.prefix(256))
@@ -90,6 +93,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.iconName = iconName
     self.category = category
     self.runtimeIdentity = runtimeIdentity
+    self.hasAmbiguousIdentity = hasAmbiguousIdentity
     self.isActive = isActive
     self.peakLevel = peakLevel
     self.rmsLevel = rmsLevel

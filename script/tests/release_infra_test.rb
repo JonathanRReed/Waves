@@ -1250,6 +1250,45 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_release_git_ignores_commit_replacements_for_source_reads_and_archives
+    with_production_release_repo do |root, _scratch|
+      revision = git(root, "rev-parse", "HEAD").strip
+      original = git(root, "show", "#{revision}:README.md")
+      original_archive = git(root, "archive", "--format=tar", revision)
+      File.write(File.join(root, "README.md"), "substituted release source\n")
+      git(root, "add", "README.md")
+      git(root, "commit", "-q", "-m", "test: replacement source")
+      replacement = git(root, "rev-parse", "HEAD").strip
+      git(root, "checkout", "-q", "--detach", revision)
+      git(root, "replace", revision, replacement)
+
+      assert_equal "substituted release source\n", git(root, "show", "#{revision}:README.md")
+      assert_equal original, WavesRelease::GitPolicy.run("show", "#{revision}:README.md", chdir: root)
+      assert_equal original_archive, WavesRelease::GitPolicy.run("archive", "--format=tar", revision, chdir: root)
+      identity = WavesRelease::ReleaseSource.identity!(root: root, expected_revision: revision)
+      assert_equal Digest::SHA256.hexdigest(original_archive), identity.fetch("sourceArchiveSHA256")
+
+      git(root, "read-tree", "--reset", "-u", replacement)
+      assert_empty git(root, "status", "--porcelain", "--untracked-files=no")
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ReleaseSource.identity!(root: root, expected_revision: revision)
+      end
+      assert_match(/clean tracked tree/, error.message)
+    end
+  end
+
+  def test_release_git_ignores_blob_replacements
+    with_production_release_repo do |root, _scratch|
+      blob = git(root, "rev-parse", "HEAD:README.md").strip
+      original = git(root, "cat-file", "blob", blob)
+      replacement = git_with_input(root, "substituted blob\n", "hash-object", "-w", "--stdin").strip
+      git(root, "replace", blob, replacement)
+
+      assert_equal "substituted blob\n", git(root, "cat-file", "blob", blob)
+      assert_equal original, WavesRelease::GitPolicy.run("cat-file", "blob", blob, chdir: root)
+    end
+  end
+
   def test_task12d_release_git_calls_use_only_the_repository_policy_launcher
     launcher = File.read(File.expand_path("../release_git", __dir__))
     assert_equal "#!/bin/bash -p", launcher.lines.first.chomp

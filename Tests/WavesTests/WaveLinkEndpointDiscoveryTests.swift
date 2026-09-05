@@ -181,6 +181,118 @@ import Testing
   }
 }
 
+@Test func waveLinkSessionUsesOneDeadlineAcrossUnmatchedNotifications() async throws {
+  let server = try TestJSONRPCServer(
+    getChannelsBehavior: .notificationsThenReply(count: 17, payloadBytes: 0, intervalMicroseconds: 50_000)
+  )
+  defer { server.close() }
+  let session = makeTestWaveLinkSession(server: server, receiveTimeout: .milliseconds(150))
+  try await session.connect()
+  let started = ContinuousClock.now
+
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await session.request(method: "getChannels", params: nil)
+  }
+  #expect(await session.connectionDescription == nil)
+  #expect(started.duration(to: ContinuousClock.now) < .milliseconds(600))
+}
+
+@Test func waveLinkSessionRejectsMoreThan64MessagesForOneRequest() async throws {
+  let server = try TestJSONRPCServer(
+    getChannelsBehavior: .notificationsThenReply(count: 65, payloadBytes: 0, intervalMicroseconds: 0)
+  )
+  defer { server.close() }
+  let session = makeTestWaveLinkSession(server: server)
+
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await session.request(method: "getChannels", params: nil)
+  }
+  #expect(await session.connectionDescription == nil)
+}
+
+@Test func waveLinkSessionRejectsMoreThan4MiBForOneResponse() async throws {
+  let server = try TestJSONRPCServer(
+    getChannelsBehavior: .notificationsThenReply(count: 5, payloadBytes: 900_000, intervalMicroseconds: 0)
+  )
+  defer { server.close() }
+  let session = makeTestWaveLinkSession(server: server)
+
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await session.request(method: "getChannels", params: nil)
+  }
+  #expect(await session.connectionDescription == nil)
+}
+
+@Test func waveLinkSessionRejectsAWebSocketMessageLargerThan1MiB() async throws {
+  let server = try TestJSONRPCServer(
+    getChannelsBehavior: .notificationsThenReply(count: 1, payloadBytes: 1_048_577, intervalMicroseconds: 0)
+  )
+  defer { server.close() }
+  let session = makeTestWaveLinkSession(server: server)
+
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await session.request(method: "getChannels", params: nil)
+  }
+  #expect(await session.connectionDescription == nil)
+}
+
+@Test func waveLinkSessionPreservesCancellationAndClearsItsConnection() async throws {
+  let server = try TestJSONRPCServer(getChannelsBehavior: .delayedReply(microseconds: 800_000))
+  defer { server.close() }
+  let session = makeTestWaveLinkSession(server: server)
+  let request = Task {
+    try await session.request(method: "getChannels", params: nil)
+  }
+
+  try await server.waitUntilReceived(method: "getChannels")
+  let cancelledAt = ContinuousClock.now
+  request.cancel()
+  do {
+    _ = try await request.value
+    Issue.record("Expected the request to be cancelled")
+  } catch is CancellationError {
+    // Cancellation is a control-flow signal and must not be wrapped.
+  } catch {
+    Issue.record("Expected CancellationError, got \(error)")
+  }
+  #expect(await session.connectionDescription == nil)
+  #expect(cancelledAt.duration(to: ContinuousClock.now) < .milliseconds(600))
+}
+
+@Test func waveLinkSessionAcceptsAReplyAtTheMessageCountLimit() async throws {
+  let server = try TestJSONRPCServer(
+    getChannelsBehavior: .notificationsThenReply(count: 63, payloadBytes: 0, intervalMicroseconds: 0)
+  )
+  defer { server.close() }
+  let session = makeTestWaveLinkSession(server: server)
+  let data = try await session.request(method: "getChannels", params: nil)
+  let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+  #expect((object["channels"] as? [Any])?.isEmpty == true)
+}
+
+@Test func waveLinkSessionStillAcceptsNotificationsBeforeItsReply() async throws {
+  let server = try TestJSONRPCServer(
+    getChannelsBehavior: .notificationsThenReply(count: 4, payloadBytes: 32, intervalMicroseconds: 10_000)
+  )
+  defer { server.close() }
+  let session = makeTestWaveLinkSession(server: server, receiveTimeout: .seconds(1))
+
+  let data = try await session.request(method: "getChannels", params: nil)
+  let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+  #expect((object["channels"] as? [Any])?.isEmpty == true)
+}
+
+private func makeTestWaveLinkSession(
+  server: TestJSONRPCServer,
+  receiveTimeout: Duration = .seconds(3)
+) -> WaveLinkLoopbackSession {
+  WaveLinkLoopbackSession(
+    candidateProvider: { [.init(pid: 1, port: server.port)] },
+    receiveTimeout: receiveTimeout,
+    idleCloseDelay: .milliseconds(50)
+  )
+}
+
 // MARK: - Test servers
 
 /// A bare TCP listener so the kernel port enumeration has something real to
@@ -227,52 +339,114 @@ private final class TestTCPListener {
 }
 
 /// A minimal WebSocket JSON-RPC server that answers `getApplicationInfo` with
-/// a configurable payload, `getChannels` with an empty list, pushes one
-/// unsolicited notification before every reply, and records what it saw.
+/// a configurable payload, applies bounded test behavior to `getChannels`,
+/// and records what it saw.
 private final class TestJSONRPCServer: @unchecked Sendable {
+  enum GetChannelsBehavior {
+    case notificationsThenReply(count: Int, payloadBytes: Int, intervalMicroseconds: useconds_t)
+    case delayedReply(microseconds: useconds_t)
+  }
+
   let port: UInt16
-  private(set) var receivedMethods: [String] = []
-  private(set) var lastOrigin: String?
+  var receivedMethods: [String] { lock.withLock { recordedMethods } }
+  var lastOrigin: String? { lock.withLock { recordedOrigin } }
   private let applicationInfo: String
+  private let getChannelsBehavior: GetChannelsBehavior
   private let listener: Int32
   private let queue = DispatchQueue(label: "waves.tests.wavelink-server")
+  private let workers = DispatchGroup()
   private let lock = NSLock()
+  private var recordedMethods: [String] = []
+  private var recordedOrigin: String?
   private var clients: [Int32] = []
   private var closed = false
 
-  init(applicationInfo: String) throws {
+  init(
+    applicationInfo: String = #"{"appID":"EWL","interfaceRevision":1,"name":"Elgato Wave Link","version":"3.2.2"}"#,
+    getChannelsBehavior: GetChannelsBehavior = .notificationsThenReply(
+      count: 1,
+      payloadBytes: 0,
+      intervalMicroseconds: 0
+    )
+  ) throws {
     self.applicationInfo = applicationInfo
+    self.getChannelsBehavior = getChannelsBehavior
     let tcp = try TestTCPListener()
     listener = tcp.socketDescriptorForServer
     port = tcp.port
-    queue.async { [weak self] in self?.acceptLoop() }
+    let flags = fcntl(listener, F_GETFL)
+    guard flags >= 0, fcntl(listener, F_SETFL, flags | O_NONBLOCK) == 0 else {
+      Darwin.close(listener)
+      throw POSIXError(.EIO)
+    }
+    workers.enter()
+    queue.async { [self] in
+      acceptLoop()
+      workers.leave()
+    }
   }
 
   func close() {
-    lock.lock()
-    closed = true
-    let clients = self.clients
-    lock.unlock()
+    let clients: [Int32]? = lock.withLock {
+      guard !closed else { return nil }
+      closed = true
+      return self.clients
+    }
+    guard let clients else { return }
     Darwin.shutdown(listener, SHUT_RDWR)
+    for client in clients { Darwin.shutdown(client, SHUT_RDWR) }
+    guard workers.wait(timeout: .now() + 5) == .success else {
+      Issue.record("The local WebSocket fixture did not stop within five seconds.")
+      return
+    }
     Darwin.close(listener)
-    for client in clients { Darwin.close(client) }
+    for client in lock.withLock({ self.clients }) { Darwin.close(client) }
+  }
+
+  func waitUntilReceived(method: String) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(1))
+    while !receivedMethods.contains(method) {
+      guard clock.now < deadline else {
+        throw POSIXError(.ETIMEDOUT)
+      }
+      try await Task.sleep(for: .milliseconds(5))
+    }
   }
 
   private func acceptLoop() {
-    while true {
+    while !lock.withLock({ closed }) {
       var address = sockaddr()
       var length = socklen_t(MemoryLayout<sockaddr>.size)
       let client = accept(listener, &address, &length)
-      guard client >= 0 else { return }
+      guard client >= 0 else {
+        if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR {
+          usleep(10_000)
+          continue
+        }
+        return
+      }
       lock.lock()
       if closed {
         lock.unlock()
         Darwin.close(client)
         return
       }
+      let clientFlags = fcntl(client, F_GETFL)
+      guard clientFlags >= 0, fcntl(client, F_SETFL, clientFlags & ~O_NONBLOCK) == 0 else {
+        lock.unlock()
+        Darwin.close(client)
+        continue
+      }
+      var noSIGPIPE: Int32 = 1
+      _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSIGPIPE, socklen_t(MemoryLayout.size(ofValue: noSIGPIPE)))
       clients.append(client)
       lock.unlock()
-      DispatchQueue.global().async { [weak self] in self?.serve(client) }
+      workers.enter()
+      DispatchQueue.global().async { [self] in
+        serve(client)
+        workers.leave()
+      }
     }
   }
 
@@ -286,9 +460,7 @@ private final class TestJSONRPCServer: @unchecked Sendable {
       switch parts[0].lowercased() {
       case "sec-websocket-key": key = parts[1]
       case "origin":
-        lock.lock()
-        lastOrigin = parts[1]
-        lock.unlock()
+        lock.withLock { recordedOrigin = parts[1] }
       default: break
       }
     }
@@ -296,23 +468,21 @@ private final class TestJSONRPCServer: @unchecked Sendable {
     let accept = TestWebSocketFraming.acceptKey(for: key)
     let response =
       "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"
-    _ = response.withCString { send(client, $0, strlen($0), 0) }
+    guard TestWebSocketFraming.writeAll(Data(response.utf8), to: client) else { return }
 
     while let text = TestWebSocketFraming.readTextFrame(from: client) {
       guard
         let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
         let method = object["method"] as? String
       else { continue }
-      lock.lock()
-      receivedMethods.append(method)
-      lock.unlock()
+      lock.withLock { recordedMethods.append(method) }
       let id = object["id"] ?? NSNull()
-      let notification = #"{"jsonrpc":"2.0","method":"channelChanged","params":{"id":"x"}}"#
-      _ = TestWebSocketFraming.writeTextFrame(notification, to: client)
       let result: String
       switch method {
       case "getApplicationInfo": result = applicationInfo
-      case "getChannels": result = #"{"channels":[]}"#
+      case "getChannels":
+        guard performGetChannelsBehavior(on: client) else { return }
+        result = #"{"channels":[]}"#
       default: result = "{}"
       }
       let idText = (id as? NSNumber).map { "\($0)" } ?? "null"
@@ -320,6 +490,23 @@ private final class TestJSONRPCServer: @unchecked Sendable {
         #"{"jsonrpc":"2.0","id":\#(idText),"result":\#(result)}"#,
         to: client
       )
+    }
+  }
+
+  private func performGetChannelsBehavior(on client: Int32) -> Bool {
+    switch getChannelsBehavior {
+    case .notificationsThenReply(let count, let payloadBytes, let intervalMicroseconds):
+      let payload = String(repeating: "x", count: payloadBytes)
+      let notification =
+        #"{"jsonrpc":"2.0","method":"channelChanged","params":{"payload":"\#(payload)"}}"#
+      for index in 0..<count {
+        guard TestWebSocketFraming.writeTextFrame(notification, to: client) else { return false }
+        if intervalMicroseconds > 0, index + 1 < count { usleep(intervalMicroseconds) }
+      }
+      return true
+    case .delayedReply(let microseconds):
+      usleep(microseconds)
+      return true
     }
   }
 
@@ -383,13 +570,33 @@ private enum TestWebSocketFraming {
     var frame: [UInt8] = [0x81]
     if payload.count < 126 {
       frame.append(UInt8(payload.count))
-    } else {
+    } else if payload.count <= Int(UInt16.max) {
       frame.append(126)
       frame.append(UInt8(payload.count >> 8))
       frame.append(UInt8(payload.count & 0xFF))
+    } else {
+      frame.append(127)
+      let length = UInt64(payload.count)
+      for shift in stride(from: 56, through: 0, by: -8) {
+        frame.append(UInt8((length >> UInt64(shift)) & 0xFF))
+      }
     }
     frame.append(contentsOf: payload)
-    return frame.withUnsafeBufferPointer { send(client, $0.baseAddress, $0.count, 0) } == frame.count
+    return writeAll(Data(frame), to: client)
+  }
+
+  static func writeAll(_ data: Data, to client: Int32) -> Bool {
+    data.withUnsafeBytes { bytes in
+      guard let baseAddress = bytes.baseAddress else { return true }
+      var offset = 0
+      while offset < bytes.count {
+        let written = send(client, baseAddress.advanced(by: offset), bytes.count - offset, 0)
+        if written < 0, errno == EINTR { continue }
+        guard written > 0 else { return false }
+        offset += written
+      }
+      return true
+    }
   }
 
   private static func readExactly(_ count: Int, from client: Int32) -> [UInt8]? {
