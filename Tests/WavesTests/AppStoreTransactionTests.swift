@@ -5,6 +5,55 @@ import WavesAudioCore
 @testable import Waves
 
 @MainActor
+@Test(arguments: [
+  AppIntentApplyOutcome.applied, .noChange, .superseded, .excluded, .unavailable, .unsupported, .failed,
+])
+func firstControlTelemetryConfirmsOnlyAcceptedBackendResults(outcome: AppIntentApplyOutcome) async {
+  let app = transactionTestApp()
+  let fixture = makeTransactionFixture(
+    apps: [app], device: transactionTestDevice(), outcomes: [outcome]
+  )
+  let recorder = LaunchPerformanceRecorder(signpostsEnabled: false)
+
+  _ = await fixture.store.startAppIntentTransaction(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(desiredVolume: app.desiredVolume, isMuted: app.isMuted),
+    reason: .userEdit,
+    persistencePolicy: .none,
+    feedbackPolicy: .none,
+    optimistic: false,
+    performanceRecorder: recorder
+  ).value
+
+  if outcome == .applied || outcome == .noChange {
+    #expect(recorder.snapshot.map(\.milestone) == [.firstControlSubmitted, .firstControlConfirmed])
+  } else {
+    #expect(recorder.snapshot.map(\.milestone) == [.firstControlSubmitted])
+  }
+}
+
+@MainActor
+@Test func noChangeFromADifferentGenerationCannotConfirmFirstControl() async {
+  let app = transactionTestApp()
+  let fixture = makeTransactionFixture(
+    apps: [app], device: transactionTestDevice(), outcomes: [.noChange], resultGenerationOffset: 1
+  )
+  let recorder = LaunchPerformanceRecorder(signpostsEnabled: false)
+
+  _ = await fixture.store.startAppIntentTransaction(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(desiredVolume: app.desiredVolume, isMuted: app.isMuted),
+    reason: .userEdit,
+    persistencePolicy: .none,
+    feedbackPolicy: .none,
+    optimistic: false,
+    performanceRecorder: recorder
+  ).value
+
+  #expect(recorder.snapshot.map(\.milestone) == [.firstControlSubmitted])
+}
+
+@MainActor
 @Test func guidedTourAdvancesOnlyAfterAcceptedAppStoreIntents() async {
   var app = transactionTestApp(desiredVolume: 0.7)
   app.peakLevel = 0.25

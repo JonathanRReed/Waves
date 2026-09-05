@@ -167,6 +167,30 @@ public enum WavesCTLCommand: Equatable, Sendable {
   }
 }
 
+/// Text that `wavesctl` prints comes from other processes: the daemon relays
+/// app names and identifiers exactly as those apps report them. A terminal
+/// obeys control characters and escape sequences wherever they appear, so an
+/// app named `\u{1B}[2J...` could clear the screen or forge output lines. This
+/// replaces every C0 control except tab, DEL, every C1 control, the Unicode
+/// line and paragraph separators, and the bidirectional formatting characters
+/// with U+FFFD so what reaches the terminal can only be read, not executed.
+public enum WavesCTLTerminalText {
+  public static func sanitized(_ text: String) -> String {
+    var scalars = String.UnicodeScalarView()
+    for scalar in text.unicodeScalars {
+      switch scalar.value {
+      case 0x09:
+        scalars.append(scalar)
+      case 0x00...0x1F, 0x7F, 0x80...0x9F, 0x2028, 0x2029, 0x202A...0x202E, 0x2066...0x2069:
+        scalars.append("\u{FFFD}")
+      default:
+        scalars.append(scalar)
+      }
+    }
+    return String(scalars)
+  }
+}
+
 public enum WavesCTLUsage {
   public static let text = """
     usage: wavesctl <command> [options]

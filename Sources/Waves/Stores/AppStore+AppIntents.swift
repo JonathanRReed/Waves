@@ -245,7 +245,7 @@ extension AppStore {
     }
 
     let confirmedControl =
-      backendResult.outcome == .applied
+      (backendResult.outcome == .applied || backendResult.outcome == .noChange)
       && backendResult.resultingApp.map { resultingApp in
         (intent.desiredVolume == resultingApp.desiredVolume)
           && (intent.isMuted == resultingApp.isMuted)

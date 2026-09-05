@@ -72,10 +72,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let staleRouteThresholdTicks = 24
   var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
   var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
-  /// Device-change passes never overlap: a second event that arrives while a
-  /// pass is rebuilding routes is folded into one follow-up pass instead.
-  var isHandlingDeviceChange = false
-  var pendingDeviceChangeSelectors: [AudioObjectPropertySelector]?
+  let deviceChangeMailbox = AudioPropertyChangeMailbox()
+  var deviceChangeTask: Task<Void, Never>?
+  let routerObservationMailbox = AudioPropertyChangeMailbox()
+  var routerObservationTask: Task<Void, Never>?
   /// The device UIDs outside Waves's own private aggregates at the last
   /// inventory pass, so events raised by Waves's own aggregate create/destroy
   /// can be told apart from real hardware changes.
@@ -142,7 +142,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     perAppAudioController: PerAppAudioController = .waves,
     waveLinkCompatibilityEnabled: Bool = true
   ) {
-    let (stream, continuation) = AsyncStream<Void>.makeStream()
+    let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     self.deviceChangeEvents = stream
     self.deviceChangeContinuation = continuation
     self.intentRouteApplyOverride = nil
@@ -192,7 +192,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     applicationCaptureProvider: (@Sendable () async -> AppRuntimeDiscovery.Capture)? = nil,
     processLifetimeLiveness: @escaping @Sendable (AppProcessLifetimeIdentity) -> Bool = RuntimeProcessIdentity.mayStillBeRunning
   ) {
-    let (stream, continuation) = AsyncStream<Void>.makeStream()
+    let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     self.deviceChangeEvents = stream
     self.deviceChangeContinuation = continuation
     self.snapshot = testingSnapshot
@@ -221,6 +221,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
     self.controllers = Dictionary(uniqueKeysWithValues: testingControllers.map { ($0.appID, $0) })
     self.isStarted = true
+  }
+
+  deinit {
+    deviceChangeMailbox.finish()
+    routerObservationMailbox.finish()
+    deviceChangeTask?.cancel()
+    routerObservationTask?.cancel()
   }
 
   func start() async throws {
@@ -294,6 +301,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var degradations = retainedCleanupDegradations
     retainedCleanupDegradations.removeAll()
 
+    // Close ingress before awaiting any work. Late native callbacks retain
+    // their mailbox safely but cannot queue more work after shutdown begins.
+    deviceChangeMailbox.finish()
+    routerObservationMailbox.finish()
+    let deviceTask = deviceChangeTask
+    let routerTask = routerObservationTask
+    deviceChangeTask = nil
+    routerObservationTask = nil
+    deviceTask?.cancel()
+    routerTask?.cancel()
+
     let levelTask = levelUpdateTask
     levelUpdateTask = nil
     levelTask?.cancel()
@@ -313,6 +331,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     record(removeDeviceChangeListener())
     record(removeRouterObservationListeners())
+    if let deviceTask { await deviceTask.value }
+    if let routerTask { await routerTask.value }
     defaultOutputDeviceChange.recordInitialUID(nil)
 
     let installedControllers = controllers.sorted { $0.key < $1.key }
