@@ -8,9 +8,9 @@
 - Current completion claim: Reviewed PR security repairs, launch measurement
   tooling, a Sparkle 2.9.6 dependency update, and source metadata for 1.7.1
   build 19. The release itself is incomplete.
-- Observable result for the active tranche: Run the code and unsigned-package
-  checks at 64daff18863623cba84809f8357e3a2ed2eddafa, preserve the installed
-  baseline, and diagnose failures without weakening release gates.
+- Observable result for the latest tranche: Verify the installed toolchain and
+  a reviewed runtime collector while preserving the installed baseline and
+  keeping missing performance evidence explicit.
 
 ## Current state
 
@@ -26,12 +26,12 @@
   Stream Deck Plus.
 - Desired endpoint: One exact 1.7.1 build 19 artifact published consistently
   after every code, security, performance, trust, and hardware gate passes.
-- Last verified checkpoint: Hosted full gate passed at 64daff1, including
-  639 Swift tests, all three TSan scenarios, infrastructure, contracts,
-  formatting, builds, package smoke and callback source audit. Local TSan
-  still crashes during initialization. The newer checksum repair at 61853b9
-  passed independent review and a fresh 12-test Elgato group with 160
-  assertions. It needs a new hosted run.
+- Last verified checkpoint: Hosted full gate passed at 4c9176d, including the
+  reviewed checksum repair. With full Xcode 27 installed, a fresh local run of
+  the built TSan executable passed three scenarios. The runtime collector
+  passed independent review, 19 tests with 124 assertions, and a real
+  synchronized Instruments smoke on an owned process. The collector commit
+  requires its own hosted run. This is not a completed runtime audit.
   Direct receipts are in
   `.audit/evidence/2026-09-04-waves-1.7.1-premerge-gates.md`.
 
@@ -45,11 +45,12 @@
 
 - Deferred: Public X posting waits for Jonathan's approval of final media and
   copy.
-- External blockers: Codex Security cannot start its read-only worker under
-  this task's unmanaged permission profile. Instruments is unavailable on both
-  Macs because neither has full Xcode. Setup is approved, but Apple sign-in
-  and platform approval remain pending. Mac mini remains connected and
-  hardware-suitable.
+- External blockers: The local security invocation remains blocked under the
+  unmanaged permission profile. The existing Mac mini audit task reports an
+  account usage limit until September 11 and did not start a scan. No scan ID
+  exists. Full Xcode, xctrace and Icon Composer are now verified locally.
+  Actual performance qualification and fresh Mac mini hardware evidence remain
+  open. Earlier remote hardware inventory is historical, not candidate proof.
 - Out of scope: New features, redesign, protocol changes, new minimum macOS,
   credential rotation, repository visibility changes, and paid services.
 
@@ -70,9 +71,9 @@
 
 | Gate | Required now | Required evidence | Status | Direct receipt |
 |---|---|---|---|---|
-| Functionality | Yes | Focused tests, full Swift suite, full quality gate | Hosted full gate passed at 64daff1, including TSan; reviewed checksum repair needs a new hosted run | `.audit/evidence/2026-09-04-waves-1.7.1-premerge-gates.md` |
+| Functionality | Yes | Focused tests, full Swift suite, full quality gate | Hosted full gate passed at 4c9176d; newer collector tooling requires fresh CI | `.audit/evidence/2026-09-04-waves-1.7.1-premerge-gates.md` |
 | UX and accessibility | Yes | Hosted/rendered tests and real installed-app interaction | Hosted and five rendered tests passed; installed-app interaction pending | `.audit/evidence/2026-09-04-waves-1.7.1-premerge-gates.md` |
-| Runtime and performance | Yes | Baseline/candidate matrix, callback stress, soak, 30 launch recordings | Tooling reviewed; actual measurements pending, Instruments unavailable | `.audit/evidence/2026-09-04-waves-maintenance-checkpoint.md` |
+| Runtime and performance | Yes | Baseline/candidate matrix, callback stress, soak, 30 launch recordings | Collector reviewed and native recording verified; actual app qualification pending | `.audit/evidence/2026-09-04-waves-1.7.1-runtime-audit.md` |
 | Data and provenance | Yes | Exact revisions, hashes, canonical metadata, evidence receipts | Partial | `.audit/evidence/2026-09-04-planning-baseline.md` |
 | Security and privacy | Yes | Deep scan, finding dispositions, final receipt, secret/dependency checks | Targeted repairs reviewed; dependency updated; deep scan blocked | `.audit/evidence/2026-09-04-sparkle-dependency-review.md` |
 | Packaging and trust | Yes | Signed/notarized/stapled candidate, Gatekeeper, universal app and dSYM | Universal ad hoc app, matching dSYM, DMG and package smoke passed; public trust checks pending | `.audit/evidence/2026-09-04-waves-1.7.1-premerge-gates.md` |
@@ -127,8 +128,8 @@
   checksum commit and receipt updates need their own hosted result.
 - Remote scan alternative: The existing Mac mini task was authorized to create
   an isolated audit-only checkout of that pushed revision and invoke the
-  official deep scan under its existing managed profile. Its current state is
-  waiting on approval. No scan-start success or scan ID has been observed.
+  official deep scan under its existing managed profile. Its latest result is
+  an account usage failure. No scan-start success or scan ID has been observed.
   Neither old remote checkout nor this audit clone can supply release bytes.
 
 ## Active bounded vertical tranche
