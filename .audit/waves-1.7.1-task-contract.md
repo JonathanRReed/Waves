@@ -5,10 +5,12 @@
 - Terminal objective: Finish Waves 1.7.1 build 19 as a secure, measured,
   Half-Bounce-qualified, signed, hardware-verified, publication-ready release,
   then complete the authorized public release pipeline.
-- Current completion claim: Design and executable implementation plans only.
-- Observable result for the active tranche: Every approved security, PR,
-  performance, Half Bounce, hardware, trust, and publication requirement is
-  mapped to a testable task with a receipt and commit boundary.
+- Current completion claim: Reviewed PR security repairs, launch measurement
+  tooling, a Sparkle 2.9.6 dependency update, and source metadata for 1.7.1
+  build 19. The release itself is incomplete.
+- Observable result for the active tranche: Metadata, changelog, cask template,
+  and release instructions agree without claiming an unpublished release is
+  available. The reviewed implementation ends at bcf0413.
 
 ## Current state
 
@@ -24,8 +26,11 @@
   Stream Deck Plus.
 - Desired endpoint: One exact 1.7.1 build 19 artifact published consistently
   after every code, security, performance, trust, and hardware gate passes.
-- Last verified checkpoint: `swift test` passed 626 tests on the branch base;
-  the durable receipt is `.audit/evidence/2026-09-04-planning-baseline.md`.
+- Last verified checkpoint: 13 launch tests with 92 assertions, four updater
+  tests, a release build, 106 release-infrastructure tests with 992 assertions,
+  two deadline tests with five assertions, repository/workflow contracts, and
+  strict formatting passed. Exact scope and remaining gaps are recorded in
+  `.audit/evidence/2026-09-04-waves-maintenance-checkpoint.md`.
 
 ## Priority scope
 
@@ -37,7 +42,10 @@
 
 - Deferred: Public X posting waits for Jonathan's approval of final media and
   copy.
-- External blocker: None at present. Mac mini is connected and hardware-suitable.
+- External blockers: Codex Security cannot start its read-only worker under
+  this task's unmanaged permission profile. Instruments is unavailable on both
+  Macs because neither has full Xcode. Permission and Xcode setup decisions
+  have been requested. Mac mini remains connected and hardware-suitable.
 - Out of scope: New features, redesign, protocol changes, new minimum macOS,
   credential rotation, repository visibility changes, and paid services.
 
@@ -58,11 +66,11 @@
 
 | Gate | Required now | Required evidence | Status | Direct receipt |
 |---|---|---|---|---|
-| Functionality | Yes | Focused tests, 626-test suite or higher, full quality gate | Baseline passed | `.audit/evidence/2026-09-04-planning-baseline.md` |
+| Functionality | Yes | Focused tests, full Swift suite, full quality gate | Current targeted checks passed; full candidate gate pending | `.audit/evidence/2026-09-04-waves-maintenance-checkpoint.md` |
 | UX and accessibility | Yes | Hosted/rendered tests and real installed-app interaction | Not run | |
-| Runtime and performance | Yes | Baseline/candidate matrix, callback stress, soak, 30 launch recordings | Not run | |
+| Runtime and performance | Yes | Baseline/candidate matrix, callback stress, soak, 30 launch recordings | Tooling reviewed; actual measurements pending, Instruments unavailable | `.audit/evidence/2026-09-04-waves-maintenance-checkpoint.md` |
 | Data and provenance | Yes | Exact revisions, hashes, canonical metadata, evidence receipts | Partial | `.audit/evidence/2026-09-04-planning-baseline.md` |
-| Security and privacy | Yes | Deep scan, finding dispositions, final receipt, secret/dependency checks | Not run | |
+| Security and privacy | Yes | Deep scan, finding dispositions, final receipt, secret/dependency checks | Targeted repairs reviewed; dependency updated; deep scan blocked | `.audit/evidence/2026-09-04-sparkle-dependency-review.md` |
 | Packaging and trust | Yes | Signed/notarized/stapled candidate, Gatekeeper, universal app and dSYM | Not run | |
 | Deployment and release | Yes | Mac mini receipt, exact tag, GitHub, appcast, site, Homebrew, public hashes | Not run | |
 
@@ -82,16 +90,15 @@
 
 ## Active bounded vertical tranche
 
-- Scope: Freeze the current PR inventory and reproduce its security properties
-  against the release branch before changing production code.
-- Observable state change: A durable adjudication matrix records every open PR,
-  exact head SHA, current checks, reproduction result, and integrated
-  disposition.
-- Checks and receipts required before closure: Fresh GitHub inventory, isolated
-  branch-test runs, one receipt row and one append-only decision row per PR,
-  `git diff --check`, and a clean receipt commit.
-- One next tranche: Implement URL automation provenance and the bounded control
-  listener proof with focused failing tests.
+- Scope: Complete the reviewed launch collector, dependency maintenance, and
+  source release-metadata preparation.
+- Observable state change: Source targets 1.7.1 build 19, resolves patched
+  Sparkle 2.9.6, and retains auditable launch attempts without replacing the
+  installed baseline.
+- Checks and receipts required before closure: Focused tests, release build,
+  infrastructure and format gates, task reviews, and the maintenance checkpoint.
+- One next tranche: Unblock the managed security scan and Instruments profiling,
+  then collect real baseline evidence before changing startup readiness.
 
 ## Instruction changes
 
