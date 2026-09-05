@@ -10,6 +10,7 @@ require "shellwords"
 require "tmpdir"
 
 require_relative "../release_tool"
+require_relative "../../release/elgato-handoff/finalize-receipt"
 
 class ReleaseInfraTest < Minitest::Test
   VERSION = "1.7.1"
@@ -1873,6 +1874,84 @@ class ReleaseInfraTest < Minitest::Test
       assert returned.fetch("tests").values.all? { |result| result.fetch("status") == "passed" }
       assert_equal Digest::SHA256.file(receipt).hexdigest,
         File.read("#{receipt}.sha256").split.first
+    end
+  end
+
+  def test_elgato_handoff_finalizer_rejects_artifact_replaced_after_checksum_snapshot
+    Dir.mktmpdir("waves-elgato-checksum-snapshot") do |root|
+      dmg_name = HANDOFF_DMG_NAME
+      immutable_files = WavesElgatoReceipt::STATIC_IMMUTABLE_FILES + [dmg_name]
+      immutable_files.each { |name| File.binwrite(File.join(root, name), "original #{name}\n") }
+
+      evidence_name = "release-evidence.candidate.json"
+      evidence_digest = Digest::SHA256.file(File.join(root, evidence_name)).hexdigest
+      File.binwrite(
+        File.join(root, "release-evidence.candidate.json.sha256"),
+        "#{evidence_digest}  #{evidence_name}\n"
+      )
+      original_checksums = immutable_files.sort.map do |name|
+        "#{Digest::SHA256.file(File.join(root, name)).hexdigest}  #{name}\n"
+      end.join
+      checksum_path = File.join(root, "SHA256SUMS")
+      File.binwrite(checksum_path, original_checksums)
+      trusted_checksums_digest = Digest::SHA256.hexdigest(original_checksums)
+
+      replacement_readme = "replacement README.md\n"
+      replacement_checksums = original_checksums.lines.map do |line|
+        if line.end_with?("  README.md\n")
+          "#{Digest::SHA256.hexdigest(replacement_readme)}  README.md\n"
+        else
+          line
+        end
+      end.join
+      handoff = {
+        "candidateEvidenceSHA256" => evidence_digest,
+        "artifacts" => {
+          "dmg" => {
+            "name" => dmg_name,
+            "sha256" => Digest::SHA256.file(File.join(root, dmg_name)).hexdigest,
+          },
+          "streamDeckPlugin" => {
+            "name" => "com.jonathanreed.waves.streamDeckPlugin",
+            "sha256" => Digest::SHA256.file(
+              File.join(root, "com.jonathanreed.waves.streamDeckPlugin")
+            ).hexdigest,
+            "sourceRevision" => "b" * 40,
+          },
+        },
+      }
+
+      replacement_installed = false
+      install_replacement = lambda do
+        next if replacement_installed
+
+        replacement_installed = true
+        File.binwrite(File.join(root, "README.md"), replacement_readme)
+        File.binwrite(checksum_path, replacement_checksums)
+      end
+      digest_singleton = Digest::SHA256.singleton_class
+      file_singleton = File.singleton_class
+      original_digest_file = Digest::SHA256.method(:file)
+      original_binread = File.method(:binread)
+      digest_singleton.send(:define_method, :file) do |path, *arguments|
+        digest = original_digest_file.call(path, *arguments)
+        install_replacement.call if path == checksum_path
+        digest
+      end
+      file_singleton.send(:define_method, :binread) do |path, *arguments|
+        contents = original_binread.call(path, *arguments)
+        install_replacement.call if path == checksum_path
+        contents
+      end
+
+      error = assert_raises(WavesElgatoReceipt::Error) do
+        WavesElgatoReceipt.verify_immutable_files!(root, handoff, trusted_checksums_digest)
+      end
+      assert_match(/checksum mismatch for README\.md/, error.message)
+      assert replacement_installed, "expected the checksum snapshot boundary to be exercised"
+    ensure
+      digest_singleton.send(:define_method, :file, original_digest_file) if original_digest_file
+      file_singleton.send(:define_method, :binread, original_binread) if original_binread
     end
   end
 

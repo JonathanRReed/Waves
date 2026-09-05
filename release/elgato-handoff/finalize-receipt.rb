@@ -135,11 +135,12 @@ module WavesElgatoReceipt
 
   def verify_immutable_files!(root, handoff, trusted_checksums_digest)
     checksum_path = safe_file!(root, "SHA256SUMS")
+    checksum_contents = File.binread(checksum_path)
     sha256!(trusted_checksums_digest, "trusted handoff checksum digest")
-    unless Digest::SHA256.file(checksum_path).hexdigest == trusted_checksums_digest
+    unless Digest::SHA256.hexdigest(checksum_contents) == trusted_checksums_digest
       raise Error, "handoff checksum file does not match the trusted out-of-band digest"
     end
-    checksums = File.readlines(checksum_path, chomp: true).to_h do |line|
+    checksums = checksum_contents.lines(chomp: true).to_h do |line|
       match = line.match(/\A([0-9a-f]{64})  ([^\/\n]+)\z/)
       raise Error, "handoff checksum file is malformed" unless match
       [match[2], match[1]]
