@@ -34,7 +34,7 @@ The literal pre-edit assertion was:
 python3 - <<'PY'
 import json, pathlib, re
 p=pathlib.Path('Package.swift').read_text(); r=json.loads(pathlib.Path('Package.resolved').read_text())
-min_ok=bool(re.search(r'Sparkle\", from: \"2\\.9\\.6\"',p))
+min_ok='Sparkle", from: "2.9.6"' in p
 pin=next(x for x in r['pins'] if x['identity']=='sparkle')['state']
 ok=min_ok and pin.get('version')=='2.9.6'
 print(f'before_assertion: manifest_min_2.9.6={min_ok} resolved_version={pin.get("version")} revision={pin.get("revision")} expected_pass={ok}')
@@ -50,14 +50,16 @@ The literal post-edit assertion was:
 python3 - <<'PY'
 import json,re,pathlib,subprocess
 p=pathlib.Path('Package.swift').read_text(); d=json.loads(pathlib.Path('Package.resolved').read_text()); s=next(x['state'] for x in d['pins'] if x['identity']=='sparkle')
-manifest=bool(re.search(r'Sparkle\", from: \"2\\.9\\.6\"',p)); tag=subprocess.check_output(['git','ls-remote','https://github.com/sparkle-project/Sparkle.git','refs/tags/2.9.6'],text=True).split()[0]
+manifest='Sparkle", from: "2.9.6"' in p; tag=subprocess.check_output(['git','ls-remote','https://github.com/sparkle-project/Sparkle.git','refs/tags/2.9.6'],text=True).split()[0]
 ok=manifest and s.get('version')=='2.9.6' and s.get('revision')==tag
 print('after_assertion:',manifest,s.get('version'),s.get('revision'),'upstream_tag=',tag,'pass=',ok)
 raise SystemExit(0 if ok else 1)
 PY
 ```
 
-Captured output: `after_assertion: True 2.9.6 ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a upstream_tag= ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a pass= True`; exit 0. The Swift Testing revision remained `18c42c19cac3fafd61cab1156d4088664b7424ae`, and Swift Syntax remained `0687f71944021d616d34d922343dcef086855920`.
+Captured output: `after_assertion: True 2.9.6 ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a upstream_tag= ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a pass= True`; exit 0. A prior receipt transcription used the wrong raw-regex escaping (`2\\.9\\.6`), which failed when executed. This corrected command uses a direct manifest-string check. The Swift Testing revision remained `18c42c19cac3fafd61cab1156d4088664b7424ae`, and Swift Syntax remained `0687f71944021d616d34d922343dcef086855920`.
+
+Fresh historical validation, without checkout or history changes, used `git show df1dbf5:Package.swift` and `git show df1dbf5:Package.resolved` to feed the same assertion. It produced `historical_before: manifest_min_2.9.6=False resolved_version=2.9.5 revision=79bc9e872948e47877e76f194cb0c8e0412b0b90 pass=False`; exit 1, as expected for the pre-update tree.
 
 Captured updater test completion lines:
 
