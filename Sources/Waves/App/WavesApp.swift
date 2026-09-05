@@ -27,11 +27,22 @@ struct WavesApp: App {
   @State private var renderActivity: RenderActivityMonitor
 
   init() {
-    self.init(composition: .live)
+    self.init(
+      composition: .live,
+      performanceRecorder: LaunchPerformanceRecorder.activateLive()
+    )
   }
 
   init(composition: WavesComposition) {
+    self.init(composition: composition, performanceRecorder: nil)
+  }
+
+  private init(
+    composition: WavesComposition,
+    performanceRecorder: LaunchPerformanceRecorder?
+  ) {
     let store = composition.makeStore()
+    performanceRecorder?.mark(.storeReady)
     _store = State(initialValue: store)
 
     // Suspend the backend level poll whenever no Waves window is on screen.
@@ -222,17 +233,19 @@ private actor FirstTerminationOutcome {
 enum AppTerminationTimeoutDecision {
   static func awaitShutdown(
     timeout: Duration,
-    operation: @escaping @MainActor @Sendable () async -> AppShutdownResult
+    operation: @escaping @MainActor @Sendable () async -> AppShutdownResult,
+    started: @escaping @MainActor @Sendable (Task<Void, Never>) -> Void = { _ in }
   ) async -> AppTerminationOutcome {
     let firstOutcome = FirstTerminationOutcome()
 
-    Task { @MainActor in
+    let shutdownTask = Task { @MainActor in
       let result = await operation()
       await firstOutcome.resolve(
         result.completion == .clean ? .clean(result) : .degraded(result)
       )
     }
-    Task {
+    await started(shutdownTask)
+    let timeoutTask = Task {
       do {
         try await Task.sleep(for: timeout)
       } catch {
@@ -241,7 +254,12 @@ enum AppTerminationTimeoutDecision {
       await firstOutcome.resolve(.timedOut)
     }
 
-    return await firstOutcome.value()
+    let outcome = await firstOutcome.value()
+    timeoutTask.cancel()
+    if case .timedOut = outcome {
+      shutdownTask.cancel()
+    }
+    return outcome
   }
 }
 
@@ -258,6 +276,7 @@ final class AppTerminationCoordinator {
   private let timeout: Duration
   private var state: State = .idle
   private var terminationTask: Task<Void, Never>?
+  private var shutdownTask: Task<Void, Never>?
 
   init(timeout: Duration = productionTimeout) {
     self.timeout = timeout
@@ -283,12 +302,17 @@ final class AppTerminationCoordinator {
       terminationTask = Task { @MainActor [self] in
         let outcome = await AppTerminationTimeoutDecision.awaitShutdown(
           timeout: timeout,
-          operation: shutdown
+          operation: shutdown,
+          started: { self.shutdownTask = $0 }
         )
         guard case .running = state else { return }
         state = .completed(outcome)
+        if case .timedOut = outcome {
+          shutdownTask?.cancel()
+        }
         report(outcome)
         reply(true)
+        shutdownTask = nil
         terminationTask = nil
       }
       return .terminateLater

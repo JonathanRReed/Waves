@@ -13,6 +13,8 @@ import Foundation
 /// to order those candidates. Every candidate is still confirmed by a protocol
 /// handshake before it carries a control command.
 enum WaveLinkEndpointDiscovery {
+  private static let maximumWSInfoBytes = 64 * 1024
+
   typealias IdentityVerifier =
     @Sendable (
       pid_t,
@@ -40,6 +42,7 @@ enum WaveLinkEndpointDiscovery {
 
   static func parsePort(fromWSInfo data: Data) -> UInt16? {
     guard
+      data.count <= maximumWSInfoBytes,
       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
       let portNumber = object["port"] as? NSNumber
     else {
@@ -58,7 +61,9 @@ enum WaveLinkEndpointDiscovery {
   ) -> [UInt16] {
     var ports: [UInt16] = []
     for url in wsInfoCandidateURLs(homeDirectory: homeDirectory) {
-      guard let data = try? Data(contentsOf: url), let port = parsePort(fromWSInfo: data) else { continue }
+      guard let data = try? BoundedRegularFileReader.read(from: url, maximumBytes: maximumWSInfoBytes),
+        let port = parsePort(fromWSInfo: data)
+      else { continue }
       if !ports.contains(port) { ports.append(port) }
     }
     return ports

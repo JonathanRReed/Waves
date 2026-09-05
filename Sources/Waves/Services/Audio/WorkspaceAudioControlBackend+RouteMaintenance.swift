@@ -335,8 +335,20 @@ extension WorkspaceAudioControlBackend {
 
   func addRouterObservationListeners() -> [CleanupDegradation] {
     guard !isShuttingDown else { return [] }
-    let degradations = routerObservationListeners.install { [weak self] in
-      Task { [weak self] in await self?.markRouterObservationDirty() }
+    let mailbox = routerObservationMailbox
+    if routerObservationTask == nil {
+      routerObservationTask = Task { [weak self, mailbox] in
+        for await _ in mailbox.wakeups {
+          guard !Task.isCancelled else { break }
+          if mailbox.takePending().contains(.routerObservation) {
+            await self?.markRouterObservationDirty()
+          }
+          await Task.yield()
+        }
+      }
+    }
+    let degradations = routerObservationListeners.install {
+      mailbox.enqueue(.routerObservation)
     }
     if degradations.isEmpty, !routerObservationListeners.requiresFallbackReobservation {
       routerObservationListenerFailureDetail = nil

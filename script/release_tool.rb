@@ -3,6 +3,8 @@
 
 require "digest"
 require "base64"
+require "date"
+require "fiddle/import"
 require "fileutils"
 require "json"
 require "open3"
@@ -105,11 +107,39 @@ module WavesRelease
     end
   end
 
+  module CanonicalSSHKey
+    ALGORITHM = "ssh-ed25519"
+
+    module_function
+
+    def parse!(public_key, context: "SSH public key")
+      match = public_key.is_a?(String) &&
+        public_key.match(/\A(ssh-ed25519) ([A-Za-z0-9+\/]+={0,2})(?: [^\s\r\n][^\r\n]*)?\z/)
+      raise Error, "#{context} is malformed" unless match
+
+      begin
+        key_blob = Base64.strict_decode64(match[2])
+        raise ArgumentError unless Base64.strict_encode64(key_blob) == match[2]
+      rescue ArgumentError
+        raise Error, "#{context} is malformed"
+      end
+
+      {
+        "algorithm" => ALGORITHM,
+        "material" => match[2],
+        "blob" => key_blob,
+        "fingerprint" => "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(key_blob)).delete('=')}",
+      }.freeze
+    end
+  end
+
   module Metadata
     KEYS = %w[
       schemaVersion version build minimumMacOSVersion bundleIdentifier developerID
       releaseAuthority sparkle
     ].freeze
+    OPTIONAL_KEYS = %w[benchmarkDeferral].freeze
+    BENCHMARK_DEFERRAL_KEYS = %w[version build approvedOn reason].freeze
     DEVELOPER_ID_KEYS = %w[identity teamIdentifier designatedRequirement].freeze
     RELEASE_AUTHORITY_KEYS = %w[principal publicKey fingerprint receiptIssuers].freeze
     RECEIPT_ISSUER_KEYS = %w[securityScan remoteElgato].freeze
@@ -121,7 +151,11 @@ module WavesRelease
       raise Error, "release metadata not found at #{path}" unless File.file?(path)
 
       value = StrictJSON.parse(File.read(path), context: path)
-      Validation.exact_keys!(value, KEYS, "release metadata")
+      Validation.hash!(value, "release metadata")
+      unknown = value.keys - KEYS - OPTIONAL_KEYS
+      missing = KEYS - value.keys
+      raise Error, "release metadata has unknown key(s): #{unknown.join(', ')}" unless unknown.empty?
+      raise Error, "release metadata is missing key(s): #{missing.join(', ')}" unless missing.empty?
       raise Error, "release metadata schemaVersion must be integer 1" unless value["schemaVersion"] == 1
 
       version = value["version"]
@@ -161,17 +195,11 @@ module WavesRelease
       %w[principal publicKey fingerprint].each do |field|
         Validation.nonempty_string!(authority[field], "release metadata releaseAuthority.#{field}")
       end
-      key_parts = authority["publicKey"].split
-      unless key_parts.length.between?(2, 3) && key_parts[0] == "ssh-ed25519"
-        raise Error, "release metadata releaseAuthority.publicKey must be an inline ssh-ed25519 public key"
-      end
-      begin
-        key_blob = Base64.strict_decode64(key_parts[1])
-      rescue ArgumentError
-        raise Error, "release metadata releaseAuthority.publicKey is malformed"
-      end
-      derived_fingerprint = "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(key_blob)).delete('=')}"
-      unless authority["fingerprint"] == derived_fingerprint
+      parsed_key = CanonicalSSHKey.parse!(
+        authority["publicKey"],
+        context: "release metadata releaseAuthority.publicKey"
+      )
+      unless authority["fingerprint"] == parsed_key.fetch("fingerprint")
         raise Error, "release metadata releaseAuthority fingerprint does not match the pinned public key"
       end
       issuers = authority["receiptIssuers"]
@@ -191,6 +219,26 @@ module WavesRelease
       end
       unless public_key_bytes.bytesize == 32 && Base64.strict_encode64(public_key_bytes) == sparkle["publicEDKey"]
         raise Error, "release metadata sparkle.publicEDKey must encode exactly 32 bytes"
+      end
+
+      if value.key?("benchmarkDeferral")
+        deferral = value["benchmarkDeferral"]
+        Validation.exact_keys!(deferral, BENCHMARK_DEFERRAL_KEYS, "release metadata benchmarkDeferral")
+        unless deferral["version"] == version
+          raise Error, "release metadata benchmarkDeferral.version must match release version"
+        end
+        unless deferral["build"] == build
+          raise Error, "release metadata benchmarkDeferral.build must match release build"
+        end
+        begin
+          approved_on = Date.iso8601(deferral["approvedOn"])
+        rescue ArgumentError, TypeError
+          raise Error, "release metadata benchmarkDeferral.approvedOn must be a canonical YYYY-MM-DD date"
+        end
+        unless approved_on.iso8601 == deferral["approvedOn"]
+          raise Error, "release metadata benchmarkDeferral.approvedOn must be a canonical YYYY-MM-DD date"
+        end
+        Validation.nonempty_string!(deferral["reason"], "release metadata benchmarkDeferral.reason")
       end
 
       value.freeze
@@ -275,7 +323,7 @@ module WavesRelease
       validate_source!(manifest["source"], expected_revision)
       validate_toolchain!(manifest["toolchain"])
       validate_tests!(manifest["tests"])
-      validate_performance!(manifest["performance"])
+      validate_performance!(manifest["performance"], metadata)
       validate_platforms!(manifest["platforms"])
       validate_package!(manifest["package"], metadata)
       validate_gates!(manifest["gates"], profile)
@@ -347,10 +395,21 @@ module WavesRelease
       end
     end
 
-    def validate_performance!(performance)
+    def validate_performance!(performance, metadata)
       Validation.exact_keys!(performance, REQUIRED_PERFORMANCE, "performance evidence")
       performance.each do |name, metric|
         Validation.exact_keys!(metric, %w[baseline candidate regressionPercent status approvedJustification], "performance.#{name}")
+        if metric["status"] == "deferred"
+          %w[baseline candidate regressionPercent].each do |field|
+            raise Error, "performance.#{name}.#{field} must be null when deferred" unless metric[field].nil?
+          end
+          deferral = metadata["benchmarkDeferral"]
+          raise Error, "performance.#{name} benchmark deferral is not authorized by release metadata" unless deferral
+          unless metric["approvedJustification"] == deferral["reason"]
+            raise Error, "performance.#{name}.approvedJustification must match the approved justification"
+          end
+          next
+        end
         %w[baseline candidate regressionPercent].each do |field|
           raise Error, "performance.#{name}.#{field} must be numeric" unless metric[field].is_a?(Numeric)
         end
@@ -848,6 +907,17 @@ module WavesRelease
   end
 
   module PrivateArtifacts
+    module DirectorySyscalls
+      extend Fiddle::Importer
+      dlload Fiddle.dlopen(nil)
+      extern "int openat(int, const char *, int, int)"
+      extern "int mkdirat(int, const char *, int)"
+      extern "int renameat(int, const char *, int, const char *)"
+      extern "int unlinkat(int, const char *, int)"
+    end
+
+    OPEN_WRITE_EXCLUSIVE = File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW
+
     module_function
 
     def capture_identity!(path:)
@@ -903,68 +973,132 @@ module WavesRelease
     end
 
     def stage_file!(source:, root:, name: File.basename(source))
-      validate_private_root!(root)
+      root_identity = validate_private_root!(root)
       identity = capture_identity!(path: source)
       raise Error, "staged release artifact must be a regular file" unless identity["type"] == "file"
-      expanded_root = File.expand_path(root)
-      destination = File.expand_path(File.join(expanded_root, name))
-      unless File.basename(name) == name && File.dirname(destination) == expanded_root
-        raise Error, "private staging destination escapes its root"
-      end
-      raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
-      File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
-        File.open(destination, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |output|
-          with_stable_identity!(path: source, identity: identity) { IO.copy_stream(input, output) }
-          output.flush
-          output.fsync
+      canonical_root = root_identity.fetch("path")
+      validate_child_name!(name)
+      destination = File.join(canonical_root, name)
+      root_handle = open_private_root!(root_identity)
+      parent_handle = File.open(File.dirname(canonical_root), File::RDONLY)
+      temporary = Tempfile.new([".waves-stage-", ".tmp"], File.dirname(canonical_root))
+      temporary.chmod(0o600)
+      placeholder_created = false
+      installed = false
+      begin
+        File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
+          with_stable_identity!(path: source, identity: identity) { IO.copy_stream(input, temporary) }
         end
+        temporary.flush
+        temporary.fsync
+        with_stable_private_root!(identity: root_identity) do
+          create_exclusive_file_at!(root_handle, name)
+          placeholder_created = true
+          rename_at!(parent_handle, File.basename(temporary.path), root_handle, name)
+          installed = true
+        end
+        unless Digest::SHA256.file(destination).hexdigest == Digest::SHA256.file(source).hexdigest
+          raise Error, "private staged artifact does not match its verified input"
+        end
+        destination
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        rollback_error = if installed
+          rollback_installed_child(root_handle, parent_handle, name, directory: false)
+        elsif placeholder_created
+          rollback_placeholder(root_handle, name, directory: false)
+        end
+        raise transactional_root_error(error, rollback_error) if root_identity_changed?(root_identity)
+        raise Error, "private staging rollback failed: #{rollback_error.message}; cause: #{error.class}: #{error.message}" if rollback_error
+        raise
+      ensure
+        temporary.close! if temporary
+        parent_handle.close
+        root_handle.close
       end
-      unless Digest::SHA256.file(destination).hexdigest == Digest::SHA256.file(source).hexdigest
-        raise Error, "private staged artifact does not match its verified input"
-      end
-      destination
     rescue Errno::ELOOP => error
       raise Error, "release artifact must not traverse a symbolic link: #{error.message}"
     end
 
     def stage_directory!(source:, root:, name: File.basename(source))
-      validate_private_root!(root)
+      root_identity = validate_private_root!(root)
       identity = capture_identity!(path: source)
       raise Error, "staged release artifact must be a directory" unless identity["type"] == "directory"
-      expanded_root = File.expand_path(root)
-      destination = File.expand_path(File.join(expanded_root, name))
-      unless File.basename(name) == name && File.dirname(destination) == expanded_root
-        raise Error, "private staging destination escapes its root"
-      end
-      raise Error, "private staging destination already exists" if File.exist?(destination) || File.symlink?(destination)
+      canonical_root = root_identity.fetch("path")
+      validate_child_name!(name)
+      destination = File.join(canonical_root, name)
+      root_handle = open_private_root!(root_identity)
+      parent_handle = File.open(File.dirname(canonical_root), File::RDONLY)
+      temporary = Dir.mktmpdir(".waves-stage-", File.dirname(canonical_root))
+      temporary_handle = File.open(temporary, File::RDONLY)
+      staged = File.join(temporary, name)
+      placeholder_created = false
+      installed = false
       expected = tree_digest(source)
-      with_stable_identity!(path: source, identity: identity) do
-        FileUtils.copy_entry(source, destination, true, false, true)
+      begin
+        with_stable_identity!(path: source, identity: identity) do
+          FileUtils.copy_entry(source, staged, true, false, true)
+        end
+        with_stable_private_root!(identity: root_identity) do
+          create_exclusive_directory_at!(root_handle, name)
+          placeholder_created = true
+          rename_at!(temporary_handle, name, root_handle, name)
+          installed = true
+        end
+        unless tree_digest(source) == expected && tree_digest(destination) == expected
+          raise Error, "private staged artifact changed during verified copy"
+        end
+        destination
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        rollback_error = if installed
+          rollback_installed_child(root_handle, temporary_handle, name, directory: true)
+        elsif placeholder_created
+          rollback_placeholder(root_handle, name, directory: true)
+        end
+        raise transactional_root_error(error, rollback_error) if root_identity_changed?(root_identity)
+        raise Error, "private staging rollback failed: #{rollback_error.message}; cause: #{error.class}: #{error.message}" if rollback_error
+        raise
+      ensure
+        temporary_handle.close
+        FileUtils.rm_rf(temporary)
+        parent_handle.close
+        root_handle.close
       end
-      unless tree_digest(source) == expected && tree_digest(destination) == expected
-        raise Error, "private staged artifact changed during verified copy"
-      end
-      destination
     end
 
     def stage_release_artifacts!(source_root:, destination_root:)
-      validate_private_root!(destination_root)
+      root_identity = validate_private_root!(destination_root)
+      canonical_root = root_identity.fetch("path")
       raise Error, "release source dist must not be a symbolic link" if File.symlink?(source_root)
-      stage_directory!(
-        source: File.join(source_root, "Waves.app"),
-        root: destination_root,
-        name: "Waves.app"
-      )
-      stage_directory!(
-        source: File.join(source_root, "Waves.app.dSYM"),
-        root: destination_root,
-        name: "Waves.app.dSYM"
-      )
-      stage_file!(
-        source: File.join(source_root, "Waves.dmg"),
-        root: destination_root,
-        name: "Waves.dmg"
-      )
+      root_handle = open_private_root!(root_identity)
+      rollback_directory = Dir.mktmpdir(".waves-stage-rollback-", File.dirname(canonical_root))
+      rollback_handle = File.open(rollback_directory, File::RDONLY)
+      completed = []
+      artifacts = [
+        [:stage_directory!, "Waves.app"],
+        [:stage_directory!, "Waves.app.dSYM"],
+        [:stage_file!, "Waves.dmg"]
+      ]
+      begin
+        artifacts.each do |method, name|
+          with_stable_private_root!(identity: root_identity) do
+            public_send(method, source: File.join(source_root, name), root: canonical_root, name: name)
+            completed << [name, method == :stage_directory!]
+          end
+        end
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        rollback_errors = completed.reverse.each_with_object([]) do |(name, directory), errors|
+          rollback_error = rollback_installed_child(root_handle, rollback_handle, name, directory: directory)
+          errors << rollback_error if rollback_error
+        end
+        unless rollback_errors.empty?
+          raise Error, "private release staging rollback failed: #{rollback_errors.map(&:message).join('; ')}; cause: #{error.class}: #{error.message}"
+        end
+        raise
+      ensure
+        rollback_handle.close
+        FileUtils.rm_rf(rollback_directory)
+        root_handle.close
+      end
       true
     end
 
@@ -995,26 +1129,32 @@ module WavesRelease
     end
 
     def publish_release_artifacts!(source_root:, destination_root:)
-      validate_private_root!(source_root)
+      root_identity = validate_private_root!(source_root)
+      source_root = root_identity.fetch("path")
       raise Error, "release destination must not be a symbolic link" if File.symlink?(destination_root)
       FileUtils.mkdir_p(destination_root)
-      Dir.mktmpdir(".waves-release-derivatives-", source_root) do |derivative_root|
+      created_destinations = []
+      backed_up_destinations = []
+      publication_backup = nil
+      Dir.mktmpdir(".waves-release-derivatives-", File.dirname(source_root)) do |derivative_root|
         FileUtils.chmod(0o700, derivative_root)
         dsym = File.join(source_root, "Waves.app.dSYM")
         dmg = File.join(source_root, "Waves.dmg")
         dsym_archive = File.join(derivative_root, "Waves.app.dSYM.zip")
         dmg_checksum = File.join(derivative_root, "Waves.dmg.sha256")
         dsym_identity = capture_identity!(path: dsym)
-        with_stable_identity!(path: dsym, identity: dsym_identity) do
-          Validation.run(
-            "/usr/bin/ditto",
-            "-c",
-            "-k",
-            "--sequesterRsrc",
-            "--keepParent",
-            dsym,
-            dsym_archive
-          )
+        with_stable_private_root!(identity: root_identity) do
+          with_stable_identity!(path: dsym, identity: dsym_identity) do
+            Validation.run(
+              "/usr/bin/ditto",
+              "-c",
+              "-k",
+              "--sequesterRsrc",
+              "--keepParent",
+              dsym,
+              dsym_archive
+            )
+          end
         end
         archive_identity = capture_identity!(path: dsym_archive)
         raise Error, "derived dSYM archive must be a regular file" unless archive_identity["type"] == "file"
@@ -1029,50 +1169,219 @@ module WavesRelease
           file.fsync
         end
 
-        publish_directory!(
-          source: File.join(source_root, "Waves.app"),
-          destination: File.join(destination_root, "Waves.app")
-        )
-        publish_directory!(
-          source: dsym,
-          destination: File.join(destination_root, "Waves.app.dSYM")
-        )
-        publish_file!(
-          source: dsym_archive,
-          destination: File.join(destination_root, "Waves.app.dSYM.zip")
-        )
-        publish_file!(
-          source: dmg,
-          destination: File.join(destination_root, "Waves.dmg")
-        )
-        publish_file!(
-          source: dmg_checksum,
-          destination: File.join(destination_root, "Waves.dmg.sha256")
-        )
-        publish_file!(
-          source: File.join(source_root, "release-source-identity.json"),
-          destination: File.join(destination_root, "release-source-identity.json")
-        )
+        publications = [
+          [:publish_directory!, File.join(source_root, "Waves.app"), "Waves.app"],
+          [:publish_directory!, dsym, "Waves.app.dSYM"],
+          [:publish_file!, dsym_archive, "Waves.app.dSYM.zip"],
+          [:publish_file!, dmg, "Waves.dmg"],
+          [:publish_file!, dmg_checksum, "Waves.dmg.sha256"],
+          [:publish_file!, File.join(source_root, "release-source-identity.json"), "release-source-identity.json"]
+        ]
         notary_log = File.join(source_root, "notary-log.json")
-        if File.exist?(notary_log) || File.symlink?(notary_log)
-          publish_file!(
-            source: notary_log,
-            destination: File.join(destination_root, "notary-log.json")
-          )
+        publications << [:publish_file!, notary_log, "notary-log.json"] if File.exist?(notary_log) || File.symlink?(notary_log)
+
+        destination_names = publications.map { |_method, _source, name| name }
+        destination_names << "notary-log.json" unless destination_names.include?("notary-log.json")
+        publication_backup = Dir.mktmpdir("waves-publication-backup-")
+        FileUtils.chmod(0o700, publication_backup)
+        destination_names.each do |name|
+          destination = File.join(destination_root, name)
+          raise Error, "release destination must not be a symbolic link" if File.symlink?(destination)
+          next unless File.exist?(destination)
+
+          backup = File.join(publication_backup, name)
+          backup_publication_artifact!(destination, backup)
+          backed_up_destinations << [destination, backup]
+          FileUtils.rm_rf(destination)
+          raise Error, "could not remove preexisting release destination: #{destination}" if File.exist?(destination) || File.symlink?(destination)
         end
+        publications.each do |method, source, name|
+          destination = File.join(destination_root, name)
+          created_destinations << destination
+          with_stable_private_root!(identity: root_identity) do
+            public_send(method, source: source, destination: destination)
+          end
+        end
+      end
+      FileUtils.rm_rf(publication_backup)
+      true
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      rollback_errors = created_destinations.reverse.each_with_object([]) do |path, errors|
+        begin
+          FileUtils.rm_rf(path)
+          errors << Error.new("could not remove #{path}") if File.exist?(path) || File.symlink?(path)
+        rescue Exception => rollback_error # rubocop:disable Lint/RescueException
+          errors << rollback_error
+        end
+      end
+      backed_up_destinations.reverse_each do |destination, backup|
+        begin
+          FileUtils.rm_rf(destination)
+          restore_publication_artifact!(backup, destination)
+        rescue Exception => rollback_error # rubocop:disable Lint/RescueException
+          rollback_errors << rollback_error
+        end
+      end
+      FileUtils.rm_rf(publication_backup) if publication_backup && rollback_errors.empty?
+      unless rollback_errors.empty?
+        raise Error, "release publication rollback failed: #{rollback_errors.map(&:message).join('; ')}; cause: #{error.class}: #{error.message}"
+      end
+      raise
+    end
+
+    def backup_publication_artifact!(source, backup)
+      identity = capture_identity!(path: source)
+      expected = publication_artifact_digest(source, identity)
+      with_stable_identity!(path: source, identity: identity) do
+        FileUtils.copy_entry(source, backup, true, false, true)
+      end
+      unless publication_artifact_digest(source, identity) == expected
+        raise Error, "preexisting publication artifact changed during backup"
+      end
+      actual_identity = capture_identity!(path: backup)
+      unless publication_artifact_digest(backup, actual_identity) == expected
+        raise Error, "publication backup does not match preexisting artifact"
       end
       true
     end
+    private_class_method :backup_publication_artifact!
+
+    def restore_publication_artifact!(backup, destination)
+      identity = capture_identity!(path: backup)
+      expected = publication_artifact_digest(backup, identity)
+      with_stable_identity!(path: backup, identity: identity) do
+        FileUtils.copy_entry(backup, destination, true, false, true)
+      end
+      unless publication_artifact_digest(backup, identity) == expected
+        raise Error, "publication backup changed during restoration"
+      end
+      restored_identity = capture_identity!(path: destination)
+      unless publication_artifact_digest(destination, restored_identity) == expected
+        raise Error, "restored publication artifact does not match retained backup"
+      end
+      true
+    end
+    private_class_method :restore_publication_artifact!
+
+    def publication_artifact_digest(path, identity)
+      mode = File.lstat(path).mode & 0o7777
+      digest = identity.fetch("type") == "directory" ? tree_digest(path) : Digest::SHA256.file(path).hexdigest
+      [identity.fetch("type"), mode, digest]
+    end
+    private_class_method :publication_artifact_digest
 
     def validate_private_root!(root)
-      stat = File.lstat(root)
-      raise Error, "private release root must not be a symbolic link" if stat.symlink?
+      supplied_stat = File.lstat(root)
+      raise Error, "private release root must not be a symbolic link" if supplied_stat.symlink?
+      canonical_root = File.realpath(root)
+      stat = File.lstat(canonical_root)
+      raise Error, "private staging root must be a directory" unless stat.directory?
       raise Error, "private release root must be owned by the current user" unless stat.uid == Process.uid
-      raise Error, "private release root must have mode 0700" unless (stat.mode & 0o777) == 0o700
-      true
+      raise Error, "private staging root must have owner-only permissions" unless (stat.mode & 0o077).zero?
+      {"path" => canonical_root, "device" => stat.dev, "inode" => stat.ino, "type" => stat.ftype}
     rescue Errno::ENOENT => error
       raise Error, "private release root is unavailable: #{error.message}"
     end
+
+    def validate_child_name!(name)
+      unless name.is_a?(String) && !name.empty? && name != "." && name != ".." &&
+          File.basename(name) == name && !name.include?(File::SEPARATOR)
+        raise Error, "private staging child name must be one basename; destination escapes its root"
+      end
+
+      true
+    end
+    private_class_method :validate_child_name!
+
+    def open_private_root!(identity)
+      handle = File.open(identity.fetch("path"), File::RDONLY | File::NOFOLLOW)
+      stat = handle.stat
+      unless stat.directory? && stat.dev == identity.fetch("device") && stat.ino == identity.fetch("inode")
+        handle.close
+        raise Error, "private release root identity changed during copy"
+      end
+      handle
+    end
+    private_class_method :open_private_root!
+
+    def create_exclusive_file_at!(directory, name)
+      descriptor = DirectorySyscalls.openat(directory.fileno, name, OPEN_WRITE_EXCLUSIVE, 0o600)
+      raise Error, "private staging destination already exists" if descriptor.negative?
+      IO.for_fd(descriptor).close
+    end
+    private_class_method :create_exclusive_file_at!
+
+    def create_exclusive_directory_at!(directory, name)
+      result = DirectorySyscalls.mkdirat(directory.fileno, name, 0o700)
+      raise Error, "private staging destination already exists" unless result.zero?
+    end
+    private_class_method :create_exclusive_directory_at!
+
+    def rename_at!(from_directory, from_name, to_directory, to_name)
+      return true if DirectorySyscalls.renameat(from_directory.fileno, from_name, to_directory.fileno, to_name).zero?
+      raise SystemCallError.new("identity-bound rename failed", Fiddle.last_error)
+    end
+    private_class_method :rename_at!
+
+    def rollback_installed_child(root_handle, rollback_handle, name, directory:)
+      if directory
+        rename_at!(root_handle, name, rollback_handle, name)
+      else
+        result = DirectorySyscalls.unlinkat(root_handle.fileno, name, 0)
+        raise SystemCallError.new("identity-bound unlink failed", Fiddle.last_error) unless result.zero?
+      end
+      nil
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      error
+    end
+    private_class_method :rollback_installed_child
+
+    def rollback_placeholder(root_handle, name, directory:)
+      flags = directory ? 0x0080 : 0
+      result = DirectorySyscalls.unlinkat(root_handle.fileno, name, flags)
+      raise SystemCallError.new("identity-bound placeholder removal failed", Fiddle.last_error) unless result.zero?
+      nil
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      error
+    end
+    private_class_method :rollback_placeholder
+
+    def root_identity_changed?(identity)
+      verify_private_root_identity!(identity)
+      false
+    rescue Error
+      true
+    end
+    private_class_method :root_identity_changed?
+
+    def transactional_root_error(error, rollback_error)
+      rollback = rollback_error ? "; rollback failed: #{rollback_error.class}: #{rollback_error.message}" : "; rollback succeeded"
+      Error.new("private release root identity changed during copy; cause: #{error.class}: #{error.message}#{rollback}")
+    end
+    private_class_method :transactional_root_error
+
+    def with_stable_private_root!(identity:)
+      verify_private_root_identity!(identity)
+      yield
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      if root_identity_changed?(identity)
+        raise transactional_root_error(error, nil)
+      end
+      raise
+    else
+      verify_private_root_identity!(identity)
+    end
+    private_class_method :with_stable_private_root!
+
+    def verify_private_root_identity!(identity)
+      current = validate_private_root!(identity.fetch("path"))
+      raise Error, "private release root identity changed during copy" unless current == identity
+
+      true
+    rescue Error, Errno::ENOENT
+      raise Error, "private release root identity changed during copy"
+    end
+    private_class_method :verify_private_root_identity!
 
     def tree_digest(root)
       digest = Digest::SHA256.new
@@ -1646,23 +1955,15 @@ module WavesRelease
       )
       principal = authority.fetch("principal")
       raise Error, "publication tag principal must be #{PRINCIPAL}" unless principal == PRINCIPAL
-      public_key = authority.fetch("publicKey")
-      parts = public_key.split
-      unless parts.length.between?(2, 3) && parts.first == "ssh-ed25519"
-        raise Error, "pinned release key is malformed"
-      end
-      begin
-        fingerprint = "SHA256:#{Base64.strict_encode64(Digest::SHA256.digest(Base64.strict_decode64(parts[1]))).delete('=')}"
-      rescue ArgumentError
-        raise Error, "pinned release key is malformed"
-      end
+      parsed_key = CanonicalSSHKey.parse!(authority.fetch("publicKey"), context: "pinned release key")
+      fingerprint = parsed_key.fetch("fingerprint")
       unless fingerprint == authority.fetch("fingerprint")
         raise Error, "pinned release key fingerprint does not match canonical metadata"
       end
 
       Tempfile.create("waves-allowed-signers") do |file|
         file.chmod(0o600)
-        file.write("#{principal} #{parts.first} #{parts[1]}\n")
+        file.write("#{principal} #{parsed_key.fetch('algorithm')} #{parsed_key.fetch('material')}\n")
         file.flush
         stdout, stderr, status = GitPolicy.run(
           "-c",
@@ -1703,12 +2004,9 @@ module WavesRelease
       )
       tag_revision = GitPolicy.run("rev-list", "-n", "1", tag, chdir: root).strip
       head_revision = GitPolicy.run("rev-parse", "HEAD", chdir: root).strip
-      _, _, ancestry_status = GitPolicy.run(
-        "merge-base", "--is-ancestor", tag_revision, head_revision, chdir: root, allow_failure: true
-      )
-      unless ancestry_status.success?
-        raise Error, "publication tag #{tag} must name a revision that is an ancestor of HEAD"
-      end
+      origin_revision = GitPolicy.run("rev-parse", "origin/main", chdir: root).strip
+      raise Error, "publication tag must equal HEAD" unless tag_revision == head_revision
+      raise Error, "publication source must equal origin/main" unless head_revision == origin_revision
       annotation = GitPolicy.run("for-each-ref", "refs/tags/#{tag}", "--format=%(contents)", chdir: root)
       annotation = annotation.sub(/\n-----BEGIN SSH SIGNATURE-----.*\z/m, "\n")
       annotation = annotation.sub(/\n+\z/, "\n")
@@ -1724,6 +2022,14 @@ module WavesRelease
   end
 
   module ElgatoHandoff
+    module AtomicRename
+      extend Fiddle::Importer
+      dlload Fiddle.dlopen(nil)
+      extern "int renameatx_np(int, const char *, int, const char *, unsigned int)"
+    end
+
+    AT_FDCWD = -2
+    RENAME_EXCL = 0x00000004
     ROLLBACK_DMG_SHA256 = "5887c0c46b824d610016dbfe7e34a1c1e2da2c4bc270555c15221ca5b694face"
     PLUGIN_NAME = "com.jonathanreed.waves.streamDeckPlugin"
     CHECK_IDS = %w[
@@ -1810,6 +2116,8 @@ module WavesRelease
       Validation.revision!(plugin_revision, "Stream Deck plugin source revision")
       raise Error, "Stream Deck plugin package must use the canonical filename" unless File.basename(plugin_path) == PLUGIN_NAME
       raise Error, "Elgato handoff destination already exists" if File.exist?(output_root) || File.symlink?(output_root)
+      anchor_path = "#{output_root}.sha256"
+      raise Error, "Elgato handoff checksum anchor already exists" if File.exist?(anchor_path) || File.symlink?(anchor_path)
 
       manifest = Evidence.verify_file!(
         path: manifest_path,
@@ -1825,6 +2133,11 @@ module WavesRelease
 
       staging = Dir.mktmpdir(".waves-elgato-handoff-", parent)
       FileUtils.chmod(0o700, staging)
+      staging_identity = directory_identity!(staging)
+      anchor_staging = Dir.mktmpdir(".waves-elgato-anchor-", parent)
+      FileUtils.chmod(0o700, anchor_staging)
+      private_anchor_path = File.join(anchor_staging, File.basename(anchor_path))
+      anchor_identity = nil
       begin
         staged_dmg = PrivateArtifacts.stage_file!(
           source: dmg_path,
@@ -1895,11 +2208,46 @@ module WavesRelease
         write_file!(File.join(staging, "ROLLBACK.md"), rollback(handoff))
         write_file!(File.join(staging, "results.json"), CanonicalJSON.generate(pending_results(handoff)))
         write_checksums!(staging, metadata)
+        checksum_digest = Digest::SHA256.file(File.join(staging, "SHA256SUMS")).hexdigest
+        anchor_contents = "#{checksum_digest}  #{File.basename(output_root)}/SHA256SUMS\n"
+        write_file!(private_anchor_path, anchor_contents)
+        File.open(anchor_staging, File::RDONLY) { |directory| directory.fsync }
+        anchor_identity = file_identity!(private_anchor_path)
         verify!(root: staging, metadata: metadata)
+        fsync_tree!(staging, metadata)
+        sealed_tree_digest = tree_digest!(staging, metadata)
+        verify_file_identity!(private_anchor_path, anchor_identity)
+        raise Error, "Elgato handoff anchor content changed before publication" unless File.binread(private_anchor_path) == anchor_contents
         File.rename(staging, output_root)
+        unless directory_identity!(output_root) == staging_identity &&
+            tree_digest!(output_root, metadata) == sealed_tree_digest
+          raise Error, "Elgato handoff sealed tree changed during publication"
+        end
+        publish_anchor!(private_anchor_path, anchor_path)
+        unless directory_identity!(output_root) == staging_identity &&
+            tree_digest!(output_root, metadata) == sealed_tree_digest &&
+            file_identity!(anchor_path) == anchor_identity &&
+            File.binread(anchor_path) == anchor_contents
+          raise Error, "Elgato handoff tree or anchor changed after publication"
+        end
+        Dir.rmdir(anchor_staging)
         staging = nil
-      ensure
-        FileUtils.rm_rf(staging) if staging && File.exist?(staging)
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        rollback = quarantine_publication!(
+          output_root: output_root,
+          anchor_path: anchor_path,
+          parent: parent,
+          staging_identity: staging_identity,
+          anchor_identity: anchor_identity,
+          anchor_contents: anchor_contents
+        )
+        retained = File.directory?(staging) ? staging : rollback[:owned_output]
+        staging = nil
+        details = [error.message]
+        details << "private staging retained at #{retained}" if retained
+        details << "private anchor retained at #{rollback[:owned_anchor]}" if rollback[:owned_anchor]
+        details.concat(rollback[:contested])
+        raise Error, details.join("; ")
       end
       output_root
     end
@@ -2001,7 +2349,9 @@ module WavesRelease
 
         Stream Deck plugin SHA-256: `#{handoff.dig('artifacts', 'streamDeckPlugin', 'sha256')}`
 
-        1. Run `/usr/bin/shasum -a 256 -c SHA256SUMS` in this folder.
+        1. Obtain the SHA-256 of `SHA256SUMS` from the maintainer through a separate,
+           authenticated channel. Do not use a digest delivered with this folder. Verify it,
+           then run `/usr/bin/shasum -a 256 -c SHA256SUMS` in this folder.
         2. Open `#{handoff.dig('artifacts', 'dmg', 'name')}` and drag Waves to Applications.
         3. Open `#{PLUGIN_NAME}` to install the companion.
         4. Follow `TEST-CHECKLIST.md` in order and record every pass or failure.
@@ -2012,7 +2362,7 @@ module WavesRelease
         7. If every group passed, create the return receipt with:
 
            ```bash
-           ./finalize-receipt.rb "$PWD" "$PWD/results.json" \\
+           ./finalize-receipt.rb TRUSTED_SHA256SUMS_SHA256 "$PWD" "$PWD/results.json" \\
              /ABSOLUTE/PATH/TO/DIAGNOSTICS \\
              /ABSOLUTE/PATH/TO/RETURN/remote-elgato-receipt.json
            ```
@@ -2179,6 +2529,106 @@ module WavesRelease
       true
     end
     private_class_method :verify_checksums!
+
+    def fsync_tree!(root, metadata)
+      files(metadata).each do |name|
+        File.open(File.join(root, name), File::RDONLY | File::NOFOLLOW) { |file| file.fsync }
+      end
+      File.open(root, File::RDONLY) { |directory| directory.fsync }
+    end
+    private_class_method :fsync_tree!
+
+    def file_identity!(path)
+      stat = File.lstat(path)
+      raise Error, "Elgato handoff anchor must be a regular file" unless stat.file?
+
+      [stat.dev, stat.ino]
+    end
+    private_class_method :file_identity!
+
+    def directory_identity!(path)
+      stat = File.lstat(path)
+      raise Error, "Elgato handoff root changed during publication" unless stat.directory?
+
+      [stat.dev, stat.ino]
+    end
+    private_class_method :directory_identity!
+
+    def owned_directory?(path, identity)
+      directory_identity!(path) == identity
+    rescue Errno::ENOENT, Error
+      false
+    end
+    private_class_method :owned_directory?
+
+    def publish_anchor!(source, destination)
+      result = AtomicRename.renameatx_np(AT_FDCWD, source, AT_FDCWD, destination, RENAME_EXCL)
+      return true if result.zero?
+
+      raise SystemCallError.new("exclusive Elgato handoff anchor publication failed", Fiddle.last_error)
+    end
+    private_class_method :publish_anchor!
+
+    def quarantine_publication!(output_root:, anchor_path:, parent:, staging_identity:, anchor_identity:, anchor_contents:)
+      result = {owned_output: nil, owned_anchor: nil, contested: []}
+      [
+        [output_root, "handoff", :directory],
+        [anchor_path, "anchor", :file],
+      ].each do |path, label, type|
+        quarantine_root = Dir.mktmpdir(".waves-elgato-quarantine-", parent)
+        FileUtils.chmod(0o700, quarantine_root)
+        quarantined = File.join(quarantine_root, File.basename(path))
+        begin
+          File.rename(path, quarantined)
+        rescue Errno::ENOENT
+          next
+        end
+        owned = if type == :directory
+          owned_directory?(quarantined, staging_identity)
+        else
+          begin
+            file_identity!(quarantined) == anchor_identity && File.binread(quarantined) == anchor_contents
+          rescue Errno::ENOENT, Error
+            false
+          end
+        end
+        if owned
+          result[type == :directory ? :owned_output : :owned_anchor] = quarantined
+        else
+          begin
+            publish_anchor!(quarantined, path)
+          rescue SystemCallError => restore_error
+            result[:contested] << "contested #{label} rollback retained unowned bytes at #{quarantined}: #{restore_error.message}"
+          end
+        end
+      end
+      result
+    end
+    private_class_method :quarantine_publication!
+
+    def tree_digest!(root, metadata)
+      digest = Digest::SHA256.new
+      names = Dir.children(root).sort
+      raise Error, "Elgato handoff file set changed during publication" unless names == files(metadata)
+      names.each do |name|
+        path = File.join(root, name)
+        stat = File.lstat(path)
+        raise Error, "Elgato handoff entry changed during publication: #{name}" unless stat.file?
+        digest << name << "\0" << (stat.mode & 0o777).to_s(8) << "\0"
+        digest << Digest::SHA256.file(path).digest
+      end
+      digest.hexdigest
+    rescue Errno::ENOENT => error
+      raise Error, "Elgato handoff sealed tree changed during publication: #{error.message}"
+    end
+    private_class_method :tree_digest!
+
+    def verify_file_identity!(path, identity)
+      raise Error, "Elgato handoff anchor changed before publication" unless file_identity!(path) == identity
+    rescue Errno::ENOENT
+      raise Error, "Elgato handoff anchor changed before publication"
+    end
+    private_class_method :verify_file_identity!
 
     def verify_file_hash!(root:, name:, digest:, label:)
       Validation.sha256!(digest, "Elgato handoff #{label} SHA-256")

@@ -70,6 +70,10 @@ struct MainWindowView: View {
       store.start()
     }
     .onAppear {
+      // SwiftUI appearance is not proof that AppKit displayed a frame. The
+      // signpost is named MainWindowViewAppeared; synchronized video remains
+      // the authority for the qualifying first-frame measurement.
+      LaunchPerformanceRecorder.active?.mark(.firstFrame)
       store.beginLiveLevels()
       validateSelection()
       // Covers the case where the menu bar's "N more in Waves" link had to

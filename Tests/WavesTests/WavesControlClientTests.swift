@@ -16,6 +16,25 @@ func wavesCTLRejectsInvalidArgumentsBeforeTransport(_ arguments: [String]) {
   }
 }
 
+@Test func wavesCTLTerminalTextNeutralizesControlSequences() {
+  let hostile =
+    "Zoom\u{1B}[2J\u{1B}]0;pwned\u{07}\r\nfake: line\u{2028}x\u{202E}y\u{9B}z\tw\u{7F}"
+  let safe = WavesCTLTerminalText.sanitized(hostile)
+  #expect(
+    safe
+      == "Zoom\u{FFFD}[2J\u{FFFD}]0;pwned\u{FFFD}\u{FFFD}\u{FFFD}fake: line\u{FFFD}x\u{FFFD}y\u{FFFD}z\tw\u{FFFD}"
+  )
+  #expect(!safe.unicodeScalars.contains { $0.value < 0x20 && $0.value != 0x09 })
+  #expect(!safe.unicodeScalars.contains { (0x7F...0x9F).contains($0.value) })
+}
+
+@Test func wavesCTLTerminalTextPreservesOrdinaryNames() {
+  let names = ["Google Chrome", "Über — Musik", "日本語", "emoji 🎧", "tab\tkept"]
+  for name in names {
+    #expect(WavesCTLTerminalText.sanitized(name) == name)
+  }
+}
+
 private final class WavesCTLBuildDirectoryLocator {}
 
 @Test func wavesCTLExecutableRejectsInvalidVolumeBeforeConnecting() throws {

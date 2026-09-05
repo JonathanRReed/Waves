@@ -15,12 +15,19 @@ private func fail(_ message: String, code: Int32 = 1) -> Never {
 private func describe(_ response: [String: JSONValue]) {
   guard response["ok"]?.boolValue == false else { return }
   fail(
-    "error: \(response["error"]?.stringValue ?? "unknown")\n"
-      + (response["message"]?.stringValue ?? ""))
+    WavesCTLTerminalText.sanitized(
+      "error: \(response["error"]?.stringValue ?? "unknown")\n"
+        + (response["message"]?.stringValue ?? "")))
 }
 
 private func percent(_ value: JSONValue?) -> Int {
   Int(((value?.numberValue ?? 0) * 100).rounded())
+}
+
+/// Every line that carries daemon-supplied text goes through the sanitizer
+/// before it reaches the terminal.
+private func emit(_ line: String) {
+  print(WavesCTLTerminalText.sanitized(line))
 }
 
 let command: WavesCTLCommand
@@ -58,7 +65,7 @@ do {
         app["live"]?.boolValue == true ? "live" : nil,
         app["managed"]?.boolValue == true ? "managed" : nil,
       ].compactMap { $0 }.joined(separator: " ")
-      print(
+      emit(
         "\(id.padding(toLength: max(width, id.count), withPad: " ", startingAt: 0))  "
           + "\(String(format: "%3d", percent(app["volume"])))%  \(name)  \(flags)")
     }
@@ -66,7 +73,7 @@ do {
   case .icon:
     let response = try client.request(command.request(id: 1))
     describe(response)
-    print(response["icon"]?.stringValue ?? "(no icon)")
+    emit(response["icon"]?.stringValue ?? "(no icon)")
 
   case .volume(_, let requested):
     let response = try client.request(command.request(id: 1))
@@ -98,9 +105,9 @@ do {
       if let changed = event["changed"]?.objectValue {
         let id = changed["id"]?.stringValue ?? "?"
         let muted = changed["muted"]?.boolValue == true
-        print("\(name): \(id) \(percent(changed["volume"]))%\(muted ? " muted" : "")")
+        emit("\(name): \(id) \(percent(changed["volume"]))%\(muted ? " muted" : "")")
       } else {
-        print(name)
+        emit(name)
       }
     }
 
@@ -109,7 +116,7 @@ do {
     let ordered = response.keys.sorted().map { key in
       "  \"\(key)\": \(response[key]!.description)"
     }.joined(separator: ",\n")
-    print("{\n\(ordered)\n}")
+    emit("{\n\(ordered)\n}")
   }
 } catch let error as WavesCTLTransportError {
   fail(error.description)

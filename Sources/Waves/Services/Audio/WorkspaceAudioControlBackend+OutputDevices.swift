@@ -226,11 +226,20 @@ extension WorkspaceAudioControlBackend {
     // start() runs more than once.
     guard deviceChangeListenerBlock == nil else { return }
 
-    let listenerBlock: AudioObjectPropertyListenerBlock = { [weak self] count, addresses in
-      let selectors = (0..<Int(count)).map { addresses[$0].mSelector }
-      Task { [weak self] in
-        await self?.handleDeviceChange(selectors: selectors)
+    let mailbox = deviceChangeMailbox
+    if deviceChangeTask == nil {
+      deviceChangeTask = Task { [weak self, mailbox] in
+        for await _ in mailbox.wakeups {
+          guard !Task.isCancelled else { break }
+          let changes = mailbox.takePending()
+          guard !changes.isEmpty else { continue }
+          await self?.performDeviceChangePass(selectors: changes.outputSelectors)
+          await Task.yield()
+        }
       }
+    }
+    let listenerBlock: AudioObjectPropertyListenerBlock = { count, addresses in
+      mailbox.enqueue(.outputChanges(in: UnsafeBufferPointer(start: addresses, count: Int(count))))
     }
 
     let selectors: [AudioObjectPropertySelector] = [
@@ -296,30 +305,8 @@ extension WorkspaceAudioControlBackend {
     return checkedCleanupDegradations(from: observations)
   }
 
-  private func handleDeviceChange(selectors: [AudioObjectPropertySelector]) async {
-    guard !isShuttingDown else { return }
-    // macOS commonly raises the default-output change twice in quick
-    // succession (Bluetooth connect, dock, display wake). Two overlapping
-    // passes on this reentrant actor each rebuilt every managed route, so the
-    // second pass replaced and disposed the controllers the first had just
-    // created: twice the tap and aggregate churn, and two dropouts per app.
-    // Fold later events into one follow-up pass instead.
-    if isHandlingDeviceChange {
-      pendingDeviceChangeSelectors = (pendingDeviceChangeSelectors ?? []) + selectors
-      return
-    }
-    isHandlingDeviceChange = true
-    defer { isHandlingDeviceChange = false }
-    var currentSelectors = selectors
-    while true {
-      await performDeviceChangePass(selectors: currentSelectors)
-      guard !isShuttingDown, let pending = pendingDeviceChangeSelectors else { return }
-      pendingDeviceChangeSelectors = nil
-      currentSelectors = pending
-    }
-  }
-
   private func performDeviceChangePass(selectors: [AudioObjectPropertySelector]) async {
+    guard !isShuttingDown, !Task.isCancelled else { return }
     let currentDefaultUID = try? currentDefaultOutputDeviceUID()
     let defaultOutputChanged = defaultOutputDeviceChange.didChange(
       selectors: selectors,

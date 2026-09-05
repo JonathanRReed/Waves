@@ -95,6 +95,14 @@ private struct SecurityRuntimeSigningIdentityOperations: RuntimeSigningIdentityO
 }
 
 enum RuntimeProcessIdentity {
+  static func mayStillBeRunning(_ lifetime: AppProcessLifetimeIdentity) -> Bool {
+    guard lifetime.pid > 0 else { return false }
+    if let current = processLifetime(pid: lifetime.pid) {
+      return current == lifetime
+    }
+    return kill(lifetime.pid, 0) == 0 || errno != ESRCH
+  }
+
   static func probe(pid: pid_t) -> RuntimeProcessProbe? {
     guard pid > 0,
       let lifetime = processLifetime(pid: pid),

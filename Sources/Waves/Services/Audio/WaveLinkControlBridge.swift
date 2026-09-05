@@ -492,6 +492,10 @@ actor WaveLinkControlBridge: WaveLinkControlling {
 /// sequence so a slider drag reuses one connection, then closed while idle so
 /// a Wave Link restart on a new port is picked up by the next sequence.
 actor WaveLinkLoopbackSession {
+  private static let maximumMessageBytes = 1_048_576
+  private static let maximumResponseBytes = 4 * 1_048_576
+  private static let maximumResponseMessages = 64
+
   typealias CandidateProvider = @Sendable () throws -> [WaveLinkEndpointDiscovery.Listener]
 
   struct Connection: Equatable, Sendable {
@@ -530,8 +534,8 @@ actor WaveLinkLoopbackSession {
     idleCloseDelay: Duration = .seconds(2)
   ) {
     // Only the connect handshake gets a session timeout. A resource lifetime
-    // limit would tear the socket down mid-sequence; per-message stalls are
-    // bounded by the receive timeout instead.
+    // limit would tear the socket down mid-sequence. Each request instead gets
+    // one deadline covering its send and all response messages.
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = 2
     urlSession = URLSession(configuration: configuration)
@@ -549,6 +553,7 @@ actor WaveLinkLoopbackSession {
   /// is accepted; the first that does becomes the connection.
   @discardableResult
   func connect() async throws -> Connection {
+    try Task.checkCancellation()
     cancelIdleClose()
     if let connection, socket != nil { return connection }
     closeSocket(with: .goingAway)
@@ -557,9 +562,11 @@ actor WaveLinkLoopbackSession {
     let candidates = try await Task.detached(priority: .utility) {
       try candidateProvider()
     }.value
+    try Task.checkCancellation()
 
     var rejections: [String] = []
     for candidate in candidates {
+      try Task.checkCancellation()
       let socket = openSocket(port: candidate.port)
       do {
         let data = try await performRequest(method: "getApplicationInfo", params: nil, on: socket)
@@ -578,6 +585,10 @@ actor WaveLinkLoopbackSession {
         )
         return connection
       } catch {
+        if error is CancellationError || Task.isCancelled {
+          socket.cancel(with: .abnormalClosure, reason: nil)
+          throw CancellationError()
+        }
         rejections.append("port \(candidate.port): \(error.localizedDescription)")
         socket.cancel(with: .abnormalClosure, reason: nil)
       }
@@ -655,6 +666,7 @@ actor WaveLinkLoopbackSession {
     var request = URLRequest(url: URL(string: "ws://127.0.0.1:\(port)")!)
     request.setValue("streamdeck://", forHTTPHeaderField: "Origin")
     let socket = urlSession.webSocketTask(with: request)
+    socket.maximumMessageSize = Self.maximumMessageBytes
     socket.resume()
     return socket
   }
@@ -664,6 +676,7 @@ actor WaveLinkLoopbackSession {
     params: Data?,
     on socket: URLSessionWebSocketTask
   ) async throws -> Data {
+    try Task.checkCancellation()
     let requestID = nextRequestID
     nextRequestID += 1
 
@@ -678,67 +691,95 @@ actor WaveLinkLoopbackSession {
       payload["params"] = try JSONSerialization.jsonObject(with: params)
     }
     let requestData = try JSONSerialization.data(withJSONObject: payload)
+    guard requestData.count <= Self.maximumMessageBytes else {
+      throw WaveLinkControlBridgeError.protocolViolation("The request exceeded the message byte limit.")
+    }
     guard let requestText = String(data: requestData, encoding: .utf8) else {
       throw WaveLinkControlBridgeError.protocolViolation("The request was not UTF-8.")
     }
 
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: receiveTimeout)
+    let timeoutError = WaveLinkControlBridgeError.unavailable("Wave Link did not answer within the request time limit.")
+    let maximumMessageBytes = Self.maximumMessageBytes
+    let maximumResponseBytes = Self.maximumResponseBytes
+    let maximumResponseMessages = Self.maximumResponseMessages
+
     do {
-      try await socket.send(.string(requestText))
-      while true {
-        let message = try await receiveNextMessage(from: socket)
-        let responseData: Data
-        switch message {
-        case .data(let data):
-          responseData = data
-        case .string(let string):
-          responseData = Data(string.utf8)
-        @unknown default:
-          throw WaveLinkControlBridgeError.protocolViolation("Unknown WebSocket message type.")
+      return try await withTaskCancellationHandler {
+        try await withThrowingTaskGroup(of: Data?.self) { group in
+          defer { group.cancelAll() }
+          group.addTask {
+            try await socket.send(.string(requestText))
+            var receivedBytes = 0
+            for _ in 0..<maximumResponseMessages {
+              try Task.checkCancellation()
+              guard clock.now < deadline else { throw timeoutError }
+              let message = try await socket.receive()
+              let responseData: Data
+              switch message {
+              case .data(let data):
+                guard data.count <= maximumMessageBytes else {
+                  throw WaveLinkControlBridgeError.protocolViolation("The response exceeded the message byte limit.")
+                }
+                responseData = data
+              case .string(let string):
+                guard string.utf8.count <= maximumMessageBytes else {
+                  throw WaveLinkControlBridgeError.protocolViolation("The response exceeded the message byte limit.")
+                }
+                responseData = Data(string.utf8)
+              @unknown default:
+                throw WaveLinkControlBridgeError.protocolViolation("Unknown WebSocket message type.")
+              }
+              guard responseData.count <= maximumResponseBytes - receivedBytes else {
+                throw WaveLinkControlBridgeError.protocolViolation("The response exceeded the aggregate byte limit.")
+              }
+              receivedBytes += responseData.count
+              // Notifications and wrong IDs consume the same request budget.
+              guard
+                let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                (object["id"] as? NSNumber)?.intValue == requestID
+              else { continue }
+              if let errorObject = object["error"] {
+                let errorData = try JSONSerialization.data(withJSONObject: errorObject)
+                let errorPayload = try? JSONDecoder().decode(RPCErrorPayload.self, from: errorData)
+                let detail = errorPayload?.message ?? "JSON-RPC error \(errorPayload?.code ?? -1)"
+                throw WaveLinkControlBridgeError.unavailable("\(method): \(detail)")
+              }
+              guard let result = object["result"] else {
+                throw WaveLinkControlBridgeError.protocolViolation("Missing JSON-RPC result for \(method).")
+              }
+              guard clock.now < deadline else { throw timeoutError }
+              if result is NSNull { return Data("{}".utf8) }
+              return try JSONSerialization.data(withJSONObject: result)
+            }
+            throw WaveLinkControlBridgeError.protocolViolation("The response exceeded the message-count limit.")
+          }
+          group.addTask {
+            try await clock.sleep(until: deadline)
+            return nil
+          }
+          guard let completion = try await group.next() else {
+            throw WaveLinkControlBridgeError.unavailable("The control connection closed unexpectedly.")
+          }
+          try Task.checkCancellation()
+          guard let response = completion else {
+            socket.cancel(with: .abnormalClosure, reason: nil)
+            throw timeoutError
+          }
+          return response
         }
-        // Wave Link pushes notifications (no `id`) on the same socket; skip
-        // anything that is not the reply to this request.
-        guard
-          let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-          (object["id"] as? NSNumber)?.intValue == requestID
-        else {
-          continue
-        }
-        if let errorObject = object["error"] {
-          let errorData = try JSONSerialization.data(withJSONObject: errorObject)
-          let errorPayload = try? JSONDecoder().decode(RPCErrorPayload.self, from: errorData)
-          let detail = errorPayload?.message ?? "JSON-RPC error \(errorPayload?.code ?? -1)"
-          throw WaveLinkControlBridgeError.unavailable("\(method): \(detail)")
-        }
-        guard let result = object["result"] else {
-          throw WaveLinkControlBridgeError.protocolViolation("Missing JSON-RPC result for \(method).")
-        }
-        if result is NSNull { return Data("{}".utf8) }
-        return try JSONSerialization.data(withJSONObject: result)
+      } onCancel: {
+        socket.cancel(with: .abnormalClosure, reason: nil)
       }
+    } catch is CancellationError {
+      throw CancellationError()
     } catch let error as WaveLinkControlBridgeError {
+      if Task.isCancelled { throw CancellationError() }
       throw error
     } catch {
+      if Task.isCancelled { throw CancellationError() }
       throw WaveLinkControlBridgeError.unavailable("\(method): \(error.localizedDescription)")
-    }
-  }
-
-  private func receiveNextMessage(
-    from socket: URLSessionWebSocketTask
-  ) async throws -> URLSessionWebSocketTask.Message {
-    let timeout = receiveTimeout
-    return try await withThrowingTaskGroup(of: URLSessionWebSocketTask.Message.self) { group in
-      group.addTask {
-        try await socket.receive()
-      }
-      group.addTask {
-        try await Task.sleep(for: timeout)
-        throw WaveLinkControlBridgeError.unavailable("Wave Link did not answer within \(timeout.components.seconds) seconds.")
-      }
-      guard let message = try await group.next() else {
-        throw WaveLinkControlBridgeError.unavailable("The control connection closed unexpectedly.")
-      }
-      group.cancelAll()
-      return message
     }
   }
 }

@@ -38,6 +38,10 @@ run_infra() {
     "$RELEASE_RUBY" -I"$ROOT_DIR/script" "$ROOT_DIR/script/tests/release_infra_test.rb"
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Process-group deadline self-tests" \
     "$RELEASE_RUBY" "$ROOT_DIR/script/tests/run_phase_test.rb"
+  run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Launch measurement tooling self-tests" \
+    "$RELEASE_RUBY" "$ROOT_DIR/script/tests/launch_measurement_test.rb"
+  run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Runtime profile tooling self-tests" \
+    "$RELEASE_RUBY" "$ROOT_DIR/script/tests/runtime_profile_test.rb"
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Repository release contract" \
     "$RELEASE_RUBY" "$ROOT_DIR/script/release_tool.rb" validate-repository
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Repository workflow contract" \

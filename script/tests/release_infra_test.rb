@@ -5,14 +5,16 @@ require "base64"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "securerandom"
 require "shellwords"
 require "tmpdir"
 
 require_relative "../release_tool"
+require_relative "../../release/elgato-handoff/finalize-receipt"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.7.0"
-  BUILD = 16
+  VERSION = "1.7.1"
+  BUILD = 19
   RELEASE_TAG = "v#{VERSION}"
   HANDOFF_NAME = "Waves-#{VERSION}-#{BUILD}-Elgato-Handoff"
   HANDOFF_DMG_NAME = "Waves-#{VERSION}-#{BUILD}.dmg"
@@ -30,6 +32,74 @@ class ReleaseInfraTest < Minitest::Test
   RELEASE_FINGERPRINT = "SHA256:53uCiv5rg7roncACotblHKo4OvHAsvYw/+x/5pU0mCQ"
   SPARKLE_ACCOUNT = "com.jonathanreed.Waves"
   SPARKLE_PUBLIC_KEY = "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
+  BENCHMARK_DEFERRAL_REASON =
+    "Maintenance release 1.7.1 defers exhaustive benchmarks while retaining active and idle stability smoke checks."
+
+  def production_cleanup
+    root = File.expand_path("../..", __dir__)
+    script = File.read(File.join(root, "script/build_and_run.sh"))
+    cleanup = script[/cleanup\(\) \{.*?\n\}\ntrap cleanup EXIT/m]
+    refute_nil cleanup, "production cleanup function must be available"
+    cleanup
+  end
+
+  def writable_dmg_workspace
+    loop do
+      path = File.join("/private/tmp", "waves-dmg-layout.#{SecureRandom.alphanumeric(6)}")
+      next if File.exist?(path) || File.symlink?(path)
+
+      Dir.mkdir(path, 0o700)
+      File.write(File.join(path, "layout.dmg"), "layout-image-bytes")
+      return path
+    end
+  end
+
+  def remove_created_path(path)
+    return unless path && (File.exist?(path) || File.symlink?(path))
+
+    FileUtils.remove_entry(path)
+  end
+
+  def run_production_cleanup(workspace:, image:, mount: "", detach_status: 0)
+    Dir.mktmpdir("waves-cleanup-hook") do |hook_dir|
+      hook = File.join(hook_dir, "hdiutil")
+      log = File.join(hook_dir, "detach.log")
+      File.write(hook, <<~BASH)
+        #!/bin/bash
+        test -f "$EXPECTED_IMAGE" || exit 90
+        printf '%s\n' "$*" > "$DETACH_LOG"
+        exit "$DETACH_STATUS"
+      BASH
+      FileUtils.chmod(0o700, hook)
+      cleanup = production_cleanup.gsub("/usr/bin/hdiutil", Shellwords.escape(hook))
+      probe = <<~BASH
+        set -u
+        SMOKE_PID="" ACTIVE_MOUNT_DIR="$MOUNT" ACTIVE_STAGING_DIR="" ACTIVE_SMOKE_HOME=""
+        ACTIVE_WRITABLE_DMG_DIR="$WORKSPACE" ACTIVE_WRITABLE_DMG="$IMAGE"
+        cleanup_isolated_distribution_build() { :; }
+        #{cleanup}
+        cleanup
+        printf 'mount=%s\ndir=%s\nimage=%s\n' \
+          "$ACTIVE_MOUNT_DIR" "$ACTIVE_WRITABLE_DMG_DIR" "$ACTIVE_WRITABLE_DMG"
+        if [ -f "$IMAGE" ]; then
+          printf 'bytes='
+          /usr/bin/base64 < "$IMAGE"
+        fi
+      BASH
+      stdout, stderr, status = Open3.capture3(
+        {
+          "WORKSPACE" => workspace,
+          "IMAGE" => image,
+          "MOUNT" => mount,
+          "EXPECTED_IMAGE" => File.join(workspace, "layout.dmg"),
+          "DETACH_LOG" => log,
+          "DETACH_STATUS" => detach_status.to_s
+        },
+        "/bin/bash", "-c", probe
+      )
+      [stdout, stderr, status, File.exist?(log) ? File.read(log) : nil]
+    end
+  end
 
   def test_dmg_builder_configures_and_verifies_premium_finder_layout
     root = File.expand_path("../..", __dir__)
@@ -46,9 +116,10 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes build_script, ".background"
     assert_includes build_script, ".DS_Store"
     assert_includes build_script, "finder_metadata_attempt"
-    assert_includes build_script, '/private/tmp/waves-dmg-layout.XXXXXX'
+    assert_match(/ACTIVE_WRITABLE_DMG_DIR=.*mktemp -d.*waves-dmg-layout\.XXXXXX.*\n\s+chmod 700.*ACTIVE_WRITABLE_DMG_DIR.*\n\s+ACTIVE_WRITABLE_DMG=.*layout\.dmg/, build_script)
     assert_includes build_script, '/private/tmp/waves-dmg-mount.XXXXXX'
-    assert_includes build_script, 'layout_volume_name="$APP_NAME Layout ${ACTIVE_WRITABLE_DMG##*.}"'
+    assert_includes build_script, 'layout_token="${ACTIVE_WRITABLE_DMG_DIR##*.}"'
+    assert_includes build_script, 'layout_volume_name="$APP_NAME Layout $layout_token"'
     assert_includes build_script, 'diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME"'
 
     finder_script = File.read(finder_script_path)
@@ -64,6 +135,116 @@ class ReleaseInfraTest < Minitest::Test
                     'set position of item ".background" of targetFolder to {590, 80}'
     refute_includes finder_script,
                     'file "Waves.png" of folder ".background" of targetFolder'
+  end
+
+  def test_writable_dmg_workspace_is_private_and_layout_volume_uses_unique_token
+    root = File.expand_path("../..", __dir__)
+    script = File.read(File.join(root, "script/build_and_run.sh"))
+    setup = script[/ACTIVE_WRITABLE_DMG_DIR="\$\(mktemp -d .*?layout_volume_name="\$APP_NAME Layout \$layout_token"/m]
+    refute_nil setup, "writable DMG setup must remain executable as one production block"
+    stdout, stderr, status = Open3.capture3(
+      {"APP_NAME" => "Waves"},
+      "/bin/bash", "-c",
+      "set -eu; #{setup}; : > \"$ACTIVE_WRITABLE_DMG\"; " \
+      "printf '%s\\n%s\\n%s\\n' \"$ACTIVE_WRITABLE_DMG_DIR\" \"$ACTIVE_WRITABLE_DMG\" \"$layout_volume_name\""
+    )
+    assert status.success?, stderr
+    workspace, image, volume = stdout.lines.map(&:chomp)
+    token = File.basename(workspace).delete_prefix("waves-dmg-layout.")
+    assert_match(%r{\A/private/tmp/waves-dmg-layout\.[A-Za-z0-9]{6}\z}, workspace)
+    assert_equal 0o700, File.stat(workspace).mode & 0o777
+    assert_equal File.join(workspace, "layout.dmg"), image
+    assert File.file?(image)
+    assert_equal "Waves Layout #{token}", volume
+  ensure
+    remove_created_path(workspace)
+  end
+
+  def test_writable_dmg_cleanup_retains_workspace_when_detach_fails
+    workspace = writable_dmg_workspace
+    image = File.join(workspace, "layout.dmg")
+    mount = "/private/tmp/waves-dmg-mount.failure"
+    stdout, stderr, status, detach = run_production_cleanup(
+      workspace: workspace, image: image, mount: mount, detach_status: 1
+    )
+    assert status.success?, stderr
+    assert_equal "detach #{mount} -quiet\n", detach
+    assert_includes stdout, "mount=#{mount}\n"
+    assert_includes stdout, "dir=#{workspace}\n"
+    assert_includes stdout, "image=#{image}\n"
+    encoded = ["layout-image-bytes"].pack("m0")
+    assert_includes stdout, "bytes=#{encoded}\n"
+    assert File.directory?(workspace)
+    assert_equal "layout-image-bytes", File.binread(image)
+  ensure
+    remove_created_path(workspace)
+  end
+
+  def test_writable_dmg_cleanup_normal_no_active_mount
+    workspace = writable_dmg_workspace
+    image = File.join(workspace, "layout.dmg")
+    File.delete(image)
+    assert File.directory?(workspace), "production leaves the empty workspace for EXIT cleanup"
+    refute File.exist?(image), "production removes layout.dmg after conversion"
+    _stdout, stderr, status, detach = run_production_cleanup(workspace: workspace, image: image)
+    assert status.success?, stderr
+    assert_nil detach, "cleanup without an active mount must not invoke hdiutil"
+    refute File.exist?(workspace), "normal cleanup must remove the exact workspace"
+  ensure
+    remove_created_path(workspace)
+  end
+
+  def test_writable_dmg_cleanup_detaches_before_removing_layout_failure_workspace
+    workspace = writable_dmg_workspace
+    image = File.join(workspace, "layout.dmg")
+    _stdout, stderr, status, detach = run_production_cleanup(
+      workspace: workspace, image: image, mount: "/private/tmp/waves-dmg-mount.success"
+    )
+    assert status.success?, stderr
+    assert_equal "detach /private/tmp/waves-dmg-mount.success -quiet\n", detach
+    refute File.exist?(workspace), "successful detach must be followed by workspace removal"
+  ensure
+    remove_created_path(workspace)
+  end
+
+  def test_writable_dmg_cleanup_rejects_unsafe_workspace_targets
+    sentinels = []
+
+    valid_target = writable_dmg_workspace
+    symlink = File.join("/private/tmp", "waves-dmg-layout.#{SecureRandom.alphanumeric(6)}")
+    File.symlink(valid_target, symlink)
+    sentinels << [symlink, File.join(symlink, "layout.dmg")]
+
+    wrong_mode = writable_dmg_workspace
+    FileUtils.chmod(0o755, wrong_mode)
+    sentinels << [wrong_mode, File.join(wrong_mode, "layout.dmg")]
+
+    malformed = File.join("/private/tmp", "waves-dmg-layout.#{SecureRandom.alphanumeric(5)}")
+    Dir.mkdir(malformed, 0o700)
+    File.write(File.join(malformed, "layout.dmg"), "layout-image-bytes")
+    sentinels << [malformed, File.join(malformed, "layout.dmg")]
+
+    mismatch = writable_dmg_workspace
+    sentinels << [mismatch, File.join(mismatch, "other.dmg")]
+
+    broad_sentinel = writable_dmg_workspace
+    sentinels << ["", ""]
+    sentinels << ["/private/tmp", File.join(broad_sentinel, "layout.dmg")]
+
+    sentinels.each do |workspace, image|
+      _stdout, stderr, status, = run_production_cleanup(workspace: workspace, image: image)
+      assert status.success?, "#{workspace.inspect}: #{stderr}"
+    end
+    assert File.symlink?(symlink), "symlink target must remain untouched"
+    assert_equal "layout-image-bytes", File.binread(File.join(valid_target, "layout.dmg"))
+    assert_equal "layout-image-bytes", File.binread(File.join(wrong_mode, "layout.dmg"))
+    assert_equal "layout-image-bytes", File.binread(File.join(malformed, "layout.dmg"))
+    assert_equal "layout-image-bytes", File.binread(File.join(mismatch, "layout.dmg"))
+    assert_equal "layout-image-bytes", File.binread(File.join(broad_sentinel, "layout.dmg"))
+  ensure
+    [symlink, valid_target, wrong_mode, malformed, mismatch, broad_sentinel].each do |path|
+      remove_created_path(path)
+    end
   end
 
   def test_dmg_background_renderer_matches_the_660_by_430_finder_window
@@ -303,6 +484,27 @@ class ReleaseInfraTest < Minitest::Test
     }
   end
 
+  def deferred_performance_metric(reason: BENCHMARK_DEFERRAL_REASON)
+    {
+      "baseline" => nil,
+      "candidate" => nil,
+      "regressionPercent" => nil,
+      "status" => "deferred",
+      "approvedJustification" => reason,
+    }
+  end
+
+  def benchmark_deferral_metadata_hash
+    metadata_hash.merge(
+      "benchmarkDeferral" => {
+        "version" => VERSION,
+        "build" => BUILD,
+        "approvedOn" => "2026-09-05",
+        "reason" => BENCHMARK_DEFERRAL_REASON,
+      }
+    )
+  end
+
   def required_gates
     %w[
       localQA securityScan sanitizer routeLifecycleStress socketStress
@@ -346,6 +548,20 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal DESIGNATED_REQUIREMENT, metadata.dig("developerID", "designatedRequirement")
   end
 
+  def test_tracked_metadata_authorizes_only_the_approved_current_release_benchmark_deferral
+    metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
+
+    assert_equal(
+      {
+        "version" => VERSION,
+        "build" => BUILD,
+        "approvedOn" => "2026-09-05",
+        "reason" => BENCHMARK_DEFERRAL_REASON,
+      },
+      metadata.fetch("benchmarkDeferral")
+    )
+  end
+
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
     future = metadata_hash.merge("version" => "1.7.1", "build" => 16)
     with_metadata(future) do |path|
@@ -367,6 +583,99 @@ class ReleaseInfraTest < Minitest::Test
       [metadata_hash.merge("minimumMacOSVersion" => "14.2.0"), /minimum macOS/],
     ].each do |contents, message|
       with_metadata(contents) { |path| assert_release_error(message) { WavesRelease::Metadata.load(path) } }
+    end
+  end
+
+  def test_metadata_rejects_malformed_and_noncanonical_release_key_material
+    algorithm, material = RELEASE_PUBLIC_KEY.split.first(2)
+    [
+      ["rsa-sha2-512 #{material}", /publicKey/],
+      ["#{algorithm} #{material}*", /publicKey/],
+      ["#{algorithm} #{material}=", /publicKey/],
+      ["#{algorithm} #{material[0, 12]} #{material[12..-1]}", /publicKey|fingerprint/],
+    ].each do |public_key, message|
+      contents = security_metadata_hash(public_key: public_key)
+      with_metadata(contents) do |path|
+        assert_release_error(message) { WavesRelease::Metadata.load(path) }
+      end
+    end
+  end
+
+  def test_metadata_rejects_malformed_or_unbound_benchmark_deferral_policy
+    valid = benchmark_deferral_metadata_hash
+    cases = [
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("version" => "1.7.2")), /version/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("build" => BUILD + 1)), /build/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("approvedOn" => "2026-9-5")), /approvedOn/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("reason" => "")), /reason/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("scope" => "securityScan")), /unknown key/],
+    ]
+
+    cases.each do |contents, message|
+      with_metadata(contents) do |path|
+        assert_release_error(message) { WavesRelease::Metadata.load(path) }
+      end
+    end
+  end
+
+  def test_evidence_accepts_approved_current_release_benchmark_deferral
+    metadata = benchmark_deferral_metadata_hash
+    input = evidence_input
+    input["performance"] = input.fetch("performance").transform_values { deferred_performance_metric }
+
+    manifest = WavesRelease::Evidence.seal(input: input, metadata: metadata, profile: "candidate")
+
+    assert_equal ["deferred"], manifest.fetch("performance").values.map { |metric| metric.fetch("status") }.uniq
+  end
+
+  def test_evidence_rejects_deferred_benchmarks_without_canonical_approval
+    input = evidence_input
+    input["performance"] = input.fetch("performance").transform_values { deferred_performance_metric }
+
+    assert_release_error(/not authorized/) do
+      WavesRelease::Evidence.seal(input: input, metadata: metadata_hash, profile: "candidate")
+    end
+  end
+
+  def test_evidence_rejects_numeric_values_or_unapproved_reason_for_a_deferred_metric
+    metadata = benchmark_deferral_metadata_hash
+    numeric = evidence_input
+    numeric.fetch("performance")["launchTime"] = deferred_performance_metric.merge("baseline" => 100.0)
+    assert_release_error(/must be null/) do
+      WavesRelease::Evidence.seal(input: numeric, metadata: metadata, profile: "candidate")
+    end
+
+    wrong_reason = evidence_input
+    wrong_reason.fetch("performance")["launchTime"] = deferred_performance_metric(reason: "Caller supplied reason")
+    assert_release_error(/approved justification/) do
+      WavesRelease::Evidence.seal(input: wrong_reason, metadata: metadata, profile: "candidate")
+    end
+  end
+
+  def test_evidence_keeps_measured_performance_validation_when_deferral_is_approved
+    metadata = benchmark_deferral_metadata_hash
+    WavesRelease::Evidence.seal(input: evidence_input, metadata: metadata, profile: "candidate")
+
+    invalid = evidence_input
+    invalid.fetch("performance").fetch("launchTime")["regressionPercent"] = 4.0
+    assert_release_error(/does not match/) do
+      WavesRelease::Evidence.seal(input: invalid, metadata: metadata, profile: "candidate")
+    end
+  end
+
+  def test_benchmark_deferral_does_not_defer_security_or_hardware_gates
+    metadata = benchmark_deferral_metadata_hash
+
+    security = evidence_input
+    security.fetch("gates").fetch("securityScan")["status"] = "deferred"
+    assert_release_error(/securityScan/) do
+      WavesRelease::Evidence.seal(input: security, metadata: metadata, profile: "candidate")
+    end
+
+    hardware = evidence_input
+    hardware.fetch("platforms").fetch("goldenGateNative")["status"] = "deferred"
+    assert_release_error(/goldenGateNative/) do
+      WavesRelease::Evidence.seal(input: hardware, metadata: metadata, profile: "candidate")
     end
   end
 
@@ -941,6 +1250,45 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_release_git_ignores_commit_replacements_for_source_reads_and_archives
+    with_production_release_repo do |root, _scratch|
+      revision = git(root, "rev-parse", "HEAD").strip
+      original = git(root, "show", "#{revision}:README.md")
+      original_archive = git(root, "archive", "--format=tar", revision)
+      File.write(File.join(root, "README.md"), "substituted release source\n")
+      git(root, "add", "README.md")
+      git(root, "commit", "-q", "-m", "test: replacement source")
+      replacement = git(root, "rev-parse", "HEAD").strip
+      git(root, "checkout", "-q", "--detach", revision)
+      git(root, "replace", revision, replacement)
+
+      assert_equal "substituted release source\n", git(root, "show", "#{revision}:README.md")
+      assert_equal original, WavesRelease::GitPolicy.run("show", "#{revision}:README.md", chdir: root)
+      assert_equal original_archive, WavesRelease::GitPolicy.run("archive", "--format=tar", revision, chdir: root)
+      identity = WavesRelease::ReleaseSource.identity!(root: root, expected_revision: revision)
+      assert_equal Digest::SHA256.hexdigest(original_archive), identity.fetch("sourceArchiveSHA256")
+
+      git(root, "read-tree", "--reset", "-u", replacement)
+      assert_empty git(root, "status", "--porcelain", "--untracked-files=no")
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ReleaseSource.identity!(root: root, expected_revision: revision)
+      end
+      assert_match(/clean tracked tree/, error.message)
+    end
+  end
+
+  def test_release_git_ignores_blob_replacements
+    with_production_release_repo do |root, _scratch|
+      blob = git(root, "rev-parse", "HEAD:README.md").strip
+      original = git(root, "cat-file", "blob", blob)
+      replacement = git_with_input(root, "substituted blob\n", "hash-object", "-w", "--stdin").strip
+      git(root, "replace", blob, replacement)
+
+      assert_equal "substituted blob\n", git(root, "cat-file", "blob", blob)
+      assert_equal original, WavesRelease::GitPolicy.run("cat-file", "blob", blob, chdir: root)
+    end
+  end
+
   def test_task12d_release_git_calls_use_only_the_repository_policy_launcher
     launcher = File.read(File.expand_path("../release_git", __dir__))
     assert_equal "#!/bin/bash -p", launcher.lines.first.chomp
@@ -1124,6 +1472,9 @@ class ReleaseInfraTest < Minitest::Test
         results.json
       ]
       assert_equal expected_files, Dir.children(output).sort
+      anchor_path = "#{output}.sha256"
+      assert_equal Digest::SHA256.file(File.join(output, "SHA256SUMS")).hexdigest,
+        File.read(anchor_path).split.first
 
       handoff_manifest = WavesRelease::StrictJSON.load(File.join(output, "handoff.json"))
       assert_equal 1, handoff_manifest.fetch("schemaVersion")
@@ -1166,6 +1517,343 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_elgato_handoff_rejects_staged_byte_mutation_before_publication
+    mutations = {
+      "DMG" => HANDOFF_DMG_NAME,
+      "plugin" => "com.jonathanreed.waves.streamDeckPlugin",
+      "manifest" => "release-evidence.candidate.json",
+      "static kit" => "README.md",
+    }
+
+    mutations.each do |label, name|
+      Dir.mktmpdir("waves-elgato-mutation") do |root|
+        dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+        singleton = WavesRelease::ElgatoHandoff.singleton_class
+        original = WavesRelease::ElgatoHandoff.method(:write_file!)
+        singleton.send(:define_method, :write_file!) do |path, contents|
+          original.call(path, contents)
+          next unless contents.end_with?("/SHA256SUMS\n")
+
+          staging = Dir.glob(File.join(root, ".waves-elgato-handoff-*")).fetch(0)
+          File.open(File.join(staging, name), "ab") { |file| file << "mutated after seal\n" }
+        end
+        singleton.send(:private, :write_file!)
+
+        error = assert_raises(WavesRelease::Error, "expected #{label} mutation to fail closed") do
+          WavesRelease::ElgatoHandoff.prepare!(
+            manifest_path: manifest,
+            metadata: load_metadata,
+            dmg_path: dmg,
+            plugin_path: plugin,
+            plugin_revision: "b" * 40,
+            templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+            output_root: output
+          )
+        end
+        assert_match(/retained at/, error.message)
+        refute File.exist?(output), "#{label} mutation must not publish the handoff"
+        refute File.exist?("#{output}.sha256"), "#{label} mutation must not leave a partial anchor"
+        retained = error.message[/retained at (.+)\z/, 1]
+        assert retained && File.directory?(retained), "#{label} failure must retain private staging"
+      ensure
+        singleton.send(:define_method, :write_file!, original)
+        singleton.send(:private, :write_file!)
+      end
+    end
+  end
+
+  def test_elgato_handoff_anchor_failure_retains_private_staging_without_publication
+    Dir.mktmpdir("waves-elgato-anchor-failure") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      singleton = WavesRelease::ElgatoHandoff.singleton_class
+      original = WavesRelease::ElgatoHandoff.method(:write_file!)
+      singleton.send(:define_method, :write_file!) do |path, contents|
+        raise Errno::ENOSPC, path if contents.end_with?("/SHA256SUMS\n")
+
+        original.call(path, contents)
+      end
+      singleton.send(:private, :write_file!)
+
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_match(/retained at/, error.message)
+      refute File.exist?(output)
+      refute File.exist?("#{output}.sha256")
+      retained = error.message[/retained at (.+)\z/, 1]
+      assert retained && File.directory?(retained)
+    ensure
+      singleton.send(:define_method, :write_file!, original)
+      singleton.send(:private, :write_file!)
+    end
+  end
+
+  def test_elgato_handoff_does_not_expose_anchor_before_directory_publication
+    Dir.mktmpdir("waves-elgato-anchor-visibility") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      singleton = WavesRelease::ElgatoHandoff.singleton_class
+      original = WavesRelease::ElgatoHandoff.method(:verify!)
+      anchor_was_public_during_verification = nil
+      singleton.send(:define_method, :verify!) do |**arguments|
+        anchor_was_public_during_verification = File.exist?("#{output}.sha256")
+        original.call(**arguments)
+      end
+
+      WavesRelease::ElgatoHandoff.prepare!(
+        manifest_path: manifest,
+        metadata: load_metadata,
+        dmg_path: dmg,
+        plugin_path: plugin,
+        plugin_revision: "b" * 40,
+        templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+        output_root: output
+      )
+      assert_equal false, anchor_was_public_during_verification
+      assert File.directory?(output)
+      assert File.file?("#{output}.sha256")
+    ensure
+      singleton.send(:define_method, :verify!, original)
+    end
+  end
+
+  def test_elgato_handoff_cleanup_does_not_unlink_replaced_anchor
+    Dir.mktmpdir("waves-elgato-anchor-replacement") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      singleton = WavesRelease::ElgatoHandoff.singleton_class
+      original = WavesRelease::ElgatoHandoff.method(:file_identity!)
+      replacement = {}
+      singleton.send(:define_method, :file_identity!) do |path|
+        identity = original.call(path)
+        if replacement.empty?
+          File.unlink(path)
+          File.write(path, "racing replacement\n")
+          replacement[:path] = path
+        end
+        identity
+      end
+      singleton.send(:private, :file_identity!)
+
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_match(/anchor changed before publication/, error.message)
+      refute File.exist?(output)
+      replacement_path = replacement[:path]
+      assert replacement_path && File.file?(replacement_path)
+      assert_equal "racing replacement\n", File.read(replacement_path)
+    ensure
+      singleton.send(:define_method, :file_identity!, original)
+      singleton.send(:private, :file_identity!)
+    end
+  end
+
+  def test_elgato_handoff_rechecks_sealed_tree_after_directory_rename
+    Dir.mktmpdir("waves-elgato-rename-mutation") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      singleton = File.singleton_class
+      original = File.method(:rename)
+      singleton.send(:define_method, :rename) do |source, destination|
+        if destination == output && File.basename(source).start_with?(".waves-elgato-handoff-")
+          File.open(File.join(source, "README.md"), "a") { |file| file << "rename seam mutation\n" }
+        end
+        original.call(source, destination)
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_match(/sealed tree changed during publication/, error.message)
+      refute File.exist?(output)
+      refute File.exist?("#{output}.sha256")
+      retained = error.message[/retained at (.+)\z/, 1]
+      assert retained && File.directory?(retained)
+    ensure
+      singleton.send(:define_method, :rename, original)
+    end
+  end
+
+  def test_elgato_handoff_rollback_does_not_move_an_output_replacement
+    Dir.mktmpdir("waves-elgato-output-replacement") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      stolen_output = File.join(root, "stolen-owned-output")
+      handoff_singleton = WavesRelease::ElgatoHandoff.singleton_class
+      file_singleton = File.singleton_class
+      original_publish = WavesRelease::ElgatoHandoff.method(:publish_anchor!)
+      original_rename = File.method(:rename)
+      replace_output = lambda do |source, destination|
+        if destination == "#{output}.sha256" && source.include?(".waves-elgato-anchor-")
+          original_rename.call(output, stolen_output)
+          Dir.mkdir(output)
+          File.write(File.join(output, "attacker.txt"), "unowned replacement\n")
+          raise Errno::ENOSPC, destination
+        end
+      end
+      handoff_singleton.send(:define_method, :publish_anchor!) do |source, destination|
+        replace_output.call(source, destination)
+        original_publish.call(source, destination)
+      end
+      handoff_singleton.send(:private, :publish_anchor!)
+
+      assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_equal "unowned replacement\n", File.read(File.join(output, "attacker.txt"))
+      assert File.directory?(stolen_output)
+      refute File.exist?("#{output}.sha256")
+    ensure
+      handoff_singleton.send(:define_method, :publish_anchor!, original_publish)
+      handoff_singleton.send(:private, :publish_anchor!)
+    end
+  end
+
+  def test_elgato_handoff_rechecks_tree_and_anchor_after_final_publication
+    Dir.mktmpdir("waves-elgato-final-publication-mutation") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      handoff_singleton = WavesRelease::ElgatoHandoff.singleton_class
+      file_singleton = File.singleton_class
+      if WavesRelease::ElgatoHandoff.respond_to?(:publish_anchor!, true)
+        original_publish = WavesRelease::ElgatoHandoff.method(:publish_anchor!)
+        handoff_singleton.send(:define_method, :publish_anchor!) do |source, destination|
+          File.open(File.join(output, "README.md"), "a") { |file| file << "final tree mutation\n" }
+          File.open(source, "a") { |file| file << "final anchor mutation\n" }
+          original_publish.call(source, destination)
+        end
+        handoff_singleton.send(:private, :publish_anchor!)
+      else
+        original_link = File.method(:link)
+        file_singleton.send(:define_method, :link) do |source, destination|
+          if destination == "#{output}.sha256"
+            File.open(File.join(output, "README.md"), "a") { |file| file << "final tree mutation\n" }
+            File.open(source, "a") { |file| file << "final anchor mutation\n" }
+          end
+          original_link.call(source, destination)
+        end
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_match(/changed after publication/, error.message)
+      refute File.exist?(output)
+      refute File.exist?("#{output}.sha256")
+      retained_paths = error.message.scan(/retained at ([^;,]+)/).flatten
+      assert retained_paths.any? { |path| File.exist?(path) }
+    ensure
+      if original_publish
+        handoff_singleton.send(:define_method, :publish_anchor!, original_publish)
+        handoff_singleton.send(:private, :publish_anchor!)
+      elsif original_link
+        file_singleton.send(:define_method, :link, original_link)
+      end
+    end
+  end
+
+  def test_elgato_handoff_quarantines_before_deciding_rollback_ownership
+    Dir.mktmpdir("waves-elgato-rollback-check-race") do |root|
+      dmg, plugin, manifest, output = elgato_handoff_fixture(root)
+      stolen_output = File.join(root, "stolen-before-rollback")
+      handoff_singleton = WavesRelease::ElgatoHandoff.singleton_class
+      file_singleton = File.singleton_class
+      original_publish = WavesRelease::ElgatoHandoff.method(:publish_anchor!)
+      original_rename = File.method(:rename)
+      replacement_installed = false
+      handoff_singleton.send(:define_method, :publish_anchor!) do |source, destination|
+        raise Errno::ENOSPC, destination if destination == "#{output}.sha256"
+        original_publish.call(source, destination)
+      end
+      handoff_singleton.send(:private, :publish_anchor!)
+      file_singleton.send(:define_method, :rename) do |source, destination|
+        if source == output && !replacement_installed
+          replacement_installed = true
+          original_rename.call(output, stolen_output)
+          Dir.mkdir(output)
+          File.write(File.join(output, "attacker.txt"), "between-check replacement\n")
+        end
+        original_rename.call(source, destination)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        WavesRelease::ElgatoHandoff.prepare!(
+          manifest_path: manifest,
+          metadata: load_metadata,
+          dmg_path: dmg,
+          plugin_path: plugin,
+          plugin_revision: "b" * 40,
+          templates_root: File.expand_path("../../release/elgato-handoff", __dir__),
+          output_root: output
+        )
+      end
+      assert_equal "between-check replacement\n", File.read(File.join(output, "attacker.txt"))
+      assert File.directory?(stolen_output)
+      refute File.exist?("#{output}.sha256")
+    ensure
+      handoff_singleton.send(:define_method, :publish_anchor!, original_publish)
+      handoff_singleton.send(:private, :publish_anchor!)
+      file_singleton.send(:define_method, :rename, original_rename)
+    end
+  end
+
+  def elgato_handoff_fixture(root)
+    dmg = File.join(root, "Waves.dmg")
+    plugin = File.join(root, "com.jonathanreed.waves.streamDeckPlugin")
+    manifest = File.join(root, "release-evidence.candidate.json")
+    output = File.join(root, HANDOFF_NAME)
+    File.write(dmg, "signed candidate dmg bytes\n")
+    File.write(plugin, "stream deck package bytes\n")
+    input = evidence_input
+    dmg_hash = Digest::SHA256.file(dmg).hexdigest
+    input.fetch("package").fetch("hashes")["dmg"] = dmg_hash
+    input.fetch("package").fetch("notarization")["artifactSHA256"] = dmg_hash
+    input.fetch("externalReceipts").fetch("securityScan")["artifactSHA256"] = dmg_hash
+    WavesRelease::Evidence.write!(
+      input: input,
+      metadata: load_metadata,
+      profile: "candidate",
+      output: manifest
+    )
+    [dmg, plugin, manifest, output]
+  end
+
   def test_elgato_handoff_finalizer_requires_every_result_and_binds_returned_diagnostics
     handoff = WavesRelease.const_defined?(:ElgatoHandoff) ? WavesRelease::ElgatoHandoff : nil
     refute_nil handoff, "expected deterministic Elgato handoff assembly"
@@ -1202,6 +1890,7 @@ class ReleaseInfraTest < Minitest::Test
       )
 
       finalizer = File.join(output, "finalize-receipt.rb")
+      trusted_checksums_digest = Digest::SHA256.file(File.join(output, "SHA256SUMS")).hexdigest
       results_path = File.join(output, "results.json")
       assert File.executable?(finalizer), "expected a runnable receipt finalizer in the handoff"
       return unless File.executable?(finalizer)
@@ -1225,10 +1914,32 @@ class ReleaseInfraTest < Minitest::Test
         end
       end
 
+      original_checksums = File.binread(File.join(output, "SHA256SUMS"))
+      original_readme = File.binread(File.join(output, "README.md"))
+      File.open(File.join(output, "README.md"), "a") { |file| file << "tampered\n" }
+      replacement = original_checksums.lines.map do |line|
+        if line.end_with?("  README.md\n")
+          "#{Digest::SHA256.file(File.join(output, 'README.md')).hexdigest}  README.md\n"
+        else
+          line
+        end
+      end.join
+      File.binwrite(File.join(output, "SHA256SUMS"), replacement)
+      _stdout, stderr, status = Open3.capture3(
+        "/usr/bin/ruby", "--disable-gems", finalizer, trusted_checksums_digest,
+        output, results_path, diagnostics, receipt
+      )
+      refute status.success?
+      assert_match(/trusted out-of-band digest/, stderr)
+      refute File.exist?(receipt)
+      File.binwrite(File.join(output, "SHA256SUMS"), original_checksums)
+      File.binwrite(File.join(output, "README.md"), original_readme)
+
       _stdout, stderr, status = Open3.capture3(
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1251,6 +1962,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1267,6 +1979,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1283,6 +1996,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1297,6 +2011,7 @@ class ReleaseInfraTest < Minitest::Test
         "/usr/bin/ruby",
         "--disable-gems",
         finalizer,
+        trusted_checksums_digest,
         output,
         results_path,
         diagnostics,
@@ -1313,6 +2028,84 @@ class ReleaseInfraTest < Minitest::Test
       assert returned.fetch("tests").values.all? { |result| result.fetch("status") == "passed" }
       assert_equal Digest::SHA256.file(receipt).hexdigest,
         File.read("#{receipt}.sha256").split.first
+    end
+  end
+
+  def test_elgato_handoff_finalizer_rejects_artifact_replaced_after_checksum_snapshot
+    Dir.mktmpdir("waves-elgato-checksum-snapshot") do |root|
+      dmg_name = HANDOFF_DMG_NAME
+      immutable_files = WavesElgatoReceipt::STATIC_IMMUTABLE_FILES + [dmg_name]
+      immutable_files.each { |name| File.binwrite(File.join(root, name), "original #{name}\n") }
+
+      evidence_name = "release-evidence.candidate.json"
+      evidence_digest = Digest::SHA256.file(File.join(root, evidence_name)).hexdigest
+      File.binwrite(
+        File.join(root, "release-evidence.candidate.json.sha256"),
+        "#{evidence_digest}  #{evidence_name}\n"
+      )
+      original_checksums = immutable_files.sort.map do |name|
+        "#{Digest::SHA256.file(File.join(root, name)).hexdigest}  #{name}\n"
+      end.join
+      checksum_path = File.join(root, "SHA256SUMS")
+      File.binwrite(checksum_path, original_checksums)
+      trusted_checksums_digest = Digest::SHA256.hexdigest(original_checksums)
+
+      replacement_readme = "replacement README.md\n"
+      replacement_checksums = original_checksums.lines.map do |line|
+        if line.end_with?("  README.md\n")
+          "#{Digest::SHA256.hexdigest(replacement_readme)}  README.md\n"
+        else
+          line
+        end
+      end.join
+      handoff = {
+        "candidateEvidenceSHA256" => evidence_digest,
+        "artifacts" => {
+          "dmg" => {
+            "name" => dmg_name,
+            "sha256" => Digest::SHA256.file(File.join(root, dmg_name)).hexdigest,
+          },
+          "streamDeckPlugin" => {
+            "name" => "com.jonathanreed.waves.streamDeckPlugin",
+            "sha256" => Digest::SHA256.file(
+              File.join(root, "com.jonathanreed.waves.streamDeckPlugin")
+            ).hexdigest,
+            "sourceRevision" => "b" * 40,
+          },
+        },
+      }
+
+      replacement_installed = false
+      install_replacement = lambda do
+        next if replacement_installed
+
+        replacement_installed = true
+        File.binwrite(File.join(root, "README.md"), replacement_readme)
+        File.binwrite(checksum_path, replacement_checksums)
+      end
+      digest_singleton = Digest::SHA256.singleton_class
+      file_singleton = File.singleton_class
+      original_digest_file = Digest::SHA256.method(:file)
+      original_binread = File.method(:binread)
+      digest_singleton.send(:define_method, :file) do |path, *arguments|
+        digest = original_digest_file.call(path, *arguments)
+        install_replacement.call if path == checksum_path
+        digest
+      end
+      file_singleton.send(:define_method, :binread) do |path, *arguments|
+        contents = original_binread.call(path, *arguments)
+        install_replacement.call if path == checksum_path
+        contents
+      end
+
+      error = assert_raises(WavesElgatoReceipt::Error) do
+        WavesElgatoReceipt.verify_immutable_files!(root, handoff, trusted_checksums_digest)
+      end
+      assert_match(/checksum mismatch for README\.md/, error.message)
+      assert replacement_installed, "expected the checksum snapshot boundary to be exercised"
+    ensure
+      digest_singleton.send(:define_method, :file, original_digest_file) if original_digest_file
+      file_singleton.send(:define_method, :binread, original_binread) if original_binread
     end
   end
 
@@ -1508,7 +2301,7 @@ class ReleaseInfraTest < Minitest::Test
         root: "#{private_root}/.",
         name: "Waves.dmg"
       )
-      assert_equal File.join(private_root, "Waves.dmg"), staged
+      assert_equal File.join(File.realpath(private_root), "Waves.dmg"), staged
 
       assert_release_error(/escapes/) do
         WavesRelease::PrivateArtifacts.stage_file!(
@@ -1516,6 +2309,481 @@ class ReleaseInfraTest < Minitest::Test
           root: private_root,
           name: "../escaped.dmg"
         )
+      end
+    end
+  end
+
+  def test_private_root_validation_returns_canonical_identity_for_var_alias
+    Dir.mktmpdir("waves-private-root", "/private/tmp") do |canonical_root|
+      FileUtils.chmod(0o700, canonical_root)
+      aliased_root = canonical_root.sub(%r{\A/private/var/}, "/var/")
+
+      identity = WavesRelease::PrivateArtifacts.validate_private_root!(aliased_root)
+
+      assert_equal canonical_root, identity.fetch("path")
+      stat = File.lstat(canonical_root)
+      assert_equal stat.dev, identity.fetch("device")
+      assert_equal stat.ino, identity.fetch("inode")
+      assert_equal "directory", identity.fetch("type")
+    end
+  end
+
+  def test_private_root_validation_rejects_symlink_non_directory_and_exposed_permissions
+    Dir.mktmpdir("waves-private-root-validation") do |root|
+      private_root = File.join(root, "private")
+      Dir.mkdir(private_root, 0o700)
+      symlink_root = File.join(root, "private-link")
+      File.symlink(private_root, symlink_root)
+      regular_file = File.join(root, "not-a-directory")
+      File.write(regular_file, "bytes")
+
+      assert_release_error(/symbolic link/) do
+        WavesRelease::PrivateArtifacts.validate_private_root!(symlink_root)
+      end
+      assert_release_error(/directory/) do
+        WavesRelease::PrivateArtifacts.validate_private_root!(regular_file)
+      end
+
+      [0o740, 0o704, 0o750, 0o701].each do |mode|
+        FileUtils.chmod(mode, private_root)
+        assert_release_error(/permissions/) do
+          WavesRelease::PrivateArtifacts.validate_private_root!(private_root)
+        end
+      end
+    end
+  end
+
+  def test_private_stage_rejects_replaced_root_during_copy
+    Dir.mktmpdir("waves-private-root-swap") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      displaced_root = File.join(root, "displaced-private")
+      File.binwrite(source, "verified bytes")
+      Dir.mkdir(private_root, 0o700)
+      original_copy_stream = IO.method(:copy_stream)
+      swapped = false
+      swapping_copy = lambda do |input, output, *arguments|
+        unless swapped
+          File.rename(private_root, displaced_root)
+          Dir.mkdir(private_root, 0o700)
+          swapped = true
+        end
+        original_copy_stream.call(input, output, *arguments)
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, swapping_copy) do
+          WavesRelease::PrivateArtifacts.stage_file!(
+            source: source,
+            root: private_root,
+            name: "Waves.dmg"
+          )
+        end
+      end
+      assert_match(/private release root identity changed/, error.message)
+      assert swapped, "the root must be replaced while IO.copy_stream is active"
+      refute File.exist?(File.join(private_root, "Waves.dmg"))
+      refute File.exist?(File.join(displaced_root, "Waves.dmg"))
+    end
+  end
+
+  def test_private_directory_stage_rolls_back_when_root_is_replaced_during_copy
+    Dir.mktmpdir("waves-private-directory-swap") do |root|
+      source = File.join(root, "Waves.app")
+      private_root = File.join(root, "private")
+      displaced_root = File.join(root, "displaced-private")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "Info.plist"), "verified app")
+      Dir.mkdir(private_root, 0o700)
+      original_copy_entry = FileUtils.method(:copy_entry)
+      swapped = false
+      swapping_copy = lambda do |from, to, *arguments|
+        if from == source && !swapped
+          File.rename(private_root, displaced_root)
+          Dir.mkdir(private_root, 0o700)
+          swapped = true
+        end
+        original_copy_entry.call(from, to, *arguments)
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        FileUtils.stub(:copy_entry, swapping_copy) do
+          WavesRelease::PrivateArtifacts.stage_directory!(source: source, root: private_root)
+        end
+      end
+      assert_match(/private release root identity changed/, error.message)
+      assert swapped
+      refute File.exist?(File.join(private_root, "Waves.app"))
+      refute File.exist?(File.join(displaced_root, "Waves.app"))
+    end
+  end
+
+  def test_private_file_stage_removes_placeholder_when_identity_bound_rename_fails
+    Dir.mktmpdir("waves-private-file-rename-failure") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      File.write(source, "dmg")
+      Dir.mkdir(private_root, 0o700)
+
+      assert_raises(SystemCallError) do
+        WavesRelease::PrivateArtifacts::DirectorySyscalls.stub(:renameat, -1) do
+          WavesRelease::PrivateArtifacts.stage_file!(source: source, root: private_root)
+        end
+      end
+      refute File.exist?(File.join(private_root, "Waves.dmg")), "failed rename must not leave a file placeholder"
+    end
+  end
+
+  def test_private_directory_stage_removes_placeholder_when_identity_bound_rename_fails
+    Dir.mktmpdir("waves-private-directory-rename-failure") do |root|
+      source = File.join(root, "Waves.app")
+      private_root = File.join(root, "private")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "Info.plist"), "app")
+      Dir.mkdir(private_root, 0o700)
+
+      assert_raises(SystemCallError) do
+        WavesRelease::PrivateArtifacts::DirectorySyscalls.stub(:renameat, -1) do
+          WavesRelease::PrivateArtifacts.stage_directory!(source: source, root: private_root)
+        end
+      end
+      refute File.exist?(File.join(private_root, "Waves.app")), "failed rename must not leave a directory placeholder"
+    end
+  end
+
+  def test_private_release_stage_rolls_back_prior_children_when_root_changes_between_copies
+    Dir.mktmpdir("waves-private-release-swap") do |root|
+      source = File.join(root, "dist")
+      private_root = File.join(root, "private")
+      displaced_root = File.join(root, "displaced-private")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "symbols")
+      File.write(File.join(source, "Waves.dmg"), "dmg")
+      Dir.mkdir(private_root, 0o700)
+      stage = WavesRelease::PrivateArtifacts
+      original = stage.method(:stage_directory!)
+      calls = 0
+      swapping_stage = lambda do |**arguments|
+        result = original.call(**arguments)
+        calls += 1
+        if calls == 1
+          File.rename(private_root, displaced_root)
+          Dir.mkdir(private_root, 0o700)
+        end
+        result
+      end
+
+      assert_raises(WavesRelease::Error) do
+        stage.stub(:stage_directory!, swapping_stage) do
+          stage.stage_release_artifacts!(source_root: source, destination_root: private_root)
+        end
+      end
+      %w[Waves.app Waves.app.dSYM Waves.dmg].each do |name|
+        refute File.exist?(File.join(private_root, name)), "replacement root retained #{name}"
+        refute File.exist?(File.join(displaced_root, name)), "displaced root retained #{name}"
+      end
+    end
+  end
+
+  def test_private_root_compromise_preserves_copy_failure_and_reports_rollback
+    Dir.mktmpdir("waves-private-copy-failure") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      displaced_root = File.join(root, "displaced-private")
+      File.write(source, "dmg")
+      Dir.mkdir(private_root, 0o700)
+      failing_copy = lambda do |_input, _output, *_arguments|
+        File.rename(private_root, displaced_root)
+        Dir.mkdir(private_root, 0o700)
+        raise "copy exploded"
+      end
+
+      error = assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, failing_copy) do
+          WavesRelease::PrivateArtifacts.stage_file!(source: source, root: private_root)
+        end
+      end
+      assert_match(/cause: RuntimeError: copy exploded/, error.message)
+      assert_match(/rollback succeeded/, error.message)
+      refute File.exist?(File.join(private_root, "Waves.dmg"))
+      refute File.exist?(File.join(displaced_root, "Waves.dmg"))
+    end
+  end
+
+  def test_private_release_publication_removes_partial_public_set_when_source_root_changes
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-private-publication-swap") do |root|
+      source = File.join(root, "private")
+      displaced_source = File.join(root, "displaced-private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "symbols")
+      File.write(File.join(source, "Waves.dmg"), "dmg")
+      File.write(File.join(source, "release-source-identity.json"), "identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      original_copy_stream = IO.method(:copy_stream)
+      swapped = false
+      swapping_copy = lambda do |input, output, *arguments|
+        unless swapped
+          File.rename(source, displaced_source)
+          Dir.mkdir(source, 0o700)
+          swapped = true
+        end
+        original_copy_stream.call(input, output, *arguments)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, swapping_copy) do
+          stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+        end
+      end
+      assert swapped
+      assert_empty Dir.children(destination), "publication must leave no partial public release set"
+      assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
+    end
+  end
+
+  def test_private_release_publication_restores_complete_preexisting_set_after_late_root_change
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-private-publication-restore") do |root|
+      source = File.join(root, "private")
+      displaced_source = File.join(root, "displaced-private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      File.write(File.join(source, "notary-log.json"), "new notary")
+      new_notary_log = File.realpath(File.join(source, "notary-log.json"))
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(File.join(destination, "Waves.app"))
+      FileUtils.mkdir_p(File.join(destination, "Waves.app.dSYM"))
+      File.write(File.join(destination, "Waves.app/old"), "old app")
+      File.write(File.join(destination, "Waves.app.dSYM/old"), "old symbols")
+      %w[Waves.app.dSYM.zip Waves.dmg Waves.dmg.sha256 release-source-identity.json notary-log.json].each do |name|
+        File.write(File.join(destination, name), "old #{name}")
+      end
+      old_digest = stage.tree_digest(destination)
+      original_copy_stream = IO.method(:copy_stream)
+      swapping_copy = lambda do |input, output, *arguments|
+        if input.respond_to?(:path) && input.path == new_notary_log
+          File.rename(source, displaced_source)
+          Dir.mkdir(source, 0o700)
+        end
+        original_copy_stream.call(input, output, *arguments)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, swapping_copy) do
+          stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+        end
+      end
+      assert_equal old_digest, stage.tree_digest(destination), "the complete old public set must be restored byte-for-byte"
+      assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
+    end
+  end
+
+  def test_successful_private_release_publication_replaces_full_set_and_removes_backups
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-private-publication-success") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      File.write(File.join(source, "notary-log.json"), "new notary")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(File.join(destination, "Waves.app"))
+      FileUtils.mkdir_p(File.join(destination, "Waves.app.dSYM"))
+      File.write(File.join(destination, "Waves.app/old"), "old app")
+      File.write(File.join(destination, "Waves.app.dSYM/old"), "old symbols")
+      %w[Waves.app.dSYM.zip Waves.dmg Waves.dmg.sha256 release-source-identity.json notary-log.json].each do |name|
+        File.write(File.join(destination, name), "old #{name}")
+      end
+
+      assert stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+      assert_equal "new app", File.read(File.join(destination, "Waves.app/Info.plist"))
+      assert_equal "new symbols", File.read(File.join(destination, "Waves.app.dSYM/Waves"))
+      assert_equal "new dmg", File.read(File.join(destination, "Waves.dmg"))
+      assert_equal "new identity", File.read(File.join(destination, "release-source-identity.json"))
+      assert_equal "new notary", File.read(File.join(destination, "notary-log.json"))
+      assert_equal(
+        %w[Waves.app Waves.app.dSYM Waves.app.dSYM.zip Waves.dmg Waves.dmg.sha256 notary-log.json release-source-identity.json],
+        Dir.children(destination).sort
+      )
+      refute File.exist?(File.join(destination, "Waves.app/old"))
+      refute File.exist?(File.join(destination, "Waves.app.dSYM/old"))
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
+      assert_empty Dir.glob(File.join(root, ".waves-release-derivatives-*"))
+    end
+  end
+
+  def test_successful_publication_removes_stale_notary_when_new_source_has_none
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-stale-notary-removal") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      File.write(File.join(destination, "notary-log.json"), "stale notary")
+
+      assert stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+      refute File.exist?(File.join(destination, "notary-log.json"))
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
+    end
+  end
+
+  def test_failed_publication_restores_stale_optional_notary_without_new_source
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-stale-notary-rollback") do |root|
+      source = File.join(root, "private")
+      displaced_source = File.join(root, "displaced-private")
+      destination = File.join(root, "dist")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      new_source_identity = File.realpath(File.join(source, "release-source-identity.json"))
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      File.write(File.join(destination, "notary-log.json"), "stale notary")
+      original_copy_stream = IO.method(:copy_stream)
+      swapping_copy = lambda do |input, output, *arguments|
+        if input.respond_to?(:path) && input.path == new_source_identity
+          File.rename(source, displaced_source)
+          Dir.mkdir(source, 0o700)
+        end
+        original_copy_stream.call(input, output, *arguments)
+      end
+
+      assert_raises(WavesRelease::Error) do
+        IO.stub(:copy_stream, swapping_copy) do
+          stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+        end
+      end
+      assert_equal ["notary-log.json"], Dir.children(destination)
+      assert_equal "stale notary", File.read(File.join(destination, "notary-log.json"))
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
+    end
+  end
+
+  def test_publication_backups_stay_outside_destination_mount_boundary
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-publication-mount-boundary") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "mounted-destination")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      old_dmg = File.join(destination, "Waves.dmg")
+      File.write(old_dmg, "old dmg")
+      original_copy_entry = FileUtils.method(:copy_entry)
+      backup_targets = []
+      checked_modes = []
+      boundary_copy = lambda do |from, to, *arguments|
+        if from == old_dmg
+          refute to.start_with?("#{destination}/"), "publication backup must never enter the public tree"
+          backup_targets << to
+          checked_modes << (File.stat(File.dirname(to)).mode & 0o777)
+        end
+        original_copy_entry.call(from, to, *arguments)
+      end
+
+      FileUtils.stub(:copy_entry, boundary_copy) do
+        assert stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+      end
+      assert_equal 1, backup_targets.length
+      assert_equal [0o700], checked_modes
+      refute File.exist?(backup_targets.first), "successful publication must remove the external backup"
+      assert_empty Dir.glob(File.join(destination, ".waves-publication-backup-*"))
+    end
+  end
+
+  def test_publication_rollback_failure_never_exposes_backup_residue
+    stage = WavesRelease::PrivateArtifacts
+    Dir.mktmpdir("waves-publication-rollback-failure") do |root|
+      source = File.join(root, "private")
+      destination = File.join(root, "mounted-destination")
+      FileUtils.mkdir_p(File.join(source, "Waves.app"))
+      FileUtils.mkdir_p(File.join(source, "Waves.app.dSYM"))
+      File.write(File.join(source, "Waves.app/Info.plist"), "new app")
+      File.write(File.join(source, "Waves.app.dSYM/Waves"), "new symbols")
+      File.write(File.join(source, "Waves.dmg"), "new dmg")
+      File.write(File.join(source, "release-source-identity.json"), "new identity")
+      FileUtils.chmod(0o700, source)
+      FileUtils.mkdir_p(destination)
+      File.write(File.join(destination, "Waves.dmg"), "old dmg")
+      original_copy_entry = FileUtils.method(:copy_entry)
+      backup_targets = []
+      failing_copy = lambda do |from, to, *arguments|
+        if from == File.join(destination, "Waves.dmg")
+          backup_targets << to
+          original_copy_entry.call(from, to, *arguments)
+        elsif backup_targets.include?(from)
+          raise Errno::EIO, "simulated restore failure"
+        else
+          original_copy_entry.call(from, to, *arguments)
+        end
+      end
+      original_publish = stage.method(:publish_file!)
+      failing_publish = lambda do |**arguments|
+        raise "simulated publication failure" if File.basename(arguments.fetch(:destination)) == "Waves.dmg"
+        original_publish.call(**arguments)
+      end
+
+      error = FileUtils.stub(:copy_entry, failing_copy) do
+        stage.stub(:publish_file!, failing_publish) do
+          assert_raises(WavesRelease::Error) do
+            stage.publish_release_artifacts!(source_root: source, destination_root: destination)
+          end
+        end
+      end
+      assert_match(/rollback failed.*simulated restore failure/, error.message)
+      assert_instance_of RuntimeError, error.cause
+      assert_equal "simulated publication failure", error.cause.message
+      assert_equal 1, backup_targets.length
+      refute backup_targets.first.start_with?("#{destination}/")
+      assert File.exist?(backup_targets.first), "rollback failure must retain external backup evidence"
+      assert Dir.children(destination).all? { |name| !name.start_with?(".waves-") }
+      FileUtils.rm_rf(File.dirname(backup_targets.first))
+    end
+  end
+
+  def test_private_stage_child_name_must_be_one_basename
+    Dir.mktmpdir("waves-private-child") do |root|
+      source = File.join(root, "Waves.dmg")
+      private_root = File.join(root, "private")
+      File.write(source, "dmg")
+      Dir.mkdir(private_root, 0o700)
+
+      ["../escaped.dmg", "nested/Waves.dmg", ".", ""].each do |name|
+        assert_release_error(/basename|escapes/) do
+          WavesRelease::PrivateArtifacts.stage_file!(source: source, root: private_root, name: name)
+        end
       end
     end
   end
@@ -2040,7 +3308,7 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def test_publication_tag_requires_an_annotated_version_tag_on_the_current_history
+  def test_publication_tag_requires_an_annotated_version_tag_at_head_and_origin_main
     with_git_repo do |root|
       with_ephemeral_ssh_keypair("waves-release-publication") do |private_key, public_key|
         metadata = security_metadata_hash(
@@ -2073,14 +3341,61 @@ class ReleaseInfraTest < Minitest::Test
         git(root, "commit", "-m", "docs: next")
         git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "HEAD").strip)
 
-        WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        assert_release_error(/tag must equal HEAD/) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        end
 
+        git(root, "tag", "-d", RELEASE_TAG)
+        revision = git(root, "rev-parse", "HEAD").strip
+        manifest = WavesRelease::Evidence.seal(
+          input: evidence_input(remote: "passed", revision: revision),
+          metadata: metadata,
+          profile: "publication"
+        )
+        json = WavesRelease::CanonicalJSON.generate(manifest)
+        envelope = WavesRelease::TagEnvelope.build(json: json, digest: WavesRelease::CanonicalJSON.sha256(json))
+        create_signed_tag(root, RELEASE_TAG, envelope, private_key)
+        git(root, "update-ref", "refs/remotes/origin/main", "#{revision}^")
+
+        assert_release_error(/source must equal origin\/main/) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        end
+
+        git(root, "update-ref", "refs/remotes/origin/main", revision)
+        WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
         git(root, "checkout", "--orphan", "diverged")
         git(root, "rm", "-rf", ".")
         File.write(File.join(root, "diverged.txt"), "diverged\n")
         git(root, "add", ".")
         git(root, "commit", "-m", "docs: divergent history")
-        assert_release_error(/ancestor of HEAD/) do
+        assert_release_error(/tag must equal HEAD/) do
+          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        end
+      end
+    end
+  end
+
+  def test_publication_tag_accepts_metadata_loaded_with_a_non_authoritative_multi_word_key_comment
+    with_git_repo do |root|
+      with_ephemeral_ssh_keypair("waves-release-metadata-comment") do |private_key, public_key|
+        algorithm, material = File.read(public_key).split.first(2)
+        metadata_contents = security_metadata_hash(
+          public_key: "#{algorithm} #{material} comment differs from signing key",
+          fingerprint: ssh_fingerprint(public_key)
+        )
+        with_metadata(metadata_contents) do |path|
+          metadata = WavesRelease::Metadata.load(path)
+          revision = git(root, "rev-parse", "HEAD").strip
+          manifest = WavesRelease::Evidence.seal(
+            input: evidence_input(remote: "passed", revision: revision),
+            metadata: metadata,
+            profile: "publication"
+          )
+          json = WavesRelease::CanonicalJSON.generate(manifest)
+          envelope = WavesRelease::TagEnvelope.build(json: json, digest: WavesRelease::CanonicalJSON.sha256(json))
+          git(root, "update-ref", "refs/remotes/origin/main", revision)
+          create_signed_tag(root, RELEASE_TAG, envelope, private_key)
+
           WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
         end
       end
@@ -2127,6 +3442,62 @@ class ReleaseInfraTest < Minitest::Test
           result = authority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
           assert_equal RELEASE_PRINCIPAL, result.fetch("principal")
           assert_equal expected.fetch("fingerprint"), result.fetch("fingerprint")
+        end
+      end
+    end
+  end
+
+  def test_tag_authority_ignores_optional_key_comment_but_not_key_material
+    with_git_repo do |root|
+      with_ephemeral_ssh_keypair("waves-release-correct") do |correct_private, correct_public|
+        with_ephemeral_ssh_keypair("waves-release-wrong") do |_wrong_private, wrong_public|
+          correct_algorithm, correct_material = File.read(correct_public).split.first(2)
+          _wrong_algorithm, wrong_material = File.read(wrong_public).split.first(2)
+          expected = {
+            "principal" => RELEASE_PRINCIPAL,
+            "publicKey" => "#{correct_algorithm} #{correct_material} metadata comment differs",
+            "fingerprint" => ssh_fingerprint(correct_public),
+          }
+          create_signed_tag(root, RELEASE_TAG, "trusted evidence\n", correct_private)
+
+          result = WavesRelease::TagAuthority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
+          assert_equal expected.fetch("fingerprint"), result.fetch("fingerprint")
+
+          assert_release_error(/fingerprint|pinned release key|signature/) do
+            WavesRelease::TagAuthority.verify!(
+              root: root,
+              tag: RELEASE_TAG,
+              authority: expected.merge("publicKey" => "#{correct_algorithm} #{wrong_material} metadata comment differs")
+            )
+          end
+        end
+      end
+    end
+  end
+
+  def test_tag_authority_rejects_fingerprint_and_principal_mismatches
+    with_git_repo do |root|
+      with_ephemeral_ssh_keypair("waves-release-authority") do |private_key, public_key|
+        expected = {
+          "principal" => RELEASE_PRINCIPAL,
+          "publicKey" => File.read(public_key).strip,
+          "fingerprint" => ssh_fingerprint(public_key),
+        }
+        create_signed_tag(root, RELEASE_TAG, "trusted evidence\n", private_key)
+
+        assert_release_error(/fingerprint/) do
+          WavesRelease::TagAuthority.verify!(
+            root: root,
+            tag: RELEASE_TAG,
+            authority: expected.merge("fingerprint" => "SHA256:#{'A' * 43}")
+          )
+        end
+        assert_release_error(/principal/) do
+          WavesRelease::TagAuthority.verify!(
+            root: root,
+            tag: RELEASE_TAG,
+            authority: expected.merge("principal" => "untrusted-release")
+          )
         end
       end
     end
@@ -2475,6 +3846,9 @@ class ReleaseInfraTest < Minitest::Test
       %w[
         .github/workflows/ci.yml
         .github/workflows/release.yml
+        Casks/waves.rb
+        CHANGELOG.md
+        release/metadata.json
         script/release_tool.rb
         script/release_environment.sh
         script/release_git
@@ -2495,6 +3869,9 @@ class ReleaseInfraTest < Minitest::Test
         "add",
         ".github/workflows/ci.yml",
         ".github/workflows/release.yml",
+        "Casks/waves.rb",
+        "CHANGELOG.md",
+        "release/metadata.json",
         "script/release_tool.rb",
         "script/release_environment.sh",
         "script/release-gate.sh",

@@ -322,14 +322,17 @@ extension AppStore {
       // Even if shutdown began while backend.start() was suspended, record the
       // successful native start so the checked shutdown path tears it back down.
       hasStartedAudioBackend = true
+      LaunchPerformanceRecorder.active?.mark(.backendStarted)
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       await backend.setManagedAudioEqualizer(preferences.managedAudioEqualizer)
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       let built = await backend.currentSnapshot()
+      LaunchPerformanceRecorder.active?.mark(.snapshotReady)
       guard !Task.isCancelled, startupState != .shuttingDown else { return }
       session = mergedSession(with: built, cached: warmSnapshot)
       cleanupStaleEntries()
       await reapplyRestoredAudioState()
+      LaunchPerformanceRecorder.active?.mark(.restoredRoutesReady)
       if preferences.adaptiveMixMode.usesSpeechFocus,
         preferences.autoPauseMusicForConferencing
       {
@@ -632,8 +635,7 @@ extension AppStore {
         )
         return
       }
-      setDesiredVolume(volume, for: app)
-      commitDesiredVolume(for: app)
+      commitDesiredVolume(volume, for: app, reason: .automation)
 
     case let .setMuted(appID, isMuted):
       guard let app = session.apps.first(matchingAppKey: appID) else {
@@ -652,7 +654,7 @@ extension AppStore {
         )
         return
       }
-      setMuted(isMuted, for: app)
+      setMuted(isMuted, for: app, reason: .automation)
 
     case let .applyProfile(profileName):
       guard
@@ -667,7 +669,7 @@ extension AppStore {
         )
         return
       }
-      applyProfile(profile)
+      applyProfile(profile, purpose: .automation)
 
     case .refresh:
       refresh()
