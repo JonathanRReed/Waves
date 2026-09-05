@@ -28,6 +28,45 @@ Sources were fetched through read-only GitHub REST calls for releases/latest and
 
 The focused pre-change assertion rejected the 2.8.0 manifest minimum and resolved Sparkle 2.9.5, exiting 1 as expected. After changing the manifest, `swift package resolve sparkle --version 2.9.6` resolved Sparkle 2.9.6 at upstream tag revision `ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a`. The exact binary target is `https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-for-Swift-Package-Manager.zip` with checksum `8d5fb41d960b43f4a68aa14126bf62b098544ec8d191cdcc73eb14e63a8e7606`.
 
-The post-change assertion passed, including the exact upstream tag check. `swift test --filter updater` ran all four updater tests and passed, with no Swift warnings in the test output. `swift build -c release`, `swift format lint --strict Package.swift`, and `git diff --check` all passed. The Swift Testing revision remained `18c42c19cac3fafd61cab1156d4088664b7424ae`, and Swift Syntax remained `0687f71944021d616d34d922343dcef086855920`.
+The literal pre-edit assertion was:
+
+```sh
+python3 - <<'PY'
+import json, pathlib, re
+p=pathlib.Path('Package.swift').read_text(); r=json.loads(pathlib.Path('Package.resolved').read_text())
+min_ok=bool(re.search(r'Sparkle\", from: \"2\\.9\\.6\"',p))
+pin=next(x for x in r['pins'] if x['identity']=='sparkle')['state']
+ok=min_ok and pin.get('version')=='2.9.6'
+print(f'before_assertion: manifest_min_2.9.6={min_ok} resolved_version={pin.get("version")} revision={pin.get("revision")} expected_pass={ok}')
+raise SystemExit(0 if ok else 1)
+PY
+```
+
+Captured output: `before_assertion: manifest_min_2.9.6=False resolved_version=2.9.5 revision=79bc9e872948e47877e76f194cb0c8e0412b0b90 expected_pass=False`; `before_assertion_exit=1`.
+
+The literal post-edit assertion was:
+
+```sh
+python3 - <<'PY'
+import json,re,pathlib,subprocess
+p=pathlib.Path('Package.swift').read_text(); d=json.loads(pathlib.Path('Package.resolved').read_text()); s=next(x['state'] for x in d['pins'] if x['identity']=='sparkle')
+manifest=bool(re.search(r'Sparkle\", from: \"2\\.9\\.6\"',p)); tag=subprocess.check_output(['git','ls-remote','https://github.com/sparkle-project/Sparkle.git','refs/tags/2.9.6'],text=True).split()[0]
+ok=manifest and s.get('version')=='2.9.6' and s.get('revision')==tag
+print('after_assertion:',manifest,s.get('version'),s.get('revision'),'upstream_tag=',tag,'pass=',ok)
+raise SystemExit(0 if ok else 1)
+PY
+```
+
+Captured output: `after_assertion: True 2.9.6 ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a upstream_tag= ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a pass= True`; exit 0. The Swift Testing revision remained `18c42c19cac3fafd61cab1156d4088664b7424ae`, and Swift Syntax remained `0687f71944021d616d34d922343dcef086855920`.
+
+Captured updater test completion lines:
+
+```text
+✔ Test updaterExplicitCheckDispatchesOnlyToInjectedDriver() passed after 0.001 seconds.
+✔ Test updaterStartPolicyFollowsFeedConsentAndUnavailableChecksAreSurfaced() passed after 0.001 seconds.
+✔ Test updaterAvailabilityAndAutomaticPreferenceSynchronizeBothDirections() passed after 0.001 seconds.
+✔ Test updaterDriverFailureIsSurfacedWithoutAProductionFeed() passed after 0.001 seconds.
+◇ Test run with 4 tests passed after 0.003 seconds.
+```
 
 This records dependency and build/test evidence only. Package embedding, signing, notarization, app launch, and actual update installation were not reverified here. The two advisories remain unproven as exploitable through a supported Waves configuration.
