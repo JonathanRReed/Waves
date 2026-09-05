@@ -466,7 +466,7 @@ published_sha="$(shasum -a 256 /tmp/waves-release/Waves.dmg | cut -d ' ' -f 1)"
 Then confirm it parses and the checksum is the one users will fetch:
 
 ```bash
-ruby -c Casks/waves.rb && brew audit --cask ./Casks/waves.rb
+ruby -c ../homebrew-tap/Casks/waves.rb && brew audit --cask ../homebrew-tap/Casks/waves.rb
 ```
 
 ## Release Channels Checklist
