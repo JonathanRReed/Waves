@@ -105,6 +105,46 @@ files uncommitted. Claude resumed the thread from the rollout and this contract.
   `remoteElgato` gate therefore cannot be satisfied from here, and
   `script/release_tool.rb` refuses the publication profile without it.
   Publication is not run.
+- Gate receipt: `./script/quality-gate.sh full` with full Xcode 27.0 (27A5252f)
+  selected through `DEVELOPER_DIR` and a UTF-8 locale passed release
+  infrastructure 116 tests with 1,042 assertions, process-group deadlines 9/50,
+  launch tooling 13/92, runtime tooling 19/124, both repository contracts,
+  strict formatting, debug and release builds, 669 ordinary Swift tests, five
+  rendered tests and three Thread Sanitizer scenarios on the working tree whose
+  content is byte-identical to `c6d23fc`. The package phase refuses an
+  uncommitted tree, so universal package construction, existing-package
+  verification, packaged GUI smoke and the realtime callback audit passed in a
+  second invocation on committed `c6d23fc`. Two environment failures are
+  recorded so nobody repeats the diagnosis: without a UTF-8 locale, seven Ruby
+  self-tests fail with "invalid byte sequence in US-ASCII"; and the first exec
+  of the freshly linked `wavesctl` binary blocked for 18 minutes inside the
+  macOS launch-policy assessment (syspolicyd started at that instant) during
+  `wavesCTLExecutableRejectsInvalidVolumeBeforeConnecting`. The child was
+  killed, the binary ran normally by hand, and the rerun passed. Neither is a
+  Waves defect.
+- Candidate: `SIGN_IDENTITY="Developer ID Application: Jonathan Reed (AJ9VWBRNZN)"
+  NOTARY_PROFILE=waves-notary ./script/build_and_run.sh --notarize` on clean
+  `c6d23fcdef9532fd7b3d55723ec4034f688dfd87` produced universal (arm64 and
+  x86_64) Waves.app 1.7.1 build 19 with the hardened runtime, notarization
+  `Accepted` ("Ready for distribution"), a stapled DMG and Gatekeeper
+  `source=Notarized Developer ID`. Stapled `dist/Waves.dmg` SHA-256
+  `4ab0cd527627d5553a23ead3953e30adb5bf10bbcbb691d931c7d4f8035b8131`; the
+  submitted image in `dist/notary-log.json` hashes to
+  `9f0fd3d127b1efffd3e2445d046db11196bab18b0efb31c2896f6a9c5709f177`; source
+  archive `eb455db68a85ee885e8deb0e031505f0b9e02a94fdb7ad78f7ced8036dbc0453`;
+  build recipe `67def844c328c10fa44364264305346ce8644f83efccfc72da1ff7f9bb7dd8ee`.
+  The dSYM archive verified. This is a preview of the release path bound to
+  `c6d23fc`; the publication candidate must be rebuilt at the final release
+  revision. The 1.7.0 build 16 files previously in `dist` were copied byte for
+  byte to `~/Downloads/Waves-1.7.0-build16-dist-archive` first, and the
+  1.7.0-only evidence files were then removed from `dist` so they cannot be
+  mistaken for 1.7.1 evidence.
+- Still open, and why: sealing candidate evidence needs fresh 1.7.1 idle and
+  active stability soaks, companion plugin gates and a security-scan receipt
+  bound to this DMG; `remoteElgato` needs the Mac mini hardware run or a
+  release-owner approval file like 1.7.0's `remote-elgato-approval.json`, which
+  is Jonathan's decision; findings 1 and 2 need his explicit trust-model answer.
+  No tag, GitHub Release, appcast, website or Homebrew change was made.
 
 ## Deferred, external, and out of scope
 
