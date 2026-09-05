@@ -83,6 +83,29 @@ notarization, hardware verification and publication provenance remain required.
   policy, its tests and documentation, this contract, and the audio smoke
   receipt. No app source, merge, final candidate, tag or publication changed.
 
+## Evening resumption, September 5
+
+Codex usage ran out at about 20:36 UTC with eleven verified source and test
+files uncommitted. Claude resumed the thread from the rollout and this contract.
+
+- The seven local repairs are committed on `codex/waves-1.7.1`: device-change
+  coalescing, `.noChange` confirmation telemetry, the socket-test setup budgets,
+  the timeout runner's denied-permission handling, and a new `wavesctl` output
+  sanitizer for scan finding 11. Every scan finding now has a recorded
+  disposition in `.audit/evidence/2026-09-05-waves-1.7.1-security-dispositions.md`.
+  Nine repairs are fixed, two highs are accepted under the documented
+  trusted-maintainer model pending Jonathan's explicit confirmation, and ten are
+  deferred with their rationale.
+- Jonathan reported on September 5 that GitHub CI options are exhausted. The
+  repository is public, so pushes still start the shared workflow at no cost,
+  but no run was requested and no hosted result is claimed for this batch. Local
+  verification uses the same `script/quality-gate.sh full` command that CI runs.
+- Mac mini is not reachable from this Mac: SSH to `mac-mini-codex`
+  (100.102.126.20) timed out, and its Codex session is out of usage. The
+  `remoteElgato` gate therefore cannot be satisfied from here, and
+  `script/release_tool.rb` refuses the publication profile without it.
+  Publication is not run.
+
 ## Deferred, external, and out of scope
 
 - Deferred: Half Bounce qualification, exhaustive performance benchmarks and
