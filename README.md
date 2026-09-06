@@ -2,346 +2,141 @@
 
 [![CI](https://github.com/JonathanRReed/Waves/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JonathanRReed/Waves/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JonathanRReed/Waves?label=release)](https://github.com/JonathanRReed/Waves/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/JonathanRReed/Waves/total)](https://github.com/JonathanRReed/Waves/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![macOS 14.2+](https://img.shields.io/badge/macOS-14.2%2B-black)
-![Signed & Notarized](https://img.shields.io/badge/signed-Developer%20ID%20%C2%B7%20notarized-success)
 
-Waves is a native macOS per-app audio mixer. It uses local Core Audio process taps on macOS 14.2 or newer to route selected app audio through per-app volume, mute, boost, equalizer, and adaptive mixing controls before playback.
+Control each Mac app's volume, mute, boost, equalizer, and output device. Waves uses Core Audio process taps on macOS 14.2+, with no virtual audio driver or system extension.
 
-## Release status
+Version [1.7.1 build 19](https://github.com/JonathanRReed/Waves/releases/tag/v1.7.1) is published. Release builds support Apple Silicon and Intel. Source changes on `main` are not automatically part of that release.
 
-Version **1.7.1 build 19** is the latest published, signed, and notarized
-release. Version **1.7.1 build 19** is in development and is not available from
-GitHub Releases, the Sparkle update feed, or the Homebrew tap.
+## Install
 
-## Features
-
-### Core Audio Control
-- **Per-App Volume Control**: Adjust volume levels individually for each running application
-- **Mute/Unmute Apps**: Quickly mute or unmute specific applications
-- **Volume Boost**: Enhance audio output with 2×, 3×, or 4× boost
-- **Audio-Aware Discovery**: Uses Core Audio process output state when available, with a manageable running-app fallback
-- **Browser & Electron support**: Attributes audio from helper subprocesses (Chrome, Helium, Brave, Edge, Arc, and Electron apps play through a sandboxed "Audio Service" helper) back to the parent app, so they show as **Live** and are fully controllable — including picture-in-picture / popout video
-
-### Equalizer and Adaptive Mixing
-- **Per-App Equalizer**: Choose a simple 3-band curve or an advanced 8-band curve for each app
-- **EQ Presets**: Start from Flat, Voice Focus, Warm, Bass Reduce, or Treble Soften
-- **Shared Equalizer**: Shape all audio managed by Waves with a second independent curve
-- **Adaptive Mix**: Temporarily adjusts gain from each app's content type, assigned priority, strategy, and focus mode without moving manual sliders
-- **Speech-Aware Focus**: Voice and meeting apps must carry actual speech before they can lower another app
-- **Loudness Balance**: Smooths large loudness differences between active apps while respecting the selected priority policy
-
-### Device Management
-- **Per-App Output Routing**: Send each app to a chosen output device
-- **Global Output Switching**: Change the system output device from the menu-bar panel
-- **Device Auto-Restore**: Automatically re-establishes audio routes when switching output devices
-- **Per-Device Volume Memory**: Remember volume settings for each app across different audio devices
-- **Wave Link Coexistence**: Run both mixers, choose whether Waves or Wave Link owns ordinary per-app control, or disable Wave Link-specific safeguards when using a custom routing workaround
-- **Asynchronous Route Recovery**: Rebuilds changed audio geometry outside realtime callbacks and exposes progress or a global recovery action
-
-### Automation and Integration
-- **Keyboard Shortcuts**: Assign global hotkeys for the app in front and app-specific volume or mute actions. The focused mixer also has complete keyboard control. No Accessibility permission is required
-- **URL Scheme Automation**: Opt-in custom URL schemes for integration with other tools
-- **External Control**: Opt-in, same-user Unix socket protocol for the bundled `wavesctl` tool and the separately versioned Stream Deck companion. Protocol version 1 remains stable
-- **Session-Only Call Automation**: Automatically mute or resume configured media during conferencing without turning temporary mute into durable user intent
-
-### Profiles & Organization
-- **Profiles**: Group the apps you use together — like **Work** (Slack, Teams, browsers) or **Gaming** (Discord, Steam) — and switch between them from the sidebar or menu bar
-- **Optional saved levels**: A profile can be a pure grouping, or capture each app's volume, mute, and boost so applying it restores the mix
-- **Profile Sharing**: Export and import profiles as JSON files
-- **Quick Pin**: One-click pin any app to the top of the menu bar; pins survive the app (and Waves) quitting and relaunching
-- **Drag-to-Reorder**: Customize the order of your app list
-- **Smart Sorting**: Sort apps by activity, name, category, or manual order
-
-### User Interface
-- **Dynamic Menu Bar Icon**: Menu bar icon changes based on volume and mute state
-- **Live Mixed-Waveform Visualizer**: A flowing header ribbon showing the combined audio energy of every playing app — alive when sound flows, calm when silent
-- **Real-time Audio Levels**: Per-app level meters for audio activity
-- **Liquid Glass**: Genuine `glassEffect` / `.glassProminent` on the floating layer on macOS 26 (Tahoe), with native button styling and a real `NSVisualEffectView` window backdrop on macOS 14.2–15; content cards stay tonal (not glass); honors Reduce Transparency, Reduce Motion, and Increase Contrast
-- **Empty State UI**: Helpful guidance when no audio apps are detected
-- **Setup Checklist**: Settings-based setup status for permissions, output device visibility, and route health
-- **Accessible Route State**: Full and compact controls expose labels, values, hints, actions, focus order, VoiceOver rotors, status announcements, and Reduce Motion behavior
-
-## How Waves compares
-
-Waves controls per-app audio with macOS Core Audio **process taps** — so unlike
-**Background Music**, **eqMac**, or **SoundSource**, it installs **no virtual
-audio driver, no system extension, and needs no reboot or admin password**;
-deleting the app leaves nothing behind. A few newer tools (FineTune, Fader) use
-the same driver-free approach, so against those Waves leads on other fronts:
-
-- **Truly free and MIT-licensed** — per-app volume, mute, and up to 4× boost are
-  free; eqMac paywalls its per-app mixer and SoundSource is paid.
-- **Broad reach** — macOS 14.2+ **and Intel**, where comparable driver-free
-  tools require macOS 15+.
-- **Honest routing** — every app shows whether it's visible, monitored, managed,
-  or errored, with an in-app diagnostics export, so you always know exactly what
-  Waves is (and isn't) controlling.
-- **Accessibility** — full keyboard operation and VoiceOver rotors.
-- **Reliability escape hatch** — any app that dislikes being tapped (DAWs,
-  conferencing/echo-cancellation apps, other audio tools) can be excluded in one
-  click.
-- **Private** — audio is processed locally and never recorded, transmitted, or
-  used for telemetry. macOS may still ask for audio-capture permission because
-  Core Audio process taps share that privacy gate.
-
-Waves is intentionally a **focused mixer, not a plugin suite or recorder**. Its
-built-in per-app EQ covers quick mix shaping. For parametric mastering or
-audio capture-to-file, a dedicated tool such as eqMac or Audio Hijack is a
-better fit.
-
-## System Requirements
-
-- macOS 14.2 or later (Apple Silicon or Intel — release builds are universal)
-- Audio capture permission when macOS prompts for Core Audio process taps
-- No Accessibility permission — Waves never asks for it
-
-## Installation
-
-### Download (recommended)
-
-Download the latest signed and notarized `Waves.dmg` from
-[GitHub Releases](https://github.com/JonathanRReed/Waves/releases/latest), open
-it, and drag **Waves** to **Applications**. The disk image uses a focused Finder
-layout with one clear installation action. If Waves is opened from the disk
-image or another temporary location, it explains why Applications is preferred
-before continuing. It never moves or copies itself without your action.
-
-### Homebrew
+Download the signed and notarized `Waves.dmg` from [Releases](https://github.com/JonathanRReed/Waves/releases/latest), open it, and drag Waves to Applications. Or use [the Homebrew tap](https://github.com/JonathanRReed/homebrew-tap):
 
 ```bash
 brew install --cask jonathanrreed/tap/waves
 ```
 
-The cask lives in [`JonathanRReed/homebrew-tap`](https://github.com/JonathanRReed/homebrew-tap).
+macOS may request audio-capture permission for process taps. Waves does not require Accessibility permission, an admin password, or a reboot.
 
-### Building from Source
+## Start mixing
 
-1. Clone the repository:
+Open Waves, follow the setup items needing attention, and choose `Start Mixing`. The optional tour uses a real playing app. `End Tour` or Escape stops it without changing the saved mix. Help and `Settings > Setup` reopen setup or the tour without resetting preferences.
+
+Each app shows whether it is visible, monitored, managed, or in an error state. Browser and Electron helper audio is attributed to its parent app. Apps that conflict with capture, such as some DAWs or conferencing tools, can be excluded.
+
+| Control | Use |
+| --- | --- |
+| Volume, mute, boost | Set each app's level, including 2×, 3×, or 4× boost |
+| Equalizer | Use a 3-band or 8-band curve per app, plus a separate shared curve |
+| EQ presets | Start from Flat, Voice Focus, Warm, Bass Reduce, or Treble Soften |
+| Adaptive Mix | Temporarily adjust gain by content, priority, strategy, and focus without moving manual sliders |
+| Speech-aware focus | Let voice or meeting apps lower other audio only while speech is detected |
+| Loudness Balance | Reduce level differences while respecting priorities |
+| Output routing | Choose an output per app or change the system output |
+| Per-device memory | Restore app levels for each output device |
+| Call automation | Temporarily mute or resume selected media without saving that temporary state as user intent |
+
+Routes recover after device changes, with recovery work kept outside realtime callbacks. Settings and Diagnostics show route health and manual recovery actions.
+
+Waves is a mixer, not a recorder or audio-plugin host. It processes audio locally and does not save audio files.
+
+## Profiles and layout
+
+Create a profile from the sidebar's `+` button, name it, and choose its apps. A profile can just group apps, or `Capture current levels` can save volume, mute, and boost. Profiles with saved levels expose `Apply Levels`. Import and export profiles as JSON.
+
+Pin apps, drag to reorder, or sort by activity, name, category, or manual order. The menu bar exposes profiles and output controls. Meters and the mixed waveform show audio activity.
+
+The interface supports keyboard control, VoiceOver, Reduce Motion, Reduce Transparency, and Increase Contrast. macOS 26 uses system glass; macOS 14.2 and 15 use the native visual-effect backdrop.
+
+## Shortcuts
+
+In `Settings > Shortcuts & Automation`, enable shortcuts and record the combinations you need. New installs assign no global keys. Delete clears a recorded shortcut; migrated installs may retain older bindings.
+
+Global actions control the frontmost app or show Waves. Add an app-specific mute binding under `App Shortcuts` or through the app's context menu. Only registered combinations are observed through the system hotkey API; no Accessibility permission is needed.
+
+With the mixer list focused:
+
+| Key | Action |
+| --- | --- |
+| Arrow keys | Select an app |
+| `Space` or `M` | Mute |
+| `=` or `-` | Adjust volume |
+| `B` | Cycle boost |
+| `P` | Pin |
+| `E` | Open the app's EQ |
+| `O` | Cycle output |
+| `R` | Recover routes after automatic recovery is exhausted |
+
+An orange shortcut conflict means another app has claimed the combination. App-specific shortcuts require that app to be running.
+
+## Automation
+
+URL automation is disabled by default. Enable it in `Settings > Shortcuts & Automation` before using:
+
+```text
+waves://set-volume?app=APP_ID&volume=0.5
+waves://mute?app=APP_ID&muted=true
+waves://apply-profile?name=Focus
+waves://refresh
+```
+
+Volume ranges from 0.0 to 1.0. `apply-preset` remains a deprecated alias for `apply-profile`.
+
+External socket control is a separate opt-in. It listens at `~/Library/Application Support/Waves/control.sock`, accepts only the same macOS user, and opens no network port. Bundled `wavesctl` and the separately versioned Stream Deck companion use protocol version 1 to list apps, set volume or mute, read icons, and watch state.
+
+## Wave Link and route problems
+
+Choose the per-app controller in `Settings > Mixer`. A verified parallel Wave Link path can make an app monitor-only in Waves, preventing a displayed control from claiming a level it cannot enforce.
+
+With Wave Link 3 running, `Test Connection` checks access and free software channels. Each controlled app needs its own channel. Waves assigns a free channel when you first change that app's level.
+
+Disable `Wave Link compatibility` only when a custom route already prevents a parallel monitored copy. Doing so also disables duplicate-route safeguards.
+
+For missing apps, start playback, check `Show system processes`, and refresh with `⌘R`. For failed controls or device changes, inspect Diagnostics and use `Recover Routes` in the window, Setup, or Diagnostics.
+
+## Privacy
+
+Waves does not record or transmit audio and has no analytics or telemetry. It makes no network request until you request an update check or allow automatic checks. Checks fetch the signed appcast at `https://waves.jonathanrreed.com/appcast.xml` without an account, device identifier, audio, or diagnostic upload. Disable automatic checks in General.
+
+`Copy Diagnostics` contains no audio samples, but can include app and device names or identifiers, version and OS details, permission and route state, and bounded error text. Review it before sharing.
+
+[Privacy details](PRIVACY.md) · [Security reporting](SECURITY.md)
+
+## Build and verify
+
 ```bash
 git clone https://github.com/JonathanRReed/Waves.git
 cd Waves
-```
-
-2. Build and launch the app bundle:
-```bash
 ./script/build_and_run.sh
 ```
 
-3. Build a local DMG:
 ```bash
-./script/build_and_run.sh --dmg
-```
-
-4. Run local release validation:
-```bash
+swift build
+swift test
 ./script/build_and_run.sh --release-check
 ```
 
-5. Check whether the build is acceptable for public distribution:
-```bash
-./script/build_and_run.sh --publication-check
-```
+`--dmg` builds a local disk image. `--release-check` validates a local DMG; it does not establish public distribution eligibility. `--publication-check` requires Developer ID signing and a passing Gatekeeper assessment.
 
-6. Notarize a public distribution build:
+For an authorized distribution build with your signing certificate:
+
 ```bash
 xcrun notarytool store-credentials waves-notary --apple-id <apple-id> --team-id <team-id>
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE="waves-notary" ./script/build_and_run.sh --notarize
 ```
 
-`--release-check` creates a locally verified DMG. `--publication-check` fails unless the app has a Developer ID Application signature and passes Gatekeeper assessment. `--notarize` requires a Developer ID Application certificate and a stored notarytool profile, then submits, staples, validates, and runs Gatekeeper assessment on the DMG.
+Notarization submits, staples, validates, and runs Gatekeeper checks. Follow [docs/RELEASE.md](docs/RELEASE.md) for the complete release procedure.
 
-See `docs/RELEASE.md` for the full release checklist.
+## Code guide
 
-## Usage
+`Sources/Waves/` contains the SwiftUI app, features, services, stores, and settings. `Sources/WavesAudioCore/` defines audio models and backend protocols; `Tests/WavesTests/` contains tests.
 
-### Quick Start
+The production `WorkspaceAudioControlBackend` uses Core Audio, while `PreviewAudioControlBackend` supports previews. `AppStore` coordinates intent, adaptive mixing, persistence, and device changes. `PerAppTapController` manages taps, `JSONPersistenceEngine` provides atomic schema-1 storage, and `ControlServer` bounds socket connections and output queues. `wavesctl` is a dependency-free local client.
 
-1. Launch Waves. The guided setup explains local processing before the first
-   audio request, then macOS may present its audio-capture permission prompt.
-   Waves never asks for Accessibility permission.
-2. Follow only the readiness items that need attention. Healthy checks stay out
-   of the way, and route recovery is clearly presented as optional when the core
-   mixer is already usable.
-3. Choose **Start Mixing**, or take the optional 60-second tour on a real playing
-   app. **End Tour** and Escape stop the tour immediately without changing your
-   saved mix.
-4. Adjust per-app volume, mute, output, EQ, and boost from the mixer. Accepted
-   controls advance the tour, while failed or unavailable controls leave the
-   current explanation in place.
-5. Replay **Guided Setup**, **What's New**, or the mixer tour later from Help or
-   **Settings ▸ Setup**. Replaying setup keeps profiles, levels, equalizers,
-   privacy choices, and preferences intact.
-6. Use the mute button to silence specific applications.
-7. Pin important apps to keep them easily accessible.
+## Contribute or report a problem
 
-### Keyboard Shortcuts
-
-Enable them in **Settings ▸ Shortcuts & Automation**, then click any shortcut to record your own.
-Press Delete while recording to remove it.
-
-New installs have no global chord assigned. In **Global Shortcuts**, record the
-combinations you want for frontmost-app volume, frontmost-app mute, and Show
-Waves. Existing installs may retain migrated legacy bindings.
-
-You can also give one specific app its own mute shortcut, so it works no matter
-what is in front — add it under **App Shortcuts**, or right-click the app in the
-mixer and choose **Assign Mute Shortcut**. Nothing is bound by default, so
-nothing collides with a launcher or key remapper; hyper (⌃⌥⇧⌘) combinations
-record correctly.
-
-Waves registers only the combinations you assign, through the system's own
-hot-key API. It needs no Accessibility permission and never observes any other
-keystroke.
-
-While the mixer list is focused, use the arrow keys to select an app. Press
-Space or M to mute, = or - to adjust volume, B to cycle boost, P to pin, E to
-open that app's equalizer, O to cycle output, or R to run global route recovery
-when the selected route has exhausted automatic recovery. Capability-gated
-routes owned by Wave Link ignore controls Waves must not claim. Choose the
-per-app controller, or disable Wave Link compatibility for a custom routing
-workaround, in **Settings ▸ Mixer**.
-
-### URL Scheme Automation
-
-URL scheme automation is disabled by default for security. Enable it in
-**Settings ▸ Shortcuts & Automation** before using these commands:
-
-- `waves://set-volume?app=APP_ID&volume=0.5` - Set volume for an app (0.0 to 1.0)
-- `waves://mute?app=APP_ID&muted=true` - Mute or unmute an app
-- `waves://apply-profile?name=Focus` - Apply a named profile (`apply-preset` still works as a deprecated alias)
-- `waves://refresh` - Refresh the audio session
-
-External socket control is a separate opt-in in the same pane. It listens only
-at `~/Library/Application Support/Waves/control.sock`, requires the same macOS
-user, and never opens a network port. The repository's `wavesctl` executable
-uses protocol version 1 to list apps, change volume or mute, read icons, and
-watch state changes.
-
-### Profiles
-
-1. In the main window's sidebar, click the **+** next to "Profiles"
-2. Name it (e.g. Work, Gaming) and choose which apps belong
-3. Optionally turn on **Capture current levels** to also save each app's volume, mute, and boost
-4. Select the profile in the sidebar to focus its apps, or switch to it from the menu bar; profiles that carry levels show an **Apply Levels** button
-
-### Device Switching
-
-When switching audio devices:
-- Managed routes are re-established automatically when the output device changes
-- Enable "Per-device volume memory" to remember app volumes per device
-
-## Settings
-
-- **General**: Launch at login, appearance, update consent, and general behavior
-- **Mixer**: App visibility, sorting, call automation, route behavior, and per-device volume memory
-- **Profiles**: Create, edit, delete, export, import, and select a startup profile
-- **Shortcuts & Automation**: Global and app-specific hotkeys, URL automation, and protocol-v1 external control
-- **Setup**: Permission, output, route, and login-item readiness with non-destructive repair actions
-- **Diagnostics**: Current device and route health, Recover Routes, refresh, and bounded diagnostic copy
-- **Help**: Current keyboard, automation, profile, routing, and troubleshooting guidance
-
-## Troubleshooting
-
-### No audio apps detected
-- Ensure audio applications are actually playing sound
-- Check if "Show system processes" is enabled in Settings
-- Try refreshing the app list (⌘R)
-
-### Volume changes not applying
-- In Settings ▸ Mixer, confirm the preferred **Per-app controller**. Compatibility keeps a verified parallel Wave Link path monitor-only in Waves so a displayed level cannot be bypassed
-- With Wave Link 3 running, use **Test Connection** in Settings ▸ Mixer. It reports whether Waves can reach Wave Link and how many software channels are free; an app needs a Wave Link software channel of its own before Waves can set its level, and Waves moves it to a free channel the first time you change its level yourself
-- If your custom Wave Link routing already prevents a parallel monitored copy, disable **Wave Link compatibility** to force Waves control. This also disables duplicate-route safeguards
-- Use Recover Routes from the main window status action, Setup, or Diagnostics to re-establish Waves-managed routing
-- Check the current route and permission details in Diagnostics
-- Ensure macOS 14.2+ is installed for per-app routing
-
-### Keyboard shortcuts not working
-- Verify "Enable keyboard shortcuts" is on in Settings ▸ Shortcuts & Automation
-- A combination another app already claimed is marked in orange there — record a different one
-- An app shortcut only fires while that app is running
-- No permission is involved; Waves never asks for Accessibility
-
-### Device switching issues
-- Managed routes re-establish automatically. If one did not, use Recover Routes from Setup or Diagnostics
-- Check that your audio device is properly connected
-
-## Architecture
-
-### Core Components
-
-- **WavesAudioCore**: Core audio models and backend protocols
-- **Waves**: SwiftUI application with UI components
-- **WorkspaceAudioControlBackend**: Production audio backend using Core Audio
-- **PreviewAudioControlBackend**: Preview backend for development/testing
-
-### Key Modules
-
-- **AppStore**: Main-actor observable facade over focused intent, adaptive-mix, persistence, and device-change coordinators
-- **AudioControlBackend**: Protocol for audio operations
-- **PerAppTapController**: Manages per-app audio routing taps
-- **JSONPersistenceEngine**: Internal atomic schema-1 storage shared by the existing persistence protocols
-- **ControlServer**: Same-user protocol-v1 Unix socket with bounded connection and output queues
-- **wavesctl**: Dependency-free command-line client for testing and trusted local automation
-
-## Development
-
-### Project Structure
-
-```
-Waves/
-├── Sources/
-│   ├── Waves/              # Main application
-│   │   ├── App/           # App delegate and setup
-│   │   ├── Features/      # Feature modules (Mixer, Settings, etc.)
-│   │   ├── Services/      # Services (Audio, Persistence, etc.)
-│   │   ├── Stores/        # State management
-│   │   └── Settings/      # Settings views
-│   └── WavesAudioCore/    # Core audio models and protocols
-├── Tests/
-│   └── WavesTests/        # Test suite
-└── Package.swift          # Swift Package Manager configuration
-```
-
-### Running Tests
-
-```bash
-swift test
-```
-
-### Building
-
-```bash
-swift build
-```
-
-## Privacy
-
-Waves processes audio locally and never records or transmits it. It has no
-analytics or telemetry. Waves makes no network request before you start an
-update check or allow automatic checks. An allowed check fetches the signed
-appcast from `https://waves.jonathanrreed.com/appcast.xml` without sending an
-account, device identifier, audio, diagnostics, or telemetry. Turn automatic
-checks off in General at any time. `Copy Diagnostics` contains no audio
-samples, but it can include version and OS metadata, permission and route state,
-app and device names or identifiers, and bounded error text. Review it before
-sharing. See [`PRIVACY.md`](PRIVACY.md) for details, and
-[`SECURITY.md`](SECURITY.md) to report a vulnerability.
-
-## Contributing
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). In short: keep PRs focused, cover logic
-with tests, and run `swift build`, `swift test`, and
-`./script/build_and_run.sh --release-check` before proposing changes.
+Read [CONTRIBUTING.md](CONTRIBUTING.md), keep changes focused, and run build, tests, and release checks before proposing code changes. For bugs, open an [issue](https://github.com/JonathanRReed/Waves/issues) with a reviewed `Copy Diagnostics` export.
 
 ## License
 
-Waves is released under the MIT License. See [`LICENSE`](LICENSE).
-
-## Support
-
-Check the troubleshooting section above first. For bugs and questions, open an
-issue at [github.com/JonathanRReed/Waves/issues](https://github.com/JonathanRReed/Waves/issues) —
-the bug template asks for a `Copy Diagnostics` export (Waves › Settings ›
-Diagnostics), which contains no audio samples.
+[MIT](LICENSE).
