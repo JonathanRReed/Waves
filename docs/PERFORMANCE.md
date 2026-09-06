@@ -98,6 +98,8 @@ The collector waits for the log stream filter preamble before `open -na`, resolv
 
 On completion, the attempt directory contains the raw unified log, copied observation sidecar, copied source evidence, and `manifest.json`. The manifest records the PID, executable path, host timebase, synchronization event bindings, per-pair uncertainty, adjacent-pair drift, selected signposts, file hashes, and artifact identity. Its SHA-256 appears in the measurement, `attempt.json`, and the append-only evidence index.
 
+The evidence root and attempt directories use mode `0700`. Retained immutable evidence files use mode `0400`; the append-only result and index files use mode `0600`. The collector also applies a private umask so newly created evidence is never exposed through the caller's ambient umask.
+
 On timeout, malformed evidence, log exit, ambiguous PID, or missing event, the collector marks the attempt failed. It retains the raw log, any available observation and source files, a failure manifest, and an index entry. A hard termination may leave `pending` status. Pending and failed attempts are both non-qualifying. Do not delete them or choose 30 successful attempts from a larger pool. Start a new result set if an infrastructure failure invalidates the experiment.
 
 ## Analyze the set

@@ -293,6 +293,8 @@ class LaunchMeasurementTest < Minitest::Test
       assert_equal 650_001_000, record.fetch("dockSettledNs")
       assert_equal true, record.fetch("passed")
       attempt_dir = "#{output}.evidence/attempt-1"
+      assert_equal 0o700, File.stat("#{output}.evidence").mode & 0o777
+      assert_equal 0o700, File.stat(attempt_dir).mode & 0o777
       manifest = JSON.parse(File.read(File.join(attempt_dir, "manifest.json")))
       assert_equal 4242, manifest.fetch("launchedPID")
       assert_equal 1_000, manifest.fetch("selectedSignposts").fetch("ProcessInit").first.fetch("elapsedNs")
@@ -302,6 +304,9 @@ class LaunchMeasurementTest < Minitest::Test
       assert_equal Digest::SHA256.file(File.join(attempt_dir, "manifest.json")).hexdigest, record.fetch("attemptManifestSHA256")
       assert File.exist?(File.join(attempt_dir, "unified-log.ndjson"))
       assert File.exist?(File.join(attempt_dir, "source-01-capture.mov"))
+      %w[attempt.json manifest.json observation.json unified-log.ndjson source-01-capture.mov source-02-sync-events.jsonl].each do |file|
+        assert_equal 0o400, File.stat(File.join(attempt_dir, file)).mode & 0o777
+      end
 
       bound_pair = lambda do |event_id, source_ticks, mach_ticks, locator|
         {
@@ -377,6 +382,10 @@ class LaunchMeasurementTest < Minitest::Test
       assert_equal "failed", JSON.parse(File.read(File.join(failed_dir, "attempt.json"))).fetch("status")
       assert File.exist?(File.join(failed_dir, "unified-log.ndjson"))
       assert File.exist?(File.join(failed_dir, "manifest.json"))
+      assert_equal 0o700, File.stat(failed_dir).mode & 0o777
+      %w[attempt.json manifest.json unified-log.ndjson].each do |file|
+        assert_equal 0o400, File.stat(File.join(failed_dir, file)).mode & 0o777
+      end
 
       FileUtils.rm_f(process_state)
       retry_observation = File.join(directory, "retry-observation.json")

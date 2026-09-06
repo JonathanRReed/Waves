@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
 
 usage() {
   cat >&2 <<'USAGE'
@@ -80,9 +81,10 @@ same_name=$(/usr/bin/pgrep -x "$executable_name" || true)
 
 mkdir -p "$(dirname "$output")"
 evidence_root="${output}.evidence"
-mkdir -p "$evidence_root"
+mkdir -p -m 0700 "$evidence_root"
+chmod 0700 "$evidence_root"
 attempt_dir="$evidence_root/attempt-$run"
-mkdir "$attempt_dir" 2>/dev/null || die "attempt $run already exists and cannot be reused"
+mkdir -m 0700 "$attempt_dir" 2>/dev/null || die "attempt $run already exists and cannot be reused"
 attempt_file="$attempt_dir/attempt.json"
 raw_log="$attempt_dir/unified-log.ndjson"
 failure_reason="collector exited before completing the attempt"
@@ -140,9 +142,10 @@ cleanup() {
       manifest_path = File.join(attempt_dir, "manifest.json")
       File.write(manifest_path, JSON.pretty_generate(manifest) + "\n")
       manifest_sha = Digest::SHA256.file(manifest_path).hexdigest
-      ([raw_log, manifest_path] + Dir.glob(File.join(attempt_dir, "failed-source-*")) + [File.join(attempt_dir, "observation.failed.json")]).each { |path| File.chmod(0o444, path) if File.file?(path) }
+      ([raw_log, manifest_path] + Dir.glob(File.join(attempt_dir, "failed-source-*")) + [File.join(attempt_dir, "observation.failed.json")]).each { |path| File.chmod(0o400, path) if File.file?(path) }
       attempt.merge!("status" => "failed", "failure" => ENV.fetch("FAILURE_REASON"), "manifestSHA256" => manifest_sha)
       File.write(attempt_path, JSON.pretty_generate(attempt) + "\n")
+      File.chmod(0o400, attempt_path)
       index_path = File.join(File.dirname(attempt_dir), "index.jsonl")
       File.open(index_path, File::WRONLY | File::CREAT | File::APPEND, 0o600) { |file| file.flock(File::LOCK_EX); file.puts(JSON.generate(run: attempt.fetch("run"), status: "failed", artifactSHA256: attempt.fetch("artifactSHA256"), manifestSHA256: manifest_sha)) }
     ' 2>/dev/null || true
@@ -333,7 +336,7 @@ log_pid=""
   manifest_path = File.join(attempt_dir, "manifest.json")
   File.write(manifest_path, JSON.pretty_generate(manifest) + "\n")
   manifest_sha = Digest::SHA256.file(manifest_path).hexdigest
-  ([log_path, observation_copy, manifest_path] + copied_sources.map { |source| File.join(attempt_dir, source["file"]) }).each { |path| File.chmod(0o444, path) }
+  ([log_path, observation_copy, manifest_path] + copied_sources.map { |source| File.join(attempt_dir, source["file"]) }).each { |path| File.chmod(0o400, path) }
   record = { run: run, version: version, build: build, artifactSHA256: artifact,
     processStartNs: process_ns, firstFrameNs: frame_ns, controlConfirmedNs: control_ns,
     dockSettledNs: dock_ns, passed: control_ns < dock_ns, attemptManifestSHA256: manifest_sha }
@@ -343,6 +346,7 @@ log_pid=""
   File.write(attempt_path, JSON.pretty_generate(attempt) + "\n")
   index_path = File.join(File.dirname(attempt_dir), "index.jsonl")
   File.open(index_path, File::WRONLY | File::CREAT | File::APPEND, 0o600) { |file| file.flock(File::LOCK_EX); file.puts(JSON.generate(run: run, status: "completed", artifactSHA256: artifact, manifestSHA256: manifest_sha)) }
+  File.chmod(0o400, attempt_path)
 ' "$raw_log" "$observation" "$output" "$attempt_dir" "$launched_pid" "$executable" "$run" "$expected_version" "$expected_build" "$expected_sha"
 
 completed=1
