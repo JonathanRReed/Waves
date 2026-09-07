@@ -2767,6 +2767,8 @@ class ReleaseInfraTest < Minitest::Test
       assert_equal "simulated publication failure", error.cause.message
       assert_equal 1, backup_targets.length
       refute backup_targets.first.start_with?("#{destination}/")
+      assert_equal root, File.dirname(File.dirname(backup_targets.first)),
+        "rollback evidence must remain beside, rather than inside, the destination"
       assert File.exist?(backup_targets.first), "rollback failure must retain external backup evidence"
       assert Dir.children(destination).all? { |name| !name.start_with?(".waves-") }
       FileUtils.rm_rf(File.dirname(backup_targets.first))

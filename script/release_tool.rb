@@ -1182,7 +1182,7 @@ module WavesRelease
 
         destination_names = publications.map { |_method, _source, name| name }
         destination_names << "notary-log.json" unless destination_names.include?("notary-log.json")
-        publication_backup = Dir.mktmpdir("waves-publication-backup-")
+        publication_backup = Dir.mktmpdir("waves-publication-backup-", File.dirname(destination_root))
         FileUtils.chmod(0o700, publication_backup)
         destination_names.each do |name|
           destination = File.join(destination_root, name)
