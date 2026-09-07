@@ -468,6 +468,20 @@ func controlServerCapsOneProcessAndRemovesSocketOnShutdown() async throws {
   )
 }
 
+@Test func listenerSelfProofClientSuppressesSIGPIPE() {
+  let client = socket(AF_UNIX, SOCK_STREAM, 0)
+  #expect(client >= 0)
+  guard client >= 0 else { return }
+  defer { _ = Darwin.close(client) }
+
+  #expect(ControlServer.suppressSIGPIPE(client))
+  var enabled: Int32 = 0
+  var length = socklen_t(MemoryLayout<Int32>.size)
+  #expect(getsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &enabled, &length) == 0)
+  #expect(enabled == 1)
+  #expect(!ControlServer.suppressSIGPIPE(-1))
+}
+
 @Test func backlogPressureRequiresTheConfiguredQueueCapacityFirst() {
   #expect(!backlogPressureIsProven(confirmedConnections: 0))
   #expect(

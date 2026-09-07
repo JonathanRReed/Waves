@@ -374,6 +374,17 @@ final class ControlServer {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0
   }
 
+  nonisolated static func suppressSIGPIPE(_ fd: Int32) -> Bool {
+    var enabled: Int32 = 1
+    return setsockopt(
+      fd,
+      SOL_SOCKET,
+      SO_NOSIGPIPE,
+      &enabled,
+      socklen_t(MemoryLayout<Int32>.size)
+    ) == 0
+  }
+
   private func verifyListener(
     phase: ControlListenerSelfProofPhase,
     listener: Int32,
@@ -409,6 +420,7 @@ final class ControlServer {
     let client = socket(AF_UNIX, SOCK_STREAM, 0)
     guard client >= 0 else { return false }
     defer { _ = Darwin.close(client) }
+    guard suppressSIGPIPE(client) else { return false }
     guard setNonBlocking(client) else { return false }
 
     var address = sockaddr_un()
