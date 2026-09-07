@@ -197,13 +197,16 @@ class ReleaseInfraTest < Minitest::Test
   def test_writable_dmg_cleanup_detaches_before_removing_layout_failure_workspace
     workspace = writable_dmg_workspace
     image = File.join(workspace, "layout.dmg")
+    mount = Dir.mktmpdir("waves-dmg-mount.")
     _stdout, stderr, status, detach = run_production_cleanup(
-      workspace: workspace, image: image, mount: "/private/tmp/waves-dmg-mount.success"
+      workspace: workspace, image: image, mount: mount
     )
     assert status.success?, stderr
-    assert_equal "detach /private/tmp/waves-dmg-mount.success -quiet\n", detach
+    assert_equal "detach #{mount} -quiet\n", detach
+    refute File.exist?(mount), "successful detach must remove the private mount directory"
     refute File.exist?(workspace), "successful detach must be followed by workspace removal"
   ensure
+    remove_created_path(mount)
     remove_created_path(workspace)
   end
 
