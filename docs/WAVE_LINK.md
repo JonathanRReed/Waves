@@ -35,9 +35,9 @@ producing output. Detection updates during the regular refresh, so allow a few
 seconds after starting or stopping playback, or choose Refresh. A foreground
 app alone does not count as playing.
 
-Waves does not capture a second copy of Wave Link audio to draw meters. Use
-Wave Link for signal levels; the Waves visualizer can remain flat while those
-apps play.
+Waves does not capture a second copy of Wave Link audio to draw meters. Its
+header animation indicates playback activity for these apps, not measured
+signal strength. Use Wave Link for actual signal levels.
 
 ## If something goes wrong
 
