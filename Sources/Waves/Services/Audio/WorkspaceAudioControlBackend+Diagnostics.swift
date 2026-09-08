@@ -88,7 +88,10 @@ extension WorkspaceAudioControlBackend {
     switch bridge.phase {
     case .idle: .informational
     case .connected:
-      bridge.channels.contains { $0.isSoftware && ($0.mixCount == 0 || $0.appIdentifiers.count > 1) }
+      bridge.channels.contains {
+        $0.isSoftware
+          && ((!$0.appIdentifiers.isEmpty && $0.mixCount == 0) || $0.appIdentifiers.count > 1)
+      }
         ? .warning : .passed
     case .failed: .warning
     }
@@ -101,7 +104,9 @@ extension WorkspaceAudioControlBackend {
     case .failed:
       return bridge.summaryLine
     case .connected:
-      if bridge.channels.contains(where: { $0.isSoftware && $0.mixCount == 0 }) {
+      if bridge.channels.contains(where: {
+        $0.isSoftware && !$0.appIdentifiers.isEmpty && $0.mixCount == 0
+      }) {
         return bridge.summaryLine
           + ". A software channel is not added to a mix. In Wave Link, add it to the mix you listen to and check the mix's output device."
       }

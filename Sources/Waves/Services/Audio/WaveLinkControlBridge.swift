@@ -199,7 +199,8 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
       appIdentifiers: apps.map(\.id),
       level: level,
       isMuted: isMuted,
-      mixCount: mixes?.count
+      mixCount: mixes?.count,
+      isRelocationReady: relocationMixes != nil
     )
   }
 }
@@ -394,7 +395,8 @@ actor WaveLinkControlBridge: WaveLinkControlling {
       // Moving between different mixes or per-mix settings can silence the app
       // or expose it to a stream. Unknown metadata requires manual setup too.
       guard matchingChannels.count == 1,
-        let sourceMixes = matchingChannels.first?.relocationMixes,
+        let source = matchingChannels.first,
+        let sourceMixes = source.relocationMixes,
         let empty = channels.first(where: {
           $0.isSoftware && $0.apps.isEmpty && $0.relocationMixes == sourceMixes
         })
@@ -408,12 +410,14 @@ actor WaveLinkControlBridge: WaveLinkControlling {
       _ = try await request("addToChannel", try encoder.encode(addRequest))
       channels = try await readChannels()
       let movedMatches = channels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
+      let currentSource = channels.first { $0.id == source.id }
       guard
         movedMatches.count == 1,
         let moved = movedMatches.first,
         moved.id == empty.id,
         moved.apps.count == 1,
-        moved.relocationMixes == sourceMixes
+        moved.relocationMixes == sourceMixes,
+        currentSource?.relocationMixes == sourceMixes
       else {
         throw WaveLinkControlBridgeError.readBackMismatch(
           "The app or mix settings changed while moving to \(empty.name). Check its channel and mix assignments in Wave Link before retrying."

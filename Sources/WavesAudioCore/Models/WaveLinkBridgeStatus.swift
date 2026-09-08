@@ -21,6 +21,9 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
     public var level: Float
     public var isMuted: Bool
     public var mixCount: Int?
+    /// Whether the channel reported complete mix metadata for safe relocation.
+    /// Optional so diagnostics exported by older Waves builds still decode.
+    public var isRelocationReady: Bool?
 
     public init(
       id: String,
@@ -29,7 +32,8 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
       appIdentifiers: [String],
       level: Float,
       isMuted: Bool,
-      mixCount: Int? = nil
+      mixCount: Int? = nil,
+      isRelocationReady: Bool? = nil
     ) {
       self.id = id
       self.name = name
@@ -38,11 +42,14 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
       self.level = level
       self.isMuted = isMuted
       self.mixCount = mixCount
+      self.isRelocationReady = isRelocationReady
     }
 
-    /// A software channel holding no app and not known to lack a mix is one
+    /// A software channel holding no app with complete mix metadata is one
     /// Waves can claim for an app that needs independent control.
-    public var isFreeSoftwareChannel: Bool { isSoftware && appIdentifiers.isEmpty && mixCount != 0 }
+    public var isFreeSoftwareChannel: Bool {
+      isSoftware && appIdentifiers.isEmpty && isRelocationReady == true
+    }
   }
 
   public var phase: Phase

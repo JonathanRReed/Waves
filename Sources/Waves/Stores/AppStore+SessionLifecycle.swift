@@ -446,6 +446,7 @@ extension AppStore {
       let app = session.apps[index]
       guard app.runtimeIdentity == storedIdentity else { continue }
       matchedIDs.append(app.logicalID)
+      session.apps[index].isProducingOutput = false
       if app.isActive || app.routingState == .managed || app.routingState == .live {
         session.apps[index].isActive = false
         session.apps[index].routingState = .monitorOnly

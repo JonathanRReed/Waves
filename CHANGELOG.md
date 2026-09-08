@@ -11,6 +11,7 @@ All notable changes to Waves are documented here. The format follows
 ### Fixed
 - Keep playing Wave Link-controlled apps in Live by tracking Core Audio playback
   separately from route ownership.
+- Remove terminated Wave Link-controlled apps from Live immediately.
 - Omit parameters on parameterless Wave Link requests so Wave Link 3 accepts
   the connection handshake and channel listing instead of returning Invalid params.
 - Preserve mix assignments, per-mix levels, and mute settings when moving apps

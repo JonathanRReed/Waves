@@ -191,6 +191,7 @@ private actor WaveLinkRPCStub {
   private let applicationID: String
   private let interfaceRevision: Int
   private let mixesAfterAdd: [WaveLinkChannelMix]?
+  private let sourceMixesAfterAdd: [WaveLinkChannelMix]?
   private let roundsChannelLevels: Bool
   private(set) var applicationInfoRequestCount = 0
   private(set) var addRequests: [AddRequest] = []
@@ -202,12 +203,14 @@ private actor WaveLinkRPCStub {
   init(
     channels: [WaveLinkChannel], applicationID: String = "EWL", interfaceRevision: Int = 1,
     mixesAfterAdd: [WaveLinkChannelMix]? = nil,
+    sourceMixesAfterAdd: [WaveLinkChannelMix]? = nil,
     roundsChannelLevels: Bool = false
   ) {
     self.channels = channels
     self.applicationID = applicationID
     self.interfaceRevision = interfaceRevision
     self.mixesAfterAdd = mixesAfterAdd
+    self.sourceMixesAfterAdd = sourceMixesAfterAdd
     self.roundsChannelLevels = roundsChannelLevels
   }
 
@@ -229,8 +232,14 @@ private actor WaveLinkRPCStub {
     case "addToChannel":
       let request = try JSONDecoder().decode(AddRequest.self, from: try #require(params))
       addRequests.append(request)
+      let sourceIndex = channels.firstIndex { channel in
+        channel.apps.contains { $0.id == request.appID }
+      }
       for index in channels.indices {
         channels[index].apps.removeAll(where: { $0.id == request.appID })
+      }
+      if let sourceIndex, let sourceMixesAfterAdd {
+        channels[sourceIndex].mixes = sourceMixesAfterAdd
       }
       guard let index = channels.firstIndex(where: { $0.id == request.channelID }) else {
         throw WaveLinkControlBridgeError.protocolViolation("Unknown channel")
@@ -302,7 +311,10 @@ private actor WaveLinkRPCStub {
   let rpc = WaveLinkRPCStub(
     channels: [
       .init(id: "music", name: "Music", type: "Software", level: 0.8, isMuted: false, apps: [.init(id: "com.spotify.client")]),
-      .init(id: "aux", name: "Aux 1", type: "Software", level: 1, isMuted: false, apps: []),
+      .init(
+        id: "aux", name: "Aux 1", type: "Software", level: 1, isMuted: false, apps: [],
+        mixes: [.init(id: "personal", level: 1, isMuted: false)]
+      ),
       .init(id: "mic", name: "Wave:3", type: "Hardware", level: 1, isMuted: false, apps: []),
     ]
   )
@@ -395,6 +407,52 @@ private actor WaveLinkRPCStub {
   #expect(status.freeSoftwareChannelCount == 0)
 }
 
+@Test func waveLinkDiagnosticsIgnoreAnEmptyUnroutedChannel() {
+  let occupied = WaveLinkChannel(
+    id: "zoom", name: "Zoom", type: "Software", level: 0.5,
+    isMuted: false, apps: [.init(id: "us.zoom.xos")],
+    mixes: [.init(id: "personal", level: 1, isMuted: false)]
+  )
+  let unused = WaveLinkChannel(
+    id: "unused", name: "Unused", type: "Software", level: 1,
+    isMuted: false, apps: [], mixes: []
+  )
+  let status = WaveLinkBridgeStatus(
+    phase: .connected,
+    channels: [occupied.statusSummary, unused.statusSummary]
+  )
+
+  #expect(WorkspaceAudioControlBackend.diagnosticsStatus(for: status) == .passed)
+  #expect(!WorkspaceAudioControlBackend.diagnosticsDetail(for: status).contains("not added to a mix"))
+  #expect(status.freeSoftwareChannelCount == 0)
+}
+
+@Test func waveLinkStatusDoesNotReportIncompleteMixMetadataAsFree() {
+  let incomplete = WaveLinkChannel(
+    id: "empty", name: "Empty", type: "Software", level: 1,
+    isMuted: false, apps: [], mixes: [.init(id: "personal")]
+  )
+  let status = WaveLinkBridgeStatus(
+    phase: .connected,
+    channels: [incomplete.statusSummary]
+  )
+
+  #expect(status.freeSoftwareChannelCount == 0)
+  #expect(status.summaryLine.contains("0 free"))
+}
+
+@Test func waveLinkStatusDecodesAChannelSummaryWithoutRelocationReadiness() throws {
+  let status = try JSONDecoder().decode(
+    WaveLinkBridgeStatus.self,
+    from: Data(
+      #"{"phase":"connected","channels":[{"id":"empty","name":"Empty","isSoftware":true,"appIdentifiers":[],"level":1,"isMuted":false,"mixCount":1}],"updatedAt":0}"#.utf8
+    )
+  )
+
+  #expect(status.channels.first?.isRelocationReady == nil)
+  #expect(status.freeSoftwareChannelCount == 0)
+}
+
 @Test(arguments: ["differentMix", "differentLevel", "differentMute", "missingSource", "missingTarget", "missingLevel", "missingMute", "duplicateMix"])
 func waveLinkBridgeRejectsRelocationThatCannotPreserveMixSettings(_ scenario: String) async throws {
   let originalMix: [String: Any] = ["id": "personal", "level": 0.75, "isMuted": false]
@@ -482,6 +540,32 @@ func waveLinkBridgeRejectsRelocationThatCannotPreserveMixSettings(_ scenario: St
       Issue.record("Expected a read-back failure, received \(error).")
       return
     }
+  }
+  #expect(await rpc.addRequests.count == 1)
+  #expect(await rpc.setRequests.isEmpty)
+}
+
+@Test func waveLinkBridgeStopsIfSourceMixSettingsChangeDuringRelocation() async throws {
+  let personal = WaveLinkChannelMix(id: "personal", level: 1, isMuted: false)
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(
+        id: "shared", name: "Voice Apps", type: "Software", level: 1, isMuted: false,
+        apps: [.init(id: "us.zoom.xos"), .init(id: "com.example.chat")], mixes: [personal]
+      ),
+      .init(
+        id: "empty", name: "Empty", type: "Software", level: 1, isMuted: false,
+        apps: [], mixes: [personal]
+      ),
+    ],
+    sourceMixesAfterAdd: [.init(id: "stream", level: 1, isMuted: false)]
+  )
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    try await rpc.request(method: method, params: params)
+  })
+
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await bridge.apply(bundleIdentifier: "us.zoom.xos", volume: 0.5, isMuted: false)
   }
   #expect(await rpc.addRequests.count == 1)
   #expect(await rpc.setRequests.isEmpty)

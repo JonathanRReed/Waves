@@ -1718,11 +1718,11 @@ private func waitForRefresh(_ store: AppStore) async {
 
   // Reset returns to the pre-Meeting mix, clears the point and active profile.
   fixture.store.resetMix()
+  #expect(fixture.store.toasts.contains { $0.title == "Mix reset" })
   await fixture.store.drainAppIntentTransactions()
   #expect(fixture.store.mixRestorePoint == nil)
   #expect(fixture.store.activeProfileID == nil)
   #expect(fixture.store.session.apps.first?.desiredVolume == 0.8)
-  #expect(fixture.store.toasts.contains { $0.title == "Mix reset" })
   // The synthesized restore profile never lands in the saved profiles list.
   #expect(!fixture.store.profiles.contains { $0.name == "Meeting" && $0.id != profile.id })
 }
@@ -1844,6 +1844,30 @@ private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async
   #expect(!released.isActive)
   #expect(released.routingState == .monitorOnly)
   #expect(released.appliedVolume == nil)
+}
+
+@MainActor
+@Test(arguments: [false, true])
+func appTerminationImmediatelyClearsWaveLinkOutputActivity(isActive: Bool) async throws {
+  let identity = transactionRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+  var app = transactionTestApp(runtimeIdentity: identity)
+  app.routingState = .monitorOnly
+  app.routeHealthContext = .waveLinkBridge
+  app.isActive = isActive
+  app.isProducingOutput = true
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice()
+  )
+
+  #expect(fixture.store.isLive(app))
+
+  fixture.store.handleAppTermination(pid: 42)
+
+  let terminated = try #require(fixture.store.session.apps.first)
+  #expect(!terminated.isProducingOutput)
+  #expect(!fixture.store.isLive(terminated))
+  #expect(terminated.routingState == .monitorOnly)
 }
 
 @MainActor
