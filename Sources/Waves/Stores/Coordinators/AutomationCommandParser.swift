@@ -58,9 +58,10 @@ final class AutomationCommandParser {
           shouldPresent: false
         ))
     }
-    guard url.scheme == "waves",
+    // RFC 3986 specifies URL schemes and hosts are case-insensitive.
+    guard url.scheme?.lowercased() == "waves",
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-      let host = components.host,
+      let host = components.host?.lowercased(),
       !host.isEmpty
     else {
       return .rejected(
