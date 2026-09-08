@@ -61,6 +61,7 @@ enum WaveLinkControlBridgeError: Error, Equatable, LocalizedError, Sendable {
   case incompatibleApplication
   case unverifiedLoopbackPeer
   case dedicatedChannelRequired(String)
+  case channelNotInMix(String)
   case relocationNotPermitted(String)
   case protocolViolation(String)
   case readBackMismatch(String)
@@ -78,7 +79,9 @@ enum WaveLinkControlBridgeError: Error, Equatable, LocalizedError, Sendable {
     case .unverifiedLoopbackPeer:
       "The running Wave Link is not signed by Elgato, so Waves will not send it commands."
     case .dedicatedChannelRequired(let appID):
-      "Every Wave Link software channel already holds an app, so \(appID) cannot get its own level. In Wave Link, give it a channel of its own or empty one."
+      "No empty Wave Link software channel is ready for \(appID). In Wave Link, give the app its own channel and add that channel to your listening mix."
+    case .channelNotInMix(let channelName):
+      "The Wave Link channel \(channelName) is not added to a mix. In Wave Link, add this channel to the mix you listen to, check that mix's output device, then try again."
     case .relocationNotPermitted(let appID):
       "\(appID) shares a Wave Link channel with other apps. Waves only moves an app to its own Wave Link channel when you change its level yourself."
     case .protocolViolation(let detail):
@@ -121,6 +124,12 @@ struct WaveLinkChannelApp: Codable, Equatable, Sendable {
   }
 }
 
+struct WaveLinkChannelMix: Codable, Equatable, Sendable {
+  let id: String
+  var level: Float? = nil
+  var isMuted: Bool? = nil
+}
+
 struct WaveLinkChannel: Codable, Equatable, Sendable {
   let id: String
   let name: String
@@ -128,6 +137,9 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
   var level: Float
   var isMuted: Bool
   var apps: [WaveLinkChannelApp]
+  // Older responses can omit mix metadata. An explicit empty list means the
+  // channel has no output mix and must not be chosen as a relocation target.
+  var mixes: [WaveLinkChannelMix]?
 
   init(
     id: String,
@@ -135,7 +147,8 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     type: String,
     level: Float,
     isMuted: Bool,
-    apps: [WaveLinkChannelApp]
+    apps: [WaveLinkChannelApp],
+    mixes: [WaveLinkChannelMix]? = nil
   ) {
     self.id = id
     self.name = name
@@ -143,6 +156,7 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     self.level = level
     self.isMuted = isMuted
     self.apps = apps
+    self.mixes = mixes
   }
 
   init(from decoder: Decoder) throws {
@@ -154,6 +168,7 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
     // Hardware channels omit `apps` entirely; software channels list them.
     apps = try container.decodeIfPresent([WaveLinkChannelApp].self, forKey: .apps) ?? []
+    mixes = try container.decodeIfPresent([WaveLinkChannelMix].self, forKey: .mixes)
   }
 
   var isSoftware: Bool {
@@ -164,6 +179,18 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     apps.contains { $0.id.caseInsensitiveCompare(bundleIdentifier) == .orderedSame }
   }
 
+  fileprivate var relocationMixes: [String: WaveLinkChannelMix]? {
+    guard let mixes, !mixes.isEmpty else { return nil }
+    var configuration: [String: WaveLinkChannelMix] = [:]
+    for mix in mixes {
+      guard !mix.id.isEmpty, let level = mix.level,
+        level.isFinite, (0...1).contains(level), mix.isMuted != nil,
+        configuration.updateValue(mix, forKey: mix.id) == nil
+      else { return nil }
+    }
+    return configuration
+  }
+
   var statusSummary: WaveLinkBridgeStatus.ChannelSummary {
     WaveLinkBridgeStatus.ChannelSummary(
       id: id,
@@ -171,7 +198,8 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
       isSoftware: isSoftware,
       appIdentifiers: apps.map(\.id),
       level: level,
-      isMuted: isMuted
+      isMuted: isMuted,
+      mixCount: mixes?.count
     )
   }
 }
@@ -363,7 +391,14 @@ actor WaveLinkControlBridge: WaveLinkControlling {
       guard allowsChannelRelocation else {
         throw WaveLinkControlBridgeError.relocationNotPermitted(bundleIdentifier)
       }
-      guard let empty = channels.first(where: { $0.isSoftware && $0.apps.isEmpty }) else {
+      // Moving between different mixes or per-mix settings can silence the app
+      // or expose it to a stream. Unknown metadata requires manual setup too.
+      guard matchingChannels.count == 1,
+        let sourceMixes = matchingChannels.first?.relocationMixes,
+        let empty = channels.first(where: {
+          $0.isSoftware && $0.apps.isEmpty && $0.relocationMixes == sourceMixes
+        })
+      else {
         throw WaveLinkControlBridgeError.dedicatedChannelRequired(bundleIdentifier)
       }
       Self.logger.info(
@@ -377,14 +412,19 @@ actor WaveLinkControlBridge: WaveLinkControlling {
         movedMatches.count == 1,
         let moved = movedMatches.first,
         moved.id == empty.id,
-        moved.apps.count == 1
+        moved.apps.count == 1,
+        moved.relocationMixes == sourceMixes
       else {
         throw WaveLinkControlBridgeError.readBackMismatch(
-          "The app was not isolated on channel \(empty.name)."
+          "The app or mix settings changed while moving to \(empty.name). Check its channel and mix assignments in Wave Link before retrying."
         )
       }
       targetChannel = moved
       relocated = true
+    }
+
+    guard targetChannel.mixes?.isEmpty != true else {
+      throw WaveLinkControlBridgeError.channelNotInMix(targetChannel.name)
     }
 
     let setRequest = SetChannelRequest(id: targetChannel.id, level: volume, isMuted: isMuted)
@@ -680,12 +720,11 @@ actor WaveLinkLoopbackSession {
     let requestID = nextRequestID
     nextRequestID += 1
 
-    // The official plugin sends an explicit null for parameterless calls.
+    // JSON-RPC permits omitted params. Wave Link 3 rejects explicit null params.
     var payload: [String: Any] = [
       "id": requestID,
       "jsonrpc": "2.0",
       "method": method,
-      "params": NSNull(),
     ]
     if let params {
       payload["params"] = try JSONSerialization.jsonObject(with: params)

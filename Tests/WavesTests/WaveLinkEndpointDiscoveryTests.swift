@@ -488,6 +488,15 @@ private final class TestJSONRPCServer: @unchecked Sendable {
       else { continue }
       lock.withLock { recordedMethods.append(method) }
       let id = object["id"] ?? NSNull()
+      // Wave Link 3 rejects JSON null params with JSON-RPC Invalid params.
+      if object["params"] is NSNull {
+        let idText = (id as? NSNumber).map { "\($0)" } ?? "null"
+        _ = TestWebSocketFraming.writeTextFrame(
+          #"{"jsonrpc":"2.0","id":\#(idText),"error":{"code":-32602,"message":"Invalid params"}}"#,
+          to: client
+        )
+        continue
+      }
       let result: String
       switch method {
       case "getApplicationInfo": result = applicationInfo

@@ -371,7 +371,7 @@ import WavesAudioCore
   #expect(resultingApp.routingState == .monitorOnly)
   #expect(resultingApp.routeHealthContext == .waveLinkBridge)
   #expect(resultingApp.appliedVolume == nil)
-  #expect(result.detail?.contains("empty software channel") == true)
+  #expect(result.detail?.contains("needs its own Wave Link channel") == true)
   #expect(await renderer.count() == 0)
   #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
 }

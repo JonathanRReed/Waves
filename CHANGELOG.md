@@ -6,6 +6,22 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-09-08
+
+### Fixed
+- Omit parameters on parameterless Wave Link requests so Wave Link 3 accepts
+  the connection handshake and channel listing instead of returning Invalid params.
+- Preserve mix assignments, per-mix levels, and mute settings when moving apps
+  to independent channels. Leave apps in place when a safe match cannot be verified.
+- Explain when an app's dedicated channel has not been added to a mix.
+- Add setup and troubleshooting guidance in Mixer settings and Help, including
+  shared channels, silent output, connection failures, and diagnostics.
+- Stop flagging a full set of dedicated channels as a setup problem.
+- Exercise the real server's rejection of null parameters in the loopback tests.
+
+Independent app volume still requires a dedicated Wave Link software channel.
+Apps sharing a channel, such as Zoom and Slack, must be separated in Wave Link.
+
 ## [1.7.1] - 2026-09-05
 
 Waves 1.7.1 build 19 is a maintenance release: security repairs from the

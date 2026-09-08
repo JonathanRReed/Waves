@@ -20,6 +20,7 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
     public var appIdentifiers: [String]
     public var level: Float
     public var isMuted: Bool
+    public var mixCount: Int?
 
     public init(
       id: String,
@@ -27,7 +28,8 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
       isSoftware: Bool,
       appIdentifiers: [String],
       level: Float,
-      isMuted: Bool
+      isMuted: Bool,
+      mixCount: Int? = nil
     ) {
       self.id = id
       self.name = name
@@ -35,11 +37,12 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
       self.appIdentifiers = appIdentifiers
       self.level = level
       self.isMuted = isMuted
+      self.mixCount = mixCount
     }
 
-    /// A software channel holding no app is one Waves can claim for an app
-    /// that needs independent control.
-    public var isFreeSoftwareChannel: Bool { isSoftware && appIdentifiers.isEmpty }
+    /// A software channel holding no app and not known to lack a mix is one
+    /// Waves can claim for an app that needs independent control.
+    public var isFreeSoftwareChannel: Bool { isSoftware && appIdentifiers.isEmpty && mixCount != 0 }
   }
 
   public var phase: Phase

@@ -8,6 +8,11 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
+The current source candidate is 1.7.2 build 20. It fixes parameterless Wave Link
+JSON-RPC requests rejected with Invalid params. The 1.7.1 benchmark deferral
+has been removed from candidate metadata. Signing, notarization, and publication
+must be completed before 1.7.2 is presented as a downloadable update.
+
 Version 1.7.1 build 19 is the latest published release. GitHub published it on
 2026-09-05 from the signed annotated `v1.7.1` tag at
 `2055c7a72a58af85a933e39f1e781ec2b330c571`. The release includes the DMG,
