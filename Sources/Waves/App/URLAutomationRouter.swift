@@ -72,7 +72,8 @@ struct URLAutomationRouter {
   func handle(rawURLString: String) {
     guard isEnabled() else { return }
     guard admitInvocation() else { return }
-    guard let url = parse(rawURLString), url.scheme == "waves" else { return }
+    // RFC 3986 specifies URL schemes are case-insensitive.
+    guard let url = parse(rawURLString), url.scheme?.lowercased() == "waves" else { return }
     guard isAudioRunning() else {
       promptForSetup()
       presentSetup()
