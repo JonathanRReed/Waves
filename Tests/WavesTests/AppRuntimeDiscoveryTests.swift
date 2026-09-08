@@ -866,3 +866,62 @@ private func waitForRuntimeIdentity(pid: pid_t) -> AppRuntimeIdentity? {
   }
   return nil
 }
+
+@MainActor
+@Test(arguments: [true, false])
+func waveLinkPlaybackRemainsLiveAfterRouteOwnershipChanges(isPlaying: Bool) async {
+  let capture = AppRuntimeDiscovery.Capture(applications: [
+    .init(
+      pid: 42, bundleID: "com.example.player", localizedName: "Player",
+      bundlePath: "/Applications/Player.app", activationPolicy: .regular,
+      isActive: true, iconTIFFData: nil
+    )
+  ])
+  var app = AppRuntimeDiscovery.discoverRunningApps(
+    from: capture, currentBundleID: nil, audiblePIDs: isPlaying ? [42] : [],
+    audibleParentBundlePaths: []
+  )[0]
+  app.routingState = .monitorOnly
+  app.routeHealthContext = .waveLinkBridge
+  let store = await makeControlStoreFixture()
+  #expect(store.isLive(app) == isPlaying)
+  app.isMuted = true
+  #expect(store.isLive(app) == false)
+  _ = await store.shutdown()
+}
+
+@Test func discoveredPlaybackActivityIsNotRestoredFromSavedSessions() throws {
+  var app = AudioApp(id: "player", displayName: "Player", category: .media)
+  app.isProducingOutput = true
+  app.routeHealthContext = .waveLinkBridge
+  let data = try JSONEncoder().encode(app)
+  let restored = try JSONDecoder().decode(AudioApp.self, from: data)
+  #expect(restored.isProducingOutput == false)
+  #expect(restored.routeHealthContext == .waveLinkBridge)
+}
+
+@MainActor
+@Test func waveLinkHelperPlaybackTracksFreshDiscoveryAndDoesNotInventMeterLevels() async {
+  let capture = AppRuntimeDiscovery.Capture(applications: [
+    .init(
+      pid: 42, bundleID: "com.example.browser", localizedName: "Browser",
+      bundlePath: "/Applications/Browser.app", activationPolicy: .regular,
+      isActive: false, iconTIFFData: nil
+    )
+  ])
+  let store = await makeControlStoreFixture()
+  for isPlaying in [true, false] {
+    var app = AppRuntimeDiscovery.discoverRunningApps(
+      from: capture, currentBundleID: nil, audiblePIDs: [],
+      audibleParentBundlePaths: isPlaying ? ["/Applications/Browser.app"] : []
+    )[0]
+    app.routingState = .monitorOnly
+    app.routeHealthContext = .waveLinkBridge
+    #expect(store.isLive(app) == isPlaying)
+    #expect(app.peakLevel == 0)
+    #expect(app.rmsLevel == 0)
+    app.hasAmbiguousIdentity = true
+    #expect(store.isLive(app) == false)
+  }
+  _ = await store.shutdown()
+}

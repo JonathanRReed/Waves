@@ -203,10 +203,10 @@ private struct WaveLinkBridgeStatusRow: View {
           if store.isTestingWaveLinkConnection {
             ProgressView()
               .controlSize(.small)
-              .frame(width: 96)
+              .frame(minWidth: 108)
           } else {
             Text("Test Connection")
-              .frame(width: 96)
+              .frame(minWidth: 108)
           }
         }
         .buttonStyle(.bordered)
@@ -219,9 +219,20 @@ private struct WaveLinkBridgeStatusRow: View {
           .foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)
       }
+      DisclosureGroup("Wave Link setup and troubleshooting") {
+        VStack(alignment: .leading, spacing: 6) {
+          Text("1. Open Wave Link 3. Keep compatibility on and select Waves as the per-app controller.")
+          Text("2. In Wave Link, give each app its own software channel. Choose Create channel and select the app, then add that channel to the mix you listen to.")
+          Text("3. Choose Test Connection here, play sound in the app, then adjust its volume in Waves.")
+          Text("If connection fails, restart Wave Link and Waves and test again. Use current versions of both apps. If it still fails, open Settings > Diagnostics to copy the report for support.")
+          Text("If a connected app is silent, check its channel and mix mute buttons, mix level, and output device in Wave Link. Boost, EQ, and output routing stay in Wave Link.")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+      }
     }
-    .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(title). \(detail)")
+    .accessibilityElement(children: .contain)
   }
 
   private var status: WaveLinkBridgeStatus? { store.waveLinkBridgeStatus }
@@ -229,7 +240,7 @@ private struct WaveLinkBridgeStatusRow: View {
   private var title: String {
     switch status?.phase {
     case .connected: "Wave Link connected"
-    case .failed: "Wave Link not reachable"
+    case .failed: "Wave Link needs attention"
     case .idle, nil: "Wave Link connection"
     }
   }
@@ -265,7 +276,8 @@ private struct WaveLinkBridgeStatusRow: View {
     guard !software.isEmpty else { return "No software channels reported." }
     let described = software.map { channel -> String in
       let apps = channel.appIdentifiers.isEmpty ? "free" : "\(channel.appIdentifiers.count) app\(channel.appIdentifiers.count == 1 ? "" : "s")"
-      return "\(channel.name) (\(apps))"
+      let mix = channel.mixCount == 0 ? ", not added to a mix" : ""
+      return "\(channel.name) (\(apps)\(mix))"
     }
     return "Channels: " + described.joined(separator: ", ")
   }

@@ -8,6 +8,11 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
+The current source candidate is 1.7.2 build 20. It fixes parameterless Wave Link
+JSON-RPC requests rejected with Invalid params. The 1.7.1 benchmark deferral
+has been removed from candidate metadata. Signing, notarization, and publication
+must be completed before 1.7.2 is presented as a downloadable update.
+
 Version 1.7.1 build 19 is the latest published release. GitHub published it on
 2026-09-05 from the signed annotated `v1.7.1` tag at
 `2055c7a72a58af85a933e39f1e781ec2b330c571`. The release includes the DMG,
@@ -46,14 +51,12 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
-For the 1.7.1 build 19 maintenance release, canonical metadata records Jonathan's
-September 5 approval to defer the exhaustive benchmarks. Represent each deferred
-`launchTime`, `idleCPU`, `steadyMemory`, or `activeMixing` record with status
-`deferred`, null `baseline`, `candidate`, and `regressionPercent` values, and the
-exact approved reason from metadata as `approvedJustification`. Do not invent
-measurements. A deferred record is not a passing benchmark or a performance
-improvement. The policy is bound to version 1.7.1 build 19, so a version or build
-change must remove it or replace it with a new explicit approval.
+The 1.7.1 build 19 metadata recorded Jonathan's September 5 approval to defer
+exhaustive benchmarks. The 1.7.2 metadata removes that release-specific policy.
+Record fresh `launchTime`, `idleCPU`, `steadyMemory`, and `activeMixing`
+comparisons for this candidate. A new deferral requires explicit approval tied
+to this version and build. A deferred record is not a passing benchmark or a
+performance improvement.
 
 This deferral does not change any release gate. Active and idle stability smoke
 checks, security, tests, platform and physical Elgato checks, signing,
@@ -294,7 +297,7 @@ that checkout's exact lowercase revision. The output directory must not exist.
   /ABSOLUTE/PATH/TO/dist/release-evidence.candidate.json \
   /ABSOLUTE/PATH/TO/com.jonathanreed.waves.streamDeckPlugin \
   PLUGIN_40_CHARACTER_REVISION \
-  /ABSOLUTE/PATH/TO/Waves-1.7.1-19-Elgato-Handoff
+  /ABSOLUTE/PATH/TO/Waves-1.7.2-20-Elgato-Handoff
 ```
 
 The command reruns the complete candidate gate, privately snapshots and
@@ -473,7 +476,7 @@ After GitHub publishes the DMG and you download it back, update the tap's
 
 ```bash
 published_sha="$(shasum -a 256 /tmp/waves-release/Waves.dmg | cut -d ' ' -f 1)"
-/usr/bin/ruby -e 'path = ARGV.fetch(0); version = ARGV.fetch(1); sha = ARGV.fetch(2); text = File.read(path); text.sub!(/^  version ".*"$/, "  version \"#{version}\"") or abort "version line missing"; text.sub!(/^  sha256 ".*"$/, "  sha256 \"#{sha}\"") or abort "sha256 line missing"; File.write(path, text)' ../homebrew-tap/Casks/waves.rb 1.7.1 "$published_sha"
+/usr/bin/ruby -e 'path = ARGV.fetch(0); version = ARGV.fetch(1); sha = ARGV.fetch(2); text = File.read(path); text.sub!(/^  version ".*"$/, "  version \"#{version}\"") or abort "version line missing"; text.sub!(/^  sha256 ".*"$/, "  sha256 \"#{sha}\"") or abort "sha256 line missing"; File.write(path, text)' ../homebrew-tap/Casks/waves.rb 1.7.2 "$published_sha"
 ```
 
 Then confirm it parses and the checksum is the one users will fetch:

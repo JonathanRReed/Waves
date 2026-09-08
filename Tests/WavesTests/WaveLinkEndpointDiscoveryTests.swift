@@ -122,171 +122,178 @@ import Testing
   #expect(WaveLinkEndpointDiscovery.listeningTCPPorts(ofPID: -1).isEmpty)
 }
 
-@Test func waveLinkSessionAcceptsTheFirstCandidateThatAnswersAsWaveLink3() async throws {
-  let waveLink = try TestJSONRPCServer(
-    applicationInfo: #"{"appID":"EWL","interfaceRevision":1,"name":"Elgato Wave Link","version":"3.2.2"}"#
-  )
-  defer { waveLink.close() }
-  let impostor = try TestJSONRPCServer(applicationInfo: #"{"appID":"egwl","interfaceRevision":7}"#)
-  defer { impostor.close() }
+// These tests run blocking loopback socket fixtures. Running several fixtures
+// concurrently can starve URLSession's WebSocket work on CI and turn healthy
+// handshakes into timeouts, so keep this suite serialized.
+@Suite(.serialized)
+struct WaveLinkLoopbackSessionTests {
+  @Test func waveLinkSessionAcceptsTheFirstCandidateThatAnswersAsWaveLink3() async throws {
+    let waveLink = try TestJSONRPCServer(
+      applicationInfo: #"{"appID":"EWL","interfaceRevision":1,"name":"Elgato Wave Link","version":"3.2.2"}"#
+    )
+    defer { waveLink.close() }
+    let impostor = try TestJSONRPCServer(applicationInfo: #"{"appID":"egwl","interfaceRevision":7}"#)
+    defer { impostor.close() }
 
-  let session = WaveLinkLoopbackSession(
-    candidateProvider: {
-      [
-        .init(pid: 1, port: impostor.port),
-        .init(pid: 1, port: waveLink.port),
-      ]
-    },
-    receiveTimeout: .seconds(3),
-    idleCloseDelay: .milliseconds(50)
-  )
+    let session = WaveLinkLoopbackSession(
+      candidateProvider: {
+        [
+          .init(pid: 1, port: impostor.port),
+          .init(pid: 1, port: waveLink.port),
+        ]
+      },
+      receiveTimeout: .seconds(3),
+      idleCloseDelay: .milliseconds(50)
+    )
 
-  let connection = try await session.connect()
-  #expect(connection.endpoint.port == waveLink.port)
-  #expect(connection.applicationInfo.version == "3.2.2")
-  #expect(await session.connectionDescription?.endpoint == "127.0.0.1:\(waveLink.port)")
+    let connection = try await session.connect()
+    #expect(connection.endpoint.port == waveLink.port)
+    #expect(connection.applicationInfo.version == "3.2.2")
+    #expect(await session.connectionDescription?.endpoint == "127.0.0.1:\(waveLink.port)")
 
-  // Requests reuse the accepted socket, and notifications on it are skipped.
-  let data = try await session.request(method: "getChannels", params: nil)
-  let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-  #expect((object["channels"] as? [Any])?.isEmpty == true)
-  #expect(waveLink.receivedMethods == ["getApplicationInfo", "getChannels"])
-  #expect(waveLink.lastOrigin == "streamdeck://")
+    // Requests reuse the accepted socket, and notifications on it are skipped.
+    let data = try await session.request(method: "getChannels", params: nil)
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect((object["channels"] as? [Any])?.isEmpty == true)
+    #expect(waveLink.receivedMethods == ["getApplicationInfo", "getChannels"])
+    #expect(waveLink.lastOrigin == "streamdeck://")
 
-  await session.endSequence()
-  try await Task.sleep(for: .milliseconds(300))
-  #expect(await session.connectionDescription == nil)
-}
+    await session.endSequence()
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(await session.connectionDescription == nil)
+  }
 
-@Test func waveLinkSessionFailsClosedWhenNoCandidateAnswersAsWaveLink3() async throws {
-  let impostor = try TestJSONRPCServer(applicationInfo: #"{"appID":"egwl","interfaceRevision":7}"#)
-  defer { impostor.close() }
-  let session = WaveLinkLoopbackSession(
-    candidateProvider: { [.init(pid: 1, port: impostor.port)] },
-    receiveTimeout: .seconds(2),
-    idleCloseDelay: .milliseconds(50)
-  )
-  await #expect(throws: WaveLinkControlBridgeError.self) {
+  @Test func waveLinkSessionFailsClosedWhenNoCandidateAnswersAsWaveLink3() async throws {
+    let impostor = try TestJSONRPCServer(applicationInfo: #"{"appID":"egwl","interfaceRevision":7}"#)
+    defer { impostor.close() }
+    let session = WaveLinkLoopbackSession(
+      candidateProvider: { [.init(pid: 1, port: impostor.port)] },
+      receiveTimeout: .seconds(2),
+      idleCloseDelay: .milliseconds(50)
+    )
+    await #expect(throws: WaveLinkControlBridgeError.self) {
+      try await session.connect()
+    }
+    #expect(await session.connectionDescription == nil)
+
+    let nothing = WaveLinkLoopbackSession(
+      candidateProvider: { throw WaveLinkControlBridgeError.unavailable("Wave Link 3 is not running.") },
+      receiveTimeout: .seconds(2),
+      idleCloseDelay: .milliseconds(50)
+    )
+    await #expect(throws: WaveLinkControlBridgeError.unavailable("Wave Link 3 is not running.")) {
+      try await nothing.request(method: "getChannels", params: nil)
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func waveLinkSessionUsesOneDeadlineAcrossUnmatchedNotifications() async throws {
+    let server = try TestJSONRPCServer(
+      handshakeDelayMicroseconds: 300_000,
+      getChannelsBehavior: .notificationsThenReply(count: 40, payloadBytes: 0, intervalMicroseconds: 250_000)
+    )
+    defer { server.close() }
+    // Use the normal three-second budget for setup too. The delayed handshake
+    // must succeed before the notification stream exercises the request deadline.
+    let session = makeTestWaveLinkSession(server: server)
     try await session.connect()
-  }
-  #expect(await session.connectionDescription == nil)
 
-  let nothing = WaveLinkLoopbackSession(
-    candidateProvider: { throw WaveLinkControlBridgeError.unavailable("Wave Link 3 is not running.") },
-    receiveTimeout: .seconds(2),
-    idleCloseDelay: .milliseconds(50)
-  )
-  await #expect(throws: WaveLinkControlBridgeError.unavailable("Wave Link 3 is not running.")) {
-    try await nothing.request(method: "getChannels", params: nil)
-  }
-}
-
-@Test(.timeLimit(.minutes(1)))
-func waveLinkSessionUsesOneDeadlineAcrossUnmatchedNotifications() async throws {
-  let server = try TestJSONRPCServer(
-    handshakeDelayMicroseconds: 300_000,
-    getChannelsBehavior: .notificationsThenReply(count: 40, payloadBytes: 0, intervalMicroseconds: 250_000)
-  )
-  defer { server.close() }
-  // Use the normal three-second budget for setup too. The delayed handshake
-  // must succeed before the notification stream exercises the request deadline.
-  let session = makeTestWaveLinkSession(server: server)
-  try await session.connect()
-
-  // The matching reply follows nearly ten seconds of notifications. Restarting
-  // the deadline after each message would accept it; the one-request budget must not.
-  await #expect(
-    throws: WaveLinkControlBridgeError.unavailable("Wave Link did not answer within the request time limit.")
-  ) {
-    try await session.request(method: "getChannels", params: nil)
-  }
-  #expect(server.receivedMethods == ["getApplicationInfo", "getChannels"])
-  #expect(await session.connectionDescription == nil)
-}
-
-@Test func waveLinkSessionRejectsMoreThan64MessagesForOneRequest() async throws {
-  let server = try TestJSONRPCServer(
-    getChannelsBehavior: .notificationsThenReply(count: 65, payloadBytes: 0, intervalMicroseconds: 0)
-  )
-  defer { server.close() }
-  let session = makeTestWaveLinkSession(server: server)
-
-  await #expect(throws: WaveLinkControlBridgeError.self) {
-    try await session.request(method: "getChannels", params: nil)
-  }
-  #expect(await session.connectionDescription == nil)
-}
-
-@Test func waveLinkSessionRejectsMoreThan4MiBForOneResponse() async throws {
-  let server = try TestJSONRPCServer(
-    getChannelsBehavior: .notificationsThenReply(count: 5, payloadBytes: 900_000, intervalMicroseconds: 0)
-  )
-  defer { server.close() }
-  let session = makeTestWaveLinkSession(server: server)
-
-  await #expect(throws: WaveLinkControlBridgeError.self) {
-    try await session.request(method: "getChannels", params: nil)
-  }
-  #expect(await session.connectionDescription == nil)
-}
-
-@Test func waveLinkSessionRejectsAWebSocketMessageLargerThan1MiB() async throws {
-  let server = try TestJSONRPCServer(
-    getChannelsBehavior: .notificationsThenReply(count: 1, payloadBytes: 1_048_577, intervalMicroseconds: 0)
-  )
-  defer { server.close() }
-  let session = makeTestWaveLinkSession(server: server)
-
-  await #expect(throws: WaveLinkControlBridgeError.self) {
-    try await session.request(method: "getChannels", params: nil)
-  }
-  #expect(await session.connectionDescription == nil)
-}
-
-@Test func waveLinkSessionPreservesCancellationAndClearsItsConnection() async throws {
-  let server = try TestJSONRPCServer(getChannelsBehavior: .delayedReply(microseconds: 800_000))
-  defer { server.close() }
-  let session = makeTestWaveLinkSession(server: server)
-  let request = Task {
-    try await session.request(method: "getChannels", params: nil)
+    // The matching reply follows nearly ten seconds of notifications. Restarting
+    // the deadline after each message would accept it; the one-request budget must not.
+    await #expect(
+      throws: WaveLinkControlBridgeError.unavailable("Wave Link did not answer within the request time limit.")
+    ) {
+      try await session.request(method: "getChannels", params: nil)
+    }
+    #expect(server.receivedMethods == ["getApplicationInfo", "getChannels"])
+    #expect(await session.connectionDescription == nil)
   }
 
-  try await server.waitUntilReceived(method: "getChannels")
-  let cancelledAt = ContinuousClock.now
-  request.cancel()
-  do {
-    _ = try await request.value
-    Issue.record("Expected the request to be cancelled")
-  } catch is CancellationError {
-    // Cancellation is a control-flow signal and must not be wrapped.
-  } catch {
-    Issue.record("Expected CancellationError, got \(error)")
+  @Test func waveLinkSessionRejectsMoreThan64MessagesForOneRequest() async throws {
+    let server = try TestJSONRPCServer(
+      getChannelsBehavior: .notificationsThenReply(count: 65, payloadBytes: 0, intervalMicroseconds: 0)
+    )
+    defer { server.close() }
+    let session = makeTestWaveLinkSession(server: server)
+
+    await #expect(throws: WaveLinkControlBridgeError.self) {
+      try await session.request(method: "getChannels", params: nil)
+    }
+    #expect(await session.connectionDescription == nil)
   }
-  #expect(await session.connectionDescription == nil)
-  #expect(cancelledAt.duration(to: ContinuousClock.now) < .milliseconds(600))
-}
 
-@Test func waveLinkSessionAcceptsAReplyAtTheMessageCountLimit() async throws {
-  let server = try TestJSONRPCServer(
-    getChannelsBehavior: .notificationsThenReply(count: 63, payloadBytes: 0, intervalMicroseconds: 0)
-  )
-  defer { server.close() }
-  let session = makeTestWaveLinkSession(server: server)
-  let data = try await session.request(method: "getChannels", params: nil)
-  let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-  #expect((object["channels"] as? [Any])?.isEmpty == true)
-}
+  @Test func waveLinkSessionRejectsMoreThan4MiBForOneResponse() async throws {
+    let server = try TestJSONRPCServer(
+      getChannelsBehavior: .notificationsThenReply(count: 5, payloadBytes: 900_000, intervalMicroseconds: 0)
+    )
+    defer { server.close() }
+    let session = makeTestWaveLinkSession(server: server)
 
-@Test func waveLinkSessionStillAcceptsNotificationsBeforeItsReply() async throws {
-  let server = try TestJSONRPCServer(
-    getChannelsBehavior: .notificationsThenReply(count: 4, payloadBytes: 32, intervalMicroseconds: 10_000)
-  )
-  defer { server.close() }
-  let session = makeTestWaveLinkSession(server: server, receiveTimeout: .seconds(1))
+    await #expect(throws: WaveLinkControlBridgeError.self) {
+      try await session.request(method: "getChannels", params: nil)
+    }
+    #expect(await session.connectionDescription == nil)
+  }
 
-  let data = try await session.request(method: "getChannels", params: nil)
-  let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-  #expect((object["channels"] as? [Any])?.isEmpty == true)
+  @Test func waveLinkSessionRejectsAWebSocketMessageLargerThan1MiB() async throws {
+    let server = try TestJSONRPCServer(
+      getChannelsBehavior: .notificationsThenReply(count: 1, payloadBytes: 1_048_577, intervalMicroseconds: 0)
+    )
+    defer { server.close() }
+    let session = makeTestWaveLinkSession(server: server)
+
+    await #expect(throws: WaveLinkControlBridgeError.self) {
+      try await session.request(method: "getChannels", params: nil)
+    }
+    #expect(await session.connectionDescription == nil)
+  }
+
+  @Test func waveLinkSessionPreservesCancellationAndClearsItsConnection() async throws {
+    let server = try TestJSONRPCServer(getChannelsBehavior: .delayedReply(microseconds: 800_000))
+    defer { server.close() }
+    let session = makeTestWaveLinkSession(server: server)
+    let request = Task {
+      try await session.request(method: "getChannels", params: nil)
+    }
+
+    try await server.waitUntilReceived(method: "getChannels")
+    let cancelledAt = ContinuousClock.now
+    request.cancel()
+    do {
+      _ = try await request.value
+      Issue.record("Expected the request to be cancelled")
+    } catch is CancellationError {
+      // Cancellation is a control-flow signal and must not be wrapped.
+    } catch {
+      Issue.record("Expected CancellationError, got \(error)")
+    }
+    #expect(await session.connectionDescription == nil)
+    #expect(cancelledAt.duration(to: ContinuousClock.now) < .milliseconds(600))
+  }
+
+  @Test func waveLinkSessionAcceptsAReplyAtTheMessageCountLimit() async throws {
+    let server = try TestJSONRPCServer(
+      getChannelsBehavior: .notificationsThenReply(count: 63, payloadBytes: 0, intervalMicroseconds: 0)
+    )
+    defer { server.close() }
+    let session = makeTestWaveLinkSession(server: server)
+    let data = try await session.request(method: "getChannels", params: nil)
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect((object["channels"] as? [Any])?.isEmpty == true)
+  }
+
+  @Test func waveLinkSessionStillAcceptsNotificationsBeforeItsReply() async throws {
+    let server = try TestJSONRPCServer(
+      getChannelsBehavior: .notificationsThenReply(count: 4, payloadBytes: 32, intervalMicroseconds: 10_000)
+    )
+    defer { server.close() }
+    let session = makeTestWaveLinkSession(server: server, receiveTimeout: .seconds(1))
+
+    let data = try await session.request(method: "getChannels", params: nil)
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect((object["channels"] as? [Any])?.isEmpty == true)
+  }
+
 }
 
 private func makeTestWaveLinkSession(
@@ -488,6 +495,15 @@ private final class TestJSONRPCServer: @unchecked Sendable {
       else { continue }
       lock.withLock { recordedMethods.append(method) }
       let id = object["id"] ?? NSNull()
+      // Wave Link 3 rejects JSON null params with JSON-RPC Invalid params.
+      if object["params"] is NSNull {
+        let idText = (id as? NSNumber).map { "\($0)" } ?? "null"
+        _ = TestWebSocketFraming.writeTextFrame(
+          #"{"jsonrpc":"2.0","id":\#(idText),"error":{"code":-32602,"message":"Invalid params"}}"#,
+          to: client
+        )
+        continue
+      }
       let result: String
       switch method {
       case "getApplicationInfo": result = applicationInfo

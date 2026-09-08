@@ -110,16 +110,19 @@ struct HelpView: View {
           "Monitoring only means Waves can see the app but is not currently changing its audio path"
         )
         bullet(
-          "While Wave Link is mixing, Waves sends volume and mute to each app's own Wave Link software channel instead of adding a second audio route. An app that shares a channel is moved to a free one the first time you change its level"
+          "While Wave Link is mixing, Waves sends volume and mute to each app's own Wave Link software channel instead of adding a second audio route. An app that shares a channel can move to an available channel when you change its level. Both channels must have matching mix assignments, levels, and mute settings"
         )
         bullet(
           "Use Test Connection in Settings > Mixer to see whether Waves can reach Wave Link and how many software channels are free. Boost, EQ, and output routing stay in Wave Link for those apps"
         )
         bullet(
+          "Live includes Wave Link apps when macOS detects output. Allow a few seconds or choose Refresh after playback changes. The header animation indicates activity for these apps; use Wave Link for actual signal levels"
+        )
+        bullet(
           "With compatibility enabled, Waves never wraps Wave Link's mixed output. Adjust upstream apps inside Wave Link"
         )
         bullet(
-          "Disable Wave Link compatibility only for a custom routing workaround. Waves then applies no Wave Link-specific duplicate-route safeguards"
+          "For independent control, open Wave Link 3, choose Create channel, select the app, and add its channel to the mix you listen to. Keep Wave Link compatibility on and select Waves as the per-app controller"
         )
         bullet(
           "If audio geometry changes, Waves retries in the background. Recovery failed exposes Recover Routes, which rebuilds every Waves-managed route"
@@ -365,7 +368,22 @@ struct HelpView: View {
         troubleshootingItem(
           issue: "Volume changes not applying",
           solution:
-            "Check Per-app controller in Settings > Mixer. A Wave Link-owned route must be adjusted in Wave Link. If your custom Wave Link setup already prevents parallel monitoring, disable Wave Link compatibility to force a Waves route. For a failed Waves route, use Recover Routes, then check Diagnostics"
+            "In Settings > Mixer, select Waves as the per-app controller and choose Test Connection. Each app needs its own Wave Link software channel added to a mix. When Elgato Wave Link is selected as controller, adjust the app in Wave Link. For a failed Waves-managed route, use Recover Routes, then check Diagnostics"
+        )
+        troubleshootingItem(
+          issue: "Wave Link will not connect",
+          solution:
+            "Open Wave Link 3 and choose Test Connection in Settings > Mixer. If the test fails, restart Wave Link and Waves and test again. Use current versions of both apps. If it still fails, copy the report from Settings > Diagnostics for support. Keep compatibility enabled"
+        )
+        troubleshootingItem(
+          issue: "Zoom changes Slack's volume too",
+          solution:
+            "Those apps share a Wave Link channel. In Wave Link, choose Create channel and select Zoom under Transfer from other channel. Add the new Zoom channel to your listening mix, then adjust Zoom in Waves"
+        )
+        troubleshootingItem(
+          issue: "Wave Link is connected but an app is silent",
+          solution:
+            "In Wave Link, add the app's channel to your listening mix. Check the channel and mix mute buttons, their levels, and the mix output device. A successful connection test does not verify that sound reaches your speakers"
         )
         troubleshootingItem(
           issue: "An app shows a red Core Audio error",

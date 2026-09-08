@@ -87,7 +87,12 @@ extension WorkspaceAudioControlBackend {
   static func diagnosticsStatus(for bridge: WaveLinkBridgeStatus) -> DiagnosticsStatus {
     switch bridge.phase {
     case .idle: .informational
-    case .connected: bridge.softwareChannelCount > 0 && bridge.freeSoftwareChannelCount == 0 ? .warning : .passed
+    case .connected:
+      bridge.channels.contains {
+        $0.isSoftware
+          && ((!$0.appIdentifiers.isEmpty && $0.mixCount == 0) || $0.appIdentifiers.count > 1)
+      }
+        ? .warning : .passed
     case .failed: .warning
     }
   }
@@ -99,9 +104,15 @@ extension WorkspaceAudioControlBackend {
     case .failed:
       return bridge.summaryLine
     case .connected:
-      if bridge.softwareChannelCount > 0, bridge.freeSoftwareChannelCount == 0 {
+      if bridge.channels.contains(where: {
+        $0.isSoftware && !$0.appIdentifiers.isEmpty && $0.mixCount == 0
+      }) {
         return bridge.summaryLine
-          + ". Every software channel holds an app, so only apps that already have their own channel can be controlled from Waves."
+          + ". A software channel is not added to a mix. In Wave Link, add it to the mix you listen to and check the mix's output device."
+      }
+      if bridge.channels.contains(where: { $0.isSoftware && $0.appIdentifiers.count > 1 }) {
+        return bridge.summaryLine
+          + ". Some apps share a software channel. Give each app its own channel for independent volume and mute."
       }
       return bridge.summaryLine + "."
     }

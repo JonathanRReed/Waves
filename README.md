@@ -8,6 +8,8 @@ Control each Mac app's volume, mute, boost, equalizer, and output device. Waves 
 
 Version [1.7.1 build 19](https://github.com/JonathanRReed/Waves/releases/tag/v1.7.1) is published. Release builds support Apple Silicon and Intel. Source changes on `main` are not automatically part of that release.
 
+For setup and common connection or audio problems, see the [Wave Link guide](docs/WAVE_LINK.md).
+
 ## Install
 
 Download the signed and notarized `Waves.dmg` from [Releases](https://github.com/JonathanRReed/Waves/releases/latest), open it, and drag Waves to Applications. Or use [the Homebrew tap](https://github.com/JonathanRReed/homebrew-tap):

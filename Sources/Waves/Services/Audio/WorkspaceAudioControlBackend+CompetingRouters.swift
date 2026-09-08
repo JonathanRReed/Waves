@@ -192,7 +192,7 @@ extension WorkspaceAudioControlBackend {
     switch error as? WaveLinkControlBridgeError {
     case .dedicatedChannelRequired:
       return
-        "Every Wave Link software channel already holds an app, so \(app.displayName) cannot get its own level. Free up an empty software channel in Wave Link, or give \(app.displayName) one of its own, then try again."
+        "\(app.displayName) needs its own Wave Link channel. In Wave Link, choose Create channel, select \(app.displayName), and add the new channel to your mix. Then try again."
     case .relocationNotPermitted:
       return
         "\(app.displayName) shares a Wave Link channel with other apps, so Waves left it alone. Move it to its own Wave Link channel, or change its level here yourself, to control it from Waves."
