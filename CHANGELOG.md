@@ -13,6 +13,8 @@ All notable changes to Waves are documented here. The format follows
   the connection handshake and channel listing instead of returning Invalid params.
 - Preserve mix assignments, per-mix levels, and mute settings when moving apps
   to independent channels. Leave apps in place when a safe match cannot be verified.
+- Match Wave Link's whole-percent volume steps so dragging a slider does not
+  report a false read-back failure.
 - Explain when an app's dedicated channel has not been added to a mix.
 - Add setup and troubleshooting guidance in Mixer settings and Help, including
   shared channels, silent output, connection failures, and diagnostics.

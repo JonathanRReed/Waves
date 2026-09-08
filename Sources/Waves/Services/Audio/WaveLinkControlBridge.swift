@@ -427,7 +427,10 @@ actor WaveLinkControlBridge: WaveLinkControlling {
       throw WaveLinkControlBridgeError.channelNotInMix(targetChannel.name)
     }
 
-    let setRequest = SetChannelRequest(id: targetChannel.id, level: volume, isMuted: isMuted)
+    // Wave Link stores channel levels as whole percentages. Sending a slider's
+    // fractional value would otherwise fail read-back despite applying it.
+    let channelVolume = (volume * 100).rounded() / 100
+    let setRequest = SetChannelRequest(id: targetChannel.id, level: channelVolume, isMuted: isMuted)
     _ = try await request("setChannel", try encoder.encode(setRequest))
 
     let confirmedChannels = try await readChannels()
@@ -442,15 +445,15 @@ actor WaveLinkControlBridge: WaveLinkControlling {
         "The dedicated app channel disappeared after the update."
       )
     }
-    guard abs(confirmed.level - volume) <= 0.001, confirmed.isMuted == isMuted else {
+    guard abs(confirmed.level - channelVolume) <= 0.001, confirmed.isMuted == isMuted else {
       throw WaveLinkControlBridgeError.readBackMismatch(
-        "Requested \(volume), muted \(isMuted); received \(confirmed.level), muted \(confirmed.isMuted)."
+        "Requested \(channelVolume), muted \(isMuted); received \(confirmed.level), muted \(confirmed.isMuted)."
       )
     }
 
     await recordSuccess(applicationInfo: applicationInfo, channels: confirmedChannels)
     Self.logger.debug(
-      "Applied level \(volume, privacy: .public) muted \(isMuted, privacy: .public) to \(bundleIdentifier, privacy: .public) on channel \(confirmed.name, privacy: .public)"
+      "Applied level \(confirmed.level, privacy: .public) muted \(isMuted, privacy: .public) to \(bundleIdentifier, privacy: .public) on channel \(confirmed.name, privacy: .public)"
     )
     return WaveLinkControlConfirmation(
       channelID: confirmed.id,

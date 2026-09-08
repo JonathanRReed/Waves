@@ -191,6 +191,7 @@ private actor WaveLinkRPCStub {
   private let applicationID: String
   private let interfaceRevision: Int
   private let mixesAfterAdd: [WaveLinkChannelMix]?
+  private let roundsChannelLevels: Bool
   private(set) var applicationInfoRequestCount = 0
   private(set) var addRequests: [AddRequest] = []
   private(set) var setRequests: [SetRequest] = []
@@ -200,12 +201,14 @@ private actor WaveLinkRPCStub {
   // value real installs answer with.
   init(
     channels: [WaveLinkChannel], applicationID: String = "EWL", interfaceRevision: Int = 1,
-    mixesAfterAdd: [WaveLinkChannelMix]? = nil
+    mixesAfterAdd: [WaveLinkChannelMix]? = nil,
+    roundsChannelLevels: Bool = false
   ) {
     self.channels = channels
     self.applicationID = applicationID
     self.interfaceRevision = interfaceRevision
     self.mixesAfterAdd = mixesAfterAdd
+    self.roundsChannelLevels = roundsChannelLevels
   }
 
   func request(method: String, params: Data?) throws -> Data {
@@ -241,7 +244,7 @@ private actor WaveLinkRPCStub {
       guard let index = channels.firstIndex(where: { $0.id == request.id }) else {
         throw WaveLinkControlBridgeError.protocolViolation("Unknown channel")
       }
-      channels[index].level = request.level
+      channels[index].level = roundsChannelLevels ? (request.level * 100).rounded() / 100 : request.level
       channels[index].isMuted = request.isMuted
       return Data("{}".utf8)
     default:
@@ -482,4 +485,22 @@ func waveLinkBridgeRejectsRelocationThatCannotPreserveMixSettings(_ scenario: St
   }
   #expect(await rpc.addRequests.count == 1)
   #expect(await rpc.setRequests.isEmpty)
+}
+
+@Test func waveLinkBridgeUsesWholePercentLevelsForFractionalSliderValues() async throws {
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(
+        id: "zoom", name: "Zoom", type: "Software", level: 1, isMuted: false,
+        apps: [.init(id: "us.zoom.xos")]
+      )
+    ],
+    roundsChannelLevels: true
+  )
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    try await rpc.request(method: method, params: params)
+  })
+  let result = try await bridge.apply(bundleIdentifier: "us.zoom.xos", volume: 0.18112664, isMuted: false)
+  #expect(result.appliedVolume == 0.18)
+  #expect(await rpc.setRequests.last?.level == 0.18)
 }
