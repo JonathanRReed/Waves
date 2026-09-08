@@ -9,9 +9,11 @@ tags, sign, notarize, or publish releases.
 ## Current release boundary
 
 The current source candidate is 1.7.2 build 20. It fixes parameterless Wave Link
-JSON-RPC requests rejected with Invalid params. The 1.7.1 benchmark deferral
-has been removed from candidate metadata. Signing, notarization, and publication
-must be completed before 1.7.2 is presented as a downloadable update.
+JSON-RPC requests rejected with Invalid params. On 2026-09-08, Jonathan approved
+deferring fresh performance comparisons, macOS 15 runtime testing, and the full
+physical Stream Deck matrix for this release after confirming the tested setup
+was working. Signing, notarization, and publication must still be completed
+before 1.7.2 is presented as a downloadable update.
 
 Version 1.7.1 build 19 is the latest published release. GitHub published it on
 2026-09-05 from the signed annotated `v1.7.1` tag at
@@ -51,17 +53,18 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
-The 1.7.1 build 19 metadata recorded Jonathan's September 5 approval to defer
-exhaustive benchmarks. The 1.7.2 metadata removes that release-specific policy.
-Record fresh `launchTime`, `idleCPU`, `steadyMemory`, and `activeMixing`
-comparisons for this candidate. A new deferral requires explicit approval tied
-to this version and build. A deferred record is not a passing benchmark or a
-performance improvement.
+The 1.7.2 approval is encoded in canonical metadata and applies only to all four
+performance comparisons, `platforms.sequoiaAppleSilicon`, and
+`gates.remoteElgato`. Evidence must record each approved gap as `deferred` with
+the exact approved justification. It must never record a deferred check as
+passed. The remote Elgato waiver covers the full physical Stream Deck matrix;
+it does not claim a new remote hardware receipt or verified physical behavior.
 
-This deferral does not change any release gate. Active and idle stability smoke
-checks, security, tests, platform and physical Elgato checks, signing,
-notarization, Gatekeeper, provenance, artifact validation, and publication
-receipts remain required.
+All other checks remain required, including tests, security, sanitizers, active
+and idle stability, local QA, Tahoe and Rosetta coverage, package verification,
+Developer ID signing, notarization, stapling, Gatekeeper, provenance, and
+artifact validation. This approval is bound to version 1.7.2 build 20 and does
+not carry forward.
 
 ## Protected command environment
 

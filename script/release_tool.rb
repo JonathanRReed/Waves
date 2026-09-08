@@ -138,8 +138,11 @@ module WavesRelease
       schemaVersion version build minimumMacOSVersion bundleIdentifier developerID
       releaseAuthority sparkle
     ].freeze
-    OPTIONAL_KEYS = %w[benchmarkDeferral].freeze
+    OPTIONAL_KEYS = %w[benchmarkDeferral releaseDeferral].freeze
     BENCHMARK_DEFERRAL_KEYS = %w[version build approvedOn reason].freeze
+    RELEASE_DEFERRAL_KEYS = %w[version build approvedOn reason platforms gates].freeze
+    DEFERRABLE_PLATFORMS = %w[sequoiaAppleSilicon].freeze
+    DEFERRABLE_GATES = %w[remoteElgato].freeze
     DEVELOPER_ID_KEYS = %w[identity teamIdentifier designatedRequirement].freeze
     RELEASE_AUTHORITY_KEYS = %w[principal publicKey fingerprint receiptIssuers].freeze
     RECEIPT_ISSUER_KEYS = %w[securityScan remoteElgato].freeze
@@ -241,6 +244,32 @@ module WavesRelease
         Validation.nonempty_string!(deferral["reason"], "release metadata benchmarkDeferral.reason")
       end
 
+      if value.key?("releaseDeferral")
+        deferral = value["releaseDeferral"]
+        Validation.exact_keys!(deferral, RELEASE_DEFERRAL_KEYS, "release metadata releaseDeferral")
+        unless deferral["version"] == version
+          raise Error, "release metadata releaseDeferral.version must match release version"
+        end
+        unless deferral["build"] == build
+          raise Error, "release metadata releaseDeferral.build must match release build"
+        end
+        begin
+          approved_on = Date.iso8601(deferral["approvedOn"])
+        rescue ArgumentError, TypeError
+          raise Error, "release metadata releaseDeferral.approvedOn must be a canonical YYYY-MM-DD date"
+        end
+        unless approved_on.iso8601 == deferral["approvedOn"]
+          raise Error, "release metadata releaseDeferral.approvedOn must be a canonical YYYY-MM-DD date"
+        end
+        Validation.nonempty_string!(deferral["reason"], "release metadata releaseDeferral.reason")
+        unless deferral["platforms"] == DEFERRABLE_PLATFORMS
+          raise Error, "release metadata releaseDeferral.platforms must be exactly sequoiaAppleSilicon"
+        end
+        unless deferral["gates"] == DEFERRABLE_GATES
+          raise Error, "release metadata releaseDeferral.gates must be exactly remoteElgato"
+        end
+      end
+
       value.freeze
     end
   end
@@ -324,9 +353,9 @@ module WavesRelease
       validate_toolchain!(manifest["toolchain"])
       validate_tests!(manifest["tests"])
       validate_performance!(manifest["performance"], metadata)
-      validate_platforms!(manifest["platforms"])
+      validate_platforms!(manifest["platforms"], metadata)
       validate_package!(manifest["package"], metadata)
-      validate_gates!(manifest["gates"], profile)
+      validate_gates!(manifest["gates"], profile, metadata)
       validate_skip_data!(manifest)
       validate_external_receipts!(manifest, metadata: metadata, profile: profile)
       manifest
@@ -425,11 +454,18 @@ module WavesRelease
       end
     end
 
-    def validate_platforms!(platforms)
+    def validate_platforms!(platforms, metadata)
       Validation.exact_keys!(platforms, REQUIRED_PLATFORMS, "platform evidence")
-      (REQUIRED_PLATFORMS - ["sonomaPhysical"]).each do |name|
+      (REQUIRED_PLATFORMS - ["sonomaPhysical", "sequoiaAppleSilicon"]).each do |name|
         Validation.passed_result!(platforms[name], "platforms.#{name}")
       end
+      validate_release_deferral_result!(
+        platforms["sequoiaAppleSilicon"],
+        context: "platforms.sequoiaAppleSilicon",
+        metadata: metadata,
+        scope: "platforms",
+        name: "sequoiaAppleSilicon"
+      )
       sonoma = platforms["sonomaPhysical"]
       Validation.exact_keys!(sonoma, %w[status detail], "platforms.sonomaPhysical")
       raise Error, "platforms.sonomaPhysical must honestly record unavailable" unless sonoma["status"] == "unavailable"
@@ -483,16 +519,40 @@ module WavesRelease
       end
     end
 
-    def validate_gates!(gates, profile)
+    def validate_gates!(gates, profile, metadata)
       Validation.exact_keys!(gates, REQUIRED_GATES, "gate evidence")
       (REQUIRED_GATES - ["remoteElgato"]).each do |name|
         Validation.passed_result!(gates[name], "gates.#{name}")
       end
-      allowed_remote = profile == "candidate" ? %w[pending passed] : ["passed"]
-      Validation.passed_result!(gates["remoteElgato"], "gates.remoteElgato", allowed_statuses: allowed_remote)
-      if profile == "publication" && gates["remoteElgato"]["status"] != "passed"
+      allowed_remote = profile == "candidate" ? %w[pending passed deferred] : %w[passed deferred]
+      validate_release_deferral_result!(
+        gates["remoteElgato"],
+        context: "gates.remoteElgato",
+        metadata: metadata,
+        scope: "gates",
+        name: "remoteElgato",
+        allowed_statuses: allowed_remote
+      )
+      if profile == "publication" && !%w[passed deferred].include?(gates["remoteElgato"]["status"])
         raise Error, "gates.remoteElgato must pass before publication"
       end
+    end
+
+    def validate_release_deferral_result!(value, context:, metadata:, scope:, name:, allowed_statuses: %w[passed deferred])
+      Validation.hash!(value, context)
+      if value["status"] == "deferred"
+        Validation.exact_keys!(value, %w[status detail approvedJustification], context)
+        Validation.nonempty_string!(value["detail"], "#{context}.detail")
+        deferral = metadata["releaseDeferral"]
+        unless deferral && deferral.fetch(scope).include?(name)
+          raise Error, "#{context} deferral is not authorized by release metadata"
+        end
+        unless value["approvedJustification"] == deferral["reason"]
+          raise Error, "#{context}.approvedJustification must match the approved justification"
+        end
+        return
+      end
+      Validation.passed_result!(value, context, allowed_statuses: allowed_statuses - ["deferred"])
     end
 
     def validate_skip_data!(manifest)
@@ -512,13 +572,17 @@ module WavesRelease
     def validate_external_receipts!(manifest, metadata:, profile:)
       receipts = manifest["externalReceipts"]
       required = ["securityScan"]
-      required << "remoteElgato" if profile == "publication"
+      remote_deferred = manifest.fetch("gates").fetch("remoteElgato").fetch("status") == "deferred"
+      required << "remoteElgato" if profile == "publication" && !remote_deferred
       allowed = %w[securityScan remoteElgato]
       Validation.hash!(receipts, "external receipt evidence")
       unknown = receipts.keys - allowed
       missing = required - receipts.keys
       raise Error, "external receipt evidence has unknown key(s): #{unknown.join(', ')}" unless unknown.empty?
       raise Error, "external receipt evidence is missing receipt(s): #{missing.join(', ')}" unless missing.empty?
+      if remote_deferred && receipts.key?("remoteElgato")
+        raise Error, "deferred gates.remoteElgato must not claim an external remoteElgato receipt"
+      end
 
       source_revision = manifest.fetch("source").fetch("revision")
       dmg_hash = manifest.fetch("package").fetch("hashes").fetch("dmg")

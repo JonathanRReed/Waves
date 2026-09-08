@@ -33,7 +33,8 @@ class ReleaseInfraTest < Minitest::Test
   SPARKLE_ACCOUNT = "com.jonathanreed.Waves"
   SPARKLE_PUBLIC_KEY = "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
   BENCHMARK_DEFERRAL_REASON =
-    "Maintenance release 1.7.1 defers exhaustive benchmarks while retaining active and idle stability smoke checks."
+    "Jonathan approved deferring fresh performance comparisons, macOS 15 runtime testing, and the full physical Stream Deck matrix for Waves 1.7.2 build 20 after confirming the tested setup was working."
+  RELEASE_DEFERRAL_REASON = BENCHMARK_DEFERRAL_REASON
 
   def production_cleanup
     root = File.expand_path("../..", __dir__)
@@ -497,15 +498,51 @@ class ReleaseInfraTest < Minitest::Test
     }
   end
 
+  def deferred_result(detail, reason: RELEASE_DEFERRAL_REASON)
+    {
+      "status" => "deferred",
+      "detail" => detail,
+      "approvedJustification" => reason,
+    }
+  end
+
   def benchmark_deferral_metadata_hash
     metadata_hash.merge(
       "benchmarkDeferral" => {
         "version" => VERSION,
         "build" => BUILD,
-        "approvedOn" => "2026-09-05",
+        "approvedOn" => "2026-09-08",
         "reason" => BENCHMARK_DEFERRAL_REASON,
       }
     )
+  end
+
+  def release_deferral_metadata_hash
+    metadata_hash.merge(
+      "releaseDeferral" => {
+        "version" => VERSION,
+        "build" => BUILD,
+        "approvedOn" => "2026-09-08",
+        "reason" => RELEASE_DEFERRAL_REASON,
+        "platforms" => ["sequoiaAppleSilicon"],
+        "gates" => ["remoteElgato"],
+      }
+    )
+  end
+
+  def approved_deferral_metadata_hash
+    benchmark_deferral_metadata_hash.merge(
+      "releaseDeferral" => release_deferral_metadata_hash.fetch("releaseDeferral")
+    )
+  end
+
+  def apply_approved_release_deferrals(input)
+    input.fetch("performance").transform_values! { deferred_performance_metric }
+    input.fetch("platforms")["sequoiaAppleSilicon"] =
+      deferred_result("Fresh macOS 15 runtime testing deferred for 1.7.2 build 20.")
+    input.fetch("gates")["remoteElgato"] =
+      deferred_result("Full physical Stream Deck matrix deferred for 1.7.2 build 20.")
+    input
   end
 
   def required_gates
@@ -551,10 +588,14 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal DESIGNATED_REQUIREMENT, metadata.dig("developerID", "designatedRequirement")
   end
 
-  def test_tracked_metadata_does_not_carry_forward_a_previous_release_benchmark_deferral
+  def test_tracked_metadata_records_only_the_approved_release_deferrals
     metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
 
-    refute metadata.key?("benchmarkDeferral")
+    assert_equal "2026-09-08", metadata.dig("benchmarkDeferral", "approvedOn")
+    assert_equal ["sequoiaAppleSilicon"], metadata.dig("releaseDeferral", "platforms")
+    assert_equal ["remoteElgato"], metadata.dig("releaseDeferral", "gates")
+    assert_equal BENCHMARK_DEFERRAL_REASON, metadata.dig("benchmarkDeferral", "reason")
+    assert_equal RELEASE_DEFERRAL_REASON, metadata.dig("releaseDeferral", "reason")
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
@@ -604,6 +645,27 @@ class ReleaseInfraTest < Minitest::Test
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("approvedOn" => "2026-9-5")), /approvedOn/],
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("reason" => "")), /reason/],
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("scope" => "securityScan")), /unknown key/],
+    ]
+
+    cases.each do |contents, message|
+      with_metadata(contents) do |path|
+        assert_release_error(message) { WavesRelease::Metadata.load(path) }
+      end
+    end
+  end
+
+  def test_metadata_rejects_malformed_unbound_or_broadened_release_deferral_policy
+    valid = release_deferral_metadata_hash
+    deferral = valid.fetch("releaseDeferral")
+    cases = [
+      [valid.merge("releaseDeferral" => deferral.merge("version" => "1.7.3")), /version/],
+      [valid.merge("releaseDeferral" => deferral.merge("build" => BUILD + 1)), /build/],
+      [valid.merge("releaseDeferral" => deferral.merge("approvedOn" => "2026-9-8")), /approvedOn/],
+      [valid.merge("releaseDeferral" => deferral.merge("reason" => "")), /reason/],
+      [valid.merge("releaseDeferral" => deferral.merge("platforms" => [])), /sequoiaAppleSilicon/],
+      [valid.merge("releaseDeferral" => deferral.merge("platforms" => ["sequoiaAppleSilicon", "tahoeAppleSilicon"])), /sequoiaAppleSilicon/],
+      [valid.merge("releaseDeferral" => deferral.merge("gates" => [])), /remoteElgato/],
+      [valid.merge("releaseDeferral" => deferral.merge("gates" => ["remoteElgato", "securityScan"])), /remoteElgato/],
     ]
 
     cases.each do |contents, message|
@@ -671,6 +733,72 @@ class ReleaseInfraTest < Minitest::Test
     hardware.fetch("platforms").fetch("goldenGateNative")["status"] = "deferred"
     assert_release_error(/goldenGateNative/) do
       WavesRelease::Evidence.seal(input: hardware, metadata: metadata, profile: "candidate")
+    end
+  end
+
+  def test_candidate_and_publication_accept_only_the_exact_approved_release_deferrals
+    metadata = approved_deferral_metadata_hash
+
+    %w[candidate publication].each do |profile|
+      manifest = WavesRelease::Evidence.seal(
+        input: apply_approved_release_deferrals(evidence_input),
+        metadata: metadata,
+        profile: profile
+      )
+
+      assert_equal "deferred", manifest.dig("platforms", "sequoiaAppleSilicon", "status")
+      assert_equal "deferred", manifest.dig("gates", "remoteElgato", "status")
+      assert_equal ["securityScan"], manifest.fetch("externalReceipts").keys
+      assert_equal ["deferred"], manifest.fetch("performance").values.map { |row| row.fetch("status") }.uniq
+      assert_equal profile == "publication", manifest.fetch("publicationEligible")
+    end
+  end
+
+  def test_release_evidence_rejects_absent_approval_wrong_reason_and_other_deferred_checks
+    without_approval = evidence_input
+    without_approval.fetch("platforms")["sequoiaAppleSilicon"] = deferred_result("Deferred")
+    assert_release_error(/not authorized/) do
+      WavesRelease::Evidence.seal(input: without_approval, metadata: metadata_hash, profile: "candidate")
+    end
+
+    wrong_reason = evidence_input
+    wrong_reason.fetch("gates")["remoteElgato"] =
+      deferred_result("Deferred", reason: "Caller supplied reason")
+    assert_release_error(/approved justification/) do
+      WavesRelease::Evidence.seal(
+        input: wrong_reason,
+        metadata: release_deferral_metadata_hash,
+        profile: "publication"
+      )
+    end
+
+    other_platform = evidence_input
+    other_platform.fetch("platforms")["tahoeAppleSilicon"] = deferred_result("Deferred")
+    assert_release_error(/tahoeAppleSilicon/) do
+      WavesRelease::Evidence.seal(
+        input: other_platform,
+        metadata: release_deferral_metadata_hash,
+        profile: "candidate"
+      )
+    end
+
+    other_gate = evidence_input
+    other_gate.fetch("gates")["securityScan"] = deferred_result("Deferred")
+    assert_release_error(/securityScan/) do
+      WavesRelease::Evidence.seal(
+        input: other_gate,
+        metadata: release_deferral_metadata_hash,
+        profile: "candidate"
+      )
+    end
+
+    claimed_receipt = apply_approved_release_deferrals(security_evidence_input(remote: "passed"))
+    assert_release_error(/must not claim/) do
+      WavesRelease::Evidence.seal(
+        input: claimed_receipt,
+        metadata: approved_deferral_metadata_hash,
+        profile: "publication"
+      )
     end
   end
 
