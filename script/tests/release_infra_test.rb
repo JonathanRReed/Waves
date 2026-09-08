@@ -13,8 +13,8 @@ require_relative "../release_tool"
 require_relative "../../release/elgato-handoff/finalize-receipt"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.7.1"
-  BUILD = 19
+  VERSION = "1.7.2"
+  BUILD = 20
   RELEASE_TAG = "v#{VERSION}"
   HANDOFF_NAME = "Waves-#{VERSION}-#{BUILD}-Elgato-Handoff"
   HANDOFF_DMG_NAME = "Waves-#{VERSION}-#{BUILD}.dmg"
@@ -551,18 +551,10 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal DESIGNATED_REQUIREMENT, metadata.dig("developerID", "designatedRequirement")
   end
 
-  def test_tracked_metadata_authorizes_only_the_approved_current_release_benchmark_deferral
+  def test_tracked_metadata_does_not_carry_forward_a_previous_release_benchmark_deferral
     metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
 
-    assert_equal(
-      {
-        "version" => VERSION,
-        "build" => BUILD,
-        "approvedOn" => "2026-09-05",
-        "reason" => BENCHMARK_DEFERRAL_REASON,
-      },
-      metadata.fetch("benchmarkDeferral")
-    )
+    refute metadata.key?("benchmarkDeferral")
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
@@ -607,7 +599,7 @@ class ReleaseInfraTest < Minitest::Test
   def test_metadata_rejects_malformed_or_unbound_benchmark_deferral_policy
     valid = benchmark_deferral_metadata_hash
     cases = [
-      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("version" => "1.7.2")), /version/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("version" => "1.7.3")), /version/],
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("build" => BUILD + 1)), /build/],
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("approvedOn" => "2026-9-5")), /approvedOn/],
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("reason" => "")), /reason/],

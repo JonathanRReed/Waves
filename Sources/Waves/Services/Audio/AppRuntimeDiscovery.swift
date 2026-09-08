@@ -311,7 +311,8 @@ enum AppRuntimeDiscovery {
           notes: representative.ambiguous ? identityCollisionNote : nil,
           volumeBoost: 1.0,
           runtimeIdentity: representative.ambiguous ? nil : app.runtimeIdentity,
-          hasAmbiguousIdentity: representative.ambiguous
+          hasAmbiguousIdentity: representative.ambiguous,
+          isProducingOutput: !representative.ambiguous && isAudible
         )
       }
   }

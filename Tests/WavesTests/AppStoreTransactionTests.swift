@@ -2112,6 +2112,9 @@ private func makeTransactionFixture(
     resultGenerationOffset: resultGenerationOffset
   )
   let preferencesStore = TransactionPreferencesStore()
+  // Transaction tests must not react to conferencing apps on the test desktop.
+  // Automatic behavior tests drive their transitions explicitly.
+  preferencesStore.value.autoPauseMusicForConferencing = false
   preferencesStore.value.urlSchemeAutomationAcknowledged = true
   preferencesStore.value.appAudioIntentMigrationVersion = 1
   preferencesStore.value.hasCompletedPrivacySetup = true

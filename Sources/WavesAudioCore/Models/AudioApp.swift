@@ -18,6 +18,9 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   /// Live discovery conflict, never restored from saved session data.
   public var hasAmbiguousIdentity: Bool
 
+  /// Current Core Audio output activity, independent of route ownership and
+  /// foreground focus. Never persisted because playback cannot survive relaunch.
+  public var isProducingOutput: Bool
   public var isActive: Bool
   public var peakLevel: Float
   public var rmsLevel: Float
@@ -72,7 +75,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     targetDeviceUID: String? = nil,
     routeHealthContext: RouteHealthContext? = nil,
     runtimeIdentity: AppRuntimeIdentity? = nil,
-    hasAmbiguousIdentity: Bool = false
+    hasAmbiguousIdentity: Bool = false,
+    isProducingOutput: Bool = false
   ) {
     // Validate string lengths to prevent excessive memory usage
     self.id = String(id.prefix(256))
@@ -94,6 +98,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.category = category
     self.runtimeIdentity = runtimeIdentity
     self.hasAmbiguousIdentity = hasAmbiguousIdentity
+    self.isProducingOutput = isProducingOutput
     self.isActive = isActive
     self.peakLevel = peakLevel
     self.rmsLevel = rmsLevel

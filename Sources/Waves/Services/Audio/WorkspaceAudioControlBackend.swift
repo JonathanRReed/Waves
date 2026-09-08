@@ -1580,6 +1580,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
       var retained = previous
       retained.isActive = false
+      retained.isProducingOutput = false
       retained.peakLevel = 0
       retained.rmsLevel = 0
       if let controller = controllers[retained.id], controller.isActive {

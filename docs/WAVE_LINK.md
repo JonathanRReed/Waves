@@ -28,6 +28,17 @@ and mute settings. If that information is missing or different, Waves leaves
 the app in place and asks you to configure a dedicated channel manually.
 Automated commands do not move apps between channels.
 
+## Live activity and meters
+
+Live includes Wave Link-controlled apps when macOS reports that they are
+producing output. Detection updates during the regular refresh, so allow a few
+seconds after starting or stopping playback, or choose Refresh. A foreground
+app alone does not count as playing.
+
+Waves does not capture a second copy of Wave Link audio to draw meters. Use
+Wave Link for signal levels; the Waves visualizer can remain flat while those
+apps play.
+
 ## If something goes wrong
 
 | What you see | What to do |

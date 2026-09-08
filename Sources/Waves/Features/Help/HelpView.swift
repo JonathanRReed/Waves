@@ -116,6 +116,9 @@ struct HelpView: View {
           "Use Test Connection in Settings > Mixer to see whether Waves can reach Wave Link and how many software channels are free. Boost, EQ, and output routing stay in Wave Link for those apps"
         )
         bullet(
+          "Live includes Wave Link apps when macOS detects output. Allow a few seconds or choose Refresh after playback changes. Use Wave Link for signal meters; the Waves visualizer can stay flat for these apps"
+        )
+        bullet(
           "With compatibility enabled, Waves never wraps Wave Link's mixed output. Adjust upstream apps inside Wave Link"
         )
         bullet(

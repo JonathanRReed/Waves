@@ -430,6 +430,11 @@ final class AppStore {
   /// (`liveLevels`, refreshed a few times a second while a surface is visible);
   /// fall back to the last snapshot levels when the poll isn't running.
   func isLive(_ app: AudioApp) -> Bool {
+    if app.routeHealthContext == .waveLinkBridge {
+      // Wave Link owns the renderer, so Waves has no per-app meter. Preserve
+      // the Core Audio activity signal instead of excluding its monitor-only row.
+      return app.isProducingOutput && !app.isMuted && !app.hasAmbiguousIdentity
+    }
     if app.routingState == .live { return true }
     guard app.routingState == .managed, !app.isMuted else { return false }
     if let levels = liveLevels[app.logicalID] {
