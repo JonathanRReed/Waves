@@ -121,7 +121,8 @@ struct ControlCommandHandler {
 
     switch request.cmd {
     case .setVolume:
-      guard let volume = request.volume else {
+      // Ensure volume is finite to prevent NaN/Infinity from corrupting audio levels or DSP.
+      guard let volume = request.volume, volume.isFinite else {
         return .failure(id: request.id, .missingParameter)
       }
       let clamped = max(0, min(1, volume))
@@ -130,7 +131,8 @@ struct ControlCommandHandler {
       response.volume = clamped
 
     case .adjustVolume:
-      guard let delta = request.delta else {
+      // Ensure delta is finite to prevent NaN/Infinity from corrupting audio levels or DSP.
+      guard let delta = request.delta, delta.isFinite else {
         return .failure(id: request.id, .missingParameter)
       }
       // Waves owns the clamp so a fast dial sweep cannot overshoot, and the
