@@ -89,6 +89,10 @@ struct ControlCommandHandler {
     guard let appID = request.app else {
       return .failure(id: request.id, .missingParameter)
     }
+    // Security enhancement: Enforce maximum length limit (256 chars) on app ID input to prevent DoS/memory pressure
+    guard appID.count <= 256 else {
+      return .failure(id: request.id, .malformedRequest)
+    }
     guard let app = store.controlApp(forID: appID) else {
       return .failure(id: request.id, .unknownApp)
     }
@@ -105,6 +109,10 @@ struct ControlCommandHandler {
   private func handleMutation(_ request: ControlRequest) -> ControlResponse {
     guard let appID = request.app else {
       return .failure(id: request.id, .missingParameter)
+    }
+    // Security enhancement: Enforce maximum length limit (256 chars) on app ID input to prevent DoS/memory pressure
+    guard appID.count <= 256 else {
+      return .failure(id: request.id, .malformedRequest)
     }
     guard store.isAudioRunning else {
       return .failure(id: request.id, .audioNotRunning)
