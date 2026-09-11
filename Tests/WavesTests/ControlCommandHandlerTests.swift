@@ -114,6 +114,18 @@ import WavesAudioCore
     session: .init(didHandshake: true)
   )
   #expect(audioNotRunning.response.error == .audioNotRunning)
+
+  let nonFiniteVolume = await runningHandler.handle(
+    ControlRequest(id: 8, cmd: .setVolume, app: appID, volume: .nan),
+    session: .init(didHandshake: true)
+  )
+  #expect(nonFiniteVolume.response.error == .malformedRequest)
+
+  let nonFiniteDelta = await runningHandler.handle(
+    ControlRequest(id: 9, cmd: .adjustVolume, app: appID, delta: .infinity),
+    session: .init(didHandshake: true)
+  )
+  #expect(nonFiniteDelta.response.error == .malformedRequest)
 }
 
 @MainActor

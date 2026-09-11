@@ -124,6 +124,9 @@ struct ControlCommandHandler {
       guard let volume = request.volume else {
         return .failure(id: request.id, .missingParameter)
       }
+      guard volume.isFinite else {
+        return .failure(id: request.id, .malformedRequest)
+      }
       let clamped = max(0, min(1, volume))
       store.setDesiredVolume(clamped, for: app)
       store.commitDesiredVolume(for: app)
@@ -132,6 +135,9 @@ struct ControlCommandHandler {
     case .adjustVolume:
       guard let delta = request.delta else {
         return .failure(id: request.id, .missingParameter)
+      }
+      guard delta.isFinite else {
+        return .failure(id: request.id, .malformedRequest)
       }
       // Waves owns the clamp so a fast dial sweep cannot overshoot, and the
       // resulting value comes back so the client never has to read first.
