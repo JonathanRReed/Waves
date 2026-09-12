@@ -141,6 +141,12 @@ import WavesAudioCore
   let missingDelta = await handler.handle(
     ControlRequest(id: 42, cmd: .adjustVolume, app: "com.example.render"), session: session)
   #expect(missingDelta.response == .failure(id: 42, .missingParameter))
+  let nanVolume = await handler.handle(
+    ControlRequest(id: 421, cmd: .setVolume, app: "com.example.render", volume: .nan), session: session)
+  #expect(nanVolume.response == .failure(id: 421, .missingParameter))
+  let infiniteDelta = await handler.handle(
+    ControlRequest(id: 422, cmd: .adjustVolume, app: "com.example.render", delta: .infinity), session: session)
+  #expect(infiniteDelta.response == .failure(id: 422, .missingParameter))
   let missingMute = await handler.handle(
     ControlRequest(id: 43, cmd: .setMute, app: "com.example.render"), session: session)
   #expect(missingMute.response == .failure(id: 43, .missingParameter))
