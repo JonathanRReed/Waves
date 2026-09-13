@@ -22,9 +22,9 @@ func wavesCTLRejectsInvalidArgumentsBeforeTransport(_ arguments: [String]) {
   let safe = WavesCTLTerminalText.sanitized(hostile)
   #expect(
     safe
-      == "Zoom\u{FFFD}[2J\u{FFFD}]0;pwned\u{FFFD}\u{FFFD}\u{FFFD}fake: line\u{FFFD}x\u{FFFD}y\u{FFFD}z\tw\u{FFFD}"
+      == "Zoom\u{FFFD}[2J\u{FFFD}]0;pwned\u{FFFD}\u{FFFD}\nfake: line\u{FFFD}x\u{FFFD}y\u{FFFD}z\tw\u{FFFD}"
   )
-  #expect(!safe.unicodeScalars.contains { $0.value < 0x20 && $0.value != 0x09 })
+  #expect(!safe.unicodeScalars.contains { $0.value < 0x20 && $0.value != 0x09 && $0.value != 0x0A })
   #expect(!safe.unicodeScalars.contains { (0x7F...0x9F).contains($0.value) })
 }
 

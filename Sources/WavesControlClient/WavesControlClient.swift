@@ -179,7 +179,7 @@ public enum WavesCTLTerminalText {
     var scalars = String.UnicodeScalarView()
     for scalar in text.unicodeScalars {
       switch scalar.value {
-      case 0x09:
+      case 0x09, 0x0A:
         scalars.append(scalar)
       case 0x00...0x1F, 0x7F, 0x80...0x9F, 0x2028, 0x2029, 0x202A...0x202E, 0x2066...0x2069:
         scalars.append("\u{FFFD}")

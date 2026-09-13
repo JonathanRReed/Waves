@@ -88,6 +88,18 @@ import WavesAudioCore
   )
   #expect(missingParameter.response.error == .missingParameter)
 
+  let nanVolume = await runningHandler.handle(
+    ControlRequest(id: 30, cmd: .setVolume, app: appID, volume: .nan),
+    session: .init(didHandshake: true)
+  )
+  #expect(nanVolume.response.error == .missingParameter)
+
+  let nanDelta = await runningHandler.handle(
+    ControlRequest(id: 31, cmd: .adjustVolume, app: appID, delta: .nan),
+    session: .init(didHandshake: true)
+  )
+  #expect(nanDelta.response.error == .missingParameter)
+
   let unknownApp = await runningHandler.handle(
     ControlRequest(id: 4, cmd: .setMute, app: "missing.app", muted: true),
     session: .init(didHandshake: true)
