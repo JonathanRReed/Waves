@@ -74,7 +74,7 @@ import WavesAudioCore
   let hostileCommands = [
     "waves://set-volume?app=music%0Ainjected&volume=0.5",
     "waves://set-volume?app=music%1B%5B2J&volume=0.5",
-    "waves://mute?app=music%0R&muted=true",
+    "waves://mute?app=music%0D&muted=true",
     "waves://apply-preset?name=Focus%0AHeader",
     "waves://apply-preset?name=Focus%202028%E2%80%A8Separator",
     "waves://set-volume%0Ainjected?app=music&volume=0.5",
