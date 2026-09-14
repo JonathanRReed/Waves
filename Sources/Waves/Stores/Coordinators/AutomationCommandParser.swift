@@ -61,7 +61,8 @@ final class AutomationCommandParser {
     guard url.scheme == "waves",
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
       let host = components.host,
-      !host.isEmpty
+      !host.isEmpty,
+      !containsControlCharacters(host)
     else {
       return .rejected(
         AutomationCommandRejection(
@@ -74,6 +75,7 @@ final class AutomationCommandParser {
       guard let appID = queryValue(named: "app", in: components),
         let volumeValue = queryValue(named: "volume", in: components),
         appID.count <= 256,
+        !containsControlCharacters(appID),
         volumeValue.count <= 32,
         let volume = Float(volumeValue),
         volume.isFinite,
@@ -88,6 +90,7 @@ final class AutomationCommandParser {
       guard let appID = queryValue(named: "app", in: components),
         let muteValue = queryValue(named: "muted", in: components),
         appID.count <= 256,
+        !containsControlCharacters(appID),
         muteValue.count <= 16,
         let shouldMute = Bool(muteValue)
       else {
@@ -98,7 +101,8 @@ final class AutomationCommandParser {
     case "apply-profile", "apply-preset":
       guard let profileName = queryValue(named: "name", in: components),
         !profileName.isEmpty,
-        profileName.count <= 256
+        profileName.count <= 256,
+        !containsControlCharacters(profileName)
       else {
         return presentedRejection("Profile command was invalid.")
       }
@@ -147,5 +151,16 @@ final class AutomationCommandParser {
 
   private func presentedRejection(_ message: String) -> AutomationCommandParseResult {
     .rejected(AutomationCommandRejection(message: message, shouldPresent: true))
+  }
+
+  private func containsControlCharacters(_ string: String) -> Bool {
+    string.unicodeScalars.contains { scalar in
+      switch scalar.value {
+      case 0x00...0x1F, 0x7F...0x9F, 0x2028, 0x2029, 0x202A...0x202E, 0x2066...0x2069:
+        return true
+      default:
+        return false
+      }
+    }
   }
 }

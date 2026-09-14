@@ -69,6 +69,26 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func automationParserRejectsControlCharactersAndFormattingSeparators() {
+  let parser = AutomationCommandParser()
+  let hostileCommands = [
+    "waves://set-volume?app=music%0Ainjected&volume=0.5",
+    "waves://set-volume?app=music%1B%5B2J&volume=0.5",
+    "waves://mute?app=music%0R&muted=true",
+    "waves://apply-preset?name=Focus%0AHeader",
+    "waves://apply-preset?name=Focus%202028%E2%80%A8Separator",
+    "waves://set-volume%0Ainjected?app=music&volume=0.5",
+  ]
+
+  for command in hostileCommands {
+    guard case .rejected = parser.parse(URL(string: command)!) else {
+      Issue.record("expected rejection for hostile command \(command)")
+      continue
+    }
+  }
+}
+
+@MainActor
 @Test func deviceSuppressionExpiresConsumesAndShutsDownDeterministically() async {
   let clock = CoordinatorTestClock()
   let suppression = DeviceChangeSuppressionCoordinator(
