@@ -58,7 +58,7 @@ final class AutomationCommandParser {
           shouldPresent: false
         ))
     }
-    guard url.scheme == "waves",
+    guard url.scheme?.lowercased() == "waves",
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
       let host = components.host,
       !host.isEmpty
@@ -72,6 +72,7 @@ final class AutomationCommandParser {
     switch host {
     case "set-volume":
       guard let appID = queryValue(named: "app", in: components),
+        !appID.isEmpty,
         let volumeValue = queryValue(named: "volume", in: components),
         appID.count <= 256,
         volumeValue.count <= 32,
@@ -86,6 +87,7 @@ final class AutomationCommandParser {
 
     case "mute":
       guard let appID = queryValue(named: "app", in: components),
+        !appID.isEmpty,
         let muteValue = queryValue(named: "muted", in: components),
         appID.count <= 256,
         muteValue.count <= 16,
