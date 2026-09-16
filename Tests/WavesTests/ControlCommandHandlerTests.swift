@@ -159,6 +159,20 @@ import WavesAudioCore
   #expect(throttled.session.didHandshake)
 }
 
+@Test func controlRequestSanitizesClientLengthOnDecodeAndInit() throws {
+  let longClient = String(repeating: "a", count: 300)
+  let request = ControlRequest(cmd: .hello, client: longClient)
+  #expect(request.client?.count == 256)
+  #expect(request.client == String(repeating: "a", count: 256))
+
+  let json = """
+  {"cmd": "hello", "client": "\(longClient)"}
+  """.data(using: .utf8)!
+  let decoded = try JSONDecoder().decode(ControlRequest.self, from: json)
+  #expect(decoded.client?.count == 256)
+  #expect(decoded.client == String(repeating: "a", count: 256))
+}
+
 @MainActor
 private func makeHandlerStore(
   initialStartupState: AppStartupState = .running,
