@@ -63,6 +63,39 @@ struct ControlRequest: Codable, Equatable, Sendable {
     case id, cmd, app, volume, delta, muted, client
     case protocolVersion = "protocol"
   }
+
+  init(
+    id: Int? = nil,
+    cmd: ControlCommand,
+    app: String? = nil,
+    volume: Float? = nil,
+    delta: Float? = nil,
+    muted: Bool? = nil,
+    client: String? = nil,
+    protocolVersion: Int? = nil
+  ) {
+    self.id = id
+    self.cmd = cmd
+    self.app = app.map { String($0.prefix(256)) }
+    self.volume = volume
+    self.delta = delta
+    self.muted = muted
+    self.client = client.map { String($0.prefix(128)) }
+    self.protocolVersion = protocolVersion
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decodeIfPresent(Int.self, forKey: .id)
+    cmd = try container.decode(ControlCommand.self, forKey: .cmd)
+    // Security: Bound string properties on decode to prevent memory exhaustion
+    app = try container.decodeIfPresent(String.self, forKey: .app).map { String($0.prefix(256)) }
+    volume = try container.decodeIfPresent(Float.self, forKey: .volume)
+    delta = try container.decodeIfPresent(Float.self, forKey: .delta)
+    muted = try container.decodeIfPresent(Bool.self, forKey: .muted)
+    client = try container.decodeIfPresent(String.self, forKey: .client).map { String($0.prefix(128)) }
+    protocolVersion = try container.decodeIfPresent(Int.self, forKey: .protocolVersion)
+  }
 }
 
 // MARK: - Responses
