@@ -35,6 +35,16 @@ func wavesCTLRejectsInvalidArgumentsBeforeTransport(_ arguments: [String]) {
   }
 }
 
+@Test func wavesControlJSONValueDescriptionEscapesSpecialCharacters() {
+  let stringValue = WavesControlJSONValue.string("quote: \" backslash: \\ newline: \n tab: \t")
+  #expect(stringValue.description == "\"quote: \\\" backslash: \\\\ newline: \\n tab: \\t\"")
+
+  let objectValue = WavesControlJSONValue.object([
+    "key\"with\\quote": .string("val\"ue")
+  ])
+  #expect(objectValue.description == "{\"key\\\"with\\\\quote\": \"val\\\"ue\"}")
+}
+
 private final class WavesCTLBuildDirectoryLocator {}
 
 @Test func wavesCTLExecutableRejectsInvalidVolumeBeforeConnecting() throws {

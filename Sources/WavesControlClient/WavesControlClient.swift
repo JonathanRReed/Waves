@@ -480,18 +480,30 @@ extension WavesControlJSONValue {
 }
 
 extension WavesControlJSONValue: CustomStringConvertible {
+  private static func escapeJSONString(_ string: String) -> String {
+    guard let data = try? JSONSerialization.data(withJSONObject: [string]),
+      let text = String(data: data, encoding: .utf8)
+    else {
+      let escaped = string
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+      return "\"\(escaped)\""
+    }
+    return String(text.dropFirst().dropLast())
+  }
+
   public var description: String {
     switch self {
     case .object(let object):
       let items = object.keys.sorted().compactMap { key -> String? in
         guard let value = object[key] else { return nil }
-        return "\"\(key)\": \(value.description)"
+        return "\(Self.escapeJSONString(key)): \(value.description)"
       }.joined(separator: ", ")
       return "{\(items)}"
     case .array(let array):
       return "[" + array.map(\.description).joined(separator: ", ") + "]"
     case .string(let string):
-      return "\"" + string.replacingOccurrences(of: "\"", with: "\\\"") + "\""
+      return Self.escapeJSONString(string)
     case .number(let number):
       if number.rounded(.towardZero) == number {
         return String(Int64(number))
