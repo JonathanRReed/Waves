@@ -46,11 +46,13 @@ import WavesAudioCore
   let invalidCommands = [
     "waves://unknown",
     "waves://set-volume?app=music",
+    "waves://set-volume?app=&volume=0.5",
     "waves://set-volume?app=music&volume=nan",
     "waves://set-volume?app=music&volume=inf",
     "waves://set-volume?app=music&volume=-0.1",
     "waves://set-volume?app=music&volume=1.1",
     "waves://mute?app=music",
+    "waves://mute?app=&muted=true",
     "waves://mute?app=music&muted=maybe",
     "waves://apply-profile",
     "waves://apply-preset?name=",
