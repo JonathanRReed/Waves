@@ -484,7 +484,8 @@ extension WavesControlJSONValue: CustomStringConvertible {
     guard let data = try? JSONSerialization.data(withJSONObject: [string]),
       let text = String(data: data, encoding: .utf8)
     else {
-      let escaped = string
+      let escaped =
+        string
         .replacingOccurrences(of: "\\", with: "\\\\")
         .replacingOccurrences(of: "\"", with: "\\\"")
       return "\"\(escaped)\""
