@@ -541,7 +541,12 @@ func waveLinkBridgeRejectsRelocationThatCannotPreserveMixSettings(_ scenario: St
       return
     }
   }
-  #expect(await rpc.addRequests.count == 1)
+  #expect(
+    await rpc.addRequests == [
+      .init(appID: "us.zoom.xos", channelID: "empty"),
+      .init(appID: "us.zoom.xos", channelID: "shared"),
+    ]
+  )
   #expect(await rpc.setRequests.isEmpty)
 }
 
@@ -567,7 +572,12 @@ func waveLinkBridgeRejectsRelocationThatCannotPreserveMixSettings(_ scenario: St
   await #expect(throws: WaveLinkControlBridgeError.self) {
     try await bridge.apply(bundleIdentifier: "us.zoom.xos", volume: 0.5, isMuted: false)
   }
-  #expect(await rpc.addRequests.count == 1)
+  #expect(
+    await rpc.addRequests == [
+      .init(appID: "us.zoom.xos", channelID: "empty"),
+      .init(appID: "us.zoom.xos", channelID: "shared"),
+    ]
+  )
   #expect(await rpc.setRequests.isEmpty)
 }
 

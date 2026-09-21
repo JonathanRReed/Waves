@@ -243,9 +243,11 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
   var volumeBoost: Float
 
   init(desiredVolume: Float = 1.0, isMuted: Bool = false, volumeBoost: Float = 1.0) {
-    self.desiredVolume = max(0.0, min(1.0, desiredVolume))
+    let finiteVolume = desiredVolume.isFinite ? desiredVolume : 1.0
+    self.desiredVolume = max(0.0, min(1.0, finiteVolume))
     self.isMuted = isMuted
-    self.volumeBoost = max(1.0, min(4.0, volumeBoost))
+    let finiteBoost = volumeBoost.isFinite ? volumeBoost : 1.0
+    self.volumeBoost = max(1.0, min(4.0, finiteBoost))
   }
 
   private enum CodingKeys: String, CodingKey {

@@ -419,6 +419,11 @@ actor WaveLinkControlBridge: WaveLinkControlling {
         moved.relocationMixes == sourceMixes,
         currentSource?.relocationMixes == sourceMixes
       else {
+        // The app has already moved. Restore its original routing before
+        // reporting a failed validation so an uncontrolled empty channel
+        // cannot make previously muted audio audible.
+        let rollbackRequest = AddToChannelRequest(appID: bundleIdentifier, channelID: source.id)
+        _ = try await request("addToChannel", try encoder.encode(rollbackRequest))
         throw WaveLinkControlBridgeError.readBackMismatch(
           "The app or mix settings changed while moving to \(empty.name). Check its channel and mix assignments in Wave Link before retrying."
         )

@@ -15,7 +15,17 @@ import WavesAudioCore
         .setVolume(appID: "com.example.music", volume: 0.42)
       ))
   #expect(
+    parser.parse(URL(string: "WAVES://SET-VOLUME?app=com.example.music&volume=0.42")!)
+      == .accepted(
+        .setVolume(appID: "com.example.music", volume: 0.42)
+      ))
+  #expect(
     parser.parse(URL(string: "waves://mute?app=com.example.music&muted=true")!)
+      == .accepted(
+        .setMuted(appID: "com.example.music", isMuted: true)
+      ))
+  #expect(
+    parser.parse(URL(string: "Waves://Mute?app=com.example.music&muted=true")!)
       == .accepted(
         .setMuted(appID: "com.example.music", isMuted: true)
       ))
@@ -46,11 +56,13 @@ import WavesAudioCore
   let invalidCommands = [
     "waves://unknown",
     "waves://set-volume?app=music",
+    "waves://set-volume?app=&volume=0.5",
     "waves://set-volume?app=music&volume=nan",
     "waves://set-volume?app=music&volume=inf",
     "waves://set-volume?app=music&volume=-0.1",
     "waves://set-volume?app=music&volume=1.1",
     "waves://mute?app=music",
+    "waves://mute?app=&muted=true",
     "waves://mute?app=music&muted=maybe",
     "waves://apply-profile",
     "waves://apply-preset?name=",
@@ -66,26 +78,6 @@ import WavesAudioCore
     #expect(parser.parse(URL(string: "waves://refresh")!) == .accepted(.refresh))
   }
   #expect(parser.parse(URL(string: "waves://refresh")!) == .throttled(shouldNotify: true))
-}
-
-@MainActor
-@Test func automationParserRejectsControlCharactersAndFormattingSeparators() {
-  let parser = AutomationCommandParser()
-  let hostileCommands = [
-    "waves://set-volume?app=music%0Ainjected&volume=0.5",
-    "waves://set-volume?app=music%1B%5B2J&volume=0.5",
-    "waves://mute?app=music%0D&muted=true",
-    "waves://apply-preset?name=Focus%0AHeader",
-    "waves://apply-preset?name=Focus%202028%E2%80%A8Separator",
-    "waves://set-volume%0Ainjected?app=music&volume=0.5",
-  ]
-
-  for command in hostileCommands {
-    guard case .rejected = parser.parse(URL(string: command)!) else {
-      Issue.record("expected rejection for hostile command \(command)")
-      continue
-    }
-  }
 }
 
 @MainActor

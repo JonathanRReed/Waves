@@ -265,6 +265,16 @@ import WavesAudioCore
   #expect(tooLow.volumeBoost == 1.0)
 }
 
+@Test func appVolumeSettingsSanitizesNonFiniteValuesOnInit() {
+  let nanSettings = AppVolumeSettings(desiredVolume: .nan, isMuted: false, volumeBoost: .nan)
+  #expect(nanSettings.desiredVolume == 1.0)
+  #expect(nanSettings.volumeBoost == 1.0)
+
+  let infSettings = AppVolumeSettings(desiredVolume: .infinity, isMuted: false, volumeBoost: .infinity)
+  #expect(infSettings.desiredVolume == 1.0)
+  #expect(infSettings.volumeBoost == 1.0)
+}
+
 @Test func appVolumeSettingsDecodeToleratesMissingKeys() throws {
   let prefs = try JSONDecoder().decode(AppVolumeSettings.self, from: Data("{}".utf8))
   #expect(prefs.desiredVolume == 1.0)
