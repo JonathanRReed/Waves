@@ -15,7 +15,17 @@ import WavesAudioCore
         .setVolume(appID: "com.example.music", volume: 0.42)
       ))
   #expect(
+    parser.parse(URL(string: "WAVES://SET-VOLUME?app=com.example.music&volume=0.42")!)
+      == .accepted(
+        .setVolume(appID: "com.example.music", volume: 0.42)
+      ))
+  #expect(
     parser.parse(URL(string: "waves://mute?app=com.example.music&muted=true")!)
+      == .accepted(
+        .setMuted(appID: "com.example.music", isMuted: true)
+      ))
+  #expect(
+    parser.parse(URL(string: "Waves://Mute?app=com.example.music&muted=true")!)
       == .accepted(
         .setMuted(appID: "com.example.music", isMuted: true)
       ))
