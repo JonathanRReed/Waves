@@ -58,9 +58,10 @@ final class AutomationCommandParser {
           shouldPresent: false
         ))
     }
-    guard url.scheme == "waves",
+    // RFC 3986 specifies URL schemes and hosts are case-insensitive.
+    guard url.scheme?.lowercased() == "waves",
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-      let host = components.host,
+      let host = components.host?.lowercased(),
       !host.isEmpty,
       !containsControlCharacters(host)
     else {
@@ -73,6 +74,7 @@ final class AutomationCommandParser {
     switch host {
     case "set-volume":
       guard let appID = queryValue(named: "app", in: components),
+        !appID.isEmpty,
         let volumeValue = queryValue(named: "volume", in: components),
         appID.count <= 256,
         !containsControlCharacters(appID),
@@ -88,6 +90,7 @@ final class AutomationCommandParser {
 
     case "mute":
       guard let appID = queryValue(named: "app", in: components),
+        !appID.isEmpty,
         let muteValue = queryValue(named: "muted", in: components),
         appID.count <= 256,
         !containsControlCharacters(appID),
