@@ -43,6 +43,8 @@ enum ControlCommand: String, Codable, CaseIterable, Sendable {
 }
 
 struct ControlRequest: Codable, Equatable, Sendable {
+  static let maximumClientNameLength = 256
+
   var id: Int?
   var cmd: ControlCommand
   /// Logical app identifier — the same stable key Waves persists everywhere
@@ -62,6 +64,39 @@ struct ControlRequest: Codable, Equatable, Sendable {
   enum CodingKeys: String, CodingKey {
     case id, cmd, app, volume, delta, muted, client
     case protocolVersion = "protocol"
+  }
+
+  init(
+    id: Int? = nil,
+    cmd: ControlCommand,
+    app: String? = nil,
+    volume: Float? = nil,
+    delta: Float? = nil,
+    muted: Bool? = nil,
+    client: String? = nil,
+    protocolVersion: Int? = nil
+  ) {
+    self.id = id
+    self.cmd = cmd
+    self.app = app
+    self.volume = volume
+    self.delta = delta
+    self.muted = muted
+    self.client = client.map { String($0.prefix(Self.maximumClientNameLength)) }
+    self.protocolVersion = protocolVersion
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decodeIfPresent(Int.self, forKey: .id)
+    cmd = try container.decode(ControlCommand.self, forKey: .cmd)
+    app = try container.decodeIfPresent(String.self, forKey: .app)
+    volume = try container.decodeIfPresent(Float.self, forKey: .volume)
+    delta = try container.decodeIfPresent(Float.self, forKey: .delta)
+    muted = try container.decodeIfPresent(Bool.self, forKey: .muted)
+    let rawClient = try container.decodeIfPresent(String.self, forKey: .client)
+    client = rawClient.map { String($0.prefix(Self.maximumClientNameLength)) }
+    protocolVersion = try container.decodeIfPresent(Int.self, forKey: .protocolVersion)
   }
 }
 
