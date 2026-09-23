@@ -118,13 +118,13 @@ public struct ProfileEntry: Codable, Hashable, Sendable {
     // Validate appID length to prevent excessive memory usage
     self.appID = String(appID.prefix(256))
 
-    // Clamp desiredVolume to valid range [0.0, 1.0] when present
-    self.desiredVolume = desiredVolume.map { max(0.0, min(1.0, $0)) }
+    // Clamp desiredVolume to valid range [0.0, 1.0] when present and finite
+    self.desiredVolume = desiredVolume.flatMap { $0.isFinite ? max(0.0, min(1.0, $0)) : nil }
 
     self.isMuted = isMuted
 
-    // Clamp volumeBoost to the user-facing range [1.0, 4.0] when present
-    self.volumeBoost = volumeBoost.map { max(1.0, min(4.0, $0)) }
+    // Clamp volumeBoost to the user-facing range [1.0, 4.0] when present and finite
+    self.volumeBoost = volumeBoost.flatMap { $0.isFinite ? max(1.0, min(4.0, $0)) : nil }
   }
 
   private enum CodingKeys: String, CodingKey {
