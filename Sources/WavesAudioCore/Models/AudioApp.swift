@@ -100,14 +100,18 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.hasAmbiguousIdentity = hasAmbiguousIdentity
     self.isProducingOutput = isProducingOutput
     self.isActive = isActive
-    self.peakLevel = peakLevel
-    self.rmsLevel = rmsLevel
+    self.peakLevel = peakLevel.isFinite ? peakLevel : 0
+    self.rmsLevel = rmsLevel.isFinite ? rmsLevel : 0
 
-    // Clamp desiredVolume to valid range [0.0, 1.0]
-    self.desiredVolume = max(0.0, min(1.0, desiredVolume))
+    // Clamp desiredVolume to valid range [0.0, 1.0] when finite
+    let safeDesiredVolume = desiredVolume.isFinite ? desiredVolume : 1.0
+    self.desiredVolume = max(0.0, min(1.0, safeDesiredVolume))
 
-    // Clamp appliedVolume to valid range [0.0, 1.0] if present
-    self.appliedVolume = appliedVolume.map { max(0.0, min(1.0, $0)) }
+    // Clamp appliedVolume to valid range [0.0, 1.0] if present and finite
+    self.appliedVolume = appliedVolume.flatMap { val in
+      guard val.isFinite else { return nil }
+      return max(0.0, min(1.0, val))
+    }
 
     self.isMuted = isMuted
     self.isPinned = isPinned
@@ -122,7 +126,8 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     // Clamp volumeBoost to the supported range [1.0, 4.0], matching
     // ProfileEntry and AppVolumeSettings so a tampered/corrupted session
     // cannot inject an out-of-range boost into the model.
-    self.volumeBoost = max(1.0, min(4.0, volumeBoost))
+    let safeVolumeBoost = volumeBoost.isFinite ? volumeBoost : 1.0
+    self.volumeBoost = max(1.0, min(4.0, safeVolumeBoost))
 
     self.muteSource = muteSource
     self.targetDeviceUID = targetDeviceUID.map { String($0.prefix(256)) }
