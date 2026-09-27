@@ -44,6 +44,7 @@ enum ControlCommand: String, Codable, CaseIterable, Sendable {
 
 struct ControlRequest: Codable, Equatable, Sendable {
   static let maximumClientNameLength = 256
+  static let maximumAppIDLength = 256
 
   var id: Int?
   var cmd: ControlCommand
@@ -78,7 +79,7 @@ struct ControlRequest: Codable, Equatable, Sendable {
   ) {
     self.id = id
     self.cmd = cmd
-    self.app = app
+    self.app = app.map { String($0.prefix(Self.maximumAppIDLength)) }
     self.volume = volume
     self.delta = delta
     self.muted = muted
@@ -90,7 +91,8 @@ struct ControlRequest: Codable, Equatable, Sendable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     id = try container.decodeIfPresent(Int.self, forKey: .id)
     cmd = try container.decode(ControlCommand.self, forKey: .cmd)
-    app = try container.decodeIfPresent(String.self, forKey: .app)
+    let rawApp = try container.decodeIfPresent(String.self, forKey: .app)
+    app = rawApp.map { String($0.prefix(Self.maximumAppIDLength)) }
     volume = try container.decodeIfPresent(Float.self, forKey: .volume)
     delta = try container.decodeIfPresent(Float.self, forKey: .delta)
     muted = try container.decodeIfPresent(Bool.self, forKey: .muted)

@@ -88,6 +88,16 @@ import WavesAudioCore
   #expect(ControlCodec.decode(Data(#"{"id":1}"#.utf8)) == nil)
 }
 
+@Test func controlRequestBoundsAppIDLength() {
+  let oversizedApp = String(repeating: "a", count: 300)
+  let request = ControlRequest(cmd: .getIcon, app: oversizedApp)
+  #expect(request.app?.count == ControlRequest.maximumAppIDLength)
+
+  let json = Data("{\"cmd\":\"get-icon\",\"app\":\"\(oversizedApp)\"}".utf8)
+  let decoded = ControlCodec.decode(json)
+  #expect(decoded?.app?.count == ControlRequest.maximumAppIDLength)
+}
+
 @Test func boundedRequestIDScanPreservesCorrelationWithoutDecoding() {
   #expect(ControlCodec.requestIDPrefix(Data(#"{"id":42,"cmd":"hello"}"#.utf8)) == 42)
   #expect(ControlCodec.requestIDPrefix(Data(#"{"cmd":"hello","id":-7}"#.utf8)) == -7)
