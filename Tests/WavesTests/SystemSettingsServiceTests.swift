@@ -17,3 +17,11 @@ import Testing
     #expect(url.absoluteString.contains(marker))
   }
 }
+
+@Test @MainActor func systemSettingsServiceValidatesURLSchemes() throws {
+  let service = SystemSettingsService()
+  for destination in SystemSettingsDestination.allCases {
+    let url = try #require(destination.url)
+    #expect(url.scheme?.lowercased() == "x-apple.systempreferences")
+  }
+}
