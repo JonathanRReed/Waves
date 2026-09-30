@@ -496,3 +496,47 @@ import Testing
   #expect(DeviceKind.allCases.contains(.aggregate))
   #expect(DeviceKind.allCases.contains(.unknown))
 }
+
+@Test func profileEntrySanitizesNonFiniteFloatingPointValues() {
+  let nanEntry = ProfileEntry(appID: "nan.app", desiredVolume: .nan, volumeBoost: .nan)
+  #expect(nanEntry.desiredVolume == nil)
+  #expect(nanEntry.volumeBoost == nil)
+
+  let infEntry = ProfileEntry(appID: "inf.app", desiredVolume: .infinity, volumeBoost: -.infinity)
+  #expect(infEntry.desiredVolume == nil)
+  #expect(infEntry.volumeBoost == nil)
+}
+
+@Test func audioAppSanitizesNonFiniteFloatingPointValues() {
+  let nanApp = AudioApp(
+    id: "nan.app",
+    displayName: "NaN App",
+    category: .media,
+    peakLevel: .nan,
+    rmsLevel: .nan,
+    desiredVolume: .nan,
+    appliedVolume: .nan,
+    volumeBoost: .nan
+  )
+  #expect(nanApp.desiredVolume == 1.0)
+  #expect(nanApp.appliedVolume == nil)
+  #expect(nanApp.volumeBoost == 1.0)
+  #expect(nanApp.peakLevel == 0.0)
+  #expect(nanApp.rmsLevel == 0.0)
+
+  let infApp = AudioApp(
+    id: "inf.app",
+    displayName: "Infinity App",
+    category: .media,
+    peakLevel: .infinity,
+    rmsLevel: -.infinity,
+    desiredVolume: .infinity,
+    appliedVolume: -.infinity,
+    volumeBoost: .infinity
+  )
+  #expect(infApp.desiredVolume == 1.0)
+  #expect(infApp.appliedVolume == nil)
+  #expect(infApp.volumeBoost == 1.0)
+  #expect(infApp.peakLevel == 0.0)
+  #expect(infApp.rmsLevel == 0.0)
+}
