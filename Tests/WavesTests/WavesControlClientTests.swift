@@ -54,6 +54,24 @@ func wavesCTLRejectsInvalidArgumentsBeforeTransport(_ arguments: [String]) {
   #expect(object["volume"] == largeNumber)
 }
 
+@Test(arguments: [
+  (value: 1e20, literal: "1e+20"),
+  (value: -1e20, literal: "-1e+20"),
+  (value: Double(Int64.max), literal: "9.223372036854776e+18"),
+  (value: Double(Int64.min), literal: "-9223372036854775808"),
+])
+func wavesCTLSerializesLargeNumbersThroughSocket(testCase: (value: Double, literal: String)) throws {
+  let system = ScriptedControlClientSystem()
+  let client = try WavesControlSocketClient(path: "/tmp/waves.sock", system: system)
+  let command = WavesCTLCommand.raw(["volume": .number(testCase.value)])
+  try client.send(command.requestObject(id: 1))
+
+  #expect(system.writtenBytes == Data("{\"volume\":\(testCase.literal)}\n".utf8))
+  let decoded = try JSONSerialization.jsonObject(with: system.writtenBytes)
+  let object = try #require(decoded as? [String: NSNumber])
+  #expect(object["volume"]?.doubleValue == testCase.value)
+}
+
 private final class WavesCTLBuildDirectoryLocator {}
 
 @Test func wavesCTLExecutableRejectsInvalidVolumeBeforeConnecting() throws {
