@@ -79,7 +79,7 @@ struct ControlRequest: Codable, Equatable, Sendable {
   ) {
     self.id = id
     self.cmd = cmd
-    self.app = app.map { String($0.prefix(Self.maximumAppIDLength)) }
+    self.app = app
     self.volume = volume
     self.delta = delta
     self.muted = muted
@@ -92,7 +92,14 @@ struct ControlRequest: Codable, Equatable, Sendable {
     id = try container.decodeIfPresent(Int.self, forKey: .id)
     cmd = try container.decode(ControlCommand.self, forKey: .cmd)
     let rawApp = try container.decodeIfPresent(String.self, forKey: .app)
-    app = rawApp.map { String($0.prefix(Self.maximumAppIDLength)) }
+    guard rawApp.map({ $0.count <= Self.maximumAppIDLength }) ?? true else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .app,
+        in: container,
+        debugDescription: "app identifier exceeds 256 characters"
+      )
+    }
+    app = rawApp
     volume = try container.decodeIfPresent(Float.self, forKey: .volume)
     delta = try container.decodeIfPresent(Float.self, forKey: .delta)
     muted = try container.decodeIfPresent(Bool.self, forKey: .muted)
