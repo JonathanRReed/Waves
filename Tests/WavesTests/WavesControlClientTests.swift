@@ -45,6 +45,15 @@ func wavesCTLRejectsInvalidArgumentsBeforeTransport(_ arguments: [String]) {
   #expect(objectValue.description == "{\"key\\\"with\\\\quote\": \"val\\\"ue\"}")
 }
 
+@Test func wavesControlJSONValueHandlesLargeNumbersWithoutCrashing() throws {
+  let largeNumber = WavesControlJSONValue.number(1e20)
+  #expect(!largeNumber.description.isEmpty)
+
+  let command = WavesCTLCommand.raw(["volume": largeNumber])
+  let object = command.requestObject(id: 1)
+  #expect(object["volume"] == largeNumber)
+}
+
 private final class WavesCTLBuildDirectoryLocator {}
 
 @Test func wavesCTLExecutableRejectsInvalidVolumeBeforeConnecting() throws {

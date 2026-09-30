@@ -506,8 +506,8 @@ extension WavesControlJSONValue: CustomStringConvertible {
     case .string(let string):
       return Self.escapeJSONString(string)
     case .number(let number):
-      if number.rounded(.towardZero) == number {
-        return String(Int64(number))
+      if let intValue = Int64(exactly: number) {
+        return String(intValue)
       }
       return String(number)
     case .bool(let flag):
@@ -620,8 +620,8 @@ private func appendJSON(_ value: WavesControlJSONValue, into output: inout Strin
     try appendJSONString(string, into: &output)
 
   case .number(let number):
-    if number.rounded(.towardZero) == number {
-      output.append(String(Int64(number)))
+    if let intValue = Int64(exactly: number) {
+      output.append(String(intValue))
     } else {
       output.append(String(number))
     }
