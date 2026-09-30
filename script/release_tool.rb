@@ -2089,7 +2089,11 @@ module WavesRelease
     module AtomicRename
       extend Fiddle::Importer
       dlload Fiddle.dlopen(nil)
-      extern "int renameatx_np(int, const char *, int, const char *, unsigned int)"
+      begin
+        extern "int renameatx_np(int, const char *, int, const char *, unsigned int)"
+      rescue Fiddle::DLError
+        # Darwin-specific syscall; unavailable on Linux/other platforms
+      end
     end
 
     AT_FDCWD = -2
@@ -2626,6 +2630,9 @@ module WavesRelease
     private_class_method :owned_directory?
 
     def publish_anchor!(source, destination)
+      unless AtomicRename.respond_to?(:renameatx_np)
+        raise Error, "exclusive atomic rename (renameatx_np) is not supported on this platform"
+      end
       result = AtomicRename.renameatx_np(AT_FDCWD, source, AT_FDCWD, destination, RENAME_EXCL)
       return true if result.zero?
 
@@ -2661,7 +2668,7 @@ module WavesRelease
         else
           begin
             publish_anchor!(quarantined, path)
-          rescue SystemCallError => restore_error
+          rescue SystemCallError, Error => restore_error
             result[:contested] << "contested #{label} rollback retained unowned bytes at #{quarantined}: #{restore_error.message}"
           end
         end
