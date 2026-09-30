@@ -17,3 +17,16 @@ import Testing
     #expect(url.absoluteString.contains(marker))
   }
 }
+
+@Test @MainActor func systemSettingsServiceValidatesURLSchemes() throws {
+  for destination in SystemSettingsDestination.allCases {
+    let url = try #require(destination.url)
+    #expect(SystemSettingsService.isAllowedSettingsURL(url))
+  }
+  #expect(
+    !SystemSettingsService.isAllowedSettingsURL(try #require(URL(string: "https://example.com")))
+  )
+  #expect(
+    !SystemSettingsService.isAllowedSettingsURL(try #require(URL(string: "file:///tmp/settings")))
+  )
+}
