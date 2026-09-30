@@ -159,22 +159,43 @@ import WavesAudioCore
   #expect(throttled.session.didHandshake)
 }
 
-@Test func controlRequestSanitizesClientAndAppLengthOnDecodeAndInit() throws {
+@Test func controlRequestRejectsOverlongAppOnDecodeWithoutChangingIdentity() throws {
   let longClient = String(repeating: "a", count: 300)
-  let longApp = String(repeating: "x", count: 300) + ".distinct-app"
+  let validApp = String(repeating: "x", count: ControlRequest.maximumAppIDLength)
+  let longApp = validApp + ".distinct-app"
   let request = ControlRequest(cmd: .hello, app: longApp, client: longClient)
-  #expect(request.client?.count == 256)
   #expect(request.client == String(repeating: "a", count: 256))
-  #expect(request.app?.count == 256)
-  #expect(request.app == String(longApp.prefix(256)))
+  #expect(request.app == longApp)
 
-  let json = try JSONSerialization.data(
+  let validJSON = try JSONSerialization.data(
+    withJSONObject: ["cmd": "hello", "client": longClient, "app": validApp])
+  let valid = try JSONDecoder().decode(ControlRequest.self, from: validJSON)
+  #expect(valid.client == String(repeating: "a", count: 256))
+  #expect(valid.app == validApp)
+
+  let overlongJSON = try JSONSerialization.data(
     withJSONObject: ["cmd": "hello", "client": longClient, "app": longApp])
-  let decoded = try JSONDecoder().decode(ControlRequest.self, from: json)
-  #expect(decoded.client?.count == 256)
-  #expect(decoded.client == String(repeating: "a", count: 256))
-  #expect(decoded.app?.count == 256)
-  #expect(decoded.app == String(longApp.prefix(256)))
+  #expect(throws: DecodingError.self) {
+    try JSONDecoder().decode(ControlRequest.self, from: overlongJSON)
+  }
+  #expect(ControlCodec.decode(overlongJSON) == nil)
+}
+
+@MainActor
+@Test func controlRequestNeverTargetsAppThroughOverlongDirectID() async throws {
+  let store = await makeHandlerStore()
+  let handler = ControlCommandHandler(store: store)
+  let appID = try #require(store.controlApps().first?.id)
+  let longApp = appID + String(repeating: "x", count: ControlRequest.maximumAppIDLength)
+  let session = ControlCommandHandler.Session(didHandshake: true)
+
+  let mute = await handler.handle(
+    ControlRequest(cmd: .setMute, app: longApp, muted: true), session: session)
+  #expect(mute.response.error == .unknownApp)
+
+  let icon = await handler.handle(
+    ControlRequest(cmd: .getIcon, app: longApp), session: session)
+  #expect(icon.response.error == .unknownApp)
 }
 
 @MainActor
