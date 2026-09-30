@@ -2668,7 +2668,7 @@ module WavesRelease
         else
           begin
             publish_anchor!(quarantined, path)
-          rescue SystemCallError => restore_error
+          rescue SystemCallError, Error => restore_error
             result[:contested] << "contested #{label} rollback retained unowned bytes at #{quarantined}: #{restore_error.message}"
           end
         end
