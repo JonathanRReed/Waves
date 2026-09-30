@@ -89,6 +89,10 @@ struct ControlCommandHandler {
     guard let appID = request.app else {
       return .failure(id: request.id, .missingParameter)
     }
+    // Never shorten an identifier into the key of a different app.
+    guard appID.count <= ControlRequest.maximumAppIDLength else {
+      return .failure(id: request.id, .unknownApp)
+    }
     guard let app = store.controlApp(forID: appID) else {
       return .failure(id: request.id, .unknownApp)
     }
@@ -105,6 +109,10 @@ struct ControlCommandHandler {
   private func handleMutation(_ request: ControlRequest) -> ControlResponse {
     guard let appID = request.app else {
       return .failure(id: request.id, .missingParameter)
+    }
+    // Never shorten an identifier into the key of a different app.
+    guard appID.count <= ControlRequest.maximumAppIDLength else {
+      return .failure(id: request.id, .unknownApp)
     }
     guard store.isAudioRunning else {
       return .failure(id: request.id, .audioNotRunning)
