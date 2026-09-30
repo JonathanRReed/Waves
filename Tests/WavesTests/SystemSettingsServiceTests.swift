@@ -22,6 +22,8 @@ import Testing
   let service = SystemSettingsService()
   for destination in SystemSettingsDestination.allCases {
     let url = try #require(destination.url)
-    #expect(url.scheme?.lowercased() == "x-apple.systempreferences")
+    #expect(SystemSettingsService.isAllowedSettingsURL(url))
   }
+  #expect(!SystemSettingsService.isAllowedSettingsURL(try #require(URL(string: "https://example.com"))))
+  #expect(!SystemSettingsService.isAllowedSettingsURL(try #require(URL(string: "file:///tmp/settings"))))
 }
