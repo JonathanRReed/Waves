@@ -282,7 +282,8 @@ enum DiagnosticsExportFormatter {
       lines.append("  App name [app name]: \(bounded(app.displayName, maximumLength: 256))")
       lines.append("    App identifier [identifier]: \(bounded(app.logicalID, maximumLength: 256))")
       lines.append("    Route state [route state]: \(app.routingState.rawValue)")
-      lines.append("    Desired volume: \(Int(max(0, min(1, app.desiredVolume)) * 100))%")
+      let safeDesiredVolume = app.desiredVolume.isFinite ? max(0, min(1, app.desiredVolume)) : 0
+      lines.append("    Desired volume: \(Int(safeDesiredVolume * 100))%")
       lines.append("    Muted: \(app.isMuted)")
       lines.append("    Boost: \(formattedBoost(app.volumeBoost))x")
       lines.append(
