@@ -30,6 +30,7 @@ public enum MeterBallistics {
   /// scale with a fixed floor, then applies `topGamma`. Inputs are clamped, so
   /// 0 and negative amplitudes map to 0 and ≥1.0 maps to 1.
   public static func normalize(_ amplitude: Double, floorDB dbFloor: Double = floorDB) -> Double {
+    guard amplitude.isFinite else { return 0 }
     let db = 20 * log10(max(amplitude, 1e-5))
     let span = max(1e-6, -dbFloor)  // floor is negative; span = 0 dBFS − floor
     let position = (db - dbFloor) / span
