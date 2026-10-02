@@ -21,7 +21,8 @@ final class URLInvocationLimiter {
     now: @escaping Clock = Date.init
   ) {
     self.maximumInvocations = max(0, maximumInvocations)
-    self.window = max(0, window)
+    // Non-finite TimeIntervals (e.g. NaN) bypass max(0, window) clamping and break date math.
+    self.window = window.isFinite ? max(0, window) : URLInvocationLimiter.window
     self.now = now
   }
 
