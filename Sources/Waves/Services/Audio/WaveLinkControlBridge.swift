@@ -1,3 +1,4 @@
+import CFNetwork
 import Foundation
 import OSLog
 import WavesAudioCore
@@ -77,7 +78,7 @@ enum WaveLinkControlBridgeError: Error, Equatable, LocalizedError, Sendable {
     case .incompatibleApplication:
       "The control service that answered is not a compatible Elgato Wave Link 3."
     case .unverifiedLoopbackPeer:
-      "The running Wave Link is not signed by Elgato, so Waves will not send it commands."
+      "The connected Wave Link process could not be verified. Waves will not send audio-control changes."
     case .dedicatedChannelRequired(let appID):
       "No empty Wave Link software channel is ready for \(appID). In Wave Link, give the app its own channel and add that channel to your listening mix."
     case .channelNotInMix(let channelName):
@@ -538,9 +539,21 @@ actor WaveLinkControlBridge: WaveLinkControlling {
 
 // MARK: - Loopback session
 
+private final class WaveLinkNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest,
+    completionHandler: @escaping @Sendable (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
+  }
+}
+
 /// Owns the WebSocket to the verified Wave Link 3 process: discovery of its
-/// control port, the protocol handshake that proves a port is the control
-/// service, and the socket's lifetime. The socket is kept open briefly after a
+/// control port, protocol compatibility, established peer ownership, and the
+/// socket's lifetime. The socket is kept open briefly after a
 /// sequence so a slider drag reuses one connection, then closed while idle so
 /// a Wave Link restart on a new port is picked up by the next sequence.
 actor WaveLinkLoopbackSession {
@@ -549,6 +562,7 @@ actor WaveLinkLoopbackSession {
   private static let maximumResponseMessages = 64
 
   typealias CandidateProvider = @Sendable () throws -> [WaveLinkEndpointDiscovery.Listener]
+  typealias PeerVerifier = @Sendable (WaveLinkEndpointDiscovery.Listener) -> Bool
 
   struct Connection: Equatable, Sendable {
     let endpoint: WaveLinkEndpointDiscovery.Listener
@@ -570,6 +584,7 @@ actor WaveLinkLoopbackSession {
   private static let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "WaveLinkBridge")
 
   private let candidateProvider: CandidateProvider
+  private let peerVerifier: PeerVerifier
   private let urlSession: URLSession
   private let receiveTimeout: Duration
   private let idleCloseDelay: Duration
@@ -582,6 +597,7 @@ actor WaveLinkLoopbackSession {
 
   init(
     candidateProvider: @escaping CandidateProvider = { try WaveLinkEndpointDiscovery.liveCandidates() },
+    peerVerifier: @escaping PeerVerifier = { WaveLinkEndpointDiscovery.verifyConnectedPeer($0) },
     receiveTimeout: Duration = .seconds(3),
     idleCloseDelay: Duration = .seconds(2)
   ) {
@@ -590,8 +606,14 @@ actor WaveLinkLoopbackSession {
     // one deadline covering its send and all response messages.
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = 2
-    urlSession = URLSession(configuration: configuration)
+    configuration.connectionProxyDictionary = [
+      kCFNetworkProxiesHTTPEnable as String: 0,
+      kCFNetworkProxiesHTTPSEnable as String: 0,
+      kCFNetworkProxiesSOCKSEnable as String: 0,
+    ]
+    urlSession = URLSession(configuration: configuration, delegate: WaveLinkNoRedirectDelegate(), delegateQueue: nil)
     self.candidateProvider = candidateProvider
+    self.peerVerifier = peerVerifier
     self.receiveTimeout = receiveTimeout
     self.idleCloseDelay = idleCloseDelay
   }
@@ -607,7 +629,15 @@ actor WaveLinkLoopbackSession {
   func connect() async throws -> Connection {
     try Task.checkCancellation()
     cancelIdleClose()
-    if let connection, socket != nil { return connection }
+    if let connection, socket != nil {
+      let peerVerifier = self.peerVerifier
+      guard await Task.detached(priority: .utility, operation: { peerVerifier(connection.endpoint) }).value else {
+        closeSocket(with: .abnormalClosure)
+        throw WaveLinkControlBridgeError.unverifiedLoopbackPeer
+      }
+      try Task.checkCancellation()
+      return connection
+    }
     closeSocket(with: .goingAway)
 
     let candidateProvider = self.candidateProvider
@@ -628,6 +658,11 @@ actor WaveLinkLoopbackSession {
           socket.cancel(with: .normalClosure, reason: nil)
           continue
         }
+        let peerVerifier = self.peerVerifier
+        guard await Task.detached(priority: .utility, operation: { peerVerifier(candidate) }).value else {
+          throw WaveLinkControlBridgeError.unverifiedLoopbackPeer
+        }
+        try Task.checkCancellation()
         self.socket = socket
         connectionGeneration &+= 1
         let connection = Connection(endpoint: candidate, applicationInfo: info)
@@ -668,6 +703,14 @@ actor WaveLinkLoopbackSession {
     activeRequests += 1
     defer { activeRequests -= 1 }
     do {
+      guard let endpoint = connection?.endpoint else {
+        throw WaveLinkControlBridgeError.unverifiedLoopbackPeer
+      }
+      let peerVerifier = self.peerVerifier
+      guard await Task.detached(priority: .utility, operation: { peerVerifier(endpoint) }).value else {
+        throw WaveLinkControlBridgeError.unverifiedLoopbackPeer
+      }
+      try Task.checkCancellation()
       return try await performRequest(method: method, params: params, on: socket)
     } catch {
       // Never keep a socket that produced any failure; the next sequence

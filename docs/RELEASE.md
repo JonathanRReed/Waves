@@ -13,9 +13,9 @@ reset reliability, process discovery, waveform calculation, icon lifetime
 handling, and installer layout. It is not published until its candidate and
 publication gates pass.
 
-Version 1.7.2 build 20 is the latest published release. GitHub published it on
+Version 1.7.2 build 20 was published before this candidate. GitHub published it on
 2026-09-08. The release includes signed and notarized universal artifacts and
-sealed evidence. The site appcast and Homebrew tap point at that release.
+sealed evidence. The site appcast and Homebrew tap point at that release until 1.7.3 passes publication.
 Its performance, macOS 15, and physical Stream Deck deferrals apply only to
 1.7.2 and do not qualify this candidate.
 

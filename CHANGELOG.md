@@ -9,6 +9,9 @@ All notable changes to Waves are documented here. The format follows
 ## [1.7.3] - 2026-10-03
 
 ### Fixed
+- Verify the connected Wave Link process before sending control commands and
+  recheck its identity when a connection is reused.
+- Pin the release-tag authority independently of candidate metadata.
 - Keep Reset Mix available until restoring the mix and saving intent both succeed.
 - Retain failed profile changes for retry and show a persistent Retry action.
 - Preserve existing profiles when importing a matching name, including Unicode
@@ -19,6 +22,7 @@ All notable changes to Waves are documented here. The format follows
 - Bound profiler cleanup and support the compatible SDK on newer macOS toolchains.
 
 ### Changed
+- Update Sparkle to 2.10.0 for current macOS updater fixes.
 - Share the sorted app roster across menu sections and waveform calculations.
 - Index discovery candidates before applying the existing process identity checks.
 - Render the DMG background at Retina resolution and preserve its Finder layout.

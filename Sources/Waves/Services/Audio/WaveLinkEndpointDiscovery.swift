@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import WavesAudioCore
 
 /// Locates the loopback control endpoint of the running Wave Link 3 process.
 ///
@@ -24,7 +25,30 @@ enum WaveLinkEndpointDiscovery {
   struct Listener: Hashable, Sendable {
     let pid: pid_t
     let port: UInt16
+    let lifetime: AppProcessLifetimeIdentity?
+
+    init(pid: pid_t, port: UInt16, lifetime: AppProcessLifetimeIdentity? = nil) {
+      self.pid = pid
+      self.port = port
+      self.lifetime = lifetime
+    }
   }
+
+  struct TCPConnection: Hashable, Sendable {
+    let localAddress: UInt32
+    let localPort: UInt16
+    let remoteAddress: UInt32
+    let remotePort: UInt16
+
+    var reversed: TCPConnection {
+      TCPConnection(
+        localAddress: remoteAddress, localPort: remotePort,
+        remoteAddress: localAddress, remotePort: localPort
+      )
+    }
+  }
+
+  static let ipv4Loopback: UInt32 = 0x7f00_0001
 
   /// Locations Wave Link 3 has used for `ws-info.json`. Releases before 3.2
   /// ran inside the App Sandbox container; 3.2 left the sandbox, so the plain
@@ -112,35 +136,90 @@ enum WaveLinkEndpointDiscovery {
   /// `lsof`, which cost a process launch and a system-wide socket scan per
   /// discovery.
   static func listeningTCPPorts(ofPID pid: pid_t) -> [UInt16] {
+    Set(
+      tcpSockets(ofPID: pid, state: Int32(TSI_S_LISTEN)).compactMap { socket in
+        isLoopbackListener(address: socket.localAddress, port: socket.localPort)
+          ? socket.localPort : nil
+      }
+    ).sorted()
+  }
+
+  static func isLoopbackListener(address: UInt32, port: UInt16) -> Bool {
+    port != 0 && (address == 0 || address == ipv4Loopback)
+  }
+
+  static func establishedTCPConnections(ofPID pid: pid_t) -> [TCPConnection] {
+    tcpSockets(ofPID: pid, state: Int32(TSI_S_ESTABLISHED))
+  }
+
+  private static func tcpSockets(ofPID pid: pid_t, state: Int32) -> [TCPConnection] {
     let bufferSize = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
-    guard bufferSize > 0 else { return [] }
+    guard bufferSize > 0, bufferSize <= 1_048_576 else { return [] }
     let stride = MemoryLayout<proc_fdinfo>.stride
-    // A little headroom: the process may open descriptors between the two
-    // calls, and a short read is handled by the length libproc reports back.
     var descriptors = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(bufferSize) / stride + 8)
     let capacity = Int32(descriptors.count * stride)
     let read = descriptors.withUnsafeMutableBytes {
       proc_pidinfo(pid, PROC_PIDLISTFDS, 0, $0.baseAddress, capacity)
     }
-    guard read > 0 else { return [] }
-
-    var ports = Set<UInt16>()
-    for descriptor in descriptors.prefix(Int(read) / stride)
-    where descriptor.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) {
+    guard read > 0, read <= capacity else { return [] }
+    return descriptors.prefix(Int(read) / stride).compactMap { descriptor in
+      guard descriptor.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) else { return nil }
       var info = socket_fdinfo()
       let size = Int32(MemoryLayout<socket_fdinfo>.size)
-      guard proc_pidfdinfo(pid, descriptor.proc_fd, PROC_PIDFDSOCKETINFO, &info, size) == size else {
-        continue
-      }
-      guard info.psi.soi_kind == Int32(SOCKINFO_TCP) else { continue }
+      guard proc_pidfdinfo(pid, descriptor.proc_fd, PROC_PIDFDSOCKETINFO, &info, size) == size,
+        info.psi.soi_kind == Int32(SOCKINFO_TCP),
+        info.psi.soi_family == AF_INET
+      else { return nil }
       let tcp = info.psi.soi_proto.pri_tcp
-      guard tcp.tcpsi_state == Int32(TSI_S_LISTEN) else { continue }
-      // `insi_lport` is the port in network byte order stored in an int.
-      let rawPort = UInt16(truncatingIfNeeded: UInt32(bitPattern: tcp.tcpsi_ini.insi_lport))
-      let port = UInt16(bigEndian: rawPort)
-      if port != 0 { ports.insert(port) }
+      guard tcp.tcpsi_state == state else { return nil }
+      let endpoint = tcp.tcpsi_ini
+      return TCPConnection(
+        localAddress: UInt32(bigEndian: endpoint.insi_laddr.ina_46.i46a_addr4.s_addr),
+        localPort: UInt16(bigEndian: UInt16(truncatingIfNeeded: endpoint.insi_lport)),
+        remoteAddress: UInt32(bigEndian: endpoint.insi_faddr.ina_46.i46a_addr4.s_addr),
+        remotePort: UInt16(bigEndian: UInt16(truncatingIfNeeded: endpoint.insi_fport))
+      )
     }
-    return ports.sorted()
+  }
+
+  static func connectedPeerMatches(
+    candidate: Listener,
+    clientConnections: [TCPConnection],
+    serverConnections: [TCPConnection]
+  ) -> Bool {
+    let matchingClients = Set(
+      clientConnections.filter {
+        $0.localAddress == ipv4Loopback && $0.remoteAddress == ipv4Loopback
+          && $0.remotePort == candidate.port && $0.localPort != 0
+      })
+    guard !matchingClients.isEmpty else { return false }
+    let serverTuples = Set(serverConnections)
+    // More than one session may be open during a diagnostic check. Every
+    // possible client must terminate in this verified process.
+    return matchingClients.allSatisfy { serverTuples.contains($0.reversed) }
+  }
+
+  static func verifyConnectedPeer(
+    _ candidate: Listener,
+    identityVerifier: IdentityVerifier = VerifiedRouterProcessIdentity.verifyLive,
+    lifetimeProvider: (pid_t) -> AppProcessLifetimeIdentity? = RuntimeProcessIdentity.processLifetime,
+    connectionProvider: (pid_t) -> [TCPConnection] = establishedTCPConnections,
+    listenerProvider: (pid_t) -> [UInt16] = listeningTCPPorts
+  ) -> Bool {
+    guard let lifetime = candidate.lifetime,
+      lifetime.pid == candidate.pid,
+      lifetimeProvider(candidate.pid) == lifetime,
+      verifiedProcessIdentifiers(runningPIDs: [candidate.pid], identityVerifier: identityVerifier)
+        == [candidate.pid],
+      listenerProvider(candidate.pid).contains(candidate.port),
+      connectedPeerMatches(
+        candidate: candidate,
+        clientConnections: connectionProvider(getpid()),
+        serverConnections: connectionProvider(candidate.pid)
+      ),
+      lifetimeProvider(candidate.pid) == lifetime
+    else { return false }
+    return true
   }
 
   /// The production candidate list: verified Wave Link 3 processes, their
@@ -166,8 +245,15 @@ enum WaveLinkEndpointDiscovery {
     }
     var listeners: [Listener] = []
     for pid in verified {
-      for port in listeningTCPPorts(ofPID: pid) {
-        listeners.append(Listener(pid: pid, port: port))
+      guard let lifetime = RuntimeProcessIdentity.processLifetime(pid: pid),
+        verifiedProcessIdentifiers(
+          runningPIDs: [pid], descriptor: descriptor, identityVerifier: identityVerifier
+        ) == [pid]
+      else { continue }
+      let ports = listeningTCPPorts(ofPID: pid)
+      guard RuntimeProcessIdentity.processLifetime(pid: pid) == lifetime else { continue }
+      for port in ports {
+        listeners.append(Listener(pid: pid, port: port, lifetime: lifetime))
       }
     }
     guard !listeners.isEmpty else {

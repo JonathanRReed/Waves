@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import Testing
+import WavesAudioCore
 
 @testable import Waves
 
@@ -142,6 +143,7 @@ struct WaveLinkLoopbackSessionTests {
           .init(pid: 1, port: waveLink.port),
         ]
       },
+      peerVerifier: { _ in true },
       receiveTimeout: .seconds(3),
       idleCloseDelay: .milliseconds(50)
     )
@@ -168,6 +170,7 @@ struct WaveLinkLoopbackSessionTests {
     defer { impostor.close() }
     let session = WaveLinkLoopbackSession(
       candidateProvider: { [.init(pid: 1, port: impostor.port)] },
+      peerVerifier: { _ in true },
       receiveTimeout: .seconds(2),
       idleCloseDelay: .milliseconds(50)
     )
@@ -178,6 +181,7 @@ struct WaveLinkLoopbackSessionTests {
 
     let nothing = WaveLinkLoopbackSession(
       candidateProvider: { throw WaveLinkControlBridgeError.unavailable("Wave Link 3 is not running.") },
+      peerVerifier: { _ in true },
       receiveTimeout: .seconds(2),
       idleCloseDelay: .milliseconds(50)
     )
@@ -294,6 +298,76 @@ struct WaveLinkLoopbackSessionTests {
     #expect((object["channels"] as? [Any])?.isEmpty == true)
   }
 
+  @Test func waveLinkSessionRejectsAnImpostorBeforeSendingUserCommands() async throws {
+    let server = try TestJSONRPCServer()
+    defer { server.close() }
+    let session = WaveLinkLoopbackSession(
+      candidateProvider: { [.init(pid: 1, port: server.port)] },
+      peerVerifier: { _ in false }
+    )
+    await #expect(throws: WaveLinkControlBridgeError.self) {
+      try await session.request(method: "getChannels", params: nil)
+    }
+    #expect(server.receivedMethods == ["getApplicationInfo"])
+    #expect(await session.connectionDescription == nil)
+  }
+
+  @Test func waveLinkSessionRechecksThePeerOnEveryReusedRequest() async throws {
+    let server = try TestJSONRPCServer()
+    defer { server.close() }
+    let gate = TestPeerGate()
+    let session = WaveLinkLoopbackSession(
+      candidateProvider: { [.init(pid: 1, port: server.port)] },
+      peerVerifier: { _ in gate.isAllowed }
+    )
+    _ = try await session.request(method: "getChannels", params: nil)
+    gate.reject()
+    await #expect(throws: WaveLinkControlBridgeError.self) {
+      try await session.request(method: "setChannel", params: nil)
+    }
+    #expect(server.receivedMethods == ["getApplicationInfo", "getChannels"])
+    #expect(await session.connectionDescription == nil)
+  }
+
+  @Test func waveLinkSessionNeverFollowsAHandshakeRedirect() async throws {
+    let target = try TestJSONRPCServer()
+    defer { target.close() }
+    let redirect = try TestJSONRPCServer(redirectLocation: "ws://127.0.0.1:\(target.port)")
+    defer { redirect.close() }
+    let session = WaveLinkLoopbackSession(
+      candidateProvider: { [.init(pid: 1, port: redirect.port)] },
+      peerVerifier: { _ in true },
+      receiveTimeout: .seconds(1)
+    )
+    await #expect(throws: WaveLinkControlBridgeError.self) {
+      try await session.request(method: "getChannels", params: nil)
+    }
+    #expect(target.receivedMethods.isEmpty)
+    #expect(await session.connectionDescription == nil)
+  }
+
+  @Test func waveLinkSessionKernelProofAcceptsTheRealConnectedTuple() async throws {
+    let server = try TestJSONRPCServer()
+    defer { server.close() }
+    let lifetime = try #require(RuntimeProcessIdentity.processLifetime(pid: getpid()))
+    let session = WaveLinkLoopbackSession(
+      candidateProvider: { [.init(pid: getpid(), port: server.port, lifetime: lifetime)] },
+      peerVerifier: { candidate in
+        WaveLinkEndpointDiscovery.verifyConnectedPeer(
+          candidate,
+          identityVerifier: { pid, descriptor in
+            VerifiedRouterProcessIdentity(
+              pid: pid, teamIdentifier: descriptor.teamIdentifier, matchesDesignatedRequirement: true
+            )
+          }
+        )
+      }
+    )
+    _ = try await session.request(method: "getChannels", params: nil)
+    #expect(server.receivedMethods == ["getApplicationInfo", "getChannels"])
+    await session.close()
+  }
+
 }
 
 private func makeTestWaveLinkSession(
@@ -302,6 +376,7 @@ private func makeTestWaveLinkSession(
 ) -> WaveLinkLoopbackSession {
   WaveLinkLoopbackSession(
     candidateProvider: { [.init(pid: 1, port: server.port)] },
+    peerVerifier: { _ in true },
     receiveTimeout: receiveTimeout,
     idleCloseDelay: .milliseconds(50)
   )
@@ -366,6 +441,7 @@ private final class TestJSONRPCServer: @unchecked Sendable {
   var lastOrigin: String? { lock.withLock { recordedOrigin } }
   private let applicationInfo: String
   private let handshakeDelayMicroseconds: useconds_t
+  private let redirectLocation: String?
   private let getChannelsBehavior: GetChannelsBehavior
   private let listener: Int32
   private let queue = DispatchQueue(label: "waves.tests.wavelink-server")
@@ -379,6 +455,7 @@ private final class TestJSONRPCServer: @unchecked Sendable {
   init(
     applicationInfo: String = #"{"appID":"EWL","interfaceRevision":1,"name":"Elgato Wave Link","version":"3.2.2"}"#,
     handshakeDelayMicroseconds: useconds_t = 0,
+    redirectLocation: String? = nil,
     getChannelsBehavior: GetChannelsBehavior = .notificationsThenReply(
       count: 1,
       payloadBytes: 0,
@@ -387,6 +464,7 @@ private final class TestJSONRPCServer: @unchecked Sendable {
   ) throws {
     self.applicationInfo = applicationInfo
     self.handshakeDelayMicroseconds = handshakeDelayMicroseconds
+    self.redirectLocation = redirectLocation
     self.getChannelsBehavior = getChannelsBehavior
     let tcp = try TestTCPListener()
     listener = tcp.socketDescriptorForServer
@@ -482,6 +560,11 @@ private final class TestJSONRPCServer: @unchecked Sendable {
       }
     }
     guard let key else { return }
+    if let redirectLocation {
+      let response = "HTTP/1.1 302 Found\r\nLocation: \(redirectLocation)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+      _ = TestWebSocketFraming.writeAll(Data(response.utf8), to: client)
+      return
+    }
     if handshakeDelayMicroseconds > 0 { usleep(handshakeDelayMicroseconds) }
     let accept = TestWebSocketFraming.acceptKey(for: key)
     let response =
@@ -639,4 +722,74 @@ private enum TestWebSocketFraming {
     }
     return bytes
   }
+}
+
+private final class TestPeerGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private var allowed = true
+  var isAllowed: Bool { lock.withLock { allowed } }
+  func reject() { lock.withLock { allowed = false } }
+}
+
+@Test func waveLinkPeerProofRequiresEveryConnectedTupleToBeOwned() {
+  let loopback = WaveLinkEndpointDiscovery.ipv4Loopback
+  let client = WaveLinkEndpointDiscovery.TCPConnection(
+    localAddress: loopback, localPort: 50001, remoteAddress: loopback, remotePort: 1884
+  )
+  let candidate = WaveLinkEndpointDiscovery.Listener(pid: 42, port: 1884)
+  #expect(WaveLinkEndpointDiscovery.isLoopbackListener(address: 0, port: 1884))
+  #expect(WaveLinkEndpointDiscovery.isLoopbackListener(address: loopback, port: 1884))
+  #expect(!WaveLinkEndpointDiscovery.isLoopbackListener(address: 0x0a00_0001, port: 1884))
+  #expect(!WaveLinkEndpointDiscovery.isLoopbackListener(address: loopback, port: 0))
+  #expect(
+    WaveLinkEndpointDiscovery.connectedPeerMatches(
+      candidate: candidate, clientConnections: [client], serverConnections: [client.reversed]
+    ))
+  #expect(
+    !WaveLinkEndpointDiscovery.connectedPeerMatches(
+      candidate: candidate, clientConnections: [client], serverConnections: []
+    ))
+  let other = WaveLinkEndpointDiscovery.TCPConnection(
+    localAddress: loopback, localPort: 50002, remoteAddress: loopback, remotePort: 1884
+  )
+  #expect(
+    !WaveLinkEndpointDiscovery.connectedPeerMatches(
+      candidate: candidate, clientConnections: [client, other], serverConnections: [client.reversed]
+    ))
+  #expect(
+    WaveLinkEndpointDiscovery.connectedPeerMatches(
+      candidate: candidate, clientConnections: [client, other], serverConnections: [client.reversed, other.reversed]
+    ))
+}
+
+@Test func waveLinkPeerProofRejectsChangedLifetimeAndSigningIdentity() {
+  let lifetime = AppProcessLifetimeIdentity(pid: 42, startTimeSeconds: 100, startTimeMicroseconds: 0)
+  let changed = AppProcessLifetimeIdentity(pid: 42, startTimeSeconds: 200, startTimeMicroseconds: 0)
+  let candidate = WaveLinkEndpointDiscovery.Listener(pid: 42, port: 1884, lifetime: lifetime)
+  let loopback = WaveLinkEndpointDiscovery.ipv4Loopback
+  let client = WaveLinkEndpointDiscovery.TCPConnection(
+    localAddress: loopback, localPort: 50001, remoteAddress: loopback, remotePort: 1884
+  )
+  let identity: WaveLinkEndpointDiscovery.IdentityVerifier = { pid, descriptor in
+    VerifiedRouterProcessIdentity(pid: pid, teamIdentifier: descriptor.teamIdentifier, matchesDesignatedRequirement: true)
+  }
+  #expect(
+    WaveLinkEndpointDiscovery.verifyConnectedPeer(
+      candidate, identityVerifier: identity, lifetimeProvider: { _ in lifetime },
+      connectionProvider: { $0 == getpid() ? [client] : [client.reversed] }, listenerProvider: { _ in [1884] }
+    ))
+  let unverifiedAccepted = WaveLinkEndpointDiscovery.verifyConnectedPeer(
+    candidate, identityVerifier: { _, _ in nil }, lifetimeProvider: { _ in lifetime },
+    connectionProvider: { $0 == getpid() ? [client] : [client.reversed] }, listenerProvider: { _ in [1884] }
+  )
+  #expect(!unverifiedAccepted)
+  var reads = 0
+  #expect(
+    !WaveLinkEndpointDiscovery.verifyConnectedPeer(
+      candidate, identityVerifier: identity,
+      lifetimeProvider: { _ in
+        reads += 1; return reads == 1 ? lifetime : changed
+      },
+      connectionProvider: { $0 == getpid() ? [client] : [client.reversed] }, listenerProvider: { _ in [1884] }
+    ))
 }
