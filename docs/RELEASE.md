@@ -47,7 +47,9 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
-The 1.7.3 metadata does not inherit earlier release deferrals. Tests, security,
+Jonathan approved deferring fresh macOS 15 and macOS 26 runtime testing for
+1.7.3 build 21 on 2026-10-03. The metadata records that approval for this release
+only. It does not inherit earlier release deferrals. Tests, security,
 sanitizers, stability, local QA, platform coverage, package verification,
 Developer ID signing, notarization, stapling, Gatekeeper, provenance, and
 artifact validation must be recorded against the exact candidate.

@@ -172,7 +172,7 @@ module WavesRelease
     OPTIONAL_KEYS = %w[benchmarkDeferral releaseDeferral].freeze
     BENCHMARK_DEFERRAL_KEYS = %w[version build approvedOn reason].freeze
     RELEASE_DEFERRAL_KEYS = %w[version build approvedOn reason platforms gates].freeze
-    DEFERRABLE_PLATFORMS = %w[sequoiaAppleSilicon].freeze
+    DEFERRABLE_PLATFORMS = %w[sequoiaAppleSilicon tahoeAppleSilicon].freeze
     DEFERRABLE_GATES = %w[remoteElgato].freeze
     DEVELOPER_ID_KEYS = %w[identity teamIdentifier designatedRequirement].freeze
     RELEASE_AUTHORITY_KEYS = %w[principal publicKey fingerprint receiptIssuers].freeze
@@ -293,11 +293,14 @@ module WavesRelease
           raise Error, "release metadata releaseDeferral.approvedOn must be a canonical YYYY-MM-DD date"
         end
         Validation.nonempty_string!(deferral["reason"], "release metadata releaseDeferral.reason")
-        unless deferral["platforms"] == DEFERRABLE_PLATFORMS
-          raise Error, "release metadata releaseDeferral.platforms must be exactly sequoiaAppleSilicon"
+        {"platforms" => DEFERRABLE_PLATFORMS, "gates" => DEFERRABLE_GATES}.each do |scope, allowed|
+          names = deferral[scope]
+          unless names.is_a?(Array) && names.uniq == names && (names - allowed).empty?
+            raise Error, "release metadata releaseDeferral.#{scope} must be a unique subset of #{allowed.join(', ')}"
+          end
         end
-        unless deferral["gates"] == DEFERRABLE_GATES
-          raise Error, "release metadata releaseDeferral.gates must be exactly remoteElgato"
+        if deferral["platforms"].empty? && deferral["gates"].empty?
+          raise Error, "release metadata releaseDeferral must defer at least one platform or gate"
         end
       end
 
@@ -487,16 +490,18 @@ module WavesRelease
 
     def validate_platforms!(platforms, metadata)
       Validation.exact_keys!(platforms, REQUIRED_PLATFORMS, "platform evidence")
-      (REQUIRED_PLATFORMS - ["sonomaPhysical", "sequoiaAppleSilicon"]).each do |name|
+      (REQUIRED_PLATFORMS - ["sonomaPhysical"] - Metadata::DEFERRABLE_PLATFORMS).each do |name|
         Validation.passed_result!(platforms[name], "platforms.#{name}")
       end
-      validate_release_deferral_result!(
-        platforms["sequoiaAppleSilicon"],
-        context: "platforms.sequoiaAppleSilicon",
-        metadata: metadata,
-        scope: "platforms",
-        name: "sequoiaAppleSilicon"
-      )
+      Metadata::DEFERRABLE_PLATFORMS.each do |name|
+        validate_release_deferral_result!(
+          platforms[name],
+          context: "platforms.#{name}",
+          metadata: metadata,
+          scope: "platforms",
+          name: name
+        )
+      end
       sonoma = platforms["sonomaPhysical"]
       Validation.exact_keys!(sonoma, %w[status detail], "platforms.sonomaPhysical")
       raise Error, "platforms.sonomaPhysical must honestly record unavailable" unless sonoma["status"] == "unavailable"

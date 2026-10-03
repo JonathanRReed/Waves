@@ -611,7 +611,11 @@ class ReleaseInfraTest < Minitest::Test
     metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
 
     refute metadata.key?("benchmarkDeferral")
-    refute metadata.key?("releaseDeferral")
+    deferral = metadata.fetch("releaseDeferral")
+    assert_equal VERSION, deferral.fetch("version")
+    assert_equal BUILD, deferral.fetch("build")
+    assert_equal %w[sequoiaAppleSilicon tahoeAppleSilicon], deferral.fetch("platforms")
+    assert_empty deferral.fetch("gates")
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
@@ -678,9 +682,9 @@ class ReleaseInfraTest < Minitest::Test
       [valid.merge("releaseDeferral" => deferral.merge("build" => BUILD)), /build/],
       [valid.merge("releaseDeferral" => deferral.merge("approvedOn" => "2026-9-8")), /approvedOn/],
       [valid.merge("releaseDeferral" => deferral.merge("reason" => "")), /reason/],
-      [valid.merge("releaseDeferral" => deferral.merge("platforms" => [])), /sequoiaAppleSilicon/],
-      [valid.merge("releaseDeferral" => deferral.merge("platforms" => ["sequoiaAppleSilicon", "tahoeAppleSilicon"])), /sequoiaAppleSilicon/],
-      [valid.merge("releaseDeferral" => deferral.merge("gates" => [])), /remoteElgato/],
+      [valid.merge("releaseDeferral" => deferral.merge("platforms" => ["goldenGateNative"])), /sequoiaAppleSilicon/],
+      [valid.merge("releaseDeferral" => deferral.merge("platforms" => ["sequoiaAppleSilicon", "sequoiaAppleSilicon"])), /unique subset/],
+      [valid.merge("releaseDeferral" => deferral.merge("platforms" => [], "gates" => [])), /at least one/],
       [valid.merge("releaseDeferral" => deferral.merge("gates" => ["remoteElgato", "securityScan"])), /remoteElgato/],
     ]
 
@@ -767,6 +771,22 @@ class ReleaseInfraTest < Minitest::Test
       assert_equal ["securityScan"], manifest.fetch("externalReceipts").keys
       assert_equal ["deferred"], manifest.fetch("performance").values.map { |row| row.fetch("status") }.uniq
       assert_equal profile == "publication", manifest.fetch("publicationEligible")
+    end
+  end
+
+  def test_older_os_deferrals_do_not_defer_hardware_or_other_gates
+    metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
+    reason = metadata.fetch("releaseDeferral").fetch("reason")
+    input = evidence_input(remote: "passed")
+    %w[sequoiaAppleSilicon tahoeAppleSilicon].each do |name|
+      input.fetch("platforms")[name] = deferred_result("Older OS testing pending.", reason: reason)
+    end
+    manifest = WavesRelease::Evidence.seal(input: input, metadata: metadata, profile: "publication")
+    assert_equal "deferred", manifest.dig("platforms", "tahoeAppleSilicon", "status")
+    assert_equal "passed", manifest.dig("gates", "remoteElgato", "status")
+    input.fetch("gates")["remoteElgato"] = deferred_result("Hardware testing pending.", reason: reason)
+    assert_release_error(/not authorized/) do
+      WavesRelease::Evidence.seal(input: input, metadata: metadata, profile: "publication")
     end
   end
 

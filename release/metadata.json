@@ -21,5 +21,16 @@
   "sparkle": {
     "keychainAccount": "com.jonathanreed.Waves",
     "publicEDKey": "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
+  },
+  "releaseDeferral": {
+    "version": "1.7.3",
+    "build": 21,
+    "approvedOn": "2026-10-03",
+    "reason": "Jonathan authorized publishing Waves 1.7.3 build 21 with older macOS runtime testing deferred until later. Available hardware runs macOS 27.",
+    "platforms": [
+      "sequoiaAppleSilicon",
+      "tahoeAppleSilicon"
+    ],
+    "gates": []
   }
 }
