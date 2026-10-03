@@ -598,3 +598,37 @@ func waveLinkBridgeRejectsRelocationThatCannotPreserveMixSettings(_ scenario: St
   #expect(result.appliedVolume == 0.18)
   #expect(await rpc.setRequests.last?.level == 0.18)
 }
+
+@Test func waveLinkChannelAndMixSanitizeNonFiniteFloatLevels() throws {
+  let json = """
+  {
+    "id": "ch1",
+    "name": "Channel 1",
+    "type": "Software",
+    "level": null,
+    "isMuted": false,
+    "apps": [],
+    "mixes": [
+      { "id": "m1", "level": null, "isMuted": false }
+    ]
+  }
+  """
+  // Verify init sanitizes non-finite values
+  let channelWithNaN = WaveLinkChannel(
+    id: "ch1",
+    name: "Channel 1",
+    type: "Software",
+    level: .nan,
+    isMuted: false,
+    apps: []
+  )
+  #expect(channelWithNaN.level == 1.0)
+
+  let mixWithInf = WaveLinkChannelMix(id: "m1", level: .infinity, isMuted: false)
+  #expect(mixWithInf.level == nil)
+
+  // Verify decoding null/missing level works as expected
+  let decoded = try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
+  #expect(decoded.level == 1.0)
+  #expect(decoded.mixes?.first?.level == nil)
+}

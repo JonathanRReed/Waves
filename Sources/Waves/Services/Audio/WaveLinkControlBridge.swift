@@ -129,6 +129,26 @@ struct WaveLinkChannelMix: Codable, Equatable, Sendable {
   let id: String
   var level: Float? = nil
   var isMuted: Bool? = nil
+
+  init(id: String, level: Float? = nil, isMuted: Bool? = nil) {
+    self.id = id
+    self.level = level.flatMap { $0.isFinite ? $0 : nil }
+    self.isMuted = isMuted
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case level
+    case isMuted
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let id = try container.decode(String.self, forKey: .id)
+    let rawLevel = try container.decodeIfPresent(Float.self, forKey: .level)
+    let isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted)
+    self.init(id: id, level: rawLevel, isMuted: isMuted)
+  }
 }
 
 struct WaveLinkChannel: Codable, Equatable, Sendable {
@@ -154,7 +174,7 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     self.id = id
     self.name = name
     self.type = type
-    self.level = level
+    self.level = level.isFinite ? level : 1
     self.isMuted = isMuted
     self.apps = apps
     self.mixes = mixes
@@ -165,7 +185,8 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     id = try container.decode(String.self, forKey: .id)
     name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
     type = try container.decodeIfPresent(String.self, forKey: .type) ?? ""
-    level = try container.decodeIfPresent(Float.self, forKey: .level) ?? 1
+    let rawLevel = try container.decodeIfPresent(Float.self, forKey: .level) ?? 1
+    level = rawLevel.isFinite ? rawLevel : 1
     isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
     // Hardware channels omit `apps` entirely; software channels list them.
     apps = try container.decodeIfPresent([WaveLinkChannelApp].self, forKey: .apps) ?? []
