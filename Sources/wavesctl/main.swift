@@ -113,10 +113,7 @@ do {
 
   case .raw:
     let response = try client.request(command.request(id: 1))
-    let ordered = response.keys.sorted().map { key in
-      "  \"\(key)\": \(response[key]!.description)"
-    }.joined(separator: ",\n")
-    emit("{\n\(ordered)\n}")
+    emit(JSONValue.object(response).description)
   }
 } catch let error as WavesCTLTransportError {
   fail(error.description)

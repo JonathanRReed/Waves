@@ -12,6 +12,7 @@ All notable changes to Waves are documented here. The format follows
 - Verify the connected Wave Link process before sending control commands and
   recheck its identity when a connection is reused.
 - Pin the release-tag authority independently of candidate metadata.
+- Keep raw CLI responses valid JSON while escaping terminal control characters.
 - Keep Reset Mix available until restoring the mix and saving intent both succeed.
 - Retain failed profile changes for retry and show a persistent Retry action.
 - Preserve existing profiles when importing a matching name, including Unicode
