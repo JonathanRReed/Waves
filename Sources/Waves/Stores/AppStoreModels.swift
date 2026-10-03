@@ -8,6 +8,9 @@ import WavesAudioCore
 // Runtime-only state stays on AppStore itself.
 
 struct AppToast: Identifiable, Equatable {
+  enum Action {
+    case retryProfiles
+  }
   enum Kind {
     case success
     case warning
@@ -20,6 +23,7 @@ struct AppToast: Identifiable, Equatable {
   let detail: String?
   let kind: Kind
   let duration: Duration
+  var action: Action? = nil
 
   /// The spoken form of the toast, shared by the banner's accessibility label
   /// and the one-shot VoiceOver announcement posted when the toast is added.

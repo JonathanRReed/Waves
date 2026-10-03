@@ -1,18 +1,23 @@
 import AppKit
 import WavesAudioCore
 
-/// Bounded cache for decoded runtime app icons. Keys are Core Audio runtime IDs,
-/// so an app relaunch gets a fresh decoded image rather than inheriting one from
-/// an exited process.
+/// Bounded cache for decoded app icons. The key includes process lifetime and
+/// encoded bytes, so independent stores can safely share this cache.
 @MainActor
 enum AppIconCache {
+  private struct CacheKey: Hashable {
+    let logicalID: String
+    let runtimeIdentity: AppRuntimeIdentity?
+    let sourceData: Data
+  }
+
   struct Configuration: Equatable {
     let countLimit: Int
     let totalCostLimit: Int
   }
 
   @MainActor
-  final class Storage {
+  final class Storage<Key: Hashable> {
     private struct Entry {
       let image: NSImage
       let cost: Int
@@ -20,7 +25,7 @@ enum AppIconCache {
     }
 
     let configuration: Configuration
-    private var entries: [String: Entry] = [:]
+    private var entries: [Key: Entry] = [:]
     private var accessCounter: UInt64 = 0
     private(set) var totalCost = 0
 
@@ -30,14 +35,14 @@ enum AppIconCache {
 
     var count: Int { entries.count }
 
-    func object(forKey key: String) -> NSImage? {
+    func object(forKey key: Key) -> NSImage? {
       guard var entry = entries[key] else { return nil }
       entry.lastAccess = nextAccess()
       entries[key] = entry
       return entry.image
     }
 
-    func setObject(_ image: NSImage, forKey key: String, cost: Int) {
+    func setObject(_ image: NSImage, forKey key: Key, cost: Int) {
       if let existing = entries.removeValue(forKey: key) {
         totalCost -= existing.cost
       }
@@ -56,7 +61,7 @@ enum AppIconCache {
       trimToLimits()
     }
 
-    func removeObject(forKey key: String) {
+    func removeObject(forKey key: Key) {
       guard let removed = entries.removeValue(forKey: key) else { return }
       totalCost -= removed.cost
     }
@@ -67,8 +72,12 @@ enum AppIconCache {
       accessCounter = 0
     }
 
-    func contains(_ key: String) -> Bool {
+    func contains(_ key: Key) -> Bool {
       entries[key] != nil
+    }
+
+    func contains(where predicate: (Key) -> Bool) -> Bool {
+      entries.keys.contains(where: predicate)
     }
 
     private func nextAccess() -> UInt64 {
@@ -89,10 +98,10 @@ enum AppIconCache {
         || totalCost > configuration.totalCostLimit
     }
 
-    private var leastRecentKey: String? {
+    private var leastRecentKey: Key? {
       entries.min { lhs, rhs in
         if lhs.value.lastAccess == rhs.value.lastAccess {
-          return lhs.key < rhs.key
+          return lhs.value.cost < rhs.value.cost
         }
         return lhs.value.lastAccess < rhs.value.lastAccess
       }?.key
@@ -104,7 +113,7 @@ enum AppIconCache {
     totalCostLimit: 64 * 1024 * 1024
   )
 
-  private static let shared = Storage(configuration: configuration)
+  private static let shared = Storage<CacheKey>(configuration: configuration)
 
   static var appliedConfiguration: Configuration {
     shared.configuration
@@ -112,25 +121,21 @@ enum AppIconCache {
 
   static func icon(for app: AudioApp) -> NSImage? {
     guard let data = app.iconTIFFData else { return nil }
-    let key = app.id
+    let key = CacheKey(
+      logicalID: app.id,
+      runtimeIdentity: app.runtimeIdentity,
+      sourceData: data
+    )
     if let cached = shared.object(forKey: key) {
       return cached
     }
     guard let image = NSImage(data: data) else { return nil }
-    shared.setObject(image, forKey: key, cost: decodedCost(for: image))
+    shared.setObject(
+      image,
+      forKey: key,
+      cost: min(configuration.totalCostLimit, decodedCost(for: image) + data.count)
+    )
     return image
-  }
-
-  static func prune(
-    from previousSession: AudioSessionSnapshot,
-    using currentSession: AudioSessionSnapshot
-  ) {
-    let previousRuntimeIDs = Set(previousSession.apps.map(\.id))
-    let currentRuntimeIDs = Set(currentSession.apps.map(\.id))
-    let departedRuntimeIDs = previousRuntimeIDs.subtracting(currentRuntimeIDs)
-    for runtimeID in departedRuntimeIDs {
-      shared.removeObject(forKey: runtimeID)
-    }
   }
 
   static func decodedCost(for image: NSImage) -> Int {
@@ -161,7 +166,7 @@ enum AppIconCache {
   }
 
   static func contains(runtimeID: String) -> Bool {
-    shared.contains(runtimeID)
+    shared.contains { $0.logicalID == runtimeID }
   }
 
   static func resetForTesting() {

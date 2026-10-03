@@ -159,13 +159,23 @@ extension AppStore {
         persistenceResult: persistenceResult
       )
     case .mixReset:
-      // resetMix() already confirmed optimistically; only surface problems.
-      presentQuietProfileProblems(
-        profile,
-        result: result,
-        persistenceResult: persistenceResult,
-        failureTitle: "Some levels didn't reset"
-      )
+      if profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult) {
+        mixRestorePoint = nil
+        activeProfileID = nil
+        showToast(
+          title: "Mix reset",
+          detail: "Levels are back to how they were before \(profile.name).",
+          kind: .success,
+          duration: .seconds(1.8)
+        )
+      } else {
+        presentQuietProfileProblems(
+          profile,
+          result: result,
+          persistenceResult: persistenceResult,
+          failureTitle: "Some levels didn't reset"
+        )
+      }
     case .defaultAtStartup:
       if profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult) {
         showToast(
@@ -747,7 +757,8 @@ extension AppStore {
   }
 
   /// Puts every app back to the levels it had before the last profile apply,
-  /// then clears the restore point and the active-profile highlight. The
+  /// then clears the restore point and the active-profile highlight after the
+  /// restored levels and their durable intents have both succeeded. The
   /// "meeting's over" button: apply Meeting, take the call, Reset Mix, and
   /// everything is where it was.
   func resetMix() {
@@ -757,15 +768,7 @@ extension AppStore {
       name: restorePoint.profileName,
       entries: restorePoint.entries
     )
-    mixRestorePoint = nil
-    activeProfileID = nil
     applyProfile(restoreProfile, purpose: .mixReset)
-    showToast(
-      title: "Mix reset",
-      detail: "Levels are back to how they were before \(restorePoint.profileName).",
-      kind: .success,
-      duration: .seconds(1.8)
-    )
   }
 
   /// Drops the restore point without applying it — for a user who decides the
@@ -816,7 +819,7 @@ extension AppStore {
   /// is true, each app's current volume/mute/boost is baked into its entry;
   /// otherwise the entries are membership-only (a pure grouping). Pass an `id`
   /// to edit an existing profile in place (so a rename keeps its identity);
-  /// otherwise a same-named profile is replaced, or a new one is appended.
+  /// otherwise a new profile is appended and duplicate names are rejected.
   @discardableResult
   func saveProfile(
     id: UUID? = nil,
@@ -887,12 +890,11 @@ extension AppStore {
       focusProfile(profile.id)
       savedProfileID = profile.id
     }
-    persistProfiles()
-    showToast(
-      title: "Profile saved",
-      detail: trimmedName,
-      kind: .success,
-      duration: .seconds(1.6)
+    persistProfilesWithFeedback(
+      profiles,
+      successTitle: "Profile saved",
+      successDetail: trimmedName,
+      failureTitle: "Profile not saved"
     )
     return .saved(savedProfileID)
   }
@@ -909,12 +911,13 @@ extension AppStore {
       preferences.defaultProfileID = nil
       persistPreferences()
     }
-    persistProfiles()
     if !offsets.isEmpty {
-      showToast(
-        title: "Profile removed",
-        detail: "Removed from your profiles.",
-        kind: .info,
+      persistProfilesWithFeedback(
+        profiles,
+        successTitle: "Profile removed",
+        successDetail: "Removed from your profiles.",
+        failureTitle: "Profile removal not saved",
+        successKind: .info,
         duration: .seconds(1.1)
       )
     }
@@ -1031,36 +1034,25 @@ extension AppStore {
               return
             }
 
-            if let existingIndex = working.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame }) {
-              var imported = profile
-              imported.id = working[existingIndex].id
-              imported.name = working[existingIndex].name
-              imported.createdAt = working[existingIndex].createdAt
-              imported.updatedAt = .now
-              working[existingIndex] = imported
-              // Report the name actually stored (the existing one is kept), not
-              // the imported file's name, which may differ only in case.
-              importedNames.append(working[existingIndex].name)
-            } else {
-              // Assign a fresh identity so importing a profile never collides with
-              // an existing one's UUID (which breaks SwiftUI list identity).
-              var imported = profile
-              imported.id = UUID()
-              imported.name = trimmedName
-              imported.createdAt = .now
-              imported.updatedAt = .now
-              working.append(imported)
-              importedNames.append(trimmedName)
-            }
+            // Keep an existing same-name profile intact. Imports get a clear,
+            // unique name so restoring a file can never overwrite local work.
+            let importedName = Self.uniqueImportedProfileName(trimmedName, among: working)
+            var imported = profile
+            imported.id = UUID()
+            imported.name = importedName
+            imported.createdAt = .now
+            imported.updatedAt = .now
+            working.append(imported)
+            importedNames.append(importedName)
           }
 
           // Every profile passed — commit the batch atomically and persist once.
           store.profiles = working
-          store.persistProfiles()
-          store.showToast(
-            title: importedNames.count == 1 ? "Profile imported" : "Profiles imported",
-            detail: importedNames.count == 1 ? importedNames.first : "\(importedNames.count) profiles restored",
-            kind: .success,
+          store.persistProfilesWithFeedback(
+            working,
+            successTitle: importedNames.count == 1 ? "Profile imported" : "Profiles imported",
+            successDetail: importedNames.count == 1 ? importedNames.first : "\(importedNames.count) profiles restored",
+            failureTitle: "Import not saved",
             duration: .seconds(2.0)
           )
         } catch {
@@ -1080,6 +1072,79 @@ extension AppStore {
     // The bounded decoder accepts the versioned envelope, legacy arrays, and a
     // single export while stopping before an oversized collection is decoded.
     return try? ProfilePayloadDecoder.decodeImportedProfiles(from: data, using: decoder)
+  }
+
+  nonisolated static func uniqueImportedProfileName(_ name: String, among profiles: [Profile]) -> String {
+    // Match the editor's Unicode-aware collision semantics. `lowercased()` is
+    // insufficient for cases such as German sharp S, and can disagree with
+    // the case-insensitive comparison used by saveProfile.
+    func containsName(_ candidate: String) -> Bool {
+      profiles.contains { $0.name.caseInsensitiveCompare(candidate) == .orderedSame }
+    }
+
+    if !containsName(name) { return name }
+
+    func candidate(suffix: String) -> String {
+      let baseLength = max(0, Profile.maxNameLength - suffix.count)
+      let base = String(name.prefix(baseLength))
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      return base + suffix
+    }
+
+    let firstCandidate = candidate(suffix: " (Imported)")
+    if !containsName(firstCandidate) { return firstCandidate }
+    var suffix = 2
+    var numberedCandidate = candidate(suffix: " (Imported \(suffix))")
+    while containsName(numberedCandidate) {
+      suffix += 1
+      numberedCandidate = candidate(suffix: " (Imported \(suffix))")
+    }
+    return numberedCandidate
+  }
+
+  func retrySavingProfiles() {
+    guard startupState != .shuttingDown else { return }
+    persistProfilesWithFeedback(
+      profiles,
+      successTitle: "Profiles saved",
+      successDetail: "Your profile changes are saved.",
+      failureTitle: "Profiles not saved"
+    )
+  }
+
+  private func persistProfilesWithFeedback(
+    _ snapshot: [Profile],
+    successTitle: String,
+    successDetail: String?,
+    failureTitle: String,
+    successKind: AppToast.Kind = .success,
+    duration: Duration = .seconds(1.6)
+  ) {
+    startOwnedOperation { store in
+      do {
+        let savedCurrentSnapshot = try await store.persistenceCoordinator.saveProfilesDurably(snapshot)
+        guard savedCurrentSnapshot else { return }
+        for toast in store.toasts.filter({ $0.action == .retryProfiles }) {
+          store.dismissToast(id: toast.id)
+        }
+        store.showToast(
+          title: successTitle,
+          detail: successDetail,
+          kind: successKind,
+          duration: duration
+        )
+      } catch is CancellationError {
+        return
+      } catch {
+        guard store.profiles == snapshot else { return }
+        store.showToast(
+          title: failureTitle,
+          detail: "Your changes are still open in Waves. \(error.localizedDescription)",
+          kind: .warning,
+          action: .retryProfiles
+        )
+      }
+    }
   }
 
 }

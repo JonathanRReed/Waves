@@ -5,6 +5,7 @@ import Foundation
 
 private let canvasWidth = 660
 private let canvasHeight = 430
+private let backingScale = 2
 
 guard CommandLine.arguments.count == 2 else {
   FileHandle.standardError.write(
@@ -17,8 +18,8 @@ let outputURL = URL(fileURLWithPath: CommandLine.arguments[1])
 guard
   let bitmap = NSBitmapImageRep(
     bitmapDataPlanes: nil,
-    pixelsWide: canvasWidth,
-    pixelsHigh: canvasHeight,
+    pixelsWide: canvasWidth * backingScale,
+    pixelsHigh: canvasHeight * backingScale,
     bitsPerSample: 8,
     samplesPerPixel: 4,
     hasAlpha: true,
@@ -34,6 +35,10 @@ else {
 
 NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = context
+bitmap.size = NSSize(width: canvasWidth, height: canvasHeight)
+let transform = NSAffineTransform()
+transform.scale(by: CGFloat(backingScale))
+transform.concat()
 
 let bounds = NSRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
 let background = NSGradient(

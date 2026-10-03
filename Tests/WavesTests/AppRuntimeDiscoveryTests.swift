@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 import Testing
 import WavesAudioCore
@@ -416,6 +417,188 @@ private actor CollisionWaveLinkController: WaveLinkControlling {
   )
 
   #expect(AppRuntimeDiscovery.processFamily(for: target, in: [target, helper]).map(\.pid) == [42, 84])
+}
+
+@Test func indexedProcessFamiliesMatchFullScansAcrossIdentityBoundaries() {
+  let signedTarget = processFamilyApplication(
+    pid: 10, outerBundlePath: "/Applications/Signed.app",
+    signingIdentifier: "com.example.signed", teamIdentifier: "SIGNEDTEAM"
+  )
+  let signedHelper = processFamilyApplication(
+    pid: 11, outerBundlePath: "/Applications/Signed.app",
+    signingIdentifier: "com.example.signed.helper", teamIdentifier: "SIGNEDTEAM"
+  )
+  let foreignSigner = processFamilyApplication(
+    pid: 12, outerBundlePath: "/Applications/Signed.app",
+    signingIdentifier: "com.example.foreign", teamIdentifier: "FOREIGNTEAM"
+  )
+  let adHocTarget = processFamilyApplication(
+    pid: 20, outerBundlePath: "/Applications/AdHoc.app",
+    signingIdentifier: "com.example.adhoc"
+  )
+  let adHocExactHelper = processFamilyApplication(
+    pid: 21, outerBundlePath: "/Applications/AdHoc.app",
+    signingIdentifier: "com.example.adhoc"
+  )
+  let malformedPath = processFamilyApplication(
+    pid: 30, outerBundlePath: "", signingIdentifier: "com.example.malformed",
+    executablePath: "/tmp/malformed"
+  )
+  let missingIdentity = processFamilyApplication(pid: 40, hasRuntimeIdentity: false)
+  let sameMissingPID = processFamilyApplication(pid: 40, hasRuntimeIdentity: false)
+  let reusedPID = processFamilyApplication(
+    pid: 10, outerBundlePath: "/Applications/Replacement.app",
+    signingIdentifier: "com.example.replacement", teamIdentifier: "SIGNEDTEAM",
+    startTimeSeconds: 200
+  )
+  let applications = [
+    foreignSigner, signedHelper, signedTarget, adHocExactHelper, malformedPath,
+    missingIdentity, reusedPID, adHocTarget, sameMissingPID, signedHelper,
+  ]
+  let index = AppRuntimeDiscovery.ProcessFamilyIndex(applications: applications)
+
+  for target in [signedTarget, adHocTarget, malformedPath, missingIdentity, reusedPID] {
+    let scanned = AppRuntimeDiscovery.processFamily(for: target, in: applications).map(\.pid)
+    let indexed = AppRuntimeDiscovery.processFamily(for: target, using: index).map(\.pid)
+    #expect(indexed == scanned)
+  }
+}
+
+@Test func processFamilyIndexBelongsToOneCapture() {
+  let original = processFamilyApplication(
+    pid: 42, outerBundlePath: "/Applications/Player.app",
+    signingIdentifier: "com.example.player", teamIdentifier: "TEAM123"
+  )
+  let replacement = processFamilyApplication(
+    pid: 42, outerBundlePath: "/Applications/Player.app",
+    signingIdentifier: "com.example.player", teamIdentifier: "TEAM123",
+    startTimeSeconds: 200
+  )
+  let firstCapture = [original]
+  let secondCapture = [replacement]
+
+  let firstIndex = AppRuntimeDiscovery.ProcessFamilyIndex(applications: firstCapture)
+  let secondIndex = AppRuntimeDiscovery.ProcessFamilyIndex(applications: secondCapture)
+  #expect(
+    AppRuntimeDiscovery.processFamily(for: original, using: firstIndex).map(\.runtimeIdentity)
+      == AppRuntimeDiscovery.processFamily(for: original, in: firstCapture).map(\.runtimeIdentity)
+  )
+  #expect(
+    AppRuntimeDiscovery.processFamily(for: replacement, using: secondIndex).map(\.runtimeIdentity)
+      == AppRuntimeDiscovery.processFamily(for: replacement, in: secondCapture).map(\.runtimeIdentity)
+  )
+  #expect(
+    AppRuntimeDiscovery.processFamily(for: original, using: secondIndex).map(\.runtimeIdentity)
+      == AppRuntimeDiscovery.processFamily(for: original, in: secondCapture).map(\.runtimeIdentity)
+  )
+}
+
+/// Opt-in timing for process-family derivation only. It also checks that every
+/// indexed lookup returns the same ordered candidates as the full scan.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["WAVES_DISCOVERY_BENCHMARK_OUTPUT"] != nil))
+func processFamilyIndexBenchmark() throws {
+  let iterations = 250
+  var measurements: [[String: Any]] = []
+
+  for outerAppCount in [40, 150] {
+    var applications: [AppRuntimeDiscovery.CapturedApplication] = []
+    var representatives: [AppRuntimeDiscovery.CapturedApplication] = []
+    for appIndex in 0..<outerAppCount {
+      let path = "/Applications/Benchmark \(appIndex).app"
+      let team = "TEAM\(appIndex)"
+      let target = processFamilyApplication(
+        pid: pid_t(appIndex * 4 + 1), outerBundlePath: path,
+        signingIdentifier: "com.example.benchmark.\(appIndex)", teamIdentifier: team
+      )
+      representatives.append(target)
+      applications.append(target)
+      for helperIndex in 0..<3 {
+        applications.append(
+          processFamilyApplication(
+            pid: pid_t(appIndex * 4 + helperIndex + 2), outerBundlePath: path,
+            signingIdentifier: "com.example.benchmark.\(appIndex).helper.\(helperIndex)",
+            teamIdentifier: team
+          ))
+      }
+    }
+
+    let equalityIndex = AppRuntimeDiscovery.ProcessFamilyIndex(applications: applications)
+    let scannedOutput = representatives.map {
+      AppRuntimeDiscovery.processFamily(for: $0, in: applications).map(\.pid)
+    }
+    let indexedOutput = representatives.map {
+      AppRuntimeDiscovery.processFamily(for: $0, using: equalityIndex).map(\.pid)
+    }
+    #expect(indexedOutput == scannedOutput)
+
+    var checksum = 0
+    let scanStart = DispatchTime.now().uptimeNanoseconds
+    for _ in 0..<iterations {
+      for representative in representatives {
+        checksum += AppRuntimeDiscovery.processFamily(for: representative, in: applications).count
+      }
+    }
+    let scanNanoseconds = DispatchTime.now().uptimeNanoseconds - scanStart
+
+    let indexedStart = DispatchTime.now().uptimeNanoseconds
+    for _ in 0..<iterations {
+      let index = AppRuntimeDiscovery.ProcessFamilyIndex(applications: applications)
+      for representative in representatives {
+        checksum += AppRuntimeDiscovery.processFamily(for: representative, using: index).count
+      }
+    }
+    let indexedNanoseconds = DispatchTime.now().uptimeNanoseconds - indexedStart
+    measurements.append([
+      "outerAppCount": outerAppCount,
+      "capturedProcessCount": applications.count,
+      "iterations": iterations,
+      "scanNanoseconds": scanNanoseconds,
+      "indexedNanoseconds": indexedNanoseconds,
+      "outputsEqual": indexedOutput == scannedOutput,
+      "checksum": checksum,
+    ])
+  }
+
+  let data = try JSONSerialization.data(
+    withJSONObject: measurements, options: [.prettyPrinted, .sortedKeys]
+  )
+  print(String(decoding: data, as: UTF8.self))
+  let output = try #require(
+    ProcessInfo.processInfo.environment["WAVES_DISCOVERY_BENCHMARK_OUTPUT"]
+  )
+  try data.write(to: URL(fileURLWithPath: output), options: .atomic)
+}
+
+private func processFamilyApplication(
+  pid: pid_t,
+  outerBundlePath: String = "/Applications/Fixture.app",
+  signingIdentifier: String = "com.example.fixture",
+  teamIdentifier: String? = nil,
+  executablePath: String? = nil,
+  startTimeSeconds: UInt64 = 100,
+  hasRuntimeIdentity: Bool = true
+) -> AppRuntimeDiscovery.CapturedApplication {
+  let identity =
+    hasRuntimeIdentity
+    ? AppRuntimeIdentity(
+      lifetime: AppProcessLifetimeIdentity(
+        pid: pid, startTimeSeconds: startTimeSeconds, startTimeMicroseconds: 0
+      ),
+      executablePath: executablePath ?? outerBundlePath + "/Contents/MacOS/Fixture",
+      outerBundlePath: outerBundlePath,
+      signingIdentity: AppCodeSigningIdentity(
+        identifier: signingIdentifier,
+        teamIdentifier: teamIdentifier,
+        designatedRequirement: "identifier \"\(signingIdentifier)\"",
+        codeDirectoryHash: Data(signingIdentifier.utf8)
+      )
+    )
+    : nil
+  return AppRuntimeDiscovery.CapturedApplication(
+    pid: pid, bundleID: signingIdentifier, localizedName: "Fixture \(pid)",
+    bundlePath: outerBundlePath, activationPolicy: .regular, isActive: false,
+    iconTIFFData: nil, runtimeIdentity: identity
+  )
 }
 
 @Test func appRuntimeDiscoveryDoesNotTreatAReusedPIDAsTheSameRunningProcess() {

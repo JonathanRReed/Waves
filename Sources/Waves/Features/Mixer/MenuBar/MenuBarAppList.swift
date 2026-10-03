@@ -7,10 +7,9 @@ struct MenuBarAppList: View {
 
   var body: some View {
     let snapshot = MenuBarLayout.makeAppList(
-      pinned: store.pinnedApps,
-      live: store.liveApps,
-      recent: store.recentApps,
+      visibleApps: store.visibleApps,
       includesRecent: store.preferences.showRecentApps,
+      isRecentlyLive: store.isRecentlyLive,
       isExcluded: store.isExcluded
     )
 

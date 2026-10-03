@@ -13,8 +13,10 @@ require_relative "../release_tool"
 require_relative "../../release/elgato-handoff/finalize-receipt"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.7.2"
-  BUILD = 20
+  VERSION = "1.7.3"
+  BUILD = 21
+  DEFERRAL_VERSION = "1.7.2"
+  DEFERRAL_BUILD = 20
   RELEASE_TAG = "v#{VERSION}"
   HANDOFF_NAME = "Waves-#{VERSION}-#{BUILD}-Elgato-Handoff"
   HANDOFF_DMG_NAME = "Waves-#{VERSION}-#{BUILD}.dmg"
@@ -133,7 +135,7 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes finder_script,
                     "set background picture of icon view options of layoutWindow to backgroundFile"
     assert_includes finder_script,
-                    'set position of item ".background" of targetFolder to {590, 80}'
+                    'set position of item ".background" of targetFolder to {1000, 1000}'
     refute_includes finder_script,
                     'file "Waves.png" of folder ".background" of targetFolder'
   end
@@ -267,11 +269,17 @@ class ReleaseInfraTest < Minitest::Test
         "pixelWidth",
         "-g",
         "pixelHeight",
+        "-g",
+        "dpiWidth",
+        "-g",
+        "dpiHeight",
         output
       )
       assert dimension_status.success?, dimension_error
-      assert_match(/pixelWidth: 660/, dimensions)
-      assert_match(/pixelHeight: 430/, dimensions)
+      assert_match(/pixelWidth: 1320/, dimensions)
+      assert_match(/pixelHeight: 860/, dimensions)
+      assert_match(/dpiWidth: 144/, dimensions)
+      assert_match(/dpiHeight: 144/, dimensions)
 
       contrast_probe = File.join(directory, "contrast-probe.swift")
       File.write(
@@ -285,8 +293,9 @@ class ReleaseInfraTest < Minitest::Test
                 let bitmap = NSBitmapImageRep(data: data) else {
             exit(2)
           }
+          let scale = CGFloat(bitmap.pixelsWide) / 660
           for point in [NSPoint(x: 170, y: 330), NSPoint(x: 490, y: 330)] {
-            guard let color = bitmap.colorAt(x: Int(point.x), y: Int(point.y))?.usingColorSpace(.deviceRGB) else {
+            guard let color = bitmap.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))?.usingColorSpace(.deviceRGB) else {
               exit(3)
             }
             let luminance = (0.2126 * color.redComponent)
@@ -508,9 +517,11 @@ class ReleaseInfraTest < Minitest::Test
 
   def benchmark_deferral_metadata_hash
     metadata_hash.merge(
+      "version" => DEFERRAL_VERSION,
+      "build" => DEFERRAL_BUILD,
       "benchmarkDeferral" => {
-        "version" => VERSION,
-        "build" => BUILD,
+        "version" => DEFERRAL_VERSION,
+        "build" => DEFERRAL_BUILD,
         "approvedOn" => "2026-09-08",
         "reason" => BENCHMARK_DEFERRAL_REASON,
       }
@@ -519,9 +530,11 @@ class ReleaseInfraTest < Minitest::Test
 
   def release_deferral_metadata_hash
     metadata_hash.merge(
+      "version" => DEFERRAL_VERSION,
+      "build" => DEFERRAL_BUILD,
       "releaseDeferral" => {
-        "version" => VERSION,
-        "build" => BUILD,
+        "version" => DEFERRAL_VERSION,
+        "build" => DEFERRAL_BUILD,
         "approvedOn" => "2026-09-08",
         "reason" => RELEASE_DEFERRAL_REASON,
         "platforms" => ["sequoiaAppleSilicon"],
@@ -542,6 +555,12 @@ class ReleaseInfraTest < Minitest::Test
       deferred_result("Fresh macOS 15 runtime testing deferred for 1.7.2 build 20.")
     input.fetch("gates")["remoteElgato"] =
       deferred_result("Full physical Stream Deck matrix deferred for 1.7.2 build 20.")
+    input
+  end
+
+  def deferral_evidence_input(input = evidence_input)
+    input.fetch("package")["version"] = DEFERRAL_VERSION
+    input.fetch("package")["build"] = DEFERRAL_BUILD
     input
   end
 
@@ -588,14 +607,11 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal DESIGNATED_REQUIREMENT, metadata.dig("developerID", "designatedRequirement")
   end
 
-  def test_tracked_metadata_records_only_the_approved_release_deferrals
+  def test_tracked_metadata_does_not_carry_forward_old_release_deferrals
     metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
 
-    assert_equal "2026-09-08", metadata.dig("benchmarkDeferral", "approvedOn")
-    assert_equal ["sequoiaAppleSilicon"], metadata.dig("releaseDeferral", "platforms")
-    assert_equal ["remoteElgato"], metadata.dig("releaseDeferral", "gates")
-    assert_equal BENCHMARK_DEFERRAL_REASON, metadata.dig("benchmarkDeferral", "reason")
-    assert_equal RELEASE_DEFERRAL_REASON, metadata.dig("releaseDeferral", "reason")
+    refute metadata.key?("benchmarkDeferral")
+    refute metadata.key?("releaseDeferral")
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
@@ -640,8 +656,8 @@ class ReleaseInfraTest < Minitest::Test
   def test_metadata_rejects_malformed_or_unbound_benchmark_deferral_policy
     valid = benchmark_deferral_metadata_hash
     cases = [
-      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("version" => "1.7.3")), /version/],
-      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("build" => BUILD + 1)), /build/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("version" => VERSION)), /version/],
+      [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("build" => BUILD)), /build/],
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("approvedOn" => "2026-9-5")), /approvedOn/],
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("reason" => "")), /reason/],
       [valid.merge("benchmarkDeferral" => valid.fetch("benchmarkDeferral").merge("scope" => "securityScan")), /unknown key/],
@@ -658,8 +674,8 @@ class ReleaseInfraTest < Minitest::Test
     valid = release_deferral_metadata_hash
     deferral = valid.fetch("releaseDeferral")
     cases = [
-      [valid.merge("releaseDeferral" => deferral.merge("version" => "1.7.3")), /version/],
-      [valid.merge("releaseDeferral" => deferral.merge("build" => BUILD + 1)), /build/],
+      [valid.merge("releaseDeferral" => deferral.merge("version" => VERSION)), /version/],
+      [valid.merge("releaseDeferral" => deferral.merge("build" => BUILD)), /build/],
       [valid.merge("releaseDeferral" => deferral.merge("approvedOn" => "2026-9-8")), /approvedOn/],
       [valid.merge("releaseDeferral" => deferral.merge("reason" => "")), /reason/],
       [valid.merge("releaseDeferral" => deferral.merge("platforms" => [])), /sequoiaAppleSilicon/],
@@ -675,9 +691,9 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def test_evidence_accepts_approved_current_release_benchmark_deferral
+  def test_evidence_accepts_the_approved_supported_release_benchmark_deferral
     metadata = benchmark_deferral_metadata_hash
-    input = evidence_input
+    input = deferral_evidence_input
     input["performance"] = input.fetch("performance").transform_values { deferred_performance_metric }
 
     manifest = WavesRelease::Evidence.seal(input: input, metadata: metadata, profile: "candidate")
@@ -696,13 +712,13 @@ class ReleaseInfraTest < Minitest::Test
 
   def test_evidence_rejects_numeric_values_or_unapproved_reason_for_a_deferred_metric
     metadata = benchmark_deferral_metadata_hash
-    numeric = evidence_input
+    numeric = deferral_evidence_input
     numeric.fetch("performance")["launchTime"] = deferred_performance_metric.merge("baseline" => 100.0)
     assert_release_error(/must be null/) do
       WavesRelease::Evidence.seal(input: numeric, metadata: metadata, profile: "candidate")
     end
 
-    wrong_reason = evidence_input
+    wrong_reason = deferral_evidence_input
     wrong_reason.fetch("performance")["launchTime"] = deferred_performance_metric(reason: "Caller supplied reason")
     assert_release_error(/approved justification/) do
       WavesRelease::Evidence.seal(input: wrong_reason, metadata: metadata, profile: "candidate")
@@ -711,9 +727,9 @@ class ReleaseInfraTest < Minitest::Test
 
   def test_evidence_keeps_measured_performance_validation_when_deferral_is_approved
     metadata = benchmark_deferral_metadata_hash
-    WavesRelease::Evidence.seal(input: evidence_input, metadata: metadata, profile: "candidate")
+    WavesRelease::Evidence.seal(input: deferral_evidence_input, metadata: metadata, profile: "candidate")
 
-    invalid = evidence_input
+    invalid = deferral_evidence_input
     invalid.fetch("performance").fetch("launchTime")["regressionPercent"] = 4.0
     assert_release_error(/does not match/) do
       WavesRelease::Evidence.seal(input: invalid, metadata: metadata, profile: "candidate")
@@ -723,13 +739,13 @@ class ReleaseInfraTest < Minitest::Test
   def test_benchmark_deferral_does_not_defer_security_or_hardware_gates
     metadata = benchmark_deferral_metadata_hash
 
-    security = evidence_input
+    security = deferral_evidence_input
     security.fetch("gates").fetch("securityScan")["status"] = "deferred"
     assert_release_error(/securityScan/) do
       WavesRelease::Evidence.seal(input: security, metadata: metadata, profile: "candidate")
     end
 
-    hardware = evidence_input
+    hardware = deferral_evidence_input
     hardware.fetch("platforms").fetch("goldenGateNative")["status"] = "deferred"
     assert_release_error(/goldenGateNative/) do
       WavesRelease::Evidence.seal(input: hardware, metadata: metadata, profile: "candidate")
@@ -741,7 +757,7 @@ class ReleaseInfraTest < Minitest::Test
 
     %w[candidate publication].each do |profile|
       manifest = WavesRelease::Evidence.seal(
-        input: apply_approved_release_deferrals(evidence_input),
+        input: apply_approved_release_deferrals(deferral_evidence_input),
         metadata: metadata,
         profile: profile
       )
@@ -761,7 +777,7 @@ class ReleaseInfraTest < Minitest::Test
       WavesRelease::Evidence.seal(input: without_approval, metadata: metadata_hash, profile: "candidate")
     end
 
-    wrong_reason = evidence_input
+    wrong_reason = deferral_evidence_input
     wrong_reason.fetch("gates")["remoteElgato"] =
       deferred_result("Deferred", reason: "Caller supplied reason")
     assert_release_error(/approved justification/) do
@@ -772,7 +788,7 @@ class ReleaseInfraTest < Minitest::Test
       )
     end
 
-    other_platform = evidence_input
+    other_platform = deferral_evidence_input
     other_platform.fetch("platforms")["tahoeAppleSilicon"] = deferred_result("Deferred")
     assert_release_error(/tahoeAppleSilicon/) do
       WavesRelease::Evidence.seal(
@@ -782,7 +798,7 @@ class ReleaseInfraTest < Minitest::Test
       )
     end
 
-    other_gate = evidence_input
+    other_gate = deferral_evidence_input
     other_gate.fetch("gates")["securityScan"] = deferred_result("Deferred")
     assert_release_error(/securityScan/) do
       WavesRelease::Evidence.seal(
@@ -792,7 +808,9 @@ class ReleaseInfraTest < Minitest::Test
       )
     end
 
-    claimed_receipt = apply_approved_release_deferrals(security_evidence_input(remote: "passed"))
+    claimed_receipt = apply_approved_release_deferrals(
+      deferral_evidence_input(security_evidence_input(remote: "passed"))
+    )
     assert_release_error(/must not claim/) do
       WavesRelease::Evidence.seal(
         input: claimed_receipt,
@@ -943,10 +961,10 @@ class ReleaseInfraTest < Minitest::Test
   def test_quality_gate_isolates_rendered_ui_from_timing_sensitive_tests
     quality_gate = File.read(File.expand_path("../quality-gate.sh", __dir__))
 
-    assert_includes quality_gate, "swift test --skip RenderedUISmokeTests"
+    assert_includes quality_gate, 'swift test "${SWIFT_SDK_ARGUMENTS[@]}" --skip RenderedUISmokeTests'
     assert_includes quality_gate, "CI=1"
-    assert_includes quality_gate, 'WAVES_QA_OUTPUT="$QUALITY_HOME/rendered-ui"'
-    assert_includes quality_gate, "swift test --filter RenderedUISmokeTests"
+    assert_includes quality_gate, 'WAVES_QA_OUTPUT="${WAVES_QA_OUTPUT:-$QUALITY_HOME/rendered-ui}"'
+    assert_includes quality_gate, 'swift test "${SWIFT_SDK_ARGUMENTS[@]}" --filter RenderedUISmokeTests'
   end
 
   def test_packager_uses_the_stable_macos_system_bash
@@ -3228,6 +3246,24 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def test_dmg_recipe_inputs_change_digest_and_reject_untracked_files
+    %w[script/render-dmg-background.swift script/configure-dmg.applescript].each do |relative|
+      with_production_release_repo do |root, _scratch|
+        before = WavesRelease::ReleaseSource.recipe_digest_from_files(root: root)
+        File.open(File.join(root, relative), "a") { |file| file.write("\nchanged packaging input\n") }
+        after = WavesRelease::ReleaseSource.recipe_digest_from_files(root: root)
+        refute_equal before, after, "#{relative} must affect the build recipe"
+      end
+      with_git_repo do |root|
+        FileUtils.mkdir_p(File.join(root, "script"))
+        File.write(File.join(root, relative), "untracked packaging input")
+        assert_release_error(/untracked build input/) do
+          WavesRelease::ReleaseSource.reject_untracked_build_inputs!(root)
+        end
+      end
+    end
+  end
+
   def test_distribution_builder_uses_a_fresh_private_scratch_root_outside_the_checkout
     with_release_script_repo do |root, helper_root|
       fake_bin = File.join(helper_root, "bin")
@@ -3451,12 +3487,12 @@ class ReleaseInfraTest < Minitest::Test
         git(root, "update-ref", "refs/remotes/origin/main", revision)
         create_signed_tag(root, RELEASE_TAG, envelope, private_key)
 
-        WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        validate_publication_tag_with_fixture_authority(root: root, metadata: metadata)
 
         git(root, "tag", "-d", RELEASE_TAG)
         git(root, "tag", RELEASE_TAG)
         assert_release_error(/annotated/) do
-          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+          validate_publication_tag_with_fixture_authority(root: root, metadata: metadata)
         end
 
         git(root, "tag", "-d", RELEASE_TAG)
@@ -3467,7 +3503,7 @@ class ReleaseInfraTest < Minitest::Test
         git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "HEAD").strip)
 
         assert_release_error(/tag must equal HEAD/) do
-          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+          validate_publication_tag_with_fixture_authority(root: root, metadata: metadata)
         end
 
         git(root, "tag", "-d", RELEASE_TAG)
@@ -3483,18 +3519,18 @@ class ReleaseInfraTest < Minitest::Test
         git(root, "update-ref", "refs/remotes/origin/main", "#{revision}^")
 
         assert_release_error(/source must equal origin\/main/) do
-          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+          validate_publication_tag_with_fixture_authority(root: root, metadata: metadata)
         end
 
         git(root, "update-ref", "refs/remotes/origin/main", revision)
-        WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+        validate_publication_tag_with_fixture_authority(root: root, metadata: metadata)
         git(root, "checkout", "--orphan", "diverged")
         git(root, "rm", "-rf", ".")
         File.write(File.join(root, "diverged.txt"), "diverged\n")
         git(root, "add", ".")
         git(root, "commit", "-m", "docs: divergent history")
         assert_release_error(/tag must equal HEAD/) do
-          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+          validate_publication_tag_with_fixture_authority(root: root, metadata: metadata)
         end
       end
     end
@@ -3521,7 +3557,7 @@ class ReleaseInfraTest < Minitest::Test
           git(root, "update-ref", "refs/remotes/origin/main", revision)
           create_signed_tag(root, RELEASE_TAG, envelope, private_key)
 
-          WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+          validate_publication_tag_with_fixture_authority(root: root, metadata: metadata)
         end
       end
     end
@@ -3543,19 +3579,19 @@ class ReleaseInfraTest < Minitest::Test
 
           git_with_input(root, "unsigned evidence\n", "tag", "-a", RELEASE_TAG, "-F", "-")
           assert_release_error(/signed/) do
-            authority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
+            authority.verify_signature!(root: root, tag: RELEASE_TAG, authority: expected)
           end
           git(root, "tag", "-d", RELEASE_TAG)
 
           create_signed_tag(root, RELEASE_TAG, "wrong key evidence\n", wrong_private)
           assert_release_error(/pinned release key|signature/) do
-            authority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
+            authority.verify_signature!(root: root, tag: RELEASE_TAG, authority: expected)
           end
           git(root, "tag", "-d", RELEASE_TAG)
 
           create_signed_tag(root, RELEASE_TAG, "wrong principal evidence\n", correct_private)
           assert_release_error(/principal/) do
-            authority.verify!(
+            authority.verify_signature!(
               root: root,
               tag: RELEASE_TAG,
               authority: expected.merge("principal" => "untrusted-release")
@@ -3564,11 +3600,40 @@ class ReleaseInfraTest < Minitest::Test
           git(root, "tag", "-d", RELEASE_TAG)
 
           create_signed_tag(root, RELEASE_TAG, "trusted evidence\n", correct_private)
-          result = authority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
+          result = authority.verify_signature!(root: root, tag: RELEASE_TAG, authority: expected)
           assert_equal RELEASE_PRINCIPAL, result.fetch("principal")
           assert_equal expected.fetch("fingerprint"), result.fetch("fingerprint")
         end
       end
+    end
+  end
+
+  def test_release_authority_rejects_self_asserted_keys_and_accepts_non_authoritative_comments
+    pinned = WavesRelease::ReleaseAuthority::PINNED
+    algorithm, material = pinned.fetch("publicKey").split.first(2)
+    candidate = pinned.merge("publicKey" => "#{algorithm} #{material} a different optional comment")
+
+    assert_same pinned, WavesRelease::ReleaseAuthority.validate!(candidate)
+
+    with_ephemeral_ssh_keypair("waves-release-attacker") do |_private_key, public_key|
+      attacker = {
+        "principal" => pinned.fetch("principal"),
+        "publicKey" => File.read(public_key).strip,
+        "fingerprint" => ssh_fingerprint(public_key),
+      }
+      assert_release_error(/immutable release authority/) do
+        WavesRelease::ReleaseAuthority.validate!(attacker)
+      end
+      assert_release_error(/immutable release authority/) do
+        WavesRelease::TagAuthority.verify!(root: "/unused", tag: RELEASE_TAG, authority: attacker)
+      end
+    end
+
+    assert_release_error(/principal/) do
+      WavesRelease::ReleaseAuthority.validate!(candidate.merge("principal" => "untrusted-release"))
+    end
+    assert_release_error(/immutable release authority/) do
+      WavesRelease::ReleaseAuthority.validate!(candidate.merge("fingerprint" => "SHA256:#{'A' * 43}"))
     end
   end
 
@@ -3585,11 +3650,11 @@ class ReleaseInfraTest < Minitest::Test
           }
           create_signed_tag(root, RELEASE_TAG, "trusted evidence\n", correct_private)
 
-          result = WavesRelease::TagAuthority.verify!(root: root, tag: RELEASE_TAG, authority: expected)
+          result = WavesRelease::TagAuthority.verify_signature!(root: root, tag: RELEASE_TAG, authority: expected)
           assert_equal expected.fetch("fingerprint"), result.fetch("fingerprint")
 
           assert_release_error(/fingerprint|pinned release key|signature/) do
-            WavesRelease::TagAuthority.verify!(
+            WavesRelease::TagAuthority.verify_signature!(
               root: root,
               tag: RELEASE_TAG,
               authority: expected.merge("publicKey" => "#{correct_algorithm} #{wrong_material} metadata comment differs")
@@ -3611,14 +3676,14 @@ class ReleaseInfraTest < Minitest::Test
         create_signed_tag(root, RELEASE_TAG, "trusted evidence\n", private_key)
 
         assert_release_error(/fingerprint/) do
-          WavesRelease::TagAuthority.verify!(
+          WavesRelease::TagAuthority.verify_signature!(
             root: root,
             tag: RELEASE_TAG,
             authority: expected.merge("fingerprint" => "SHA256:#{'A' * 43}")
           )
         end
         assert_release_error(/principal/) do
-          WavesRelease::TagAuthority.verify!(
+          WavesRelease::TagAuthority.verify_signature!(
             root: root,
             tag: RELEASE_TAG,
             authority: expected.merge("principal" => "untrusted-release")
@@ -3979,6 +4044,9 @@ class ReleaseInfraTest < Minitest::Test
         script/release_git
         script/release-gate.sh
         script/build_and_run.sh
+        script/swift_sdk.sh
+        script/render-dmg-background.swift
+        script/configure-dmg.applescript
         script/make_appcast.sh
         script/prepare-elgato-handoff.sh
       ].each do |relative|
@@ -4001,6 +4069,9 @@ class ReleaseInfraTest < Minitest::Test
         "script/release_environment.sh",
         "script/release-gate.sh",
         "script/build_and_run.sh",
+        "script/swift_sdk.sh",
+        "script/render-dmg-background.swift",
+        "script/configure-dmg.applescript",
         "script/make_appcast.sh",
         "script/prepare-elgato-handoff.sh"
       )
@@ -4132,6 +4203,15 @@ class ReleaseInfraTest < Minitest::Test
     File.write(path, contents.sub(before, after))
   end
 
+  def validate_publication_tag_with_fixture_authority(root:, metadata:)
+    fixture_verifier = lambda do |root:, tag:, authority:|
+      WavesRelease::TagAuthority.verify_signature!(root: root, tag: tag, authority: authority)
+    end
+    WavesRelease::TagAuthority.stub(:verify!, fixture_verifier) do
+      WavesRelease::PublicationTag.validate!(root: root, tag: RELEASE_TAG, metadata: metadata)
+    end
+  end
+
   def with_git_repo
     Dir.mktmpdir("waves-git-contract") do |root|
       git(root, "init", "-q")
@@ -4151,6 +4231,9 @@ class ReleaseInfraTest < Minitest::Test
       FileUtils.mkdir_p(File.join(root, "release"))
       FileUtils.mkdir_p(File.join(root, "Sources"))
       FileUtils.cp(File.expand_path("../build_and_run.sh", __dir__), File.join(root, "script/build_and_run.sh"))
+      FileUtils.cp(File.expand_path("../swift_sdk.sh", __dir__), File.join(root, "script/swift_sdk.sh"))
+      FileUtils.cp(File.expand_path("../render-dmg-background.swift", __dir__), File.join(root, "script/render-dmg-background.swift"))
+      FileUtils.cp(File.expand_path("../configure-dmg.applescript", __dir__), File.join(root, "script/configure-dmg.applescript"))
       FileUtils.cp(File.expand_path("../release_environment.sh", __dir__), File.join(root, "script/release_environment.sh"))
       FileUtils.cp(File.expand_path("../release_git", __dir__), File.join(root, "script/release_git"))
       FileUtils.cp(File.expand_path("../release_tool.rb", __dir__), File.join(root, "script/release_tool.rb"))

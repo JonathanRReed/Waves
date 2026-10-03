@@ -5,6 +5,27 @@ import WavesAudioCore
 
 @testable import Waves
 
+@Test @MainActor func profileSaveRecoveryToastRendersWithRetry() async throws {
+  let fixture = try await makeRenderedUIFixture()
+  fixture.store.showToast(
+    title: "Profiles not saved",
+    detail: "Your changes are still open in Waves. The disk is full.",
+    kind: .warning,
+    action: .retryProfiles
+  )
+  let view = ZStack {
+    WavesBackground()
+    AppToastStack()
+  }
+  .environment(fixture.store)
+  .wavesTheme(palette: .waves, appearance: .dark)
+  .frame(width: 620, height: 240)
+  try renderEvidence(
+    view, filename: "profile-save-retry-toast.png",
+    size: NSSize(width: 620, height: 240), appearance: .dark
+  )
+}
+
 @Test @MainActor func soundWorkspaceRendersAcrossPalettesAndAppearances() async throws {
   let fixture = try await makeRenderedUIFixture()
   let variants: [(WavesPalette, WavesAppearance)] = [
@@ -97,6 +118,32 @@ import WavesAudioCore
     }
     .wavesTheme(palette: palette, appearance: appearance)
     .frame(width: 760, height: 700)
+    let readyWithWarning = ZStack {
+      WavesBackground()
+      OnboardingReadyView(
+        warnings: [
+          RequiredReadinessIssue(
+            id: .managedRoutes,
+            title: "Managed routes need repair",
+            detail: "Waves can open the mixer now, or rebuild managed routes before you continue.",
+            severity: .warning,
+            repairAction: .recoverRoutes
+          )
+        ],
+        isCompleting: false,
+        completionError: nil,
+        onStartMixing: {},
+        onTakeTour: {}
+      )
+    }
+    .wavesTheme(palette: palette, appearance: appearance)
+    .frame(width: 760, height: 620)
+    try renderEvidence(
+      readyWithWarning,
+      filename: "onboarding-ready-warning-\(appearance.rawValue).png",
+      size: NSSize(width: 760, height: 620),
+      appearance: appearance
+    )
     let install = InstallLocationAdvisoryView(
       classification: .mountedDiskImage,
       openInFinder: {},

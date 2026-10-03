@@ -6,7 +6,7 @@
 
 Control each Mac app's volume, mute, boost, equalizer, and output device. Waves uses Core Audio process taps on macOS 14.2+, with no virtual audio driver or system extension.
 
-Version [1.7.1 build 19](https://github.com/JonathanRReed/Waves/releases/tag/v1.7.1) is published. Release builds support Apple Silicon and Intel. Source changes on `main` are not automatically part of that release.
+Version [1.7.2 build 20](https://github.com/JonathanRReed/Waves/releases/tag/v1.7.2) is published. Release builds support Apple Silicon and Intel. Source changes on `main` are not automatically part of that release.
 
 For setup and common connection or audio problems, see the [Wave Link guide](docs/WAVE_LINK.md).
 
@@ -45,6 +45,8 @@ Waves is a mixer, not a recorder or audio-plugin host. It processes audio locall
 ## Profiles and layout
 
 Create a profile from the sidebar's `+` button, name it, and choose its apps. A profile can just group apps, or `Capture current levels` can save volume, mute, and boost. Profiles with saved levels expose `Apply Levels`. Import and export profiles as JSON.
+
+An import with an existing name creates a separate copy. Profile changes report success after saving to disk; a failed save offers `Retry`. `Reset Mix` keeps its restore point until the previous levels are restored and saved.
 
 Pin apps, drag to reorder, or sort by activity, name, category, or manual order. The menu bar exposes profiles and output controls. Meters and the mixed waveform show audio activity.
 
@@ -115,10 +117,11 @@ cd Waves
 ```bash
 swift build
 swift test
+./script/build_and_run.sh --build-only
 ./script/build_and_run.sh --release-check
 ```
 
-`--dmg` builds a local disk image. `--release-check` validates a local DMG; it does not establish public distribution eligibility. `--publication-check` requires Developer ID signing and a passing Gatekeeper assessment.
+`--build-only` creates a local app bundle without launching it or stopping an installed copy. `--dmg` builds a local disk image. `--release-check` validates a local DMG; it does not establish public distribution eligibility. `--publication-check` requires Developer ID signing and a passing Gatekeeper assessment.
 
 For an authorized distribution build with your signing certificate:
 

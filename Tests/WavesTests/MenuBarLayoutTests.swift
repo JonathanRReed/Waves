@@ -72,6 +72,24 @@ import WavesAudioCore
   #expect(snapshot.overflowFocus == .frontmost)
 }
 
+@Test func overflowFocusUsesRunningWhenHiddenAppsSpanGroups() {
+  let pinned = (1...7).map {
+    menuBarApp("p\($0)", name: "Pinned \($0)", pinned: true)
+  }
+  let live = [menuBarApp("live", name: "Live", state: .live)]
+  let recent = [menuBarApp("recent", name: "Recent", state: .recent)]
+
+  let snapshot = MenuBarLayout.makeAppList(
+    pinned: pinned,
+    live: live,
+    recent: recent,
+    isExcluded: { _ in false }
+  )
+
+  #expect(snapshot.hiddenCount == 2)
+  #expect(snapshot.overflowFocus == .running)
+}
+
 private func menuBarApp(
   _ id: String,
   name: String,

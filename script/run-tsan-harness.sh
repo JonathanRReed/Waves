@@ -10,6 +10,9 @@ if [ ! -f "$RESOLVED_FILE" ]; then
   exit 1
 fi
 
+source "$ROOT_DIR/script/swift_sdk.sh"
+HARNESS_SDK="$(waves_compatible_swift_sdk "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" "$(/usr/bin/xcrun --find swift)")"
+
 HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/waves-tsan-harness.XXXXXX")"
 cleanup() {
   rm -rf "$HARNESS_ROOT"
@@ -24,6 +27,7 @@ ditto "$HARNESS_TEMPLATE/Sources/Waves/TSanAppSupport.swift" \
 ditto "$HARNESS_TEMPLATE/Sources/WavesTSanHarness" "$HARNESS_ROOT/Sources/WavesTSanHarness"
 
 swift run \
+  --sdk "$HARNESS_SDK" \
   --package-path "$HARNESS_ROOT" \
   --scratch-path "$ROOT_DIR/.build/tsan-harness" \
   --disable-automatic-resolution \

@@ -6,6 +6,13 @@ private final class DurablePreferencesSaveOutcome {
   var error: Error?
 }
 
+@MainActor
+private final class DurableProfilesSaveOutcome {
+  var error: Error?
+  var savedCurrentSnapshot = false
+  var isComplete = false
+}
+
 struct AppStorePersistenceFailure: Equatable, Sendable {
   let store: PersistenceStoreIdentifier
   let message: String
@@ -40,6 +47,7 @@ final class AppStorePersistenceCoordinator {
 
   private var pendingPreferences: UserPreferences?
   private var pendingProfiles: [Profile]?
+  private var pendingProfilesGeneration: UInt64?
   private var pendingSession: AudioSessionSnapshot?
   private var pendingDevicePresets: DeviceVolumePresets?
   private var preferencesTask: Task<Void, Never>?
@@ -47,6 +55,8 @@ final class AppStorePersistenceCoordinator {
   private var sessionTask: Task<Void, Never>?
   private var devicePresetsTask: Task<Void, Never>?
   private var durablePreferencesTasks: [UUID: Task<Void, Never>] = [:]
+  private var durableProfilesOutcomes: [UInt64: DurableProfilesSaveOutcome] = [:]
+  private var profilesSaveGeneration: UInt64 = 0
   private var isShuttingDown = false
   private var isFinalizing = false
   private var lastWarningDate: Date?
@@ -106,11 +116,7 @@ final class AppStorePersistenceCoordinator {
 
   func enqueueProfiles(_ snapshot: [Profile]) {
     guard acceptsWork else { return }
-    pendingProfiles = snapshot
-    guard profilesTask == nil else { return }
-    profilesTask = Task { @MainActor [weak self] in
-      await self?.runProfiles()
-    }
+    queueProfiles(snapshot)
   }
 
   func enqueueSession(_ snapshot: AudioSessionSnapshot) {
@@ -201,9 +207,25 @@ final class AppStorePersistenceCoordinator {
     if let error = outcome.error { throw error }
   }
 
-  func saveProfilesDurably(_ snapshot: [Profile]) async throws {
-    await drain()
-    try await profileStore.save(snapshot)
+  /// Serializes explicit profile saves and drops stale snapshots before they
+  /// reach disk. A failed current snapshot stays pending so the next profile
+  /// edit can retry the current in-memory library.
+  @discardableResult
+  func saveProfilesDurably(_ snapshot: [Profile]) async throws -> Bool {
+    guard acceptsWork else { throw CancellationError() }
+    let outcome = DurableProfilesSaveOutcome()
+    let generation = queueProfiles(snapshot, durableOutcome: outcome)
+    defer { durableProfilesOutcomes.removeValue(forKey: generation) }
+    while !outcome.isComplete {
+      guard let task = profilesTask else {
+        outcome.error = CancellationError()
+        outcome.isComplete = true
+        break
+      }
+      await task.value
+    }
+    if let error = outcome.error { throw error }
+    return outcome.savedCurrentSnapshot
   }
 
   func saveSessionDurably(_ snapshot: AudioSessionSnapshot) async throws {
@@ -246,6 +268,11 @@ final class AppStorePersistenceCoordinator {
     sessionTask = nil
     devicePresetsTask = nil
     durablePreferencesTasks.removeAll()
+    for outcome in durableProfilesOutcomes.values {
+      outcome.error = CancellationError()
+      outcome.isComplete = true
+    }
+    durableProfilesOutcomes.removeAll()
     return tasks
   }
 
@@ -262,6 +289,7 @@ final class AppStorePersistenceCoordinator {
     isFinalizing = false
     pendingPreferences = nil
     pendingProfiles = nil
+    pendingProfilesGeneration = nil
     pendingSession = nil
     pendingDevicePresets = nil
     onFailure = nil
@@ -318,14 +346,59 @@ final class AppStorePersistenceCoordinator {
 
   private func runProfiles() async {
     defer { profilesTask = nil }
-    while let snapshot = pendingProfiles {
+    while let snapshot = pendingProfiles, let generation = pendingProfilesGeneration {
       pendingProfiles = nil
+      pendingProfilesGeneration = nil
       do {
         try await profileStore.save(snapshot)
+        if let outcome = durableProfilesOutcomes[generation] {
+          outcome.savedCurrentSnapshot = generation == profilesSaveGeneration
+          outcome.isComplete = true
+        }
       } catch {
-        recordFailure(store: .profiles, error: error)
+        if generation == profilesSaveGeneration {
+          pendingProfiles = snapshot
+          pendingProfilesGeneration = generation
+          if let outcome = durableProfilesOutcomes[generation] {
+            outcome.error = error
+            outcome.isComplete = true
+          }
+          recordFailure(
+            store: .profiles,
+            error: error,
+            showWarning: durableProfilesOutcomes[generation] == nil
+          )
+          return
+        }
+        if let outcome = durableProfilesOutcomes[generation] {
+          outcome.isComplete = true
+        }
       }
     }
+  }
+
+  @discardableResult
+  private func queueProfiles(
+    _ snapshot: [Profile],
+    durableOutcome: DurableProfilesSaveOutcome? = nil
+  ) -> UInt64 {
+    profilesSaveGeneration &+= 1
+    let generation = profilesSaveGeneration
+    if let supersededGeneration = pendingProfilesGeneration,
+      let superseded = durableProfilesOutcomes[supersededGeneration]
+    {
+      superseded.isComplete = true
+    }
+    pendingProfiles = snapshot
+    pendingProfilesGeneration = generation
+    if let durableOutcome {
+      durableProfilesOutcomes[generation] = durableOutcome
+    }
+    guard profilesTask == nil else { return generation }
+    profilesTask = Task { @MainActor [weak self] in
+      await self?.runProfiles()
+    }
+    return generation
   }
 
   private func runSession() async {

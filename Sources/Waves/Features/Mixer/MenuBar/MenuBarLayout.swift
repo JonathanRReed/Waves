@@ -61,6 +61,35 @@ enum MenuBarLayout {
   static let maximumSectionsHeight: CGFloat = 420
   static let liveWaveformHeight: CGFloat = 28
 
+  /// Partitions one sorted roster instead of sorting independently for each
+  /// section. The shared builder still owns deduplication and overflow rules.
+  static func makeAppList(
+    visibleApps: [AudioApp],
+    includesRecent: Bool = true,
+    isRecentlyLive: (AudioApp) -> Bool,
+    isExcluded: (AudioApp) -> Bool
+  ) -> MenuBarAppListSnapshot {
+    var pinned: [AudioApp] = []
+    var live: [AudioApp] = []
+    var recent: [AudioApp] = []
+    for app in visibleApps where !isExcluded(app) {
+      if app.isPinned {
+        pinned.append(app)
+      } else if isRecentlyLive(app) {
+        live.append(app)
+      } else if includesRecent {
+        recent.append(app)
+      }
+    }
+    return makeAppList(
+      pinned: pinned,
+      live: live,
+      recent: recent,
+      includesRecent: includesRecent,
+      isExcluded: { _ in false }
+    )
+  }
+
   static func makeAppList(
     pinned: [AudioApp],
     live: [AudioApp],
@@ -85,7 +114,13 @@ enum MenuBarLayout {
 
     let visible = Array(all.prefix(maximumVisibleApps))
     let hiddenCount = max(0, all.count - visible.count)
-    let overflowFocus = all.dropFirst(visible.count).first?.group.sourceFilter
+    let hiddenGroups = Set(all.dropFirst(visible.count).map(\.group))
+    let overflowFocus: SourceFilter? =
+      if hiddenGroups.count > 1 {
+        .running
+      } else {
+        hiddenGroups.first?.sourceFilter
+      }
 
     return MenuBarAppListSnapshot(
       items: visible,

@@ -61,10 +61,6 @@ extension WorkspaceAudioControlBackend {
     return degradations
   }
 
-  /// - Parameter knownIconData: icons already encoded on a previous pass, keyed
-  ///   by logical ID. Reused rather than re-encoded; an app's icon is fixed for
-  ///   as long as it runs.
-
   func dictionaryByLogicalID(_ apps: [AudioApp]) -> [String: AudioApp] {
     apps.reduce(into: [:]) { result, app in
       result[app.logicalID] = app

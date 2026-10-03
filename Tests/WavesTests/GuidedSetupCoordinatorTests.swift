@@ -104,6 +104,27 @@ import WavesAudioCore
   clock.resumeAll()
   await waitUntil { coordinator.phase == .ready }
   #expect(coordinator.issues.map(\.id) == [.managedRoutes])
+  #expect(coordinator.warnings.map(\.id) == [.managedRoutes])
+  #expect(coordinator.warnings.first?.repairAction == .recoverRoutes)
+}
+
+@Test @MainActor func readyWarningsClearWhenManagedRoutesRecover() async {
+  let clock = GuidedSetupTestClock()
+  let coordinator = GuidedSetupCoordinator(
+    initialPhase: .readiness,
+    sleep: clock.sleep
+  )
+  coordinator.update(facts: .readyExceptForRouteRecovery)
+  await clock.waitForSleeper()
+  clock.resumeAll()
+  await waitUntil { coordinator.phase == .ready }
+
+  var recovered = GuidedSetupFacts.readyExceptForRouteRecovery
+  recovered.routeHealthReady = true
+  coordinator.update(facts: recovered)
+
+  #expect(coordinator.phase == .ready)
+  #expect(coordinator.warnings.isEmpty)
 }
 
 @Test @MainActor func readinessRegressionCancelsPendingAdvance() async {
@@ -123,6 +144,17 @@ import WavesAudioCore
 
   #expect(coordinator.phase == .readiness)
   #expect(coordinator.issues.map(\.id) == [.outputDevice, .managedRoutes])
+}
+
+@Test @MainActor func losingARequiredOutputReturnsReadySetupToReadiness() {
+  let coordinator = GuidedSetupCoordinator(initialPhase: .ready)
+  coordinator.update(facts: .readyExceptForRouteRecovery)
+  #expect(coordinator.phase == .ready)
+  var facts = GuidedSetupFacts.readyExceptForRouteRecovery
+  facts.outputDeviceVisible = false
+  coordinator.update(facts: facts)
+  #expect(coordinator.phase == .readiness)
+  #expect(coordinator.issues.contains { $0.id == .outputDevice && $0.severity == .blocking })
 }
 
 @Test @MainActor func cancelAndDrainRetainCancellationInsensitiveWorkUntilSettlement() async {

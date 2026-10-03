@@ -1718,13 +1718,173 @@ private func waitForRefresh(_ store: AppStore) async {
 
   // Reset returns to the pre-Meeting mix, clears the point and active profile.
   fixture.store.resetMix()
-  #expect(fixture.store.toasts.contains { $0.title == "Mix reset" })
+  #expect(!fixture.store.toasts.contains { $0.title == "Mix reset" })
   await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.toasts.contains { $0.title == "Mix reset" })
   #expect(fixture.store.mixRestorePoint == nil)
   #expect(fixture.store.activeProfileID == nil)
   #expect(fixture.store.session.apps.first?.desiredVolume == 0.8)
   // The synthesized restore profile never lands in the saved profiles list.
   #expect(!fixture.store.profiles.contains { $0.name == "Meeting" && $0.id != profile.id })
+}
+
+@MainActor
+@Test func failedResetKeepsRestorePointAndActiveProfileForRetry() async {
+  let app = transactionTestApp(id: "reset.retry", desiredVolume: 0.8)
+  let profile = Profile(
+    name: "Meeting",
+    entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)]
+  )
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    profileOutcomes: [.applied, .failed]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  fixture.store.resetMix()
+  await fixture.store.drainAppIntentTransactions()
+
+  #expect(fixture.store.mixRestorePoint?.profileName == "Meeting")
+  #expect(fixture.store.activeProfileID == profile.id)
+  #expect(!fixture.store.toasts.contains { $0.title == "Mix reset" })
+  #expect(fixture.store.toasts.contains { $0.title == "Some levels didn't reset" })
+}
+
+@MainActor
+@Test func profileSaveFeedbackWaitsForDiskAndDropsStaleSuccess() async {
+  let app = transactionTestApp(id: "profile.durable-save")
+  let profilesStore = TransactionProfilesStore()
+  profilesStore.suspendFirstSave = true
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    profileStore: profilesStore
+  )
+
+  _ = fixture.store.saveProfile(named: "First", appIDs: [app.logicalID], captureLevels: false)
+  await profilesStore.waitUntilFirstSaveIsSuspended()
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile saved" })
+
+  _ = fixture.store.saveProfile(named: "Second", appIDs: [app.logicalID], captureLevels: false)
+  profilesStore.resumeFirstSave()
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  #expect(profilesStore.value.map(\.name).contains("Second"))
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile saved" && $0.detail == "First" })
+  #expect(fixture.store.toasts.contains { $0.title == "Profile saved" && $0.detail == "Second" })
+}
+
+@MainActor
+@Test func backgroundProfileSaveSupersedesSuspendedDurableSave() async {
+  let app = transactionTestApp(id: "profile.background-newer")
+  let profilesStore = TransactionProfilesStore()
+  profilesStore.suspendFirstSave = true
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    profileStore: profilesStore
+  )
+
+  _ = fixture.store.saveProfile(named: "Older", appIDs: [app.logicalID], captureLevels: false)
+  await profilesStore.waitUntilFirstSaveIsSuspended()
+  fixture.store.profiles.append(Profile(name: "Background", entries: []))
+  fixture.store.enqueueProfilesPersistence(fixture.store.profiles)
+  profilesStore.resumeFirstSave()
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(profilesStore.value.map(\.name).contains("Background"))
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile saved" && $0.detail == "Older" })
+}
+
+@MainActor
+@Test func durableProfileSaveSupersedesSuspendedBackgroundSave() async {
+  let app = transactionTestApp(id: "profile.durable-newer")
+  let profilesStore = TransactionProfilesStore()
+  profilesStore.suspendFirstSave = true
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    profileStore: profilesStore
+  )
+
+  fixture.store.profiles = [Profile(name: "Background", entries: [])]
+  fixture.store.enqueueProfilesPersistence(fixture.store.profiles)
+  await profilesStore.waitUntilFirstSaveIsSuspended()
+  _ = fixture.store.saveProfile(named: "Newer", appIDs: [app.logicalID], captureLevels: false)
+  profilesStore.resumeFirstSave()
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(profilesStore.value.map(\.name).contains("Newer"))
+  #expect(fixture.store.toasts.contains { $0.title == "Profile saved" && $0.detail == "Newer" })
+}
+
+@MainActor
+@Test func failedProfileSaveRemainsPendingAndCanBeRetried() async {
+  let app = transactionTestApp(id: "profile.retry-save")
+  let profilesStore = TransactionProfilesStore()
+  profilesStore.saveError = TransactionTestError.writeFailed
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    profileStore: profilesStore
+  )
+
+  let result = fixture.store.saveProfile(
+    named: "Retry me",
+    appIDs: [app.logicalID],
+    captureLevels: false
+  )
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile saved" })
+  #expect(fixture.store.toasts.contains { $0.title == "Profile not saved" })
+  #expect(fixture.store.toasts.first { $0.title == "Profile not saved" }?.action == .retryProfiles)
+  #expect(fixture.store.lifecycleSnapshot.toastDismissalCount == 0)
+  #expect(fixture.store.lifecycleSnapshot.persistence.pendingSnapshotCount == 1)
+
+  profilesStore.saveError = nil
+  guard let id = result.savedProfileID else {
+    Issue.record("Expected the profile mutation to remain available for retry")
+    return
+  }
+  fixture.store.retrySavingProfiles()
+  await waitUntil { fixture.store.lifecycleSnapshot.ownedOperationCount == 0 }
+
+  #expect(fixture.store.lifecycleSnapshot.persistence.pendingSnapshotCount == 0)
+  #expect(profilesStore.value.contains { $0.id == id })
+  #expect(fixture.store.toasts.contains { $0.title == "Profiles saved" })
+  #expect(!fixture.store.toasts.contains { $0.action == .retryProfiles })
+}
+
+@MainActor
+@Test func importedProfileNamesPreserveExistingProfiles() {
+  let existing = [
+    Profile(name: "Meeting", entries: []),
+    Profile(name: "Meeting (Imported)", entries: []),
+  ]
+
+  #expect(AppStore.uniqueImportedProfileName("Focus", among: existing) == "Focus")
+  #expect(AppStore.uniqueImportedProfileName("meeting", among: existing) == "meeting (Imported 2)")
+
+  let longName = String(repeating: "x", count: Profile.maxNameLength)
+  let firstLongImport = AppStore.uniqueImportedProfileName(
+    longName,
+    among: [Profile(name: longName, entries: [])]
+  )
+  let secondLongImport = AppStore.uniqueImportedProfileName(
+    longName,
+    among: [
+      Profile(name: longName, entries: []),
+      Profile(name: firstLongImport, entries: []),
+    ]
+  )
+  #expect(firstLongImport.count <= Profile.maxNameLength)
+  #expect(secondLongImport.count <= Profile.maxNameLength)
+  #expect(firstLongImport != secondLongImport)
 }
 
 @MainActor
@@ -2122,7 +2282,8 @@ private func makeTransactionFixture(
   runtimeProcessProbe: @escaping @Sendable (Int32) -> RuntimeProcessProbe? = { _ in nil },
   deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
     duration in try await Task.sleep(for: duration)
-  }
+  },
+  profileStore: TransactionProfilesStore = TransactionProfilesStore()
 ) -> TransactionFixture {
   let snapshot = transactionSnapshot(apps: apps, device: device)
   let refreshSnapshot = refreshApps.map { transactionSnapshot(apps: $0, device: device) }
@@ -2168,7 +2329,7 @@ private func makeTransactionFixture(
   let store = AppStore(
     backend: backend,
     preferencesStore: preferencesStore,
-    profileStore: TransactionProfilesStore(),
+    profileStore: profileStore,
     sessionStore: sessionStore,
     loginItemService: TransactionLoginItemService(),
     deviceVolumePresetsStore: presetsStore,
@@ -2713,10 +2874,56 @@ private final class TransactionPreferencesStore: PreferencesPersisting, @uncheck
 
 private final class TransactionProfilesStore: ProfilesPersisting, @unchecked Sendable {
   var value = Profile.defaults
+  var saveError: Error?
+  var suspendFirstSave = false
+  private let lock = NSLock()
+  private var saveAttempts = 0
+  private var firstSaveSuspended = false
+  private var firstSaveResume: CheckedContinuation<Void, Never>?
+  private var firstSaveWaiters: [CheckedContinuation<Void, Never>] = []
+
   func load(defaults: [Profile]) -> [Profile] { value }
-  func save(_ profiles: [Profile]) async throws { value = profiles }
+  func save(_ profiles: [Profile]) async throws {
+    let shouldSuspend = lock.withLock { () -> Bool in
+      saveAttempts += 1
+      return suspendFirstSave && saveAttempts == 1
+    }
+    if shouldSuspend {
+      await withCheckedContinuation { continuation in
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+          firstSaveSuspended = true
+          firstSaveResume = continuation
+          defer { firstSaveWaiters.removeAll() }
+          return firstSaveWaiters
+        }
+        for waiter in waiters { waiter.resume() }
+      }
+    }
+    if let saveError { throw saveError }
+    value = profiles
+  }
   func flush() async throws {}
   func consumeDidRecoverFromCorruptFile() -> Bool { false }
+
+  func waitUntilFirstSaveIsSuspended() async {
+    if lock.withLock({ firstSaveSuspended }) { return }
+    await withCheckedContinuation { continuation in
+      let resumeImmediately = lock.withLock { () -> Bool in
+        if firstSaveSuspended { return true }
+        firstSaveWaiters.append(continuation)
+        return false
+      }
+      if resumeImmediately { continuation.resume() }
+    }
+  }
+
+  func resumeFirstSave() {
+    let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+      defer { firstSaveResume = nil }
+      return firstSaveResume
+    }
+    continuation?.resume()
+  }
 }
 
 private final class TransactionSessionStore: SessionPersisting, @unchecked Sendable {

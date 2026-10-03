@@ -109,20 +109,9 @@ SIGNING_KEYCHAIN=""
 SWIFT_SDK="${SWIFT_SDK:-}"
 SMOKE_SECONDS="${SMOKE_SECONDS:-5}"
 
-# Some Command Line Tools releases install a newer default SDK whose SwiftUI
-# interface references SwiftUIMacros without shipping that macro plugin. Prefer
-# the newest compatible macOS 26 SDK actually installed so local and
-# distribution builds remain usable on every build machine.
-if [ -z "$SWIFT_SDK" ] \
-  && [ ! -f /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib ]; then
-  for candidate_sdk in \
-    /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
-    /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk; do
-    if [ -d "$candidate_sdk" ]; then
-      SWIFT_SDK="$candidate_sdk"
-      break
-    fi
-  done
+source "$ROOT_DIR/script/swift_sdk.sh"
+if [ -z "$SWIFT_SDK" ]; then
+  SWIFT_SDK="$(waves_compatible_swift_sdk "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" "$(/usr/bin/xcrun --find swift)")"
 fi
 
 if [ "$MODE" = "--dmg" ] \
@@ -142,10 +131,10 @@ if [ -n "$SWIFT_SDK" ]; then
   SWIFT_BUILD+=(--sdk "$SWIFT_SDK")
 fi
 
-VALID_MODES=("run" "--dmg" "--release-check" "release-check" "--publication-check" "publication-check" "--notarize" "notarize" "--debug" "debug" "--logs" "logs" "--telemetry" "telemetry" "--verify" "verify" "--package-smoke" "package-smoke")
+VALID_MODES=("run" "--build-only" "--dmg" "--release-check" "release-check" "--publication-check" "publication-check" "--notarize" "notarize" "--debug" "debug" "--logs" "logs" "--telemetry" "telemetry" "--verify" "verify" "--package-smoke" "package-smoke")
 if [[ ! " ${VALID_MODES[*]} " =~ " ${MODE} " ]]; then
   echo "Error: Invalid mode '$MODE'" >&2
-  echo "usage: $0 [run|--dmg|--release-check|--publication-check|--notarize|--debug|--logs|--telemetry|--verify|--package-smoke]" >&2
+  echo "usage: $0 [run|--build-only|--dmg|--release-check|--publication-check|--notarize|--debug|--logs|--telemetry|--verify|--package-smoke]" >&2
   exit 2
 fi
 
@@ -831,9 +820,16 @@ build_app_bundle() {
 
   mkdir -p "$DIST_DIR"
 
-  if pgrep -x "$APP_NAME" >/dev/null 2>&1 && command -v pkill >/dev/null 2>&1; then
-    pkill -x "$APP_NAME" >/dev/null 2>&1 || true
-  fi
+  # Building a local bundle must not stop a separately installed mixer. Refuse
+  # to replace this exact bundle while it is running, leaving other copies alone.
+  while IFS= read -r existing_pid; do
+    [ -n "$existing_pid" ] || continue
+    existing_executable="$(/bin/ps -p "$existing_pid" -o comm= 2>/dev/null || true)"
+    if [ "$existing_executable" = "$APP_BINARY" ]; then
+      echo "Error: Quit $APP_BUNDLE before replacing its running bundle." >&2
+      exit 1
+    fi
+  done < <(pgrep -x "$APP_NAME" 2>/dev/null || true)
 
   if is_distribution_build_mode; then
     local arm64_scratch="$WAVES_RELEASE_SCRATCH_ROOT/arm64"
@@ -1502,6 +1498,10 @@ create_dmg() {
   # Finder caches window state by volume name. A unique temporary name forces
   # it to write this image's layout before the published name is restored.
   /usr/sbin/diskutil rename "$ACTIVE_MOUNT_DIR" "$APP_NAME" >/dev/null
+  # Save the background alias against the final volume identity too. Finder
+  # can otherwise retain the temporary layout volume name in its alias record.
+  /usr/bin/osascript "$DMG_FINDER_LAYOUT" "$ACTIVE_MOUNT_DIR"
+  /bin/sync
   /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet
   rm -rf "$ACTIVE_MOUNT_DIR"
   ACTIVE_MOUNT_DIR=""
@@ -1711,6 +1711,9 @@ if ! is_existing_package_mode; then
 fi
 
 case "$MODE" in
+  --build-only)
+    echo "Built local $APP_BUNDLE without launching it."
+    ;;
   run)
     open_app
     ;;
@@ -1750,7 +1753,7 @@ case "$MODE" in
       "$SMOKE_LOG_PATH" "$CALLER_ROOT_DIR/dist/package-smoke.log" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--dmg|--release-check|--publication-check|--notarize|--debug|--logs|--telemetry|--verify|--package-smoke]" >&2
+    echo "usage: $0 [run|--build-only|--dmg|--release-check|--publication-check|--notarize|--debug|--logs|--telemetry|--verify|--package-smoke]" >&2
     exit 2
     ;;
 esac

@@ -15,6 +15,37 @@ require "yaml"
 module WavesRelease
   class Error < StandardError; end
 
+  module ReleaseAuthority
+    PRINCIPAL = "waves-commit-signing".freeze
+    PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJaVZPTQXnIIPdGksw4PmO3yBLuqEkd+qE4SALWpFpQ waves-commit-signing".freeze
+    FINGERPRINT = "SHA256:53uCiv5rg7roncACotblHKo4OvHAsvYw/+x/5pU0mCQ".freeze
+    PINNED = {
+      "principal" => PRINCIPAL,
+      "publicKey" => PUBLIC_KEY,
+      "fingerprint" => FINGERPRINT,
+    }.freeze
+
+    module_function
+
+    def validate!(candidate)
+      Validation.exact_keys!(candidate, %w[principal publicKey fingerprint], "release tag authority")
+      unless candidate.fetch("principal") == PRINCIPAL
+        raise Error, "publication tag principal must be #{PRINCIPAL}"
+      end
+
+      pinned_key = CanonicalSSHKey.parse!(PUBLIC_KEY, context: "immutable release key")
+      candidate_key = CanonicalSSHKey.parse!(candidate.fetch("publicKey"), context: "release tag authority key")
+      unless candidate_key.fetch("algorithm") == pinned_key.fetch("algorithm") &&
+          candidate_key.fetch("material") == pinned_key.fetch("material") &&
+          candidate.fetch("fingerprint") == FINGERPRINT &&
+          candidate_key.fetch("fingerprint") == FINGERPRINT
+        raise Error, "publication tag authority does not match the immutable release authority"
+      end
+
+      PINNED
+    end
+  end
+
   module Validation
     module_function
 
@@ -1527,11 +1558,13 @@ module WavesRelease
   module ReleaseSource
     BUILD_INPUT_PATHS = %w[
       Package.swift Package.resolved PrivacyInfo.xcprivacy Sources
-      script/build_and_run.sh script/release_git script/release_tool.rb release/metadata.json
+      script/build_and_run.sh script/swift_sdk.sh script/render-dmg-background.swift
+      script/configure-dmg.applescript script/release_git script/release_tool.rb release/metadata.json
     ].freeze
     RECIPE_PATHS = %w[
       Package.swift Package.resolved PrivacyInfo.xcprivacy
-      script/build_and_run.sh script/release_git script/release_tool.rb release/metadata.json
+      script/build_and_run.sh script/swift_sdk.sh script/render-dmg-background.swift
+      script/configure-dmg.applescript script/release_git script/release_tool.rb release/metadata.json
     ].freeze
 
     module_function
@@ -2007,16 +2040,20 @@ module WavesRelease
   end
 
   module TagAuthority
-    PRINCIPAL = "waves-commit-signing"
+    PRINCIPAL = ReleaseAuthority::PRINCIPAL
 
     module_function
 
     def verify!(root:, tag:, authority:)
-      Validation.exact_keys!(
-        authority,
-        %w[principal publicKey fingerprint],
-        "release tag authority"
-      )
+      trusted_authority = ReleaseAuthority.validate!(authority)
+      verify_signature!(root: root, tag: tag, authority: trusted_authority)
+    end
+
+    # Exercises the signature-verification mechanism independently from the
+    # immutable production trust root. PublicationTag calls verify!, never this
+    # helper, so candidate metadata cannot select its own signing authority.
+    def verify_signature!(root:, tag:, authority:)
+      Validation.exact_keys!(authority, %w[principal publicKey fingerprint], "release tag authority")
       principal = authority.fetch("principal")
       raise Error, "publication tag principal must be #{PRINCIPAL}" unless principal == PRINCIPAL
       parsed_key = CanonicalSSHKey.parse!(authority.fetch("publicKey"), context: "pinned release key")

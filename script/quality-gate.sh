@@ -20,6 +20,9 @@ case "$REQUESTED_PHASE" in
 esac
 
 cd "$ROOT_DIR"
+source "$ROOT_DIR/script/swift_sdk.sh"
+QUALITY_SDK="$(waves_compatible_swift_sdk "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" "$(/usr/bin/xcrun --find swift)")"
+SWIFT_SDK_ARGUMENTS=(--sdk "$QUALITY_SDK")
 QUALITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/waves-quality-home.XXXXXX")"
 cleanup() {
   rm -rf "$QUALITY_HOME"
@@ -42,6 +45,8 @@ run_infra() {
     "$RELEASE_RUBY" "$ROOT_DIR/script/tests/launch_measurement_test.rb"
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Runtime profile tooling self-tests" \
     "$RELEASE_RUBY" "$ROOT_DIR/script/tests/runtime_profile_test.rb"
+  run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Compatible Swift SDK selection tests" \
+    "$RELEASE_RUBY" "$ROOT_DIR/script/tests/swift_sdk_test.rb"
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Repository release contract" \
     "$RELEASE_RUBY" "$ROOT_DIR/script/release_tool.rb" validate-repository
   run_phase "${WAVES_PHASE_TIMEOUT_INFRA:-300}" "Repository workflow contract" \
@@ -55,18 +60,18 @@ run_format() {
 }
 
 run_build() {
-  run_phase "${WAVES_PHASE_TIMEOUT_BUILD:-900}" "Swift debug build" swift build
-  run_phase "${WAVES_PHASE_TIMEOUT_BUILD:-1200}" "Swift release build" swift build -c release
+  run_phase "${WAVES_PHASE_TIMEOUT_BUILD:-900}" "Swift debug build" swift build "${SWIFT_SDK_ARGUMENTS[@]}"
+  run_phase "${WAVES_PHASE_TIMEOUT_BUILD:-1200}" "Swift release build" swift build "${SWIFT_SDK_ARGUMENTS[@]}" -c release
 }
 
 run_tests() {
   run_phase "${WAVES_PHASE_TIMEOUT_TESTS:-1800}" "Ordinary isolated Swift non-rendered suite" \
     /usr/bin/env HOME="$QUALITY_HOME" CFFIXED_USER_HOME="$QUALITY_HOME" \
-    swift test --skip RenderedUISmokeTests
+    swift test "${SWIFT_SDK_ARGUMENTS[@]}" --skip RenderedUISmokeTests
   run_phase "${WAVES_PHASE_TIMEOUT_TESTS:-1800}" "Isolated rendered UI suite" \
     /usr/bin/env HOME="$QUALITY_HOME" CFFIXED_USER_HOME="$QUALITY_HOME" \
-    CI=1 WAVES_QA_OUTPUT="$QUALITY_HOME/rendered-ui" \
-    swift test --filter RenderedUISmokeTests
+    CI=1 WAVES_QA_OUTPUT="${WAVES_QA_OUTPUT:-$QUALITY_HOME/rendered-ui}" \
+    swift test "${SWIFT_SDK_ARGUMENTS[@]}" --filter RenderedUISmokeTests
 }
 
 run_tsan() {

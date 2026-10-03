@@ -94,8 +94,16 @@ final class GuidedSetupCoordinator {
     Self.readinessIssues(for: facts)
   }
 
+  var warnings: [RequiredReadinessIssue] {
+    issues.filter { $0.severity == .warning }
+  }
+
   func update(facts: GuidedSetupFacts) {
     self.facts = facts
+
+    if phase == .ready, !facts.isReadyForCoreMixing {
+      phase = .readiness
+    }
 
     if phase == .waitingForMacOS, facts.hasAcceptedPrivacy {
       phase = .readiness

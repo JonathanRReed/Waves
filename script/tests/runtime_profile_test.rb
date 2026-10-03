@@ -74,7 +74,7 @@ class RuntimeProfileTest < Minitest::Test
     end
   end
 
-  def collect_with_fake_xctrace(mode:, outer_timeout: nil, start_timeout: nil, recorder_timeout: nil)
+  def collect_with_fake_xctrace(mode:, outer_timeout: nil, start_timeout: nil, recorder_timeout: nil, test_timeout: nil)
     Dir.mktmpdir do |directory|
       developer = File.join(directory, "Developer")
       fake_xctrace = File.join(developer, "usr", "bin", "xctrace")
@@ -120,7 +120,10 @@ class RuntimeProfileTest < Minitest::Test
       SH
       FileUtils.chmod(0o755, fake_xctrace)
       output = File.join(directory, "evidence")
-      target = Process.spawn("/bin/sleep", "10")
+      # Keep the target alive beyond the fixture supervisor and cleanup budget.
+      # A ten-second target could exit during the intentionally six-second setup.
+      target = Process.spawn("/bin/sleep", "45")
+      safety_timeout = test_timeout || (outer_timeout ? outer_timeout + 4 : (mode == "slow-valid" ? 18 : 12))
       recorder_pid_file = File.join(directory, "recorder.pid")
       environment = {
         "DEVELOPER_DIR" => developer,
@@ -149,7 +152,25 @@ class RuntimeProfileTest < Minitest::Test
           stdin.close
           stdout_reader = Thread.new { out.read }
           stderr_reader = Thread.new { err.read }
-          Timeout.timeout(12) { status = wait_thread.value }
+          begin
+            Timeout.timeout(safety_timeout) { status = wait_thread.value }
+          rescue Timeout::Error
+            # Open3 joins its waiter in ensure. Stop the owned process before
+            # leaving this block so that join cannot outlive the test deadline.
+            Process.kill("TERM", -collector_pid) rescue nil
+            unless wait_thread.join(6)
+              children = Open3.capture2("/bin/ps", "-axo", "pid=,ppid=").first.lines.each_with_object([]) do |line, result|
+                child_pid, parent_pid = line.split.map(&:to_i)
+                result << child_pid if parent_pid == collector_pid
+              end
+              children.each { |child_pid| Process.kill("KILL", -child_pid) rescue nil }
+              Process.kill("KILL", -collector_pid) rescue nil
+              wait_thread.join
+            end
+            stdout_reader.join
+            stderr_reader.join
+            return [stdout_reader.value, "test timeout", nil, nil]
+          end
           stdout = stdout_reader.value
           stderr = stderr_reader.value
         end
@@ -178,6 +199,14 @@ class RuntimeProfileTest < Minitest::Test
     refute result.key?("releasePass")
     assert_equal false, result.fetch("soakComparison").fetch("available")
     assert_match(/insufficient/, result.fetch("soakComparison").fetch("reason"))
+  end
+
+  def test_fixture_timeout_stops_the_collector_before_open3_joins_it
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    _stdout, stderr, status, _summary = collect_with_fake_xctrace(mode: "valid", test_timeout: 0.1)
+    assert_nil status
+    assert_equal "test timeout", stderr
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 8
   end
 
   def test_malformed_input_and_missing_scenario_or_identity_fail_closed
@@ -438,7 +467,7 @@ class RuntimeProfileTest < Minitest::Test
 
   def test_never_posting_term_resistant_recorder_fails_start_and_preserves_numeric_samples
     _stdout, stderr, status, summary = collect_with_fake_xctrace(
-      mode: "resistant", outer_timeout: 8, start_timeout: 1
+      mode: "resistant", outer_timeout: 20, start_timeout: 1
     )
     assert status&.success?, stderr
     tool = summary.fetch("tools").fetch("timeProfiler")
@@ -450,7 +479,7 @@ class RuntimeProfileTest < Minitest::Test
 
   def test_absolute_recorder_deadline_stops_ready_term_resistant_recorder
     _stdout, stderr, status, summary = collect_with_fake_xctrace(
-      mode: "ready-resistant", outer_timeout: 8, recorder_timeout: 1
+      mode: "ready-resistant", outer_timeout: 20, recorder_timeout: 1
     )
     assert status&.success?, stderr
     tool = summary.fetch("tools").fetch("timeProfiler")
@@ -469,11 +498,18 @@ class RuntimeProfileTest < Minitest::Test
 
   def test_outer_deadline_stops_term_resistant_recorder
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    _stdout, _stderr, status, summary = collect_with_fake_xctrace(mode: "resistant", outer_timeout: 1)
+    stdout, stderr, status, summary = collect_with_fake_xctrace(mode: "resistant", outer_timeout: 1)
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
     refute_nil status, "collector exceeded the test's 5-second safety deadline"
-    refute status.success?
+    assert_equal 124, status.exitstatus
+    assert_match(/bounded outer deadline expired/, stderr)
     assert_operator elapsed, :<, 5
-    assert_equal "failed", summary.fetch("result").fetch("status")
+    # The supervisor may expire before identity verification creates the output
+    # directory. It must never leave a successful receipt in either case.
+    if summary
+      assert_equal "failed", summary.fetch("result").fetch("status")
+    else
+      assert_empty stdout
+    end
   end
 end

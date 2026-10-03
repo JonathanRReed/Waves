@@ -78,6 +78,7 @@ if [[ "${WAVES_RUNTIME_INTERNAL:-}" != "1" ]]; then
       break if interrupted || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
       sleep 0.05
     end
+    warn "profile_runtime.sh: bounded outer deadline expired" unless interrupted
     begin
       Process.kill("TERM", -child)
     rescue Errno::ESRCH
@@ -96,7 +97,6 @@ if [[ "${WAVES_RUNTIME_INTERNAL:-}" != "1" ]]; then
     rescue Errno::ESRCH
     end
     Process.waitpid(child) rescue nil
-    warn "profile_runtime.sh: bounded outer deadline expired"
     exit(interrupted ? 128 + Signal.list.fetch(interrupted) : 124)
   ' "$outer_timeout" "$0" "${original_args[@]}"
 fi
@@ -155,19 +155,40 @@ xctrace_notification_key=""
 notify_pid=""
 finalized=false
 
+# Run the grace-period clock in one process. Starting Ruby for every poll can
+# consume the cleanup deadline itself on a busy Mac.
+terminate_collector_child() {
+  /usr/bin/ruby -e '
+    pid = Integer(ARGV.fetch(0))
+    grace = Float(ARGV.fetch(1))
+    target = ARGV.fetch(2) == "group" ? -pid : pid
+    signal = lambda do |name|
+      begin
+        Process.kill(name, target)
+      rescue Errno::ESRCH
+        Process.kill(name, pid) rescue Errno::ESRCH
+      end
+    end
+    alive = lambda do
+      begin
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH
+        false
+      end
+    end
+    signal.call("TERM")
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + grace
+    while alive.call && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+      sleep 0.05
+    end
+    signal.call("KILL") if alive.call
+  ' "$1" "$2" "$3"
+}
+
 stop_notify_watcher() {
   if [[ -n "$notify_pid" ]] && /bin/kill -0 "$notify_pid" 2>/dev/null; then
-    /bin/kill -TERM "$notify_pid" 2>/dev/null || true
-    local stop_start stop_now
-    stop_start=$(/usr/bin/ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
-    while /bin/kill -0 "$notify_pid" 2>/dev/null; do
-      stop_now=$(/usr/bin/ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
-      if /usr/bin/ruby -e 'exit(Float(ARGV[1]) - Float(ARGV[0]) >= 1 ? 0 : 1)' "$stop_start" "$stop_now"; then
-        /bin/kill -KILL "$notify_pid" 2>/dev/null || true
-        break
-      fi
-      /bin/sleep 0.05
-    done
+    terminate_collector_child "$notify_pid" 1 process
     wait "$notify_pid" 2>/dev/null || true
   fi
   notify_pid=""
@@ -175,17 +196,7 @@ stop_notify_watcher() {
 
 stop_xctrace() {
   if [[ -n "$xctrace_pid" ]] && /bin/kill -0 "$xctrace_pid" 2>/dev/null; then
-    /bin/kill -TERM -- "-$xctrace_pid" 2>/dev/null || /bin/kill "$xctrace_pid" 2>/dev/null || true
-    local stop_start stop_now
-    stop_start=$(/usr/bin/ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
-    while /bin/kill -0 "$xctrace_pid" 2>/dev/null; do
-      stop_now=$(/usr/bin/ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
-      if /usr/bin/ruby -e 'exit(Float(ARGV[1]) - Float(ARGV[0]) >= 2 ? 0 : 1)' "$stop_start" "$stop_now"; then
-        /bin/kill -KILL -- "-$xctrace_pid" 2>/dev/null || /bin/kill -KILL "$xctrace_pid" 2>/dev/null || true
-        break
-      fi
-      /bin/sleep 0.05
-    done
+    terminate_collector_child "$xctrace_pid" 2 group
     wait "$xctrace_pid" 2>/dev/null || true
   fi
   xctrace_pid=""
@@ -297,7 +308,7 @@ deadline_run() {
   /usr/bin/perl -e 'alarm shift; exec @ARGV' "$limit" "$@"
 }
 
-developer_dir=${DEVELOPER_DIR:-/Users/jonathanreed/Downloads/Xcode-beta.app/Contents/Developer}
+developer_dir=${DEVELOPER_DIR:-$(/usr/bin/xcode-select -p)}
 xcrun_tool=${WAVES_RUNTIME_TEST_XCRUN_TOOL:-/usr/bin/xcrun}
 if [[ -x "$developer_dir/usr/bin/xctrace" ]]; then
   templates_file="$raw_dir/xctrace-templates.txt"

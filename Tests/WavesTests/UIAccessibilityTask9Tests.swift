@@ -371,9 +371,21 @@ func defaultIconEncodingExecutorSuspendsMainActorBeforeBlockingWork() async {
   let captureCount = Task9Counter()
   let encodingCount = Task9Counter()
   let known = Data([1, 2, 3])
+  let identity = AppRuntimeIdentity(
+    lifetime: AppProcessLifetimeIdentity(pid: 42, startTimeSeconds: 100, startTimeMicroseconds: 0),
+    executablePath: "/Applications/Known.app/Contents/MacOS/Known",
+    outerBundlePath: "/Applications/Known.app",
+    signingIdentity: AppCodeSigningIdentity(
+      identifier: "com.example.known",
+      teamIdentifier: "TEAM123",
+      designatedRequirement: "identifier com.example.known",
+      codeDirectoryHash: Data([1])
+    )
+  )
   let result = await AppRuntimeDiscovery.resolveIconData(
     logicalID: "com.example.known",
-    knownIconData: ["com.example.known": known],
+    runtimeIdentity: identity,
+    knownIcons: ["com.example.known": .init(data: known, runtimeIdentity: identity)],
     captureRaster: {
       captureCount.increment()
       return AppIconRaster(

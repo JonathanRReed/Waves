@@ -9,7 +9,7 @@ public struct SupportMatrix: Codable, Hashable, Sendable {
 
   public var coverageSummary: String {
     let supportedCount = entries.filter { $0.state == .supported }.count
-    return "\(supportedCount)/\(entries.count) validated"
+    return "\(supportedCount)/\(entries.count) discovered apps supported"
   }
 }
 

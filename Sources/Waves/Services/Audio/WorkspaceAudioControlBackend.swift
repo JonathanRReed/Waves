@@ -1482,13 +1482,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // Waves can actually take over audio, not merely whether the OS supports it.
     refreshCaptureAuthorization()
     let audible = getAudibleProcesses()
-    // Carry icons forward like every other preserved field. An app's icon does
-    // not change while it runs, but this rebuild happens every 8 seconds — and
-    // each one used to draw and PNG-encode the icon of every running app, then
-    // throw the result away in the merge below, which already keeps the previous
-    // app's data. That is dozens of image encodes a minute for nothing.
-    let knownIcons = (previousSnapshot?.apps ?? []).reduce(into: [String: Data]()) { result, app in
-      if let data = app.iconTIFFData { result[app.logicalID] = data }
+    // Reuse encoded icons across discovery passes only while the captured
+    // process identity still matches. Relaunches must capture fresh bytes.
+    let knownIcons = (previousSnapshot?.apps ?? []).reduce(
+      into: [String: AppRuntimeDiscovery.KnownIcon]()
+    ) { result, app in
+      guard let data = app.iconTIFFData, let runtimeIdentity = app.runtimeIdentity else { return }
+      result[app.logicalID] = AppRuntimeDiscovery.KnownIcon(
+        data: data,
+        runtimeIdentity: runtimeIdentity
+      )
     }
     let discoveryCapture: AppRuntimeDiscovery.Capture
     if let applicationCaptureProvider {
@@ -1496,7 +1499,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     } else {
       discoveryCapture = await AppRuntimeDiscovery.captureRunningApplications(
         currentBundleID: currentBundleID,
-        knownIconData: knownIcons
+        knownIcons: knownIcons
       )
     }
     let incumbentIdentities = (previousSnapshot?.apps ?? []).reduce(into: [String: AppRuntimeIdentity]()) { result, app in

@@ -50,6 +50,15 @@ private struct AppToastBanner: View {
 
       Spacer(minLength: 0)
 
+      if toast.action == .retryProfiles {
+        Button("Retry") {
+          retryProfiles()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityLabel("Retry saving profiles")
+      }
+
       Button {
         store.dismissToast(id: toast.id)
       } label: {
@@ -95,6 +104,16 @@ private struct AppToastBanner: View {
     .accessibilityAction(named: "Dismiss") {
       store.dismissToast(id: toast.id)
     }
+    .accessibilityActions {
+      if toast.action == .retryProfiles {
+        Button("Retry saving profiles") { retryProfiles() }
+      }
+    }
+  }
+
+  private func retryProfiles() {
+    store.dismissToast(id: toast.id)
+    store.retrySavingProfiles()
   }
 
   private var bannerTransition: AnyTransition {

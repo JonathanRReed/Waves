@@ -6,6 +6,24 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-10-03
+
+### Fixed
+- Keep Reset Mix available until restoring the mix and saving intent both succeed.
+- Retain failed profile changes for retry and show a persistent Retry action.
+- Preserve existing profiles when importing a matching name, including Unicode
+  case and accent equivalents.
+- Show route recovery in the final setup step without blocking optional routing.
+- Open the correct app scope from menu overflow links.
+- Capture fresh app icons after a process relaunch and isolate decoded cache entries.
+- Bound profiler cleanup and support the compatible SDK on newer macOS toolchains.
+
+### Changed
+- Share the sorted app roster across menu sections and waveform calculations.
+- Index discovery candidates before applying the existing process identity checks.
+- Render the DMG background at Retina resolution and preserve its Finder layout.
+- Allow local build-only verification without closing or launching the installed app.
+
 ## [1.7.2] - 2026-09-08
 
 ### Fixed

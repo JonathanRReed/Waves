@@ -9,22 +9,7 @@ import WavesAudioCore
 final class AppStore {
   typealias RuntimeProcessProbeProvider = @Sendable (Int32) -> RuntimeProcessProbe?
 
-  var session: AudioSessionSnapshot {
-    didSet {
-      // Most writes touch one field of one row; the roster only changes on a
-      // rebuild. Compare identities positionally before building any sets, so
-      // the common write costs a walk and not two allocations.
-      let rosterUnchanged =
-        oldValue.apps.count == session.apps.count
-        && zip(oldValue.apps, session.apps).allSatisfy { $0.id == $1.id }
-      guard !rosterUnchanged else { return }
-      let previousRuntimeIDs = Set(oldValue.apps.map(\.id))
-      let currentRuntimeIDs = Set(session.apps.map(\.id))
-      if previousRuntimeIDs != currentRuntimeIDs {
-        AppIconCache.prune(from: oldValue, using: session)
-      }
-    }
-  }
+  var session: AudioSessionSnapshot
   var profiles: [Profile]
   /// The most recent profile result after AppStore generation checks and row-level
   /// reconciliation. Retained so diagnostics/tests can inspect every source row in
@@ -491,16 +476,47 @@ final class AppStore {
   /// which Waves can't meter without tapping it, contributes a small nominal
   /// floor so it still registers. A perceptual power curve + soft `tanh` clamp
   /// keeps quiet mixes visible and loud mixes from slamming the ceiling.
-  var mixedAudioLevel: Float {
+  var waveformSnapshot: WaveformSnapshot {
+    let managedEQActive = preferences.managedAudioEqualizer.isEnabled
     var energy = 0.0
+    var components: [WaveComponent] = []
     for app in visibleApps where !app.isMuted && isLive(app) {
       let measured = liveLevels[app.logicalID].map { Double(max($0.rms, $0.peak * 0.8)) } ?? 0
-      let contribution = measured > 0.001 ? measured : 0.12  // floor for unmetered live apps
-      energy += contribution * contribution
+      let mixedContribution = measured > 0.001 ? measured : 0.12
+      energy += mixedContribution * mixedContribution
+
+      // A slightly higher nominal floor than the combined level's: an audible
+      // but unmetered app should still ripple visibly in the showcase band.
+      let componentLevel = measured > 0.001 ? measured : 0.18
+      let isManaged = app.routingState == .managed
+      components.append(
+        WaveComponent(
+          id: app.logicalID,
+          level: min(1, pow(componentLevel, 0.5)),
+          isEqualized: isManaged
+            && (managedEQActive || equalizerSettings(for: app).isEnabled),
+          adaptiveGainDB: isManaged
+            ? Double(adaptiveGainsDBByAppID[app.logicalID] ?? 0)
+            : 0
+        ))
     }
-    guard energy > 0 else { return 0 }
-    let perceptual = pow(energy.squareRoot(), 0.6)
-    return Float(tanh(1.6 * perceptual))
+
+    if components.count > 6 {
+      components = Array(components.sorted { $0.level > $1.level }.prefix(6))
+    }
+    let mixedAudioLevel: Float
+    if energy > 0 {
+      let perceptual = pow(energy.squareRoot(), 0.6)
+      mixedAudioLevel = Float(tanh(1.6 * perceptual))
+    } else {
+      mixedAudioLevel = 0
+    }
+    return WaveformSnapshot(components: components, mixedAudioLevel: mixedAudioLevel)
+  }
+
+  /// Compatibility accessor for callers that only need the combined level.
+  var mixedAudioLevel: Float {
+    waveformSnapshot.mixedAudioLevel
   }
 
   /// Per-app live contributions for the header visualizer's superposition
@@ -510,33 +526,7 @@ final class AppStore {
   /// component wave genuinely fades out when its app goes quiet, and the same
   /// nominal floor for audible-but-unmetered `.live` apps.
   var waveComponents: [WaveComponent] {
-    let managedEQActive = preferences.managedAudioEqualizer.isEnabled
-    var components: [WaveComponent] = []
-    for app in visibleApps where !app.isMuted && isLive(app) {
-      let measured = liveLevels[app.logicalID].map { Double(max($0.rms, $0.peak * 0.8)) } ?? 0
-      // A slightly higher nominal floor than mixedAudioLevel's: an audible
-      // but unmetered app should still ripple visibly in the showcase band.
-      let level = measured > 0.001 ? measured : 0.18
-      // EQ shaping and adaptive gain only act on streams Waves actually
-      // processes, so both indicators require a managed route.
-      let isManaged = app.routingState == .managed
-      let isEqualized =
-        isManaged
-        && (managedEQActive || equalizerSettings(for: app).isEnabled)
-      let adaptiveGainDB =
-        isManaged
-        ? Double(adaptiveGainsDBByAppID[app.logicalID] ?? 0)
-        : 0
-      components.append(
-        WaveComponent(
-          id: app.logicalID,
-          level: min(1, pow(level, 0.5)),
-          isEqualized: isEqualized,
-          adaptiveGainDB: adaptiveGainDB
-        ))
-    }
-    guard components.count > 6 else { return components }
-    return Array(components.sorted { $0.level > $1.level }.prefix(6))
+    waveformSnapshot.components
   }
 
   var recentApps: [AudioApp] {
@@ -1773,7 +1763,8 @@ final class AppStore {
     title: String,
     detail: String? = nil,
     kind: AppToast.Kind,
-    duration: Duration? = nil
+    duration: Duration? = nil,
+    action: AppToast.Action? = nil
   ) {
     guard startupState != .shuttingDown else { return }
     // Give failures a longer default so they aren't missed; explicit durations
@@ -1789,9 +1780,15 @@ final class AppStore {
       title: title,
       detail: detail,
       kind: kind,
-      duration: duration ?? fallbackDuration
+      duration: duration ?? fallbackDuration,
+      action: action
     )
 
+    if let action {
+      for existing in toasts.filter({ $0.action == action }) {
+        dismissToast(id: existing.id)
+      }
+    }
     toasts.append(toast)
     trimToasts()
 
@@ -1818,7 +1815,7 @@ final class AppStore {
   /// re-armed. The single source of truth for every dismissal timer.
   private func scheduleDismissal(id: UUID, after delay: Duration) {
     guard startupState != .shuttingDown else { return }
-    guard toasts.contains(where: { $0.id == id }) else { return }
+    guard let toast = toasts.first(where: { $0.id == id }), toast.action == nil else { return }
     toastDismissals[id]?.cancel()
     toastDismissals[id] = Task { @MainActor [weak self] in
       do {
@@ -1858,7 +1855,10 @@ final class AppStore {
       // burst (volume commits, keyboard nudges) can't displace an unread .error
       // before the user sees it. Only evict an error when every remaining toast
       // is an error (oldest-first among those).
-      let evictionIndex = toasts.firstIndex { $0.kind != .error } ?? toasts.startIndex
+      let evictionIndex =
+        toasts.firstIndex { $0.kind != .error && $0.action == nil }
+        ?? toasts.firstIndex { $0.action == nil }
+        ?? toasts.startIndex
       let removed = toasts.remove(at: evictionIndex)
       toastDismissals[removed.id]?.cancel()
       toastDismissals.removeValue(forKey: removed.id)

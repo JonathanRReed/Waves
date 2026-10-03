@@ -53,10 +53,12 @@ struct OnboardingView: View {
             )
           case .ready:
             OnboardingReadyView(
+              warnings: coordinator.warnings,
               isCompleting: isCompleting,
               completionError: completionError,
               onStartMixing: { complete(startTour: false) },
-              onTakeTour: { complete(startTour: true) }
+              onTakeTour: { complete(startTour: true) },
+              onRepair: performRepair
             )
           }
         }

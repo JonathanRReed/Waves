@@ -97,6 +97,11 @@ enum AppRuntimeDiscovery {
     case prohibited
   }
 
+  struct KnownIcon: Sendable {
+    let data: Data
+    let runtimeIdentity: AppRuntimeIdentity
+  }
+
   struct CapturedApplication: Sendable {
     let pid: pid_t
     let bundleID: String?
@@ -132,12 +137,43 @@ enum AppRuntimeDiscovery {
     let applications: [CapturedApplication]
   }
 
+  struct ProcessFamilyIndex: Sendable {
+    fileprivate struct Entry: Sendable {
+      let offset: Int
+      let application: CapturedApplication
+    }
+
+    fileprivate let applicationsByOuterBundlePath: [String: [Entry]]
+    fileprivate let applicationsByPID: [pid_t: [Entry]]
+    fileprivate let missingIdentityApplicationsByPID: [pid_t: [Entry]]
+
+    init(applications: [CapturedApplication]) {
+      var applicationsByOuterBundlePath: [String: [Entry]] = [:]
+      var applicationsByPID: [pid_t: [Entry]] = [:]
+      var missingIdentityApplicationsByPID: [pid_t: [Entry]] = [:]
+
+      for (offset, application) in applications.enumerated() {
+        let entry = Entry(offset: offset, application: application)
+        applicationsByPID[application.pid, default: []].append(entry)
+        if let identity = application.runtimeIdentity {
+          applicationsByOuterBundlePath[identity.outerBundlePath, default: []].append(entry)
+        } else {
+          missingIdentityApplicationsByPID[application.pid, default: []].append(entry)
+        }
+      }
+
+      self.applicationsByOuterBundlePath = applicationsByOuterBundlePath
+      self.applicationsByPID = applicationsByPID
+      self.missingIdentityApplicationsByPID = missingIdentityApplicationsByPID
+    }
+  }
+
   /// The AppKit boundary. `NSWorkspace`, `NSRunningApplication`, icon lookup,
   /// and image rasterization never escape this main-actor capture.
   @MainActor
   static func captureRunningApplications(
     currentBundleID: String?,
-    knownIconData: [String: Data] = [:],
+    knownIcons: [String: KnownIcon] = [:],
     iconEncoder: AppIconEncoder = AppIconEncoder()
   ) async -> Capture {
     var applications: [CapturedApplication] = []
@@ -162,11 +198,17 @@ enum AppRuntimeDiscovery {
         bundleID: app.bundleIdentifier,
         bundlePath: bundlePath
       )
+      // Capture this once. Icon reuse and the emitted application must agree on
+      // the exact process lifetime; a second probe could observe a reused PID.
+      let runtimeIdentity = RuntimeProcessIdentityCache.shared.identity(
+        pid: app.processIdentifier
+      )
       let iconData =
         isManageable
         ? await resolveIconData(
           logicalID: logicalID,
-          knownIconData: knownIconData,
+          runtimeIdentity: runtimeIdentity,
+          knownIcons: knownIcons,
           captureRaster: { iconRaster(for: app) },
           iconEncoder: iconEncoder
         )
@@ -180,9 +222,7 @@ enum AppRuntimeDiscovery {
           activationPolicy: activationPolicy(for: app.activationPolicy),
           isActive: app.isActive,
           iconTIFFData: iconData,
-          runtimeIdentity: RuntimeProcessIdentityCache.shared.identity(
-            pid: app.processIdentifier
-          )
+          runtimeIdentity: runtimeIdentity
         ))
     }
     return Capture(applications: applications)
@@ -191,12 +231,18 @@ enum AppRuntimeDiscovery {
   @MainActor
   static func resolveIconData(
     logicalID: String,
-    knownIconData: [String: Data],
+    runtimeIdentity: AppRuntimeIdentity?,
+    knownIcons: [String: KnownIcon],
     captureRaster: @MainActor () -> AppIconRaster?,
     iconEncoder: AppIconEncoder
   ) async -> Data? {
-    if let known = knownIconData[logicalID] {
-      return known
+    // Without a verified process lifetime, a logical ID, bundle ID, or PID can
+    // all refer to a replacement process. Fail closed and recapture its icon.
+    if let runtimeIdentity,
+      let known = knownIcons[logicalID],
+      known.runtimeIdentity == runtimeIdentity
+    {
+      return known.data
     }
     guard let raster = captureRaster() else { return nil }
     return await iconEncoder.encode(raster)
@@ -218,6 +264,7 @@ enum AppRuntimeDiscovery {
     let runningApps = capture.applications.filter { app in
       app.bundleID != currentBundleID && app.activationPolicy != .prohibited
     }
+    let processFamilyIndex = ProcessFamilyIndex(applications: runningApps)
     // Canonicalize the audible parent paths once. Each canonicalization is an
     // lstat per path component; doing it inside the candidate × audible loop
     // was on the order of a thousand lstats per 8-second pass.
@@ -274,7 +321,7 @@ enum AppRuntimeDiscovery {
         let logicalID = AppDiscoveryPolicy.logicalAppID(bundleID: bundleID, displayName: name)
         let category = AppDiscoveryPolicy.inferCategory(bundleID: bundleID, displayName: name)
         let pid = app.pid
-        let familyApps = AppRuntimeDiscovery.processFamily(for: app, in: runningApps)
+        let familyApps = AppRuntimeDiscovery.processFamily(for: app, using: processFamilyIndex)
         let familyPIDs = Set(familyApps.map(\.pid))
         // An app is audible if a process in its NSWorkspace family is producing
         // output, OR — crucially for Chromium/Electron apps — if a helper whose
@@ -379,6 +426,34 @@ enum AppRuntimeDiscovery {
       }
 
       return candidate.pid == app.pid
+    }
+  }
+
+  static func processFamily(
+    for app: CapturedApplication,
+    using index: ProcessFamilyIndex
+  ) -> [CapturedApplication] {
+    let candidates: [ProcessFamilyIndex.Entry]
+    if let targetIdentity = app.runtimeIdentity {
+      candidates =
+        (index.applicationsByOuterBundlePath[targetIdentity.outerBundlePath] ?? [])
+        + (index.missingIdentityApplicationsByPID[app.pid] ?? [])
+    } else {
+      candidates = index.applicationsByPID[app.pid] ?? []
+    }
+
+    return candidates.sorted { $0.offset < $1.offset }.compactMap { entry in
+      let candidate = entry.application
+      if let targetIdentity = app.runtimeIdentity,
+        let candidateIdentity = candidate.runtimeIdentity
+      {
+        return AppDiscoveryPolicy.runtimeFamilyMatches(
+          target: targetIdentity,
+          candidate: candidateIdentity
+        ) ? candidate : nil
+      }
+
+      return candidate.pid == app.pid ? candidate : nil
     }
   }
 

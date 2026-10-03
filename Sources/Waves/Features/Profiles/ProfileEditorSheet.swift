@@ -257,7 +257,7 @@ struct ProfileEditorSheet: View {
     if let message = validationResult?.message { return message }
     if trimmedName.isEmpty { return "Enter a profile name" }
     if isTooLong { return "Name too long (max \(Self.maxNameLength) characters)" }
-    if !selectedIDs.isEmpty { return "Every selected app is excluded from Waves" }
+    if !selectedIDs.isEmpty, savableSelectedIDs.isEmpty { return "Every selected app is excluded from Waves" }
     if selectedIDs.isEmpty { return "Select at least one app" }
     return "Save profile"
   }

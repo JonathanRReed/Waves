@@ -18,6 +18,14 @@ struct WaveComponent: Equatable, Identifiable {
   var adaptiveGainDB: Double = 0
 }
 
+/// One coherent read of the waveform inputs. Keeping the component list and
+/// combined energy together lets the header derive both from the same app and
+/// meter scan.
+struct WaveformSnapshot: Equatable {
+  let components: [WaveComponent]
+  let mixedAudioLevel: Float
+}
+
 // MARK: - Engine
 
 /// Owns all per-frame wave state — eased levels and accumulated phases — as a
@@ -534,8 +542,9 @@ struct HeaderWaveform: View {
   var height: CGFloat = 48
 
   var body: some View {
-    let components = store.waveComponents
-    MixedWaveformView(components: components, level: Double(store.mixedAudioLevel))
+    let snapshot = store.waveformSnapshot
+    let components = snapshot.components
+    MixedWaveformView(components: components, level: Double(snapshot.mixedAudioLevel))
       .frame(height: height)
       .frame(maxWidth: .infinity)
       // Quiet corner chips naming what's shaping the sound right now, so the
@@ -557,10 +566,8 @@ struct HeaderWaveform: View {
   /// "Focus −4 dB" while the adaptive engine is actively holding something
   /// back; nil (no chip) when idle so the band stays clean.
   ///
-  /// Takes the components the body already resolved rather than reading
-  /// `store.waveComponents` again: that property rebuilds its array from
-  /// `visibleApps` (a sorted derivation), and the body evaluates on every level
-  /// poll.
+  /// Takes the components from the snapshot the body already resolved instead
+  /// of starting another app and meter scan on every level poll.
   private func focusText(for components: [WaveComponent]) -> String? {
     let strongest = components.map(\.adaptiveGainDB).min() ?? 0
     guard strongest < -0.25 else { return nil }

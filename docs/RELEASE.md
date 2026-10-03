@@ -8,22 +8,16 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-The current source candidate is 1.7.2 build 20. It fixes parameterless Wave Link
-JSON-RPC requests rejected with Invalid params. On 2026-09-08, Jonathan approved
-deferring fresh performance comparisons, macOS 15 runtime testing, and the full
-physical Stream Deck matrix for this release after confirming the tested setup
-was working. Signing, notarization, and publication must still be completed
-before 1.7.2 is presented as a downloadable update.
+The current source candidate is 1.7.3 build 21. It improves profile save and
+reset reliability, process discovery, waveform calculation, icon lifetime
+handling, and installer layout. It is not published until its candidate and
+publication gates pass.
 
-Version 1.7.1 build 19 is the latest published release. GitHub published it on
-2026-09-05 from the signed annotated `v1.7.1` tag at
-`2055c7a72a58af85a933e39f1e781ec2b330c571`. The release includes the DMG,
-checksum, notary log, source identity, candidate and publication evidence,
-both external receipts, and dSYM. The site appcast, download page, and the
-Homebrew tap point at that DMG. The release owner deferred exhaustive
-benchmarks and the physical Elgato hardware pass for this release; that
-follow-up is bound to 1.7.1 and does not carry forward. Later commits on `main`
-are not part of that published build.
+Version 1.7.2 build 20 is the latest published release. GitHub published it on
+2026-09-08. The release includes signed and notarized universal artifacts and
+sealed evidence. The site appcast and Homebrew tap point at that release.
+Its performance, macOS 15, and physical Stream Deck deferrals apply only to
+1.7.2 and do not qualify this candidate.
 
 The separately versioned Stream Deck companion at
 `/Users/jonathanreed/Downloads/waves-streamdeck` must pass its Bun typecheck,
@@ -53,18 +47,10 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
-The 1.7.2 approval is encoded in canonical metadata and applies only to all four
-performance comparisons, `platforms.sequoiaAppleSilicon`, and
-`gates.remoteElgato`. Evidence must record each approved gap as `deferred` with
-the exact approved justification. It must never record a deferred check as
-passed. The remote Elgato waiver covers the full physical Stream Deck matrix;
-it does not claim a new remote hardware receipt or verified physical behavior.
-
-All other checks remain required, including tests, security, sanitizers, active
-and idle stability, local QA, Tahoe and Rosetta coverage, package verification,
+The 1.7.3 metadata does not inherit earlier release deferrals. Tests, security,
+sanitizers, stability, local QA, platform coverage, package verification,
 Developer ID signing, notarization, stapling, Gatekeeper, provenance, and
-artifact validation. This approval is bound to version 1.7.2 build 20 and does
-not carry forward.
+artifact validation must be recorded against the exact candidate.
 
 ## Protected command environment
 
@@ -300,7 +286,7 @@ that checkout's exact lowercase revision. The output directory must not exist.
   /ABSOLUTE/PATH/TO/dist/release-evidence.candidate.json \
   /ABSOLUTE/PATH/TO/com.jonathanreed.waves.streamDeckPlugin \
   PLUGIN_40_CHARACTER_REVISION \
-  /ABSOLUTE/PATH/TO/Waves-1.7.2-20-Elgato-Handoff
+  /ABSOLUTE/PATH/TO/Waves-1.7.3-21-Elgato-Handoff
 ```
 
 The command reruns the complete candidate gate, privately snapshots and

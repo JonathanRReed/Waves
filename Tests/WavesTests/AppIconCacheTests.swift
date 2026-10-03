@@ -23,7 +23,7 @@ struct AppIconCacheTests {
     )
   }
 
-  @Test func appIconCacheReturnsTheDecodedObjectOnAHit() throws {
+  @Test func appIconCacheReturnsTheDecodedObjectWhenSourceBytesMatch() throws {
     AppIconCache.resetForTesting()
     let firstApp = AudioApp(
       id: "runtime.icon.hit",
@@ -33,15 +33,32 @@ struct AppIconCacheTests {
     )
     let first = try #require(AppIconCache.icon(for: firstApp))
 
-    let sameRuntimeWithUndecodableReplacement = AudioApp(
-      id: firstApp.id,
-      displayName: firstApp.displayName,
-      iconTIFFData: Data([0]),
-      category: .media
-    )
-    let hit = try #require(AppIconCache.icon(for: sameRuntimeWithUndecodableReplacement))
+    let hit = try #require(AppIconCache.icon(for: firstApp))
 
     #expect(first === hit)
+  }
+
+  @Test func appIconCacheDecodesReplacementBytesForTheSameLogicalID() throws {
+    AppIconCache.resetForTesting()
+    let original = AudioApp(
+      id: "com.example.player",
+      displayName: "Player",
+      iconTIFFData: iconTIFFData(width: 4, height: 4),
+      category: .media
+    )
+    let originalImage = try #require(AppIconCache.icon(for: original))
+    let replacement = AudioApp(
+      id: original.id,
+      displayName: original.displayName,
+      iconTIFFData: iconTIFFData(width: 7, height: 5),
+      category: .media
+    )
+
+    let replacementImage = try #require(AppIconCache.icon(for: replacement))
+
+    #expect(replacementImage !== originalImage)
+    #expect(replacementImage.representations.first?.pixelsWide == 7)
+    #expect(replacementImage.representations.first?.pixelsHigh == 5)
   }
 
   @Test func appIconCacheStorageEnforcesExactCountCostAndRecency() {
@@ -50,7 +67,7 @@ struct AppIconCacheTests {
     let third = NSImage(size: NSSize(width: 1, height: 1))
     let fourth = NSImage(size: NSSize(width: 1, height: 1))
 
-    let countBoundStorage = AppIconCache.Storage(
+    let countBoundStorage = AppIconCache.Storage<String>(
       configuration: AppIconCache.Configuration(countLimit: 2, totalCostLimit: 1_000)
     )
     countBoundStorage.setObject(first, forKey: "first", cost: 40)
@@ -63,7 +80,7 @@ struct AppIconCacheTests {
     #expect(countBoundStorage.object(forKey: "third") === third)
     #expect(countBoundStorage.count == 2)
 
-    let costBoundStorage = AppIconCache.Storage(
+    let costBoundStorage = AppIconCache.Storage<String>(
       configuration: AppIconCache.Configuration(countLimit: 10, totalCostLimit: 100)
     )
     costBoundStorage.setObject(first, forKey: "first", cost: 40)
@@ -84,20 +101,15 @@ struct AppIconCacheTests {
     #expect(costBoundStorage.totalCost == 70)
   }
 
-  @Test func appIconCachePrunesOnlyRuntimeIDsThatDepartedTheAuthoritativeRoster() throws {
+  @Test func boundedCacheRetainsDepartedIconsForOtherStoresToReuse() throws {
     AppIconCache.resetForTesting()
     let retained = iconApp(id: "runtime.retained", category: .media)
     let departed = iconApp(id: "runtime.departed", category: .media)
     _ = try #require(AppIconCache.icon(for: retained))
     _ = try #require(AppIconCache.icon(for: departed))
 
-    AppIconCache.prune(
-      from: iconSession(apps: [retained, departed]),
-      using: iconSession(apps: [retained])
-    )
-
     #expect(AppIconCache.contains(runtimeID: retained.id))
-    #expect(!AppIconCache.contains(runtimeID: departed.id))
+    #expect(AppIconCache.contains(runtimeID: departed.id))
   }
 
   @Test func filteredPresentationScopeNeverEvictsAnAuthoritativeSessionIcon() throws {
@@ -110,16 +122,11 @@ struct AppIconCacheTests {
     _ = try #require(AppIconCache.icon(for: visible))
     _ = try #require(AppIconCache.icon(for: filteredSystemApp))
 
-    AppIconCache.prune(
-      from: iconSession(apps: sessionRoster),
-      using: iconSession(apps: sessionRoster)
-    )
-
     #expect(AppIconCache.contains(runtimeID: visible.id))
     #expect(AppIconCache.contains(runtimeID: filteredSystemApp.id))
   }
 
-  @Test func appStorePrunesAgainstItsSessionRatherThanItsFilteredPresentation() async throws {
+  @Test func appStorePresentationFilteringDoesNotAffectTheSharedIconCache() async throws {
     let store = await makeControlStoreFixture()
     let visible = iconApp(id: "runtime.store.visible", category: .media)
     let filteredSystemApp = iconApp(id: "runtime.store.filtered", category: .system)
@@ -135,44 +142,121 @@ struct AppIconCacheTests {
     store.session.apps = [visible]
 
     #expect(AppIconCache.contains(runtimeID: visible.id))
-    #expect(!AppIconCache.contains(runtimeID: filteredSystemApp.id))
+    #expect(AppIconCache.contains(runtimeID: filteredSystemApp.id))
   }
 
-  @Test func oneAppStoreCannotEvictAnotherStoresRuntimeIcon() async throws {
+  @Test func oneAppStoreDepartureDoesNotEvictAnotherStoresSameAppIcon() async throws {
     let firstStore = await makeControlStoreFixture()
     let secondStore = await makeControlStoreFixture()
-    let firstApp = iconApp(id: "runtime.store.first", category: .media)
-    let secondApp = iconApp(id: "runtime.store.second", category: .media)
+    let identity = iconRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+    let firstApp = iconApp(
+      id: "com.example.shared",
+      category: .media,
+      runtimeIdentity: identity
+    )
+    let secondApp = firstApp
     firstStore.session.apps = [firstApp]
     secondStore.session.apps = [secondApp]
     AppIconCache.resetForTesting()
-    _ = try #require(AppIconCache.icon(for: firstApp))
-    _ = try #require(AppIconCache.icon(for: secondApp))
+    let firstImage = try #require(AppIconCache.icon(for: firstApp))
 
     firstStore.session.apps = []
+    let secondImage = try #require(AppIconCache.icon(for: secondApp))
 
-    #expect(!AppIconCache.contains(runtimeID: firstApp.id))
+    #expect(firstImage === secondImage)
     #expect(AppIconCache.contains(runtimeID: secondApp.id))
+  }
+
+  @Test func sameLogicalIDDifferentBytesKeepIndependentDecodedImages() throws {
+    AppIconCache.resetForTesting()
+    let identity = iconRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+    let firstApp = iconApp(
+      id: "com.example.shared",
+      category: .media,
+      runtimeIdentity: identity,
+      iconData: iconTIFFData(width: 4, height: 4)
+    )
+    let secondApp = iconApp(
+      id: firstApp.id,
+      category: .media,
+      runtimeIdentity: identity,
+      iconData: iconTIFFData(width: 7, height: 5)
+    )
+
+    let firstImage = try #require(AppIconCache.icon(for: firstApp))
+    let secondImage = try #require(AppIconCache.icon(for: secondApp))
+    let firstImageAgain = try #require(AppIconCache.icon(for: firstApp))
+
+    #expect(firstImage !== secondImage)
+    #expect(firstImageAgain === firstImage)
+  }
+
+  @Test func appStoreInvalidatesOnlyTheIconWhoseRuntimeLifetimeChanged() async throws {
+    let store = await makeControlStoreFixture()
+    let oldIdentity = iconRuntimeIdentity(pid: 42, startTimeSeconds: 100)
+    let newIdentity = iconRuntimeIdentity(pid: 42, startTimeSeconds: 200)
+    let unchangedIdentity = iconRuntimeIdentity(pid: 84, startTimeSeconds: 100)
+    let original = iconApp(
+      id: "com.example.player",
+      category: .media,
+      runtimeIdentity: oldIdentity
+    )
+    let unrelated = iconApp(
+      id: "com.example.chat",
+      category: .communication,
+      runtimeIdentity: unchangedIdentity
+    )
+    store.session.apps = [original, unrelated]
+    AppIconCache.resetForTesting()
+    let originalImage = try #require(AppIconCache.icon(for: original))
+    let unrelatedImage = try #require(AppIconCache.icon(for: unrelated))
+
+    let replacement = iconApp(
+      id: original.id,
+      category: original.category,
+      runtimeIdentity: newIdentity
+    )
+    store.session.apps = [replacement, unrelated]
+    let replacementImage = try #require(AppIconCache.icon(for: replacement))
+    let unrelatedImageAgain = try #require(AppIconCache.icon(for: unrelated))
+
+    #expect(replacementImage !== originalImage)
+    #expect(unrelatedImageAgain === unrelatedImage)
+    #expect(AppIconCache.contains(runtimeID: unrelated.id))
   }
 }
 
 @MainActor
-private func iconApp(id: String, category: AppCategory) -> AudioApp {
+private func iconApp(
+  id: String,
+  category: AppCategory,
+  runtimeIdentity: AppRuntimeIdentity? = nil,
+  iconData: Data? = nil
+) -> AudioApp {
   AudioApp(
     id: id,
     displayName: id,
-    iconTIFFData: iconTIFFData(width: 4, height: 4),
-    category: category
+    iconTIFFData: iconData ?? iconTIFFData(width: 4, height: 4),
+    category: category,
+    runtimeIdentity: runtimeIdentity
   )
 }
 
-private func iconSession(apps: [AudioApp]) -> AudioSessionSnapshot {
-  AudioSessionSnapshot(
-    apps: apps,
-    currentDevice: nil,
-    recentDeviceIDs: [],
-    supportMatrix: SupportMatrix(entries: []),
-    backendStatus: .unprobed
+private func iconRuntimeIdentity(pid: Int32, startTimeSeconds: UInt64) -> AppRuntimeIdentity {
+  AppRuntimeIdentity(
+    lifetime: AppProcessLifetimeIdentity(
+      pid: pid,
+      startTimeSeconds: startTimeSeconds,
+      startTimeMicroseconds: 0
+    ),
+    executablePath: "/Applications/Fixture.app/Contents/MacOS/Fixture",
+    outerBundlePath: "/Applications/Fixture.app",
+    signingIdentity: AppCodeSigningIdentity(
+      identifier: "com.example.fixture",
+      teamIdentifier: "TEAM123",
+      designatedRequirement: "identifier \"com.example.fixture\"",
+      codeDirectoryHash: Data([1, 2, 3])
+    )
   )
 }
 

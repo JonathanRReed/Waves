@@ -27,7 +27,7 @@ import Testing
     ]
   )
 
-  #expect(matrix.coverageSummary == "2/3 validated")
+  #expect(matrix.coverageSummary == "2/3 discovered apps supported")
 }
 
 @Test func profileDefaultsContainDailyUseGroups() {
