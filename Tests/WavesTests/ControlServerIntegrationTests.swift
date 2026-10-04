@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import Testing
@@ -191,13 +192,35 @@ func unsubscribingRearmsTheRealSocketIdleTimeout() async throws {
   #expect(accepted == nil)
 }
 
-@Test func iconEncoderRejectsInvalidOrNonFiniteSideDimensions() {
-  let dummyData = Data()
-  #expect(ControlIconEncoder.base64PNG(dummyData, side: .nan) == nil)
-  #expect(ControlIconEncoder.base64PNG(dummyData, side: .infinity) == nil)
-  #expect(ControlIconEncoder.base64PNG(dummyData, side: -10) == nil)
-  #expect(ControlIconEncoder.base64PNG(dummyData, side: 0) == nil)
-  #expect(ControlIconEncoder.base64PNG(dummyData, side: 4096) == nil)
+@MainActor
+@Test func iconEncoderRejectsInvalidOrNonFiniteSideDimensions() throws {
+  let bitmap = try #require(
+    NSBitmapImageRep(
+      bitmapDataPlanes: nil,
+      pixelsWide: 1,
+      pixelsHigh: 1,
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      hasAlpha: true,
+      isPlanar: false,
+      colorSpaceName: .deviceRGB,
+      bytesPerRow: 0,
+      bitsPerPixel: 0
+    ))
+  bitmap.setColor(.white, atX: 0, y: 0)
+  let tiffData = try #require(bitmap.tiffRepresentation)
+
+  // A valid image ensures these assertions exercise the dimension guard.
+  let invalidSides: [CGFloat] = [.nan, .infinity, -.infinity, -10, 0, 2049]
+  for side in invalidSides {
+    #expect(ControlIconEncoder.base64PNG(tiffData, side: side) == nil)
+  }
+
+  let encoded = try #require(ControlIconEncoder.base64PNG(tiffData))
+  let pngData = try #require(Data(base64Encoded: encoded))
+  let decoded = try #require(NSBitmapImageRep(data: pngData))
+  #expect(decoded.pixelsWide == 144)
+  #expect(decoded.pixelsHigh == 144)
 }
 
 @Test func connectionCountProbeCancellationCannotStrandTheTestTask() async {
