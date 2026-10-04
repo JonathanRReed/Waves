@@ -191,6 +191,15 @@ func unsubscribingRearmsTheRealSocketIdleTimeout() async throws {
   #expect(accepted == nil)
 }
 
+@Test func iconEncoderRejectsInvalidOrNonFiniteSideDimensions() {
+  let dummyData = Data()
+  #expect(ControlIconEncoder.base64PNG(dummyData, side: .nan) == nil)
+  #expect(ControlIconEncoder.base64PNG(dummyData, side: .infinity) == nil)
+  #expect(ControlIconEncoder.base64PNG(dummyData, side: -10) == nil)
+  #expect(ControlIconEncoder.base64PNG(dummyData, side: 0) == nil)
+  #expect(ControlIconEncoder.base64PNG(dummyData, side: 4096) == nil)
+}
+
 @Test func connectionCountProbeCancellationCannotStrandTheTestTask() async {
   let probe = ControlConnectionCountProbe()
   let marker = probe.mark()

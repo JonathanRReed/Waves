@@ -184,6 +184,8 @@ enum ControlIconEncoder {
   }
 
   nonisolated static func base64PNG(_ tiffData: Data, side: CGFloat = 144) -> String? {
+    // Validate side dimension to prevent non-finite numbers, zero/negative, or oversized dimensions from causing memory issues or crashes.
+    guard side.isFinite, side > 0, side <= 2048 else { return nil }
     guard let image = NSImage(data: tiffData) else { return nil }
     let target = NSSize(width: side, height: side)
     guard
