@@ -6,7 +6,7 @@
 
 Control each Mac app's volume, mute, boost, equalizer, and output device. Waves uses Core Audio process taps on macOS 14.2+, with no virtual audio driver or system extension.
 
-Version [1.7.2 build 20](https://github.com/JonathanRReed/Waves/releases/tag/v1.7.2) is published. Release builds support Apple Silicon and Intel. Source changes on `main` are not automatically part of that release.
+The [latest release](https://github.com/JonathanRReed/Waves/releases/latest) supports Apple Silicon and Intel. Source changes on `main` are not automatically part of a published release.
 
 For setup and common connection or audio problems, see the [Wave Link guide](docs/WAVE_LINK.md).
 

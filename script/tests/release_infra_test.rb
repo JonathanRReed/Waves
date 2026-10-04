@@ -615,7 +615,7 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal VERSION, deferral.fetch("version")
     assert_equal BUILD, deferral.fetch("build")
     assert_equal %w[sequoiaAppleSilicon tahoeAppleSilicon], deferral.fetch("platforms")
-    assert_empty deferral.fetch("gates")
+    assert_equal ["remoteElgato"], deferral.fetch("gates")
   end
 
   def test_metadata_reader_accepts_a_future_canonical_release_without_code_changes
@@ -775,7 +775,11 @@ class ReleaseInfraTest < Minitest::Test
   end
 
   def test_older_os_deferrals_do_not_defer_hardware_or_other_gates
-    metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
+    metadata = metadata_hash.merge("releaseDeferral" => {
+      "version" => VERSION, "build" => BUILD, "approvedOn" => "2026-10-03",
+      "reason" => "Only older OS testing approved.",
+      "platforms" => %w[sequoiaAppleSilicon tahoeAppleSilicon], "gates" => [],
+    })
     reason = metadata.fetch("releaseDeferral").fetch("reason")
     input = evidence_input(remote: "passed")
     %w[sequoiaAppleSilicon tahoeAppleSilicon].each do |name|

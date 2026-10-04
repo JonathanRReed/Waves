@@ -26,11 +26,13 @@
     "version": "1.7.3",
     "build": 21,
     "approvedOn": "2026-10-03",
-    "reason": "Jonathan authorized publishing Waves 1.7.3 build 21 with older macOS runtime testing deferred until later. Available hardware runs macOS 27.",
+    "reason": "Jonathan authorized publishing Waves 1.7.3 build 21 with older macOS runtime testing and the hands-on Stream Deck and device matrix deferred until later. Available Macs run macOS 27; local runtime, companion protocol, signing and package checks remain required.",
     "platforms": [
       "sequoiaAppleSilicon",
       "tahoeAppleSilicon"
     ],
-    "gates": []
+    "gates": [
+      "remoteElgato"
+    ]
   }
 }

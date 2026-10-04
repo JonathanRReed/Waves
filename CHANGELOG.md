@@ -29,6 +29,10 @@ All notable changes to Waves are documented here. The format follows
 - Render the DMG background at Retina resolution and preserve its Finder layout.
 - Allow local build-only verification without closing or launching the installed app.
 
+### Known limitation
+- If Chrome updates while running, quit and reopen Chrome before changing its
+  audio controls. macOS may keep the old main process in a separate code clone.
+
 ## [1.7.2] - 2026-09-08
 
 ### Fixed
