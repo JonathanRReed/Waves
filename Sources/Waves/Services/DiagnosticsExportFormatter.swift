@@ -341,7 +341,7 @@ enum DiagnosticsExportFormatter {
   private static func formattedVolume(_ volume: Float) -> String {
     guard volume.isFinite else { return "0%" }
     let clamped = max(0, min(1, volume))
-    return "\(Int((clamped * 100).rounded()))%"
+    return "\(Int(clamped * 100))%"
   }
 
   private static func formattedBoost(_ boost: Float) -> String {
