@@ -83,6 +83,88 @@ import WavesAudioCore
   #expect(!ProcessTapAggregatePolicy.autoStartEnabled)
 }
 
+@Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
+func diagnosticsExportFormatterHandlesNonFiniteAppVolumesSafely(_ volume: Float) {
+  var app = AudioApp(
+    id: "app.non-finite",
+    logicalID: "com.example.non-finite",
+    displayName: "Non-finite App",
+    category: .media,
+    compatibility: .supported
+  )
+  // Initialization sanitizes non-finite values, but live public state can still contain them.
+  app.desiredVolume = volume
+  #expect(!app.desiredVolume.isFinite)
+
+  let text = DiagnosticsExportFormatter.format(
+    metadata: DiagnosticsMetadata(
+      bundleInfo: [:],
+      operatingSystemVersion: "Version 27.0"
+    ),
+    captureAuthorization: nil,
+    session: .empty,
+    apps: [app],
+    availableOutputDeviceCount: 0,
+    diagnostics: nil,
+    persistenceFailureCount: 0,
+    lastPersistenceError: nil,
+    shutdownResult: nil,
+    previousShutdown: nil
+  )
+
+  let volumeLines = text.components(separatedBy: "\n").filter {
+    $0.hasPrefix("    Desired volume: ")
+  }
+  #expect(text.contains("Non-finite App"))
+  #expect(volumeLines == ["    Desired volume: 0%"])
+}
+
+@Test(arguments: [
+  (volume: -Float.greatestFiniteMagnitude, expected: "0%"),
+  (volume: Float(-0.1), expected: "0%"),
+  (volume: Float(-0.0), expected: "0%"),
+  (volume: Float(0), expected: "0%"),
+  (volume: Float(0.125), expected: "12%"),
+  (volume: Float(0.555), expected: "55%"),
+  (volume: Float(0.999), expected: "99%"),
+  (volume: Float(1), expected: "100%"),
+  (volume: Float(1.1), expected: "100%"),
+  (volume: Float.greatestFiniteMagnitude, expected: "100%"),
+])
+func diagnosticsExportFormatterPreservesFiniteVolumeClampingAndTruncation(
+  testCase: (volume: Float, expected: String)
+) {
+  var app = AudioApp(
+    id: "app.finite",
+    logicalID: "com.example.finite",
+    displayName: "Finite App",
+    category: .media,
+    compatibility: .supported
+  )
+  app.desiredVolume = testCase.volume
+
+  let text = DiagnosticsExportFormatter.format(
+    metadata: DiagnosticsMetadata(
+      bundleInfo: [:],
+      operatingSystemVersion: "Version 27.0"
+    ),
+    captureAuthorization: nil,
+    session: .empty,
+    apps: [app],
+    availableOutputDeviceCount: 0,
+    diagnostics: nil,
+    persistenceFailureCount: 0,
+    lastPersistenceError: nil,
+    shutdownResult: nil,
+    previousShutdown: nil
+  )
+
+  let volumeLines = text.components(separatedBy: "\n").filter {
+    $0.hasPrefix("    Desired volume: ")
+  }
+  #expect(volumeLines == ["    Desired volume: \(testCase.expected)"])
+}
+
 @Test func captureAuthorizationDiagnosticsFormattingKeepsEveryStructuredStateDistinct() async {
   #expect(DiagnosticsExportFormatter.captureAuthorizationDescription(.authorized) == "authorized")
   #expect(DiagnosticsExportFormatter.captureAuthorizationDescription(.notGranted) == "notGranted")
