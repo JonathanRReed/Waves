@@ -282,7 +282,7 @@ enum DiagnosticsExportFormatter {
       lines.append("  App name [app name]: \(bounded(app.displayName, maximumLength: 256))")
       lines.append("    App identifier [identifier]: \(bounded(app.logicalID, maximumLength: 256))")
       lines.append("    Route state [route state]: \(app.routingState.rawValue)")
-      lines.append("    Desired volume: \(Int(max(0, min(1, app.desiredVolume)) * 100))%")
+      lines.append("    Desired volume: \(formattedVolume(app.desiredVolume))")
       lines.append("    Muted: \(app.isMuted)")
       lines.append("    Boost: \(formattedBoost(app.volumeBoost))x")
       lines.append(
@@ -336,6 +336,12 @@ enum DiagnosticsExportFormatter {
     let singleLine = value.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     guard !singleLine.isEmpty else { return "empty" }
     return String(singleLine.prefix(maximumLength))
+  }
+
+  private static func formattedVolume(_ volume: Float) -> String {
+    guard volume.isFinite else { return "0%" }
+    let clamped = max(0, min(1, volume))
+    return "\(Int((clamped * 100).rounded()))%"
   }
 
   private static func formattedBoost(_ boost: Float) -> String {

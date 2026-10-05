@@ -83,6 +83,45 @@ import WavesAudioCore
   #expect(!ProcessTapAggregatePolicy.autoStartEnabled)
 }
 
+@Test func diagnosticsExportFormatterHandlesNonFiniteAppVolumesSafely() {
+  let nanApp = AudioApp(
+    id: "app.nan",
+    logicalID: "com.example.nan",
+    displayName: "NaN App",
+    desiredVolume: Float.nan,
+    category: .media,
+    compatibility: .supported
+  )
+  let infApp = AudioApp(
+    id: "app.inf",
+    logicalID: "com.example.inf",
+    displayName: "Inf App",
+    desiredVolume: Float.infinity,
+    category: .media,
+    compatibility: .supported
+  )
+
+  let text = DiagnosticsExportFormatter.format(
+    metadata: DiagnosticsMetadata(
+      bundleInfo: [:],
+      operatingSystemVersion: "Version 27.0"
+    ),
+    captureAuthorization: nil,
+    session: .empty,
+    apps: [nanApp, infApp],
+    availableOutputDeviceCount: 0,
+    diagnostics: nil,
+    persistenceFailureCount: 0,
+    lastPersistenceError: nil,
+    shutdownResult: nil,
+    previousShutdown: nil
+  )
+
+  #expect(text.contains("NaN App"))
+  #expect(text.contains("Inf App"))
+  #expect(text.contains("Desired volume: 0%"))
+}
+
 @Test func captureAuthorizationDiagnosticsFormattingKeepsEveryStructuredStateDistinct() async {
   #expect(DiagnosticsExportFormatter.captureAuthorizationDescription(.authorized) == "authorized")
   #expect(DiagnosticsExportFormatter.captureAuthorizationDescription(.notGranted) == "notGranted")
