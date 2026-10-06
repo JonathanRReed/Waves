@@ -88,6 +88,17 @@ import WavesAudioCore
   #expect(ControlCodec.decode(Data(#"{"id":1}"#.utf8)) == nil)
 }
 
+@Test func decodingRejectsNonFiniteVolumeAndDelta() {
+  let nanVolumeJSON = Data(#"{"cmd":"set-volume","app":"com.example.app","volume":.nan}"#.utf8)
+  #expect(ControlCodec.decode(nanVolumeJSON) == nil)
+
+  let infVolumeJSON = Data(#"{"cmd":"set-volume","app":"com.example.app","volume":1e309}"#.utf8)
+  #expect(ControlCodec.decode(infVolumeJSON) == nil)
+
+  let infDeltaJSON = Data(#"{"cmd":"adjust-volume","app":"com.example.app","delta":1e309}"#.utf8)
+  #expect(ControlCodec.decode(infDeltaJSON) == nil)
+}
+
 @Test func boundedRequestIDScanPreservesCorrelationWithoutDecoding() {
   #expect(ControlCodec.requestIDPrefix(Data(#"{"id":42,"cmd":"hello"}"#.utf8)) == 42)
   #expect(ControlCodec.requestIDPrefix(Data(#"{"cmd":"hello","id":-7}"#.utf8)) == -7)

@@ -100,8 +100,30 @@ struct ControlRequest: Codable, Equatable, Sendable {
       )
     }
     app = rawApp
-    volume = try container.decodeIfPresent(Float.self, forKey: .volume)
-    delta = try container.decodeIfPresent(Float.self, forKey: .delta)
+    if let rawVolume = try container.decodeIfPresent(Float.self, forKey: .volume) {
+      guard rawVolume.isFinite else {
+        throw DecodingError.dataCorruptedError(
+          forKey: .volume,
+          in: container,
+          debugDescription: "volume must be a finite number"
+        )
+      }
+      volume = rawVolume
+    } else {
+      volume = nil
+    }
+    if let rawDelta = try container.decodeIfPresent(Float.self, forKey: .delta) {
+      guard rawDelta.isFinite else {
+        throw DecodingError.dataCorruptedError(
+          forKey: .delta,
+          in: container,
+          debugDescription: "delta must be a finite number"
+        )
+      }
+      delta = rawDelta
+    } else {
+      delta = nil
+    }
     muted = try container.decodeIfPresent(Bool.self, forKey: .muted)
     let rawClient = try container.decodeIfPresent(String.self, forKey: .client)
     client = rawClient.map { String($0.prefix(Self.maximumClientNameLength)) }
