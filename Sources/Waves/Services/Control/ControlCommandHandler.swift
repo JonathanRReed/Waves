@@ -147,7 +147,11 @@ struct ControlCommandHandler {
       }
       // Waves owns the clamp so a fast dial sweep cannot overshoot, and the
       // resulting value comes back so the client never has to read first.
-      let clamped = max(0, min(1, app.desiredVolume + delta))
+      let newVolume = app.desiredVolume + delta
+      guard newVolume.isFinite else {
+        return .failure(id: request.id, .missingParameter)
+      }
+      let clamped = max(0, min(1, newVolume))
       store.setDesiredVolume(clamped, for: app)
       store.commitDesiredVolume(for: app)
       response.volume = clamped
