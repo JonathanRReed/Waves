@@ -91,6 +91,7 @@ import WavesAudioCore
 @Test func boundedRequestIDScanPreservesCorrelationWithoutDecoding() {
   #expect(ControlCodec.requestIDPrefix(Data(#"{"id":42,"cmd":"hello"}"#.utf8)) == 42)
   #expect(ControlCodec.requestIDPrefix(Data(#"{"cmd":"hello","id":-7}"#.utf8)) == -7)
+  #expect(ControlCodec.requestIDPrefix(Data(#"{"app":"id","id":42}"#.utf8)) == 42)
   #expect(ControlCodec.requestIDPrefix(Data(#"{"id":"42","cmd":"hello"}"#.utf8)) == nil)
   #expect(ControlCodec.requestIDPrefix(Data(#"{"cmd":"hello"}"#.utf8)) == nil)
 }
