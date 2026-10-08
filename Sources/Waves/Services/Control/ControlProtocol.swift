@@ -296,6 +296,8 @@ struct ControlCodec {
 
       guard depth == 1, !hasEscape, key == [0x69, 0x64] else { continue }
       while index < bytes.count, isWhitespace(bytes[index]) { index += 1 }
+      // Security/Correctness: If the string "id" was a value rather than a key (not followed by ':'),
+      // or if the value after key "id" is non-numeric, continue scanning to find the true "id" key.
       guard index < bytes.count, bytes[index] == 0x3A else { continue }
       index += 1
       while index < bytes.count, isWhitespace(bytes[index]) { index += 1 }
@@ -306,15 +308,17 @@ struct ControlCodec {
       while index < bytes.count, bytes[index] >= 0x30, bytes[index] <= 0x39 {
         index += 1
       }
-      guard index > digitStart else { return nil }
+      guard index > digitStart else { continue }
       if index < bytes.count {
         let terminator = bytes[index]
         guard isWhitespace(terminator) || terminator == 0x2C || terminator == 0x7D else {
-          return nil
+          continue
         }
       }
 
-      return Int(String(decoding: bytes[numberStart..<index], as: UTF8.self))
+      if let parsed = Int(String(decoding: bytes[numberStart..<index], as: UTF8.self)) {
+        return parsed
+      }
     }
 
     return nil
