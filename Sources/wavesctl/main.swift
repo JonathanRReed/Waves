@@ -21,7 +21,9 @@ private func describe(_ response: [String: JSONValue]) {
 }
 
 private func percent(_ value: JSONValue?) -> Int {
-  Int(((value?.numberValue ?? 0) * 100).rounded())
+  guard let number = value?.numberValue, number.isFinite else { return 0 }
+  let clamped = max(0.0, min(1.0, number))
+  return Int((clamped * 100).rounded())
 }
 
 /// Every line that carries daemon-supplied text goes through the sanitizer

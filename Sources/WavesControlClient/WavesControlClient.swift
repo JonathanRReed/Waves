@@ -251,6 +251,10 @@ public struct DarwinWavesControlSocketSystem: WavesControlSocketSystem {
   }
 
   public func setTimeout(_ fd: Int32, option: Int32, seconds: TimeInterval) throws {
+    let name = option == SO_RCVTIMEO ? "SO_RCVTIMEO" : "SO_SNDTIMEO"
+    guard seconds.isFinite, seconds >= 0, seconds < TimeInterval(Int32.max) else {
+      throw WavesCTLTransportError.socketConfigurationFailed(name)
+    }
     var timeout = timeval(
       tv_sec: Int(seconds.rounded(.down)),
       tv_usec: Int32((seconds.truncatingRemainder(dividingBy: 1) * 1_000_000).rounded(.down))
@@ -264,7 +268,6 @@ public struct DarwinWavesControlSocketSystem: WavesControlSocketSystem {
         socklen_t(MemoryLayout<timeval>.size)
       ) == 0
     else {
-      let name = option == SO_RCVTIMEO ? "SO_RCVTIMEO" : "SO_SNDTIMEO"
       throw WavesCTLTransportError.socketConfigurationFailed(name)
     }
   }

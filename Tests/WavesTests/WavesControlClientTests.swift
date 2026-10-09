@@ -138,6 +138,16 @@ private final class WavesCTLBuildDirectoryLocator {}
   #expect(system.didConnectAfterOptions)
 }
 
+@Test(arguments: [
+  Double.nan, Double.infinity, -Double.infinity, -1.0, Double(Int32.max), Double(Int.max)
+])
+func darwinWavesControlSocketSystemRejectsInvalidTimeouts(invalidSeconds: TimeInterval) {
+  let system = DarwinWavesControlSocketSystem()
+  #expect(throws: WavesCTLTransportError.self) {
+    try system.setTimeout(1, option: SO_RCVTIMEO, seconds: invalidSeconds)
+  }
+}
+
 @Test func wavesCTLReportsWriteAndReadTimeoutsDistinctly() throws {
   let writeSystem = ScriptedControlClientSystem(writeResults: [.failed(EAGAIN)])
   let writer = try WavesControlSocketClient(path: "/tmp/waves.sock", system: writeSystem)
