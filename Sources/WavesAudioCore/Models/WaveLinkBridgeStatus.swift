@@ -39,7 +39,9 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
       self.name = name
       self.isSoftware = isSoftware
       self.appIdentifiers = appIdentifiers
-      self.level = level
+      // Guard against non-finite floats (NaN, Infinity) before clamping
+      let safeLevel = level.isFinite ? level : 1.0
+      self.level = max(0.0, min(1.0, safeLevel))
       self.isMuted = isMuted
       self.mixCount = mixCount
       self.isRelocationReady = isRelocationReady

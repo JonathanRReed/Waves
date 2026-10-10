@@ -154,7 +154,9 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     self.id = id
     self.name = name
     self.type = type
-    self.level = level
+    // Guard against non-finite floats (NaN, Infinity) before clamping
+    let safeLevel = level.isFinite ? level : 1.0
+    self.level = max(0.0, min(1.0, safeLevel))
     self.isMuted = isMuted
     self.apps = apps
     self.mixes = mixes
@@ -165,7 +167,10 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     id = try container.decode(String.self, forKey: .id)
     name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
     type = try container.decodeIfPresent(String.self, forKey: .type) ?? ""
-    level = try container.decodeIfPresent(Float.self, forKey: .level) ?? 1
+    // Guard against non-finite floats (NaN, Infinity) before clamping on decode
+    let rawLevel = try container.decodeIfPresent(Float.self, forKey: .level) ?? 1
+    let safeLevel = rawLevel.isFinite ? rawLevel : 1.0
+    level = max(0.0, min(1.0, safeLevel))
     isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
     // Hardware channels omit `apps` entirely; software channels list them.
     apps = try container.decodeIfPresent([WaveLinkChannelApp].self, forKey: .apps) ?? []
