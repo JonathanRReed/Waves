@@ -80,8 +80,9 @@ struct ControlRequest: Codable, Equatable, Sendable {
     self.id = id
     self.cmd = cmd
     self.app = app
-    self.volume = volume
-    self.delta = delta
+    // Guard against non-finite floating point values (NaN, Infinity)
+    self.volume = volume.flatMap { $0.isFinite ? $0 : nil }
+    self.delta = delta.flatMap { $0.isFinite ? $0 : nil }
     self.muted = muted
     self.client = client.map { String($0.prefix(Self.maximumClientNameLength)) }
     self.protocolVersion = protocolVersion
@@ -100,8 +101,11 @@ struct ControlRequest: Codable, Equatable, Sendable {
       )
     }
     app = rawApp
-    volume = try container.decodeIfPresent(Float.self, forKey: .volume)
-    delta = try container.decodeIfPresent(Float.self, forKey: .delta)
+    // Guard against non-finite floating point values (NaN, Infinity) on decode
+    let rawVolume = try container.decodeIfPresent(Float.self, forKey: .volume)
+    volume = rawVolume.flatMap { $0.isFinite ? $0 : nil }
+    let rawDelta = try container.decodeIfPresent(Float.self, forKey: .delta)
+    delta = rawDelta.flatMap { $0.isFinite ? $0 : nil }
     muted = try container.decodeIfPresent(Bool.self, forKey: .muted)
     let rawClient = try container.decodeIfPresent(String.self, forKey: .client)
     client = rawClient.map { String($0.prefix(Self.maximumClientNameLength)) }
