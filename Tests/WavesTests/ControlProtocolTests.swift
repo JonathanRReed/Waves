@@ -254,6 +254,38 @@ func controlRequestDecodeSanitizesNonFiniteFloatStrings(_ value: String) throws 
   #expect(granted == ControlRateLimiter.burst)
 }
 
+@Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
+func rateLimiterRejectsNonFiniteTimeInputsWithoutCorruptingState(nonFiniteNow: Double) {
+  var limiter = ControlRateLimiter(now: 0)
+  #expect(limiter.allow(now: nonFiniteNow) == false)
+  // Subsequent valid calls should still work properly and not remain corrupted.
+  #expect(limiter.allow(now: 1.0) == true)
+
+  var limiterWithBadInit = ControlRateLimiter(now: nonFiniteNow)
+  #expect(limiterWithBadInit.allow(now: nonFiniteNow) == false)
+  #expect(limiterWithBadInit.allow(now: 1.0) == true)
+}
+
+@Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
+func inboundAdmissionRejectsNonFiniteTimeInputs(nonFiniteNow: Double) {
+  var admission = ControlInboundAdmission(now: 0)
+  let frame = Data(#"{"cmd":"hello"}"#.utf8)
+  let decision = admission.classify(frame, now: nonFiniteNow)
+  if case .failure(_, let error, _) = decision {
+    #expect(error == .rateLimited)
+  } else {
+    Issue.record("Expected rateLimited failure for non-finite timestamp")
+  }
+
+  // Next valid call succeeds.
+  let validDecision = admission.classify(frame, now: 1.0)
+  if case .request(let req, _) = validDecision {
+    #expect(req.cmd == .hello)
+  } else {
+    Issue.record("Expected successful request admission after valid timestamp")
+  }
+}
+
 // MARK: - State pushes
 
 @MainActor

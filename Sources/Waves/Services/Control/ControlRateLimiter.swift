@@ -21,16 +21,19 @@ struct ControlRateLimiter {
 
   init(now: TimeInterval) {
     tokens = Double(Self.burst)
-    lastRefill = now
+    lastRefill = now.isFinite ? now : 0
   }
 
   /// Consumes a token if one is available. Returns false when the caller should
   /// be told `.rateLimited`.
   mutating func allow(now: TimeInterval) -> Bool {
+    guard now.isFinite else { return false }
     let elapsed = max(0, now - lastRefill)
     lastRefill = now
-    tokens = min(Double(Self.burst), tokens + elapsed * Self.refillPerSecond)
-    guard tokens >= 1 else { return false }
+    if elapsed.isFinite {
+      tokens = min(Double(Self.burst), tokens + elapsed * Self.refillPerSecond)
+    }
+    guard tokens.isFinite, tokens >= 1 else { return false }
     tokens -= 1
     return true
   }
