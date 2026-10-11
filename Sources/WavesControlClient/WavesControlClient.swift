@@ -252,13 +252,7 @@ public struct DarwinWavesControlSocketSystem: WavesControlSocketSystem {
 
   public func setTimeout(_ fd: Int32, option: Int32, seconds: TimeInterval) throws {
     let name = option == SO_RCVTIMEO ? "SO_RCVTIMEO" : "SO_SNDTIMEO"
-    guard seconds.isFinite, seconds >= 0, seconds < TimeInterval(Int32.max) else {
-      throw WavesCTLTransportError.socketConfigurationFailed(name)
-    }
-    var timeout = timeval(
-      tv_sec: Int(seconds.rounded(.down)),
-      tv_usec: Int32((seconds.truncatingRemainder(dividingBy: 1) * 1_000_000).rounded(.down))
-    )
+    var timeout = try Self.timeoutValue(option: option, seconds: seconds)
     guard
       setsockopt(
         fd,
@@ -270,6 +264,17 @@ public struct DarwinWavesControlSocketSystem: WavesControlSocketSystem {
     else {
       throw WavesCTLTransportError.socketConfigurationFailed(name)
     }
+  }
+
+  static func timeoutValue(option: Int32, seconds: TimeInterval) throws -> timeval {
+    let name = option == SO_RCVTIMEO ? "SO_RCVTIMEO" : "SO_SNDTIMEO"
+    guard seconds.isFinite, seconds >= 0, seconds < TimeInterval(Int32.max) else {
+      throw WavesCTLTransportError.socketConfigurationFailed(name)
+    }
+    return timeval(
+      tv_sec: Int(seconds.rounded(.down)),
+      tv_usec: Int32((seconds.truncatingRemainder(dividingBy: 1) * 1_000_000).rounded(.down))
+    )
   }
 
   public func connect(_ fd: Int32, path: String) throws {
