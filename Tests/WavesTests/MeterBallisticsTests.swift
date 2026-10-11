@@ -49,6 +49,17 @@ import WavesAudioCore
   #expect(abs(Double(f) - d) < 1e-4)
 }
 
+@Test func meterNormalizeNonFiniteInputsReturnZero() {
+  #expect(MeterBallistics.normalize(Double.nan) == 0)
+  #expect(MeterBallistics.normalize(Double.infinity) == 0)
+  #expect(MeterBallistics.normalize(-Double.infinity) == 0)
+  #expect(MeterBallistics.normalize(Float.nan) == 0)
+  #expect(MeterBallistics.normalize(Float.infinity) == 0)
+  #expect(MeterBallistics.normalize(-Float.infinity) == 0)
+  #expect(MeterBallistics.normalize(0.5, floorDB: Double.nan) == 0)
+  #expect(MeterBallistics.normalize(0.5, floorDB: Double.infinity) == 0)
+}
+
 // MARK: - Peak-hold fall rate
 
 @Test func peakFallRateMatchesDBPerSecondOverFloor() {
