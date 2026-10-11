@@ -15,15 +15,18 @@ private struct ControlAdmissionTokenBucket {
     self.capacity = Double(max(0, capacity))
     self.refillPerSecond = max(0, refillPerSecond)
     tokens = Double(max(0, capacity))
-    lastRefill = now
+    lastRefill = now.isFinite ? now : 0
   }
 
   mutating func allow(cost: Int, now: TimeInterval) -> Bool {
+    guard now.isFinite else { return false }
     let elapsed = max(0, now - lastRefill)
     lastRefill = now
-    tokens = min(capacity, tokens + elapsed * refillPerSecond)
+    if elapsed.isFinite {
+      tokens = min(capacity, tokens + elapsed * refillPerSecond)
+    }
     let cost = Double(max(0, cost))
-    guard tokens >= cost else { return false }
+    guard tokens.isFinite, tokens >= cost else { return false }
     tokens -= cost
     return true
   }

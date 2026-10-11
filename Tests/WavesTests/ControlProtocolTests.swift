@@ -254,6 +254,244 @@ func controlRequestDecodeSanitizesNonFiniteFloatStrings(_ value: String) throws 
   #expect(granted == ControlRateLimiter.burst)
 }
 
+@Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
+func rateLimiterRejectsNonFiniteTimeInputsWithoutCorruptingState(nonFiniteNow: Double) {
+  var limiter = ControlRateLimiter(now: 0)
+
+  // 1. Drain the bucket completely at t = 0
+  for _ in 0..<ControlRateLimiter.burst {
+    #expect(limiter.allow(now: 0) == true)
+  }
+  #expect(limiter.allow(now: 0) == false)
+
+  // 2. Supply a non-finite timestamp
+  #expect(limiter.allow(now: nonFiniteNow) == false)
+
+  // 3. Advance to t = 1.0 and verify exact refilled count
+  var refilledCount = 0
+  for _ in 0..<(Int(ControlRateLimiter.refillPerSecond) + 10) {
+    if limiter.allow(now: 1.0) {
+      refilledCount += 1
+    } else {
+      break
+    }
+  }
+  #expect(refilledCount == Int(ControlRateLimiter.refillPerSecond))
+
+  // 4. Test initialization with non-finite timestamp (drain & exact refill check)
+  var limiterWithBadInit = ControlRateLimiter(now: nonFiniteNow)
+  for _ in 0..<ControlRateLimiter.burst {
+    #expect(limiterWithBadInit.allow(now: 0) == true)
+  }
+  #expect(limiterWithBadInit.allow(now: 0) == false)
+  #expect(limiterWithBadInit.allow(now: nonFiniteNow) == false)
+
+  var badInitRefilledCount = 0
+  for _ in 0..<(Int(ControlRateLimiter.refillPerSecond) + 10) {
+    if limiterWithBadInit.allow(now: 1.0) {
+      badInitRefilledCount += 1
+    } else {
+      break
+    }
+  }
+  #expect(badInitRefilledCount == Int(ControlRateLimiter.refillPerSecond))
+}
+
+@Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
+func inboundAdmissionFrameBudgetRejectsNonFiniteTimeInputsAndRecovers(nonFiniteNow: Double) {
+  var admission = ControlInboundAdmission(now: 0)
+  let frame = Data(#"{"cmd":"hello"}"#.utf8)
+
+  // 1. Drain frame budget at t = 0
+  for _ in 0..<ControlRateLimiter.burst {
+    let decision = admission.classify(frame, now: 0)
+    guard case .request = decision else {
+      Issue.record("Expected request admission during burst, got \(decision)")
+      return
+    }
+  }
+
+  // Further request at t = 0 is rate limited
+  let exhaustedDecision = admission.classify(frame, now: 0)
+  guard case .failure(_, let error, _) = exhaustedDecision else {
+    Issue.record("Expected rateLimited error at t=0, got \(exhaustedDecision)")
+    return
+  }
+  #expect(error == .rateLimited)
+
+  // 2. Supply non-finite timestamp
+  let nonFiniteDecision = admission.classify(frame, now: nonFiniteNow)
+  guard case .failure(_, let nonFiniteError, _) = nonFiniteDecision else {
+    Issue.record("Expected rateLimited failure for non-finite timestamp, got \(nonFiniteDecision)")
+    return
+  }
+  #expect(nonFiniteError == .rateLimited)
+
+  // 3. Advance to t = 1.0 and verify exact refill count
+  var refilledFrames = 0
+  for _ in 0..<(Int(ControlRateLimiter.refillPerSecond) + 10) {
+    let decision = admission.classify(frame, now: 1.0)
+    if case .request = decision {
+      refilledFrames += 1
+    } else if case .failure(_, let err, _) = decision {
+      #expect(err == .rateLimited)
+      break
+    } else {
+      Issue.record("Unexpected decision: \(decision)")
+      break
+    }
+  }
+  #expect(refilledFrames == Int(ControlRateLimiter.refillPerSecond))
+
+  // 4. Also test admission initialized with non-finite timestamp (drain & exact refill)
+  var badInitAdmission = ControlInboundAdmission(now: nonFiniteNow)
+  for _ in 0..<ControlRateLimiter.burst {
+    let decision = badInitAdmission.classify(frame, now: 0)
+    guard case .request = decision else {
+      Issue.record("Expected request admission for bad init during burst, got \(decision)")
+      return
+    }
+  }
+  let badInitExhausted = badInitAdmission.classify(frame, now: 0)
+  guard case .failure(_, let badInitError, _) = badInitExhausted else {
+    Issue.record("Expected rateLimited error for bad init at t=0, got \(badInitExhausted)")
+    return
+  }
+  #expect(badInitError == .rateLimited)
+
+  let badInitNonFinite = badInitAdmission.classify(frame, now: nonFiniteNow)
+  guard case .failure(_, let badInitNFError, _) = badInitNonFinite else {
+    Issue.record("Expected rateLimited error for bad init non-finite now, got \(badInitNonFinite)")
+    return
+  }
+  #expect(badInitNFError == .rateLimited)
+
+  var badInitRefilledFrames = 0
+  for _ in 0..<(Int(ControlRateLimiter.refillPerSecond) + 10) {
+    let decision = badInitAdmission.classify(frame, now: 1.0)
+    if case .request = decision {
+      badInitRefilledFrames += 1
+    } else if case .failure(_, let err, _) = decision {
+      #expect(err == .rateLimited)
+      break
+    } else {
+      Issue.record("Unexpected decision: \(decision)")
+      break
+    }
+  }
+  #expect(badInitRefilledFrames == Int(ControlRateLimiter.refillPerSecond))
+}
+
+@Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
+func inboundAdmissionByteBudgetRejectsNonFiniteTimeInputsAndRecovers(nonFiniteNow: Double) {
+  // Use a small, deterministic custom byte budget below the 64 KB line limit
+  let byteBurst = 1000
+  let byteRefill = 500.0
+  let basePayload = "{\"cmd\":\"hello\",\"client\":\"\"}"
+  let baseCount = Data(basePayload.utf8).count
+  let hundredBytePayload = "{\"cmd\":\"hello\",\"client\":\"" + String(repeating: "a", count: 100 - baseCount) + "\"}"
+  let hundredByteFrame = Data(hundredBytePayload.utf8)
+  #expect(hundredByteFrame.count == 100)
+
+  // 1. Normal initialization test
+  var admission = ControlInboundAdmission(
+    frameBurst: 100,
+    frameRefillPerSecond: 100.0,
+    byteBurst: byteBurst,
+    byteRefillPerSecond: byteRefill,
+    maximumAbuseStrikes: 100,
+    now: 0
+  )
+
+  // Drain byte bucket at t = 0: 1000 byte capacity / 100 bytes per frame = 10 frames
+  for _ in 0..<10 {
+    let decision = admission.classify(hundredByteFrame, now: 0)
+    guard case .request = decision else {
+      Issue.record("Expected byte burst request admission, got \(decision)")
+      return
+    }
+  }
+
+  // 11th frame exceeds byte budget at t = 0
+  let byteExhausted = admission.classify(hundredByteFrame, now: 0)
+  guard case .failure(_, let byteError, _) = byteExhausted else {
+    Issue.record("Expected rateLimited error when byte budget exhausted, got \(byteExhausted)")
+    return
+  }
+  #expect(byteError == .rateLimited)
+
+  // Non-finite timestamp rejected
+  let nonFiniteDecision = admission.classify(hundredByteFrame, now: nonFiniteNow)
+  guard case .failure(_, let nonFiniteError, _) = nonFiniteDecision else {
+    Issue.record("Expected rateLimited error for non-finite timestamp, got \(nonFiniteDecision)")
+    return
+  }
+  #expect(nonFiniteError == .rateLimited)
+
+  // Advance to t = 1.0: 500 bytes refilled / 100 bytes per frame = exactly 5 frames admitted
+  var refilledByteFrames = 0
+  for _ in 0..<10 {
+    let decision = admission.classify(hundredByteFrame, now: 1.0)
+    if case .request = decision {
+      refilledByteFrames += 1
+    } else if case .failure(_, let err, _) = decision {
+      #expect(err == .rateLimited)
+      break
+    } else {
+      Issue.record("Unexpected decision: \(decision)")
+      break
+    }
+  }
+  #expect(refilledByteFrames == 5)
+
+  // 2. Bad initialization test
+  var badInitAdmission = ControlInboundAdmission(
+    frameBurst: 100,
+    frameRefillPerSecond: 100.0,
+    byteBurst: byteBurst,
+    byteRefillPerSecond: byteRefill,
+    maximumAbuseStrikes: 100,
+    now: nonFiniteNow
+  )
+
+  for _ in 0..<10 {
+    let decision = badInitAdmission.classify(hundredByteFrame, now: 0)
+    guard case .request = decision else {
+      Issue.record("Expected byte burst request admission for bad init, got \(decision)")
+      return
+    }
+  }
+
+  let badInitByteExhausted = badInitAdmission.classify(hundredByteFrame, now: 0)
+  guard case .failure(_, let badInitByteErr, _) = badInitByteExhausted else {
+    Issue.record("Expected rateLimited error for bad init byte budget exhausted, got \(badInitByteExhausted)")
+    return
+  }
+  #expect(badInitByteErr == .rateLimited)
+
+  let badInitNonFinite = badInitAdmission.classify(hundredByteFrame, now: nonFiniteNow)
+  guard case .failure(_, let badInitNFErr, _) = badInitNonFinite else {
+    Issue.record("Expected rateLimited error for bad init non-finite timestamp, got \(badInitNonFinite)")
+    return
+  }
+  #expect(badInitNFErr == .rateLimited)
+
+  var badInitRefilledByteFrames = 0
+  for _ in 0..<10 {
+    let decision = badInitAdmission.classify(hundredByteFrame, now: 1.0)
+    if case .request = decision {
+      badInitRefilledByteFrames += 1
+    } else if case .failure(_, let err, _) = decision {
+      #expect(err == .rateLimited)
+      break
+    } else {
+      Issue.record("Unexpected decision: \(decision)")
+      break
+    }
+  }
+  #expect(badInitRefilledByteFrames == 5)
+}
+
 // MARK: - State pushes
 
 @MainActor
