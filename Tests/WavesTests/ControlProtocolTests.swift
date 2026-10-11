@@ -387,7 +387,9 @@ func inboundAdmissionByteBudgetRejectsNonFiniteTimeInputsAndRecovers(nonFiniteNo
   // Use a small, deterministic custom byte budget below the 64 KB line limit
   let byteBurst = 1000
   let byteRefill = 500.0
-  let hundredBytePayload = "{\"cmd\":\"hello\",\"client\":\"" + String(repeating: "a", count: 77) + "\"}"
+  let basePayload = "{\"cmd\":\"hello\",\"client\":\"\"}"
+  let baseCount = Data(basePayload.utf8).count
+  let hundredBytePayload = "{\"cmd\":\"hello\",\"client\":\"" + String(repeating: "a", count: 100 - baseCount) + "\"}"
   let hundredByteFrame = Data(hundredBytePayload.utf8)
   #expect(hundredByteFrame.count == 100)
 
