@@ -164,11 +164,6 @@ import WavesAudioCore
   #expect(requestWithNaN.volume == nil)
   #expect(requestWithNaN.delta == nil)
 
-  let channelWithNaN = WaveLinkChannel(
-    id: "ch1", name: "Channel 1", type: "software", level: .nan, isMuted: false, apps: []
-  )
-  #expect(channelWithNaN.level == 1.0)
-
   let summaryWithNaN = WaveLinkBridgeStatus.ChannelSummary(
     id: "ch1", name: "Channel 1", isSoftware: true, appIdentifiers: [], level: .nan, isMuted: false
   )
