@@ -257,32 +257,114 @@ func controlRequestDecodeSanitizesNonFiniteFloatStrings(_ value: String) throws 
 @Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
 func rateLimiterRejectsNonFiniteTimeInputsWithoutCorruptingState(nonFiniteNow: Double) {
   var limiter = ControlRateLimiter(now: 0)
-  #expect(limiter.allow(now: nonFiniteNow) == false)
-  // Subsequent valid calls should still work properly and not remain corrupted.
-  #expect(limiter.allow(now: 1.0) == true)
 
+  // 1. Drain the bucket completely at t = 0
+  for _ in 0..<ControlRateLimiter.burst {
+    #expect(limiter.allow(now: 0) == true)
+  }
+  #expect(limiter.allow(now: 0) == false)
+
+  // 2. Supply a non-finite timestamp
+  #expect(limiter.allow(now: nonFiniteNow) == false)
+
+  // 3. Advance to t = 1.0 and verify exact refilled count
+  var refilledCount = 0
+  while limiter.allow(now: 1.0) {
+    refilledCount += 1
+  }
+  #expect(refilledCount >= Int(ControlRateLimiter.refillPerSecond) - 1)
+  #expect(refilledCount <= Int(ControlRateLimiter.refillPerSecond) + 1)
+
+  // 4. Test initialization with non-finite timestamp
   var limiterWithBadInit = ControlRateLimiter(now: nonFiniteNow)
+  for _ in 0..<ControlRateLimiter.burst {
+    #expect(limiterWithBadInit.allow(now: 0) == true)
+  }
   #expect(limiterWithBadInit.allow(now: nonFiniteNow) == false)
-  #expect(limiterWithBadInit.allow(now: 1.0) == true)
+
+  var badInitRefilledCount = 0
+  while limiterWithBadInit.allow(now: 1.0) {
+    badInitRefilledCount += 1
+  }
+  #expect(badInitRefilledCount >= Int(ControlRateLimiter.refillPerSecond) - 1)
 }
 
 @Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
-func inboundAdmissionRejectsNonFiniteTimeInputs(nonFiniteNow: Double) {
+func inboundAdmissionFrameBudgetRejectsNonFiniteTimeInputsAndRecovers(nonFiniteNow: Double) {
   var admission = ControlInboundAdmission(now: 0)
   let frame = Data(#"{"cmd":"hello"}"#.utf8)
-  let decision = admission.classify(frame, now: nonFiniteNow)
-  if case .failure(_, let error, _) = decision {
+
+  // 1. Drain frame budget at t = 0
+  for _ in 0..<ControlRateLimiter.burst {
+    let decision = admission.classify(frame, now: 0)
+    if case .request = decision {} else {
+      Issue.record("Expected request admission during burst")
+    }
+  }
+
+  // Further request at t = 0 is rate limited
+  if case .failure(_, let error, _) = admission.classify(frame, now: 0) {
+    #expect(error == .rateLimited)
+  } else {
+    Issue.record("Expected rateLimited error")
+  }
+
+  // 2. Supply non-finite timestamp
+  if case .failure(_, let error, _) = admission.classify(frame, now: nonFiniteNow) {
     #expect(error == .rateLimited)
   } else {
     Issue.record("Expected rateLimited failure for non-finite timestamp")
   }
 
-  // Next valid call succeeds.
-  let validDecision = admission.classify(frame, now: 1.0)
-  if case .request(let req, _) = validDecision {
+  // 3. Advance to t = 1.0 and verify refill count
+  var refilledFrames = 0
+  while case .request = admission.classify(frame, now: 1.0) {
+    refilledFrames += 1
+  }
+  #expect(refilledFrames >= Int(ControlRateLimiter.refillPerSecond) - 1)
+
+  // 4. Also test admission initialized with non-finite timestamp
+  var badInitAdmission = ControlInboundAdmission(now: nonFiniteNow)
+  if case .failure(_, let error, _) = badInitAdmission.classify(frame, now: nonFiniteNow) {
+    #expect(error == .rateLimited)
+  }
+  if case .request = badInitAdmission.classify(frame, now: 1.0) {
+    // Succeeded after moving to valid timestamp
+  } else {
+    Issue.record("Expected request admission after valid timestamp")
+  }
+}
+
+@Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
+func inboundAdmissionByteBudgetRejectsNonFiniteTimeInputsAndRecovers(nonFiniteNow: Double) {
+  var admission = ControlInboundAdmission(now: 0)
+  // Large frame (e.g. 100 KB) to drain byte budget
+  let largeFramePayload = "{\"cmd\":\"hello\",\"client\":\"" + String(repeating: "a", count: 100_000) + "\"}"
+  let largeFrame = Data(largeFramePayload.utf8)
+
+  // Drain byte bucket at t = 0
+  let byteBurst = ControlInboundAdmission.byteBurst
+  let framesToDrain = byteBurst / largeFrame.count
+  for _ in 0..<framesToDrain {
+    _ = admission.classify(largeFrame, now: 0)
+  }
+
+  // Exceed byte budget at t = 0
+  if case .failure(_, let error, _) = admission.classify(largeFrame, now: 0) {
+    #expect(error == .rateLimited)
+  }
+
+  // Supply non-finite timestamp
+  if case .failure(_, let error, _) = admission.classify(largeFrame, now: nonFiniteNow) {
+    #expect(error == .rateLimited)
+  }
+
+  // Advance time by 2 seconds so byte budget refills (128 KB/s * 2s = 256 KB)
+  let refilledDecision = admission.classify(largeFrame, now: 2.0)
+  if case .request(let req, _) = refilledDecision {
     #expect(req.cmd == .hello)
   } else {
-    Issue.record("Expected successful request admission after valid timestamp")
+    Issue.record("Expected byte budget to refill and admit frame at t = 2.0")
   }
 }
 
