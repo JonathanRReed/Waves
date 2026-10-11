@@ -138,6 +138,73 @@ private final class WavesCTLBuildDirectoryLocator {}
   #expect(system.didConnectAfterOptions)
 }
 
+@Test(arguments: [
+  Double.nan, Double.infinity, -Double.infinity, -1.0, -Double.leastNonzeroMagnitude,
+  Double(Int.max), Double.greatestFiniteMagnitude,
+])
+func darwinWavesControlSocketTimeoutConversionRejectsInvalidValues(invalidSeconds: TimeInterval) {
+  #expect(throws: WavesCTLTransportError.socketConfigurationFailed("SO_RCVTIMEO")) {
+    _ = try DarwinWavesControlSocketSystem.timeoutValue(option: SO_RCVTIMEO, seconds: invalidSeconds)
+  }
+}
+
+@Test(arguments: [SO_RCVTIMEO, SO_SNDTIMEO])
+func darwinWavesControlSocketTimeoutConversionRejectsInt32UpperBound(option: Int32) {
+  let name = option == SO_RCVTIMEO ? "SO_RCVTIMEO" : "SO_SNDTIMEO"
+  // Check conversion directly: a failing setsockopt on a non-socket must not
+  // make this pass when the upper-bound guard is removed.
+  #expect(throws: WavesCTLTransportError.socketConfigurationFailed(name)) {
+    _ = try DarwinWavesControlSocketSystem.timeoutValue(option: option, seconds: Double(Int32.max))
+  }
+}
+
+@Test(arguments: [
+  (seconds: 0.0, wholeSeconds: 0, microseconds: Int32(0)),
+  (seconds: 0.125, wholeSeconds: 0, microseconds: Int32(125_000)),
+  (seconds: 5.25, wholeSeconds: 5, microseconds: Int32(250_000)),
+  (seconds: Double(Int32.max).nextDown, wholeSeconds: Int(Int32.max) - 1, microseconds: Int32(999_999)),
+])
+func darwinWavesControlSocketTimeoutConversionPreservesSupportedValues(
+  testCase: (seconds: TimeInterval, wholeSeconds: Int, microseconds: Int32)
+) throws {
+  let timeout = try DarwinWavesControlSocketSystem.timeoutValue(option: SO_RCVTIMEO, seconds: testCase.seconds)
+  #expect(timeout.tv_sec == testCase.wholeSeconds)
+  #expect(timeout.tv_usec == testCase.microseconds)
+}
+
+@Test(arguments: [SO_RCVTIMEO, SO_SNDTIMEO])
+func darwinWavesControlSocketSystemSetsValidTimeoutOnRealSocket(option: Int32) throws {
+  let system = DarwinWavesControlSocketSystem()
+  let fd = try system.openSocket()
+  defer { system.close(fd) }
+  try system.setTimeout(fd, option: option, seconds: 0.125)
+  let name = option == SO_RCVTIMEO ? "SO_RCVTIMEO" : "SO_SNDTIMEO"
+  #expect(throws: WavesCTLTransportError.socketConfigurationFailed(name)) {
+    try system.setTimeout(fd, option: option, seconds: Double(Int32.max))
+  }
+}
+
+@Test(arguments: [
+  (value: Double.nan, expected: 0), (value: Double.infinity, expected: 0),
+  (value: -Double.infinity, expected: 0), (value: -Double.greatestFiniteMagnitude, expected: 0),
+  (value: Double.greatestFiniteMagnitude, expected: 100), (value: -1e20, expected: 0),
+  (value: 1e20, expected: 100), (value: -0.1, expected: 0), (value: 0.0, expected: 0),
+  (value: 0.0049, expected: 0), (value: 0.005, expected: 1), (value: 0.9949, expected: 99),
+  (value: 0.995, expected: 100), (value: 0.35, expected: 35), (value: 1.0, expected: 100),
+  (value: 1.1, expected: 100),
+])
+func wavesCTLPercentageFormattingStaysBounded(testCase: (value: Double, expected: Int)) {
+  #expect(WavesCTLDisplay.percentage(.number(testCase.value)) == testCase.expected)
+}
+
+@Test(arguments: [
+  nil, JSONValue.null, JSONValue.string("NaN"), JSONValue.string("0.5"), JSONValue.bool(true),
+  JSONValue.array([]), JSONValue.object([:]),
+])
+func wavesCTLAbsentOrNonnumericPercentageDisplaysZero(_ value: JSONValue?) {
+  #expect(WavesCTLDisplay.percentage(value) == 0)
+}
+
 @Test func wavesCTLReportsWriteAndReadTimeoutsDistinctly() throws {
   let writeSystem = ScriptedControlClientSystem(writeResults: [.failed(EAGAIN)])
   let writer = try WavesControlSocketClient(path: "/tmp/waves.sock", system: writeSystem)

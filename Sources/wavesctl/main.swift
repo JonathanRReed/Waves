@@ -20,10 +20,6 @@ private func describe(_ response: [String: JSONValue]) {
         + (response["message"]?.stringValue ?? "")))
 }
 
-private func percent(_ value: JSONValue?) -> Int {
-  Int(((value?.numberValue ?? 0) * 100).rounded())
-}
-
 /// Every line that carries daemon-supplied text goes through the sanitizer
 /// before it reaches the terminal.
 private func emit(_ line: String) {
@@ -67,7 +63,7 @@ do {
       ].compactMap { $0 }.joined(separator: " ")
       emit(
         "\(id.padding(toLength: max(width, id.count), withPad: " ", startingAt: 0))  "
-          + "\(String(format: "%3d", percent(app["volume"])))%  \(name)  \(flags)")
+          + "\(String(format: "%3d", WavesCTLDisplay.percentage(app["volume"])))%  \(name)  \(flags)")
     }
 
   case .icon:
@@ -105,7 +101,7 @@ do {
       if let changed = event["changed"]?.objectValue {
         let id = changed["id"]?.stringValue ?? "?"
         let muted = changed["muted"]?.boolValue == true
-        emit("\(name): \(id) \(percent(changed["volume"]))%\(muted ? " muted" : "")")
+        emit("\(name): \(id) \(WavesCTLDisplay.percentage(changed["volume"]))%\(muted ? " muted" : "")")
       } else {
         emit(name)
       }
