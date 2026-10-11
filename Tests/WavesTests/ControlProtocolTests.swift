@@ -89,14 +89,16 @@ import WavesAudioCore
 }
 
 @Test func decodingRejectsNonFiniteVolumeAndDelta() {
-  let nanVolumeJSON = Data(#"{"cmd":"set-volume","app":"com.example.app","volume":.nan}"#.utf8)
-  #expect(ControlCodec.decode(nanVolumeJSON) == nil)
+  // 1e39 is valid JSON and fits within Double range (Double.greatestFiniteMagnitude ~ 1.79e308),
+  // but overflows Float to Float.infinity. The isFinite check ensures it is rejected on decode.
+  let overflowingFloatVolumeJSON = Data(#"{"cmd":"set-volume","app":"com.example.app","volume":1e39}"#.utf8)
+  #expect(ControlCodec.decode(overflowingFloatVolumeJSON) == nil)
+
+  let overflowingFloatDeltaJSON = Data(#"{"cmd":"adjust-volume","app":"com.example.app","delta":1e39}"#.utf8)
+  #expect(ControlCodec.decode(overflowingFloatDeltaJSON) == nil)
 
   let infVolumeJSON = Data(#"{"cmd":"set-volume","app":"com.example.app","volume":1e309}"#.utf8)
   #expect(ControlCodec.decode(infVolumeJSON) == nil)
-
-  let infDeltaJSON = Data(#"{"cmd":"adjust-volume","app":"com.example.app","delta":1e309}"#.utf8)
-  #expect(ControlCodec.decode(infDeltaJSON) == nil)
 }
 
 @Test func boundedRequestIDScanPreservesCorrelationWithoutDecoding() {

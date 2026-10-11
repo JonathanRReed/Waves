@@ -199,6 +199,54 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func adjustVolumeHandlesNonFiniteAndFiniteAdjustmentsCorrectly() async throws {
+  let store = await makeHandlerStore()
+  let handler = ControlCommandHandler(store: store)
+  let appID = try #require(store.controlApps().first?.id)
+  let session = ControlCommandHandler.Session(didHandshake: true)
+
+  let initialApp = try #require(store.controlApp(forID: appID))
+  #expect(initialApp.desiredVolume == 0.5)
+
+  // Non-finite result from delta addition returns failure without mutating store volume
+  let nonFiniteResult = await handler.handle(
+    ControlRequest(id: 100, cmd: .adjustVolume, app: appID, delta: Float.greatestFiniteMagnitude),
+    session: session
+  )
+  #expect(nonFiniteResult.response == .failure(id: 100, .missingParameter))
+
+  let appAfterFailedAdjust = try #require(store.controlApp(forID: appID))
+  #expect(appAfterFailedAdjust.desiredVolume == 0.5)
+
+  // Normal finite delta adjustment (+0.2 -> 0.7)
+  let normalAdjust = await handler.handle(
+    ControlRequest(id: 101, cmd: .adjustVolume, app: appID, delta: 0.2),
+    session: session
+  )
+  #expect(normalAdjust.response.ok)
+  #expect(normalAdjust.response.volume == 0.7)
+  #expect(store.controlApp(forID: appID)?.desiredVolume == 0.7)
+
+  // Upper boundary clamping (+0.8 on 0.7 -> 1.0)
+  let upperClamped = await handler.handle(
+    ControlRequest(id: 102, cmd: .adjustVolume, app: appID, delta: 0.8),
+    session: session
+  )
+  #expect(upperClamped.response.ok)
+  #expect(upperClamped.response.volume == 1.0)
+  #expect(store.controlApp(forID: appID)?.desiredVolume == 1.0)
+
+  // Lower boundary clamping (-1.5 on 1.0 -> 0.0)
+  let lowerClamped = await handler.handle(
+    ControlRequest(id: 103, cmd: .adjustVolume, app: appID, delta: -1.5),
+    session: session
+  )
+  #expect(lowerClamped.response.ok)
+  #expect(lowerClamped.response.volume == 0.0)
+  #expect(store.controlApp(forID: appID)?.desiredVolume == 0.0)
+}
+
+@MainActor
 private func makeHandlerStore(
   initialStartupState: AppStartupState = .running,
   enableExternalControl: Bool = true
