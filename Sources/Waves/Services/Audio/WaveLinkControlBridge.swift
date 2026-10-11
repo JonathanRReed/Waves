@@ -165,7 +165,17 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     id = try container.decode(String.self, forKey: .id)
     name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
     type = try container.decodeIfPresent(String.self, forKey: .type) ?? ""
-    let rawLevel = try container.decodeIfPresent(Float.self, forKey: .level) ?? 1
+    let reportedLevel = try container.decodeIfPresent(Float.self, forKey: .level)
+    // Hardware listings may omit a level. A software channel must report its
+    // actual level so an omitted readback cannot falsely confirm full scale.
+    guard reportedLevel != nil || type.caseInsensitiveCompare("software") != .orderedSame else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .level,
+        in: container,
+        debugDescription: "software channel must report its level"
+      )
+    }
+    let rawLevel = reportedLevel ?? 1
     // A peer readback must be validated as received. Clamping an invalid
     // boundary value could falsely confirm that our requested level applied.
     guard rawLevel.isFinite, (0...1).contains(rawLevel) else {
