@@ -208,17 +208,17 @@ import WavesAudioCore
   let initialApp = try #require(store.controlApp(forID: appID))
   #expect(initialApp.desiredVolume == 0.5)
 
-  // Non-finite result from delta addition returns failure without mutating store volume
-  let nonFiniteResult = await handler.handle(
-    ControlRequest(id: 100, cmd: .adjustVolume, app: appID, delta: Float.greatestFiniteMagnitude),
+  // Non-finite delta (.nan / .infinity) returns failure without mutating store volume
+  let nanResult = await handler.handle(
+    ControlRequest(id: 100, cmd: .adjustVolume, app: appID, delta: .nan),
     session: session
   )
-  #expect(nonFiniteResult.response == .failure(id: 100, .missingParameter))
+  #expect(nanResult.response == .failure(id: 100, .missingParameter))
 
   let appAfterFailedAdjust = try #require(store.controlApp(forID: appID))
   #expect(appAfterFailedAdjust.desiredVolume == 0.5)
 
-  // Normal finite delta adjustment (+0.2 -> 0.7)
+  // Normal finite delta adjustment (+0.2 on 0.5 -> 0.7)
   let normalAdjust = await handler.handle(
     ControlRequest(id: 101, cmd: .adjustVolume, app: appID, delta: 0.2),
     session: session
@@ -227,13 +227,13 @@ import WavesAudioCore
   #expect(normalAdjust.response.volume == 0.7)
   #expect(store.controlApp(forID: appID)?.desiredVolume == 0.7)
 
-  // Upper boundary clamping (+0.8 on 0.7 -> 1.0)
-  let upperClamped = await handler.handle(
-    ControlRequest(id: 102, cmd: .adjustVolume, app: appID, delta: 0.8),
+  // Large finite delta (Float.greatestFiniteMagnitude) remains finite and clamps to 1.0
+  let largeAdjust = await handler.handle(
+    ControlRequest(id: 102, cmd: .adjustVolume, app: appID, delta: Float.greatestFiniteMagnitude),
     session: session
   )
-  #expect(upperClamped.response.ok)
-  #expect(upperClamped.response.volume == 1.0)
+  #expect(largeAdjust.response.ok)
+  #expect(largeAdjust.response.volume == 1.0)
   #expect(store.controlApp(forID: appID)?.desiredVolume == 1.0)
 
   // Lower boundary clamping (-1.5 on 1.0 -> 0.0)
