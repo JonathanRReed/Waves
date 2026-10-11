@@ -165,10 +165,11 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     id = try container.decode(String.self, forKey: .id)
     name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
     type = try container.decodeIfPresent(String.self, forKey: .type) ?? ""
+    let isSoftwareChannel = type.caseInsensitiveCompare("software") == .orderedSame
     let reportedLevel = try container.decodeIfPresent(Float.self, forKey: .level)
     // Hardware listings may omit a level. A software channel must report its
     // actual level so an omitted readback cannot falsely confirm full scale.
-    guard reportedLevel != nil || type.caseInsensitiveCompare("software") != .orderedSame else {
+    guard reportedLevel != nil || !isSoftwareChannel else {
       throw DecodingError.dataCorruptedError(
         forKey: .level,
         in: container,
@@ -186,7 +187,15 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
       )
     }
     level = rawLevel
-    isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+    let reportedMute = try container.decodeIfPresent(Bool.self, forKey: .isMuted)
+    guard reportedMute != nil || !isSoftwareChannel else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .isMuted,
+        in: container,
+        debugDescription: "software channel must report its mute state"
+      )
+    }
+    isMuted = reportedMute ?? false
     // Hardware channels omit `apps` entirely; software channels list them.
     apps = try container.decodeIfPresent([WaveLinkChannelApp].self, forKey: .apps) ?? []
     mixes = try container.decodeIfPresent([WaveLinkChannelMix].self, forKey: .mixes)
