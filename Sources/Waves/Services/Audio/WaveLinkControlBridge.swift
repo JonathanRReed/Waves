@@ -165,8 +165,37 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     id = try container.decode(String.self, forKey: .id)
     name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
     type = try container.decodeIfPresent(String.self, forKey: .type) ?? ""
-    level = try container.decodeIfPresent(Float.self, forKey: .level) ?? 1
-    isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+    let isSoftwareChannel = type.caseInsensitiveCompare("software") == .orderedSame
+    let reportedLevel = try container.decodeIfPresent(Float.self, forKey: .level)
+    // Hardware listings may omit a level. A software channel must report its
+    // actual level so an omitted readback cannot falsely confirm full scale.
+    guard reportedLevel != nil || !isSoftwareChannel else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .level,
+        in: container,
+        debugDescription: "software channel must report its level"
+      )
+    }
+    let rawLevel = reportedLevel ?? 1
+    // A peer readback must be validated as received. Clamping an invalid
+    // boundary value could falsely confirm that our requested level applied.
+    guard rawLevel.isFinite, (0...1).contains(rawLevel) else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .level,
+        in: container,
+        debugDescription: "channel level must be finite and between 0 and 1"
+      )
+    }
+    level = rawLevel
+    let reportedMute = try container.decodeIfPresent(Bool.self, forKey: .isMuted)
+    guard reportedMute != nil || !isSoftwareChannel else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .isMuted,
+        in: container,
+        debugDescription: "software channel must report its mute state"
+      )
+    }
+    isMuted = reportedMute ?? false
     // Hardware channels omit `apps` entirely; software channels list them.
     apps = try container.decodeIfPresent([WaveLinkChannelApp].self, forKey: .apps) ?? []
     mixes = try container.decodeIfPresent([WaveLinkChannelMix].self, forKey: .mixes)

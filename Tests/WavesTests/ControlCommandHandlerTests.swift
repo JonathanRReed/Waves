@@ -159,6 +159,17 @@ import WavesAudioCore
   #expect(throttled.session.didHandshake)
 }
 
+@Test func controlRequestSanitizesNonFiniteFloatingPointInputs() throws {
+  let requestWithNaN = ControlRequest(cmd: .setVolume, volume: .nan, delta: .infinity)
+  #expect(requestWithNaN.volume == nil)
+  #expect(requestWithNaN.delta == nil)
+
+  let summaryWithNaN = WaveLinkBridgeStatus.ChannelSummary(
+    id: "ch1", name: "Channel 1", isSoftware: true, appIdentifiers: [], level: .nan, isMuted: false
+  )
+  #expect(summaryWithNaN.level == 1.0)
+}
+
 @Test func controlRequestRejectsOverlongAppOnDecodeWithoutChangingIdentity() throws {
   let longClient = String(repeating: "a", count: 300)
   let validApp = String(repeating: "x", count: ControlRequest.maximumAppIDLength)

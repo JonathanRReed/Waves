@@ -170,6 +170,125 @@ import WavesAudioCore
   #expect(counter.finished == 2)
 }
 
+@Test(arguments: [-0.1 as Float, 1.1 as Float])
+func waveLinkChannelInitializerPreservesRawFiniteLevel(_ level: Float) {
+  let channel = WaveLinkChannel(
+    id: "channel-browser", name: "Browser", type: "Software", level: level,
+    isMuted: false, apps: [.init(id: "com.example.browser")])
+  #expect(channel.level == level)
+}
+
+@Test(arguments: ["NaN", "Infinity", "-Infinity", "-0.1", "1.1"])
+func waveLinkChannelDecodeRejectsInvalidLevels(_ value: String) {
+  let decoder = JSONDecoder()
+  decoder.nonConformingFloatDecodingStrategy = .convertFromString(
+    positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+  let literal = Float(value)?.isFinite == true ? value : "\"\(value)\""
+  let data = Data("{\"id\":\"channel-browser\",\"level\":\(literal)}".utf8)
+  #expect(throws: DecodingError.self) {
+    try decoder.decode(WaveLinkChannel.self, from: data)
+  }
+}
+
+@Test(arguments: [0 as Float, 0.35 as Float, 1 as Float])
+func waveLinkChannelDecodePreservesValidLevels(_ level: Float) throws {
+  let data = Data("{\"id\":\"channel-browser\",\"level\":\(level)}".utf8)
+  let channel = try JSONDecoder().decode(WaveLinkChannel.self, from: data)
+  #expect(channel.level == level)
+}
+
+@Test(arguments: [
+  #"{"id":"hardware","type":"Hardware"}"#,
+  #"{"id":"hardware","type":"Hardware","level":null,"isMuted":null}"#,
+  #"{"id":"unknown"}"#,
+])
+func waveLinkChannelDecodeRetainsDefaultForUnreportedHardwareLevel(_ json: String) throws {
+  let channel = try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
+  #expect(channel.level == 1)
+  #expect(!channel.isMuted)
+}
+
+@Test(arguments: [
+  #"{"id":"browser","type":"Software","isMuted":false}"#,
+  #"{"id":"browser","type":"software","level":null,"isMuted":false}"#,
+])
+func waveLinkChannelDecodeRequiresReportedSoftwareLevel(_ json: String) {
+  #expect(throws: DecodingError.self) {
+    try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
+  }
+}
+
+@Test(arguments: [
+  #"{"id":"browser","type":"Software","level":0.5}"#,
+  #"{"id":"browser","type":"software","level":0.5,"isMuted":null}"#,
+])
+func waveLinkChannelDecodeRequiresReportedSoftwareMute(_ json: String) {
+  #expect(throws: DecodingError.self) {
+    try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
+  }
+}
+
+@Test(arguments: [(requested: 0 as Float, received: -0.1 as Float), (requested: 1 as Float, received: 2 as Float)])
+func waveLinkBridgeRejectsOutOfRangeBoundaryReadback(testCase: (requested: Float, received: Float)) async {
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(
+        id: "channel-browser", name: "Browser", type: "Software", level: 0.5,
+        isMuted: false, apps: [.init(id: "com.example.browser")])
+    ],
+    readBackLevel: testCase.received
+  )
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    try await rpc.request(method: method, params: params)
+  })
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await bridge.apply(
+      bundleIdentifier: "com.example.browser", volume: testCase.requested, isMuted: false)
+  }
+  #expect(await rpc.setRequests.count == 1)
+  #expect(await bridge.currentStatus().phase == .failed)
+}
+
+@Test(arguments: ["omitted", "null"])
+func waveLinkBridgeNeverConfirmsAnUnreportedFullScaleReadback(_ representation: String) async {
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(
+        id: "channel-browser", name: "Browser", type: "Software", level: 0.5,
+        isMuted: false, apps: [.init(id: "com.example.browser")])
+    ],
+    readBackLevelRepresentation: representation
+  )
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    try await rpc.request(method: method, params: params)
+  })
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await bridge.apply(bundleIdentifier: "com.example.browser", volume: 1, isMuted: false)
+  }
+  #expect(await rpc.setRequests.count == 1)
+  #expect(await bridge.currentStatus().phase == .failed)
+}
+
+@Test(arguments: ["omitted", "null"])
+func waveLinkBridgeNeverConfirmsAnUnreportedUnmutedReadback(_ representation: String) async {
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(
+        id: "channel-browser", name: "Browser", type: "Software", level: 0.5,
+        isMuted: true, apps: [.init(id: "com.example.browser")])
+    ],
+    readBackMuteRepresentation: representation
+  )
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    try await rpc.request(method: method, params: params)
+  })
+  await #expect(throws: WaveLinkControlBridgeError.self) {
+    try await bridge.apply(bundleIdentifier: "com.example.browser", volume: 0.5, isMuted: false)
+  }
+  #expect(await rpc.setRequests.count == 1)
+  #expect(await bridge.currentStatus().phase == .failed)
+}
+
 private actor WaveLinkRPCStub {
   struct AddRequest: Codable, Equatable, Sendable {
     let appID: String
@@ -193,6 +312,9 @@ private actor WaveLinkRPCStub {
   private let mixesAfterAdd: [WaveLinkChannelMix]?
   private let sourceMixesAfterAdd: [WaveLinkChannelMix]?
   private let roundsChannelLevels: Bool
+  private let readBackLevel: Float?
+  private let readBackLevelRepresentation: String?
+  private let readBackMuteRepresentation: String?
   private(set) var applicationInfoRequestCount = 0
   private(set) var addRequests: [AddRequest] = []
   private(set) var setRequests: [SetRequest] = []
@@ -204,7 +326,10 @@ private actor WaveLinkRPCStub {
     channels: [WaveLinkChannel], applicationID: String = "EWL", interfaceRevision: Int = 1,
     mixesAfterAdd: [WaveLinkChannelMix]? = nil,
     sourceMixesAfterAdd: [WaveLinkChannelMix]? = nil,
-    roundsChannelLevels: Bool = false
+    roundsChannelLevels: Bool = false,
+    readBackLevel: Float? = nil,
+    readBackLevelRepresentation: String? = nil,
+    readBackMuteRepresentation: String? = nil
   ) {
     self.channels = channels
     self.applicationID = applicationID
@@ -212,6 +337,9 @@ private actor WaveLinkRPCStub {
     self.mixesAfterAdd = mixesAfterAdd
     self.sourceMixesAfterAdd = sourceMixesAfterAdd
     self.roundsChannelLevels = roundsChannelLevels
+    self.readBackLevel = readBackLevel
+    self.readBackLevelRepresentation = readBackLevelRepresentation
+    self.readBackMuteRepresentation = readBackMuteRepresentation
   }
 
   func request(method: String, params: Data?) throws -> Data {
@@ -228,7 +356,29 @@ private actor WaveLinkRPCStub {
       )
     case "getChannels":
       channelRequestCount += 1
-      return try encoder.encode(WaveLinkChannelsResponse(channels: channels))
+      let data = try encoder.encode(WaveLinkChannelsResponse(channels: channels))
+      guard let updatedChannelID = setRequests.last?.id,
+        readBackLevelRepresentation != nil || readBackMuteRepresentation != nil
+      else { return data }
+      var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+      var channelObjects = try #require(object["channels"] as? [[String: Any]])
+      let index = try #require(channelObjects.firstIndex { $0["id"] as? String == updatedChannelID })
+      if let representation = readBackLevelRepresentation {
+        if representation == "null" {
+          channelObjects[index]["level"] = NSNull()
+        } else {
+          channelObjects[index].removeValue(forKey: "level")
+        }
+      }
+      if let representation = readBackMuteRepresentation {
+        if representation == "null" {
+          channelObjects[index]["isMuted"] = NSNull()
+        } else {
+          channelObjects[index].removeValue(forKey: "isMuted")
+        }
+      }
+      object["channels"] = channelObjects
+      return try JSONSerialization.data(withJSONObject: object)
     case "addToChannel":
       let request = try JSONDecoder().decode(AddRequest.self, from: try #require(params))
       addRequests.append(request)
@@ -253,7 +403,7 @@ private actor WaveLinkRPCStub {
       guard let index = channels.firstIndex(where: { $0.id == request.id }) else {
         throw WaveLinkControlBridgeError.protocolViolation("Unknown channel")
       }
-      channels[index].level = roundsChannelLevels ? (request.level * 100).rounded() / 100 : request.level
+      channels[index].level = readBackLevel ?? (roundsChannelLevels ? (request.level * 100).rounded() / 100 : request.level)
       channels[index].isMuted = request.isMuted
       return Data("{}".utf8)
     default:

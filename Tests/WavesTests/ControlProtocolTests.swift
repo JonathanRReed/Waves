@@ -88,9 +88,28 @@ import WavesAudioCore
   #expect(ControlCodec.decode(Data(#"{"id":1}"#.utf8)) == nil)
 }
 
+@Test(arguments: ["NaN", "Infinity", "-Infinity"])
+func controlRequestDecodeSanitizesNonFiniteFloatStrings(_ value: String) throws {
+  let decoder = JSONDecoder()
+  decoder.nonConformingFloatDecodingStrategy = .convertFromString(
+    positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+  let data = Data("{\"cmd\":\"set-volume\",\"volume\":\"\(value)\",\"delta\":\"\(value)\"}".utf8)
+  let request = try decoder.decode(ControlRequest.self, from: data)
+  #expect(request.volume == nil)
+  #expect(request.delta == nil)
+}
+
+@Test func controlRequestDecodePreservesFiniteFloatInputs() throws {
+  let request = try JSONDecoder().decode(
+    ControlRequest.self, from: Data(#"{"cmd":"adjust-volume","volume":0.25,"delta":-0.5}"#.utf8))
+  #expect(request.volume == 0.25)
+  #expect(request.delta == -0.5)
+}
+
 @Test func boundedRequestIDScanPreservesCorrelationWithoutDecoding() {
   #expect(ControlCodec.requestIDPrefix(Data(#"{"id":42,"cmd":"hello"}"#.utf8)) == 42)
   #expect(ControlCodec.requestIDPrefix(Data(#"{"cmd":"hello","id":-7}"#.utf8)) == -7)
+  #expect(ControlCodec.requestIDPrefix(Data(#"{"app":"id","id":42}"#.utf8)) == 42)
   #expect(ControlCodec.requestIDPrefix(Data(#"{"id":"42","cmd":"hello"}"#.utf8)) == nil)
   #expect(ControlCodec.requestIDPrefix(Data(#"{"cmd":"hello"}"#.utf8)) == nil)
 }
