@@ -139,7 +139,7 @@ private final class WavesCTLBuildDirectoryLocator {}
 }
 
 @Test(arguments: [
-  Double.nan, Double.infinity, -Double.infinity, -1.0, Double(Int32.max), Double(Int.max)
+  Double.nan, Double.infinity, -Double.infinity, -1.0, Double(Int32.max), Double(Int.max),
 ])
 func darwinWavesControlSocketSystemRejectsInvalidTimeouts(invalidSeconds: TimeInterval) {
   let system = DarwinWavesControlSocketSystem()
