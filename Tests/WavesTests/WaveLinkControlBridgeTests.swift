@@ -209,8 +209,8 @@ func waveLinkChannelDecodeRetainsDefaultForUnreportedHardwareLevel(_ json: Strin
 }
 
 @Test(arguments: [
-  #"{"id":"browser","type":"Software"}"#,
-  #"{"id":"browser","type":"software","level":null}"#,
+  #"{"id":"browser","type":"Software","isMuted":false}"#,
+  #"{"id":"browser","type":"software","level":null,"isMuted":false}"#,
 ])
 func waveLinkChannelDecodeRequiresReportedSoftwareLevel(_ json: String) {
   #expect(throws: DecodingError.self) {
