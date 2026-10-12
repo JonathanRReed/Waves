@@ -614,7 +614,8 @@ extension AppStore {
       return
     }
 
-    let clamped = max(0, min(1, value))
+    let finiteValue = value.isFinite ? value : 1.0
+    let clamped = max(0, min(1, finiteValue))
     appIntentCoordinator.setPendingVolume(clamped, for: appID)
     applyPendingVolumeProjection(forAppID: appID)
     scheduleVolumeTransaction(clamped, forAppID: appID)
@@ -694,11 +695,13 @@ extension AppStore {
     // reinstate an intermediate value.
     appIntentCoordinator.cancelVolumeDebounce(for: appID)
     let pendingValue = appIntentCoordinator.takePendingVolume(for: appID)
-    let target =
-      immediateValue.map { max(0, min(1, $0)) }
-      ?? pendingValue
+    let rawTarget =
+      immediateValue.flatMap { $0.isFinite ? $0 : nil }
+      ?? pendingValue.flatMap { $0.isFinite ? $0 : nil }
       ?? session.apps.first(matchingAppKey: appID)?.desiredVolume
       ?? app.desiredVolume
+    let finiteTarget = rawTarget.isFinite ? rawTarget : 1.0
+    let target = max(0, min(1, finiteTarget))
     startAppIntentTransaction(
       forAppID: appID,
       overrides: AppIntentOverrides(desiredVolume: target),
@@ -746,7 +749,8 @@ extension AppStore {
   func setVolumeBoost(_ boost: Float, for app: AudioApp) {
     guard requireAudioRunning() else { return }
     guard !isExcluded(app) else { return }
-    let clampedBoost = max(1, min(4, boost))
+    let finiteBoost = boost.isFinite ? boost : 1.0
+    let clampedBoost = max(1, min(4, finiteBoost))
     startAppIntentTransaction(
       forAppID: app.logicalID,
       overrides: AppIntentOverrides(volumeBoost: clampedBoost),

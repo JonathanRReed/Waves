@@ -3072,6 +3072,30 @@ private final class TransactionLoginItemService: LoginItemServicing {
 }
 
 @MainActor
+@Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
+func nonFiniteVolumeInputsAreSanitizedWithoutCrashing(nonFiniteValue: Float) async {
+  let device = transactionTestDevice()
+  let app = transactionTestApp(desiredVolume: 0.5)
+  let fixture = makeTransactionFixture(apps: [app], device: device)
+
+  fixture.store.setDesiredVolume(nonFiniteValue, for: app)
+  #expect(fixture.store.session.apps.first?.desiredVolume.isFinite == true)
+
+  fixture.store.commitDesiredVolume(nonFiniteValue, for: app)
+  await fixture.store.drainAppIntentTransactions()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.allSatisfy { $0.desiredVolume.isFinite })
+  #expect(fixture.store.session.apps.first?.desiredVolume.isFinite == true)
+
+  fixture.store.setVolumeBoost(nonFiniteValue, for: app)
+  await fixture.store.drainAppIntentTransactions()
+
+  let updatedIntents = await fixture.backend.recordedIntents()
+  #expect(updatedIntents.allSatisfy { $0.volumeBoost.isFinite })
+}
+
+@MainActor
 @Test func unmanagedVolumeEventCancelsAnEarlierManagedDebounce() async {
   let device = transactionTestDevice()
   let managedApp = transactionTestApp(desiredVolume: 0.4)

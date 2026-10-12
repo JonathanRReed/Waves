@@ -1275,7 +1275,8 @@ final class AppStore {
     guard !isExcluded(app) else { return }
 
     // Validate step parameter bounds
-    let clampedStep = max(0.01, min(step, 0.5))
+    let finiteStep = step.isFinite ? step : 0.1
+    let clampedStep = max(0.01, min(finiteStep, 0.5))
     let newVolume = min(app.desiredVolume + clampedStep, 1.0)
     setDesiredVolume(newVolume, for: app)
     // The complete-intent transaction shows the single confirmation toast
@@ -1293,7 +1294,8 @@ final class AppStore {
     guard !isExcluded(app) else { return }
 
     // Validate step parameter bounds
-    let clampedStep = max(0.01, min(step, 0.5))
+    let finiteStep = step.isFinite ? step : 0.1
+    let clampedStep = max(0.01, min(finiteStep, 0.5))
     let newVolume = max(app.desiredVolume - clampedStep, 0.0)
     setDesiredVolume(newVolume, for: app)
     // The async apply path shows the single confirmation/error toast; the
