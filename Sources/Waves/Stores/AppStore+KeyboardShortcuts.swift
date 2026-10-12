@@ -91,8 +91,10 @@ extension AppStore {
   private static let hotkeyVolumeStep: Float = 0.1
 
   private func adjustVolume(for app: AudioApp, by delta: Float) {
-    let target = min(max(app.desiredVolume + delta, 0), 1)
-    guard target != app.desiredVolume else { return }
+    guard delta.isFinite else { return }
+    let currentVolume = app.desiredVolume.isFinite ? app.desiredVolume : 1.0
+    let target = min(max(currentVolume + delta, 0), 1)
+    guard target.isFinite, target != app.desiredVolume else { return }
     setDesiredVolume(target, for: app)
     // The complete-intent transaction owns the confirmation and error toasts,
     // so this path stays silent and a keypress produces exactly one.
