@@ -3073,26 +3073,58 @@ private final class TransactionLoginItemService: LoginItemServicing {
 
 @MainActor
 @Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
-func nonFiniteVolumeInputsAreSanitizedWithoutCrashing(nonFiniteValue: Float) async {
-  let device = transactionTestDevice()
+func nonFiniteSliderValuesEmitUnityVolume(nonFiniteValue: Float) async throws {
   let app = transactionTestApp(desiredVolume: 0.5)
-  let fixture = makeTransactionFixture(apps: [app], device: device)
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
 
   fixture.store.setDesiredVolume(nonFiniteValue, for: app)
-  #expect(fixture.store.session.apps.first?.desiredVolume.isFinite == true)
+  #expect(fixture.store.session.apps.first?.desiredVolume == 1)
+  await fixture.store.drainAppIntentTransactions()
 
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  let intent = try #require(intents.first)
+  #expect(intent.appID == app.logicalID)
+  #expect(intent.desiredVolume == 1)
+  #expect(intent.volumeBoost == app.volumeBoost)
+  #expect(fixture.store.session.apps.first?.desiredVolume == 1)
+}
+
+@MainActor
+@Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
+func nonFiniteCommitsPreserveTheFreshFixtureVolume(nonFiniteValue: Float) async throws {
+  let app = transactionTestApp(desiredVolume: 0.5)
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
+
+  // No slider call may sanitize the state before this direct commit.
   fixture.store.commitDesiredVolume(nonFiniteValue, for: app)
   await fixture.store.drainAppIntentTransactions()
 
   let intents = await fixture.backend.recordedIntents()
-  #expect(intents.allSatisfy { $0.desiredVolume.isFinite })
-  #expect(fixture.store.session.apps.first?.desiredVolume.isFinite == true)
+  #expect(intents.count == 1)
+  let intent = try #require(intents.first)
+  #expect(intent.appID == app.logicalID)
+  #expect(intent.desiredVolume == 0.5)
+  #expect(intent.volumeBoost == app.volumeBoost)
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.5)
+}
+
+@MainActor
+@Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
+func nonFiniteBoostsEmitUnityBoost(nonFiniteValue: Float) async throws {
+  let app = transactionTestApp(desiredVolume: 0.5, volumeBoost: 2)
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
 
   fixture.store.setVolumeBoost(nonFiniteValue, for: app)
   await fixture.store.drainAppIntentTransactions()
 
-  let updatedIntents = await fixture.backend.recordedIntents()
-  #expect(updatedIntents.allSatisfy { $0.volumeBoost.isFinite })
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  let intent = try #require(intents.first)
+  #expect(intent.appID == app.logicalID)
+  #expect(intent.volumeBoost == 1)
+  #expect(intent.desiredVolume == 0.5)
+  #expect(fixture.store.session.apps.first?.volumeBoost == 1)
 }
 
 @MainActor
