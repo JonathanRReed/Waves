@@ -29,3 +29,24 @@ import Testing
   }
   #expect(parser.parse(URL(string: "waves://refresh")!) == .throttled(shouldNotify: true))
 }
+
+@MainActor
+@Test func limitersFallbackToDefaultWindowsWhenInitializedWithNonFiniteValues() {
+  let limiter = URLInvocationLimiter(
+    maximumInvocations: 2,
+    window: .nan
+  )
+  #expect(limiter.allow())
+  #expect(limiter.allow())
+  #expect(!limiter.allow())
+
+  let parser = AutomationCommandParser(
+    maximumRequests: 2,
+    requestWindow: .nan,
+    throttleNotificationInterval: .infinity
+  )
+  let refreshURL = URL(string: "waves://refresh")!
+  #expect(parser.parse(refreshURL) == .accepted(.refresh))
+  #expect(parser.parse(refreshURL) == .accepted(.refresh))
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+}
