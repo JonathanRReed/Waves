@@ -4170,7 +4170,7 @@ class ReleaseInfraTest < Minitest::Test
                 fetch-depth: 0
                 persist-credentials: false
             - run: ./script/quality-gate.sh full
-            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+            - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
               with:
                 retention-days: 14
     YAML
@@ -4213,7 +4213,7 @@ class ReleaseInfraTest < Minitest::Test
               env:
                 WAVES_EXPECTED_REVISION: ${{ inputs.revision }}
               run: ./script/release-gate.sh preflight
-            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+            - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
               with:
                 retention-days: 14
     YAML
