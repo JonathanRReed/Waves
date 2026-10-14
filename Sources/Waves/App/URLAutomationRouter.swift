@@ -28,7 +28,7 @@ final class URLInvocationLimiter {
   func allow() -> Bool {
     let currentTime = now()
     let cutoff = currentTime.addingTimeInterval(-window)
-    invocationTimes.removeAll { $0 < cutoff }
+    invocationTimes.removeAll { $0 < cutoff || $0 > currentTime }
     guard invocationTimes.count < maximumInvocations else { return false }
     invocationTimes.append(currentTime)
     return true
