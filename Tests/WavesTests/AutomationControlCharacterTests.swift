@@ -123,4 +123,11 @@ private final class LimiterRecoveryClock {
   // Pruning future timestamps allows rate limiters to immediately admit new requests
   #expect(limiter.allow())
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
+
+  // Notification reset: lastThrottleNotification is still at 1000 (future vs 500)
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
+
+  // Newly reset window is full — next request rejected
+  #expect(!limiter.allow())
 }

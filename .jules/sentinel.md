@@ -13,7 +13,7 @@
 **Learning:** `max(0, Double.nan)` evaluates to `NaN` in Swift, propagating through token calculations and permanently corrupting state. Defensive hardening protects internal bucket calculations from non-finite time inputs.
 **Prevention:** Always check `now.isFinite` and `elapsed.isFinite` before performing token bucket calculations with `TimeInterval` timestamps.
 
-## Rate Limiter Future Timestamp Permanent Lockout on Clock Skew
-**Vulnerability:** Sliding window rate limiters that prune timestamps using `$0 < cutoff` retain future timestamps if system time shifts backwards or clock skew occurs. Future timestamps remain greater than `cutoff` (`currentTime - window`), keeping the window permanently full and locking out legitimate requests (DoS).
-**Learning:** `removeAll { $0 < cutoff }` assumes strictly monotonic time progression. When clock skew introduces `$0 > currentTime`, those entries fail `$0 < cutoff` and remain trapped indefinitely.
-**Prevention:** Always prune future timestamps alongside expired ones with `removeAll { $0 < cutoff || $0 > currentTime }` in date-based rate limiters.
+## Rate Limiter Future Timestamp Retention on Clock Rollback
+**Vulnerability:** Sliding window rate limiters that prune only `$0 < cutoff` retain future timestamps after a backwards clock shift. Those entries stay above `cutoff` until wall-clock catches up past them (or the sliding window expires relative to recovered time), prolonging lockout for legitimate local requests until clock recovery or window expiry.
+**Learning:** `removeAll { $0 < cutoff }` assumes monotonic time. After rollback, `$0 > currentTime` entries are not expired by cutoff alone and occupy capacity until the clock recovers or the window naturally expires — finite, not permanent, and not shown to be an external DoS vector without additional evidence.
+**Prevention:** Prune future timestamps alongside expired ones with `removeAll { $0 < cutoff || $0 > currentTime }` in date-based rate limiters.
