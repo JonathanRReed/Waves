@@ -12,3 +12,8 @@
 **Vulnerability:** In Swift token-bucket rate limiters taking `TimeInterval` inputs, non-finite values (`NaN` or `Infinity`) cause `now - lastRefill` to evaluate to `NaN` or `Infinity`. Arithmetic with `NaN` converts `tokens` to `NaN`, permanently corrupting the bucket state and locking out all subsequent requests on that connection.
 **Learning:** `max(0, Double.nan)` evaluates to `NaN` in Swift, propagating through token calculations and permanently corrupting state. Defensive hardening protects internal bucket calculations from non-finite time inputs.
 **Prevention:** Always check `now.isFinite` and `elapsed.isFinite` before performing token bucket calculations with `TimeInterval` timestamps.
+
+## Rate Limiter Future Timestamp Retention on Clock Rollback
+**Vulnerability:** Sliding window rate limiters that prune only `$0 < cutoff` retain future timestamps after a backwards clock shift. Those entries stay above `cutoff` until wall-clock catches up past them (or the sliding window expires relative to recovered time), prolonging lockout for legitimate local requests until clock recovery or window expiry.
+**Learning:** `removeAll { $0 < cutoff }` assumes monotonic time. After rollback, `$0 > currentTime` entries are not expired by cutoff alone and occupy capacity until the clock recovers or the window naturally expires — finite, not permanent, and not shown to be an external DoS vector without additional evidence.
+**Prevention:** Prune future timestamps alongside expired ones with `removeAll { $0 < cutoff || $0 > currentTime }` in date-based rate limiters.

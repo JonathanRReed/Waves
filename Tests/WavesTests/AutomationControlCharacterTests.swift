@@ -102,3 +102,32 @@ private final class LimiterRecoveryClock {
     #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
   }
 }
+
+@MainActor
+@Test func limitersRecoverWhenClockShiftsBackwards() {
+  let refreshURL = URL(string: "waves://refresh")!
+  let clock = LimiterRecoveryClock()
+  clock.date = Date(timeIntervalSince1970: 1000)
+
+  let limiter = URLInvocationLimiter(maximumInvocations: 1, window: 60, now: { clock.date })
+  let parser = AutomationCommandParser(maximumRequests: 1, requestWindow: 60, now: { clock.date })
+
+  #expect(limiter.allow())
+  #expect(!limiter.allow())
+  #expect(parser.parse(refreshURL) == .accepted(.refresh))
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+
+  // Move system time backwards
+  clock.date = Date(timeIntervalSince1970: 500)
+
+  // Pruning future timestamps allows rate limiters to immediately admit new requests
+  #expect(limiter.allow())
+  #expect(parser.parse(refreshURL) == .accepted(.refresh))
+
+  // Notification reset: lastThrottleNotification is still at 1000 (future vs 500)
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
+
+  // Newly reset window is full — next request rejected
+  #expect(!limiter.allow())
+}
