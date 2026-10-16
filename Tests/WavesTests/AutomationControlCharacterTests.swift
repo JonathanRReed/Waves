@@ -102,3 +102,21 @@ private final class LimiterRecoveryClock {
     #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
   }
 }
+
+@MainActor
+@Test func rateLimitersFailClosedOnNonFiniteCurrentTime() {
+  let refreshURL = URL(string: "waves://refresh")!
+  let nonFiniteDates = [
+    Date(timeIntervalSinceReferenceDate: .nan),
+    Date(timeIntervalSinceReferenceDate: .infinity),
+    Date(timeIntervalSinceReferenceDate: -.infinity),
+  ]
+
+  for nonFiniteDate in nonFiniteDates {
+    let limiter = URLInvocationLimiter(now: { nonFiniteDate })
+    #expect(!limiter.allow())
+
+    let parser = AutomationCommandParser(now: { nonFiniteDate })
+    #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
+  }
+}
