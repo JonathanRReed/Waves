@@ -252,7 +252,7 @@ extension WorkspaceAudioControlBackend {
     let maxPathSize = 4 * 1024
     var pathBuffer = [CChar](repeating: 0, count: maxPathSize)
     let length = proc_pidpath(pid, &pathBuffer, UInt32(maxPathSize))
-    guard length > 0 else { return nil }
+    guard length > 0, Int(length) < maxPathSize else { return nil }
     let executablePath = pathBuffer.withUnsafeBufferPointer { buffer in
       buffer.baseAddress.map { String(cString: $0) } ?? ""
     }
