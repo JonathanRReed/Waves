@@ -12,3 +12,8 @@
 **Vulnerability:** In Swift token-bucket rate limiters taking `TimeInterval` inputs, non-finite values (`NaN` or `Infinity`) cause `now - lastRefill` to evaluate to `NaN` or `Infinity`. Arithmetic with `NaN` converts `tokens` to `NaN`, permanently corrupting the bucket state and locking out all subsequent requests on that connection.
 **Learning:** `max(0, Double.nan)` evaluates to `NaN` in Swift, propagating through token calculations and permanently corrupting state. Defensive hardening protects internal bucket calculations from non-finite time inputs.
 **Prevention:** Always check `now.isFinite` and `elapsed.isFinite` before performing token bucket calculations with `TimeInterval` timestamps.
+
+## 2025-05-20 - Unbounded C String Conversion on proc_pidpath Buffers
+**Vulnerability:** `proc_pidpath` populates a stack CChar buffer without null-terminating if the path length meets or exceeds the buffer capacity. Calling `String(cString:)` on a non-null-terminated buffer causes an out-of-bounds stack memory overread.
+**Learning:** `proc_pidpath` returns the number of bytes written. If `length >= bufferSize`, the buffer is truncated and lacks a null-terminator byte.
+**Prevention:** Always check `Int(length) < bufferSize` before passing fixed CChar buffers filled by `proc_pidpath` to `String(cString:)`.
