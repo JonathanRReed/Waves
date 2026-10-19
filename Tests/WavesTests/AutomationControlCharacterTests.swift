@@ -60,7 +60,7 @@ private final class LimiterRecoveryClock {
 @MainActor
 @Test func parserRequestsRecoverAfterNonFiniteWindowFallback() {
   let refreshURL = URL(string: "waves://refresh")!
-  for window in [TimeInterval.nan, .infinity, -.infinity] {
+  for window in [TimeInterval.nan, .infinity, -.infinity, -10] {
     let clock = LimiterRecoveryClock()
     let parser = AutomationCommandParser(
       maximumRequests: 2,
@@ -83,7 +83,7 @@ private final class LimiterRecoveryClock {
 @MainActor
 @Test func parserNotificationsResumeAfterNonFiniteIntervalFallback() {
   let refreshURL = URL(string: "waves://refresh")!
-  for interval in [TimeInterval.nan, .infinity, -.infinity] {
+  for interval in [TimeInterval.nan, .infinity, -.infinity, -5] {
     let clock = LimiterRecoveryClock()
     let parser = AutomationCommandParser(
       maximumRequests: 0,
