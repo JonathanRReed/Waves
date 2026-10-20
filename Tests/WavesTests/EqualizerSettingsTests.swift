@@ -24,6 +24,20 @@ import Testing
   #expect(settings.advancedGainsDB == [12, 0, 0, 0, 0, 0, 0, 0])
 }
 
+@Test func equalizerSettingsHandlesNonFiniteGainsSafely() {
+  var settings = EqualizerSettings(
+    simpleGainsDB: [.infinity, -.infinity, .nan],
+    advancedGainsDB: [.nan]
+  )
+
+  #expect(settings.simpleGainsDB == [0, 0, 0])
+  #expect(settings.advancedGainsDB == Array(repeating: 0, count: 8))
+
+  settings.setGain(.nan, at: 0, mode: .simple)
+  settings.setGain(.infinity, at: 1, mode: .simple)
+  #expect(settings.simpleGainsDB == [0, 0, 0])
+}
+
 @Test func equalizerPresetAppliesOnlyToRequestedMode() {
   var settings = EqualizerSettings()
   settings.applyPreset(.voiceFocus, mode: .simple)
