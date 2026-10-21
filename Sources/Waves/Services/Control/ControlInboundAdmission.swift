@@ -13,7 +13,9 @@ private struct ControlAdmissionTokenBucket {
 
   init(capacity: Int, refillPerSecond: Double, now: TimeInterval) {
     self.capacity = Double(max(0, capacity))
-    self.refillPerSecond = max(0, refillPerSecond)
+    // Guard against non-finite (NaN or Infinity) refill rates to prevent state corruption
+    // where max(0, Double.nan) evaluates to NaN and permanently locks out requests.
+    self.refillPerSecond = refillPerSecond.isFinite ? max(0, refillPerSecond) : 0
     tokens = Double(max(0, capacity))
     lastRefill = now.isFinite ? now : 0
   }
