@@ -104,7 +104,8 @@ private final class LimiterRecoveryClock {
 }
 
 @MainActor
-@Test func invocationLimiterFailsClosedOnNonFiniteCurrentTime() {
+@Test(arguments: [TimeInterval.nan, .infinity, -.infinity])
+func invocationLimiterFailsClosedOnNonFiniteCurrentTime(nonFiniteTime: TimeInterval) {
   let clock = LimiterRecoveryClock()
   let limiter = URLInvocationLimiter(
     maximumInvocations: 2,
@@ -112,15 +113,21 @@ private final class LimiterRecoveryClock {
   )
   #expect(limiter.allow())
 
-  clock.date = Date(timeIntervalSinceReferenceDate: .nan)
+  clock.date = Date(timeIntervalSinceReferenceDate: nonFiniteTime)
   #expect(!limiter.allow())
 
   clock.date = Date(timeIntervalSince1970: 10)
   #expect(limiter.allow())
+  #expect(!limiter.allow())
+  clock.date = Date(timeIntervalSince1970: 70.001)
+  #expect(limiter.allow())
+  #expect(limiter.allow())
+  #expect(!limiter.allow())
 }
 
 @MainActor
-@Test func automationParserFailsClosedOnNonFiniteCurrentTime() {
+@Test(arguments: [TimeInterval.nan, .infinity, -.infinity])
+func automationParserFailsClosedOnNonFiniteCurrentTime(nonFiniteTime: TimeInterval) {
   let refreshURL = URL(string: "waves://refresh")!
   let clock = LimiterRecoveryClock()
   let parser = AutomationCommandParser(
@@ -129,9 +136,29 @@ private final class LimiterRecoveryClock {
   )
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
 
-  clock.date = Date(timeIntervalSinceReferenceDate: .nan)
+  clock.date = Date(timeIntervalSinceReferenceDate: nonFiniteTime)
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
 
   clock.date = Date(timeIntervalSince1970: 10)
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+  clock.date = Date(timeIntervalSince1970: 70.001)
+  #expect(parser.parse(refreshURL) == .accepted(.refresh))
+  #expect(parser.parse(refreshURL) == .accepted(.refresh))
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+}
+
+@MainActor
+@Test(arguments: [TimeInterval.nan, .infinity, -.infinity])
+func automationParserPreservesNotificationCooldownAcrossInvalidClock(nonFiniteTime: TimeInterval) {
+  let refreshURL = URL(string: "waves://refresh")!
+  let clock = LimiterRecoveryClock()
+  let parser = AutomationCommandParser(maximumRequests: 0, now: { clock.date })
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+  clock.date = Date(timeIntervalSinceReferenceDate: nonFiniteTime)
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
+  clock.date = Date(timeIntervalSince1970: 1)
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
+  clock.date = Date(timeIntervalSince1970: 5)
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
 }
