@@ -120,11 +120,16 @@ final class AutomationCommandParser {
 
     guard acceptRequest() else {
       let currentTime = now()
-      let shouldNotify =
-        lastThrottleNotification.map {
-          currentTime.timeIntervalSince($0) >= throttleNotificationInterval
-        } ?? true
-      if shouldNotify { lastThrottleNotification = currentTime }
+      let shouldNotify: Bool
+      if currentTime.timeIntervalSinceReferenceDate.isFinite {
+        shouldNotify =
+          lastThrottleNotification.map {
+            currentTime.timeIntervalSince($0) >= throttleNotificationInterval
+          } ?? true
+        if shouldNotify { lastThrottleNotification = currentTime }
+      } else {
+        shouldNotify = false
+      }
       return .throttled(shouldNotify: shouldNotify)
     }
     return .accepted(validated)
@@ -141,6 +146,7 @@ final class AutomationCommandParser {
 
   private func acceptRequest() -> Bool {
     let currentTime = now()
+    guard currentTime.timeIntervalSinceReferenceDate.isFinite else { return false }
     let cutoff = currentTime.addingTimeInterval(-requestWindow)
     acceptedRequestTimes.removeAll { $0 < cutoff }
     guard acceptedRequestTimes.count < maximumRequests else { return false }
