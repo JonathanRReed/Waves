@@ -102,3 +102,36 @@ private final class LimiterRecoveryClock {
     #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
   }
 }
+
+@MainActor
+@Test func invocationLimiterFailsClosedOnNonFiniteCurrentTime() {
+  let clock = LimiterRecoveryClock()
+  let limiter = URLInvocationLimiter(
+    maximumInvocations: 2,
+    now: { clock.date }
+  )
+  #expect(limiter.allow())
+
+  clock.date = Date(timeIntervalSinceReferenceDate: .nan)
+  #expect(!limiter.allow())
+
+  clock.date = Date(timeIntervalSince1970: 10)
+  #expect(limiter.allow())
+}
+
+@MainActor
+@Test func automationParserFailsClosedOnNonFiniteCurrentTime() {
+  let refreshURL = URL(string: "waves://refresh")!
+  let clock = LimiterRecoveryClock()
+  let parser = AutomationCommandParser(
+    maximumRequests: 2,
+    now: { clock.date }
+  )
+  #expect(parser.parse(refreshURL) == .accepted(.refresh))
+
+  clock.date = Date(timeIntervalSinceReferenceDate: .nan)
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
+
+  clock.date = Date(timeIntervalSince1970: 10)
+  #expect(parser.parse(refreshURL) == .accepted(.refresh))
+}
