@@ -104,7 +104,7 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def run_production_dmg_detach(statuses)
+  def run_production_dmg_detach(statuses, caller: :helper)
     root = File.expand_path("../..", __dir__)
     script = File.read(File.join(root, "script/build_and_run.sh"))
     helper = script[/detach_dmg_with_retry\(\) \{.*?\n\}/m]
@@ -126,6 +126,12 @@ class ReleaseInfraTest < Minitest::Test
       sleeper = File.join(directory, "sleep")
       File.write(hdiutil, <<~BASH)
         #!/bin/bash
+        if [ "$CALLER" = construction ]; then
+          case "$1" in
+            create) touch "${@: -1}"; exit 0 ;;
+            attach) touch "$MOUNT/.DS_Store"; exit 0 ;;
+          esac
+        fi
         [ "$#" -eq 2 ] && [ "$1" = detach ] && [ "$2" = "$MOUNT" ] || exit 90
         printf 'detach\n' >> "$DETACH_LOG"
         attempt=$(wc -l < "$DETACH_LOG" | tr -d ' ')
@@ -139,10 +145,45 @@ class ReleaseInfraTest < Minitest::Test
       FileUtils.chmod(0o700, [hdiutil, sleeper])
       probe = helper.gsub("/usr/bin/hdiutil", Shellwords.escape(hdiutil))
                     .gsub("/bin/sleep", Shellwords.escape(sleeper))
+      invocation = 'detach_dmg_with_retry "$MOUNT"'
+      if caller == :verification
+        function = script[/^unmount_dmg\(\) \{.*?^\}/m]
+        refute_nil function
+        probe += "\n#{function}\nACTIVE_MOUNT_DIR=\"$MOUNT\""
+        invocation = "unmount_dmg"
+      elsif caller == :construction
+        function = script[/^create_dmg\(\) \{.*?^\}/m]
+        refute_nil function
+        function = function.gsub("/usr/bin/hdiutil", Shellwords.escape(hdiutil))
+                           .gsub("/usr/bin/osascript", "/usr/bin/true")
+                           .gsub("/usr/sbin/diskutil", "/usr/bin/true")
+                           .gsub("/bin/sync", "/usr/bin/true")
+        probe += <<~BASH
+
+          require_command() { :; }
+          xattr() { :; }
+          ditto() { mkdir -p "$2"; }
+          render_dmg_background() { touch "$1"; }
+          mktemp() {
+            case "$*" in
+              *waves-dmg-mount*) printf '%s\\n' "$MOUNT" ;;
+              *waves-dmg-layout*) mkdir -p "$TEST_ROOT/layout"; printf '%s\\n' "$TEST_ROOT/layout" ;;
+              *) mkdir -p "$TEST_ROOT/staging"; printf '%s\\n' "$TEST_ROOT/staging" ;;
+            esac
+          }
+          APP_NAME=Waves SIGN_IDENTITY=""
+          APP_BUNDLE="$TEST_ROOT/Waves.app" DIST_DIR="$TEST_ROOT/dist"
+          DMG_FINDER_LAYOUT="$TEST_ROOT/layout.applescript" DMG_PATH="$TEST_ROOT/final.dmg"
+          mkdir -p "$APP_BUNDLE"
+          touch "$DMG_FINDER_LAYOUT"
+          #{function}
+        BASH
+        invocation = "create_dmg"
+      end
       stdout, stderr, status = Open3.capture3(
         {"MOUNT" => mount, "DETACH_LOG" => calls, "DELAY_LOG" => delays,
-         "DETACH_STATUSES" => results},
-        "/bin/bash", "-c", "set -euo pipefail\n#{probe}\ndetach_dmg_with_retry \"$MOUNT\""
+         "DETACH_STATUSES" => results, "TEST_ROOT" => directory, "CALLER" => caller.to_s},
+        "/bin/bash", "-c", "set -euo pipefail\n#{probe}\n#{invocation}"
       )
       assert_equal "preserve me", File.read(marker), "detach must never delete mounted data"
       [stdout, stderr, status, File.readlines(calls).length, File.readlines(delays, chomp: true)]
@@ -182,6 +223,22 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal %w[1 2 3], delays
     assert_includes stderr, "exit 16, attempt 4/4"
     assert_includes stderr, "Not force-detaching or removing the mounted image"
+  end
+
+  def test_dmg_verification_caller_keeps_mount_after_detach_failure
+    [[5], [16, 16, 16, 16]].each do |statuses|
+      _stdout, stderr, status, calls, _delays = run_production_dmg_detach(statuses, caller: :verification)
+      assert_equal 1, status.exitstatus, stderr
+      assert_equal statuses.length, calls
+    end
+  end
+
+  def test_dmg_construction_caller_keeps_mount_after_detach_failure
+    [[5], [16, 16, 16, 16]].each do |statuses|
+      _stdout, stderr, status, calls, _delays = run_production_dmg_detach(statuses, caller: :construction)
+      assert_equal statuses.last, status.exitstatus, stderr
+      assert_equal statuses.length, calls
+    end
   end
 
   def test_dmg_builder_configures_and_verifies_premium_finder_layout
