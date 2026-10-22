@@ -104,6 +104,86 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def run_production_dmg_detach(statuses)
+    root = File.expand_path("../..", __dir__)
+    script = File.read(File.join(root, "script/build_and_run.sh"))
+    helper = script[/detach_dmg_with_retry\(\) \{.*?\n\}/m]
+    refute_nil helper, "test the actual production detach helper"
+    assert_equal 2, script.scan('detach_dmg_with_retry "$ACTIVE_MOUNT_DIR"').length,
+                 "both construction and verification must use bounded detach"
+    Dir.mktmpdir("waves-detach-test") do |directory|
+      mount = File.join(directory, "mount with spaces")
+      FileUtils.mkdir_p(mount)
+      marker = File.join(mount, "unsaved-data")
+      File.write(marker, "preserve me")
+      calls = File.join(directory, "calls")
+      delays = File.join(directory, "delays")
+      results = File.join(directory, "statuses")
+      File.write(calls, "")
+      File.write(delays, "")
+      File.write(results, statuses.join("\n") + "\n")
+      hdiutil = File.join(directory, "hdiutil")
+      sleeper = File.join(directory, "sleep")
+      File.write(hdiutil, <<~BASH)
+        #!/bin/bash
+        [ "$#" -eq 2 ] && [ "$1" = detach ] && [ "$2" = "$MOUNT" ] || exit 90
+        printf 'detach\n' >> "$DETACH_LOG"
+        attempt=$(wc -l < "$DETACH_LOG" | tr -d ' ')
+        exit "$(sed -n "${attempt}p" "$DETACH_STATUSES")"
+      BASH
+      File.write(sleeper, <<~BASH)
+        #!/bin/bash
+        [ "$#" -eq 1 ] || exit 91
+        printf '%s\n' "$1" >> "$DELAY_LOG"
+      BASH
+      FileUtils.chmod(0o700, [hdiutil, sleeper])
+      probe = helper.gsub("/usr/bin/hdiutil", Shellwords.escape(hdiutil))
+                    .gsub("/bin/sleep", Shellwords.escape(sleeper))
+      stdout, stderr, status = Open3.capture3(
+        {"MOUNT" => mount, "DETACH_LOG" => calls, "DELAY_LOG" => delays,
+         "DETACH_STATUSES" => results},
+        "/bin/bash", "-c", "set -euo pipefail\n#{probe}\ndetach_dmg_with_retry \"$MOUNT\""
+      )
+      assert_equal "preserve me", File.read(marker), "detach must never delete mounted data"
+      [stdout, stderr, status, File.readlines(calls).length, File.readlines(delays, chomp: true)]
+    end
+  end
+
+  def test_dmg_detach_success_does_not_retry
+    stdout, stderr, status, calls, delays = run_production_dmg_detach([0])
+    assert status.success?, stderr
+    assert_empty stdout
+    assert_empty stderr
+    assert_equal 1, calls
+    assert_empty delays
+  end
+
+  def test_dmg_detach_recovers_after_busy_responses
+    _stdout, stderr, status, calls, delays = run_production_dmg_detach([16, 16, 0])
+    assert status.success?, stderr
+    assert_equal 3, calls
+    assert_equal %w[1 2], delays
+    assert_includes stderr, "Disk image is busy"
+    refute_includes stderr, "Error:"
+  end
+
+  def test_dmg_detach_does_not_retry_non_busy_errors
+    _stdout, stderr, status, calls, delays = run_production_dmg_detach([5])
+    assert_equal 5, status.exitstatus
+    assert_equal 1, calls
+    assert_empty delays
+    assert_includes stderr, "exit 5, attempt 1/4"
+  end
+
+  def test_dmg_detach_exhausts_busy_retries_without_force
+    _stdout, stderr, status, calls, delays = run_production_dmg_detach([16, 16, 16, 16])
+    assert_equal 16, status.exitstatus
+    assert_equal 4, calls
+    assert_equal %w[1 2 3], delays
+    assert_includes stderr, "exit 16, attempt 4/4"
+    assert_includes stderr, "Not force-detaching or removing the mounted image"
+  end
+
   def test_dmg_builder_configures_and_verifies_premium_finder_layout
     root = File.expand_path("../..", __dir__)
     build_script = File.read(File.join(root, "script/build_and_run.sh"))

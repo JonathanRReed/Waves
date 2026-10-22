@@ -1270,6 +1270,29 @@ bundle_trees_match() {
   return "$result"
 }
 
+detach_dmg_with_retry() {
+  local mount_path="$1"
+  local attempt=1
+  local status=0
+
+  # Finder can briefly retain the volume after saving its layout. Retry only
+  # EBUSY, with a bounded delay; never force-detach unsaved filesystem data.
+  while true; do
+    if /usr/bin/hdiutil detach "$mount_path" >/dev/null; then
+      return 0
+    else
+      status=$?
+    fi
+    if [ "$status" -ne 16 ] || [ "$attempt" -ge 4 ]; then
+      echo "Error: hdiutil detach failed for $mount_path (exit $status, attempt $attempt/4). Not force-detaching or removing the mounted image." >&2
+      return "$status"
+    fi
+    echo "Warning: Disk image is busy (exit $status, attempt $attempt/4); retrying detach in ${attempt}s: $mount_path" >&2
+    /bin/sleep "$attempt"
+    attempt=$((attempt + 1))
+  done
+}
+
 mount_dmg() {
   require_command hdiutil "to inspect $DMG_PATH"
 
@@ -1284,7 +1307,7 @@ mount_dmg() {
 
 unmount_dmg() {
   if [ -n "$ACTIVE_MOUNT_DIR" ]; then
-    if ! /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null; then
+    if ! detach_dmg_with_retry "$ACTIVE_MOUNT_DIR"; then
       echo "Error: Failed to detach $ACTIVE_MOUNT_DIR." >&2
       exit 1
     fi
@@ -1502,7 +1525,7 @@ create_dmg() {
   # can otherwise retain the temporary layout volume name in its alias record.
   /usr/bin/osascript "$DMG_FINDER_LAYOUT" "$ACTIVE_MOUNT_DIR"
   /bin/sync
-  /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet
+  detach_dmg_with_retry "$ACTIVE_MOUNT_DIR"
   rm -rf "$ACTIVE_MOUNT_DIR"
   ACTIVE_MOUNT_DIR=""
 
