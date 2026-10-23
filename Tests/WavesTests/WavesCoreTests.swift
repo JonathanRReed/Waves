@@ -507,6 +507,31 @@ import Testing
   #expect(infEntry.volumeBoost == nil)
 }
 
+@Test func profileSanitizesNonFiniteDates() {
+  let nanDate = Date(timeIntervalSinceReferenceDate: .nan)
+  let infDate = Date(timeIntervalSinceReferenceDate: .infinity)
+  let profile = Profile(
+    name: "NonFiniteDates",
+    entries: [],
+    createdAt: nanDate,
+    updatedAt: infDate
+  )
+
+  #expect(profile.createdAt == .distantPast)
+  #expect(profile.updatedAt == .distantPast)
+}
+
+@Test func profileEntryDecodeSanitizesNonFiniteFloatStrings() throws {
+  let decoder = JSONDecoder()
+  decoder.nonConformingFloatDecodingStrategy = .convertFromString(
+    positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+
+  let json = #"{"appID":"nan.app","desiredVolume":"NaN","volumeBoost":"Infinity"}"#.data(using: .utf8)!
+  let entry = try decoder.decode(ProfileEntry.self, from: json)
+  #expect(entry.desiredVolume == nil)
+  #expect(entry.volumeBoost == nil)
+}
+
 @Test func audioAppSanitizesNonFiniteFloatingPointValues() {
   let nanApp = AudioApp(
     id: "nan.app",
