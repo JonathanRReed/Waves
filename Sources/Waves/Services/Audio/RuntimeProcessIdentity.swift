@@ -167,7 +167,7 @@ enum RuntimeProcessIdentity {
     let maximumPathSize = 4 * 1_024
     var pathBuffer = [CChar](repeating: 0, count: maximumPathSize)
     let length = proc_pidpath(pid, &pathBuffer, UInt32(maximumPathSize))
-    guard length > 0 else { return nil }
+    guard length > 0, Int(length) < maximumPathSize else { return nil }
     let path = pathBuffer.withUnsafeBufferPointer { buffer in
       buffer.baseAddress.map(String.init(cString:))
     }
