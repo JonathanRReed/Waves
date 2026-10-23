@@ -42,8 +42,8 @@ final class AutomationCommandParser {
     now: @escaping Clock = Date.init
   ) {
     self.maximumRequests = max(0, maximumRequests)
-    self.requestWindow = requestWindow.isFinite ? max(0, requestWindow) : 60
-    self.throttleNotificationInterval = throttleNotificationInterval.isFinite ? max(0, throttleNotificationInterval) : 5
+    self.requestWindow = (requestWindow.isFinite && requestWindow >= 0) ? requestWindow : 60
+    self.throttleNotificationInterval = (throttleNotificationInterval.isFinite && throttleNotificationInterval >= 0) ? throttleNotificationInterval : 5
     self.now = now
   }
 
