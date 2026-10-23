@@ -387,6 +387,7 @@ public struct EqualizerSettings: Codable, Hashable, Sendable {
   }
 
   private static func clamped(_ value: Float) -> Float {
+    // Guard against non-finite float inputs (NaN, Infinity) that bypass max/min comparison.
     guard value.isFinite else { return 0 }
     return min(maximumGainDB, max(minimumGainDB, value))
   }
