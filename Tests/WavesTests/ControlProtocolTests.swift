@@ -492,6 +492,45 @@ func inboundAdmissionByteBudgetRejectsNonFiniteTimeInputsAndRecovers(nonFiniteNo
   #expect(badInitRefilledByteFrames == 5)
 }
 
+@Test(arguments: [Double.nan, Double.infinity, -Double.infinity])
+func inboundAdmissionSanitizesNonFiniteRefillRates(nonFiniteRefill: Double) {
+  let frame = Data(#"{"cmd":"hello"}"#.utf8)
+
+  var admission = ControlInboundAdmission(
+    frameBurst: 5,
+    frameRefillPerSecond: nonFiniteRefill,
+    byteBurst: 1000,
+    byteRefillPerSecond: nonFiniteRefill,
+    maximumAbuseStrikes: 3,
+    now: 0
+  )
+
+  // Initial burst of 5 requests at t = 0 should be admitted despite non-finite refill parameter
+  for _ in 0..<5 {
+    let decision = admission.classify(frame, now: 0)
+    guard case .request = decision else {
+      Issue.record("Expected request admission during burst, got \(decision)")
+      return
+    }
+  }
+
+  // 6th request at t = 0 is rate-limited
+  let exhausted = admission.classify(frame, now: 0)
+  guard case .failure(_, let error, _) = exhausted else {
+    Issue.record("Expected rateLimited error when burst exhausted, got \(exhausted)")
+    return
+  }
+  #expect(error == .rateLimited)
+
+  // Advancing time should not crash or produce NaN tokens; non-finite refill was sanitized to 0
+  let decisionLater = admission.classify(frame, now: 10.0)
+  guard case .failure(_, let errorLater, _) = decisionLater else {
+    Issue.record("Expected rateLimited error at t = 10, got \(decisionLater)")
+    return
+  }
+  #expect(errorLater == .rateLimited)
+}
+
 // MARK: - State pushes
 
 @MainActor
