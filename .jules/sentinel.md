@@ -12,3 +12,8 @@
 **Vulnerability:** In Swift token-bucket rate limiters taking `TimeInterval` inputs, non-finite values (`NaN` or `Infinity`) cause `now - lastRefill` to evaluate to `NaN` or `Infinity`. Arithmetic with `NaN` converts `tokens` to `NaN`, permanently corrupting the bucket state and locking out all subsequent requests on that connection.
 **Learning:** `max(0, Double.nan)` evaluates to `NaN` in Swift, propagating through token calculations and permanently corrupting state. Defensive hardening protects internal bucket calculations from non-finite time inputs.
 **Prevention:** Always check `now.isFinite` and `elapsed.isFinite` before performing token bucket calculations with `TimeInterval` timestamps.
+
+## 2025-05-20 - Control Admission Refill Rate Hardening Rejected
+**Vulnerability:** Attempted fallback sanitization of non-finite `refillPerSecond` parameters in internal rate limiter initializers.
+**Learning:** Production code uses fixed, finite rate limits (`ControlRateLimiter.refillPerSecond` and `ControlInboundAdmission.byteRefillPerSecond`). In Swift, `max(0, Double.nan)` returns zero when `0` is the left operand in standard comparisons, and infinity behavior is a policy choice for injected configurations rather than a demonstrated exploit.
+**Prevention:** Avoid speculative security hardening on internal initializers when production constants are already finite and no untrusted input reaches the initialization parameters.
