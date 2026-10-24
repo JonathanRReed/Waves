@@ -29,7 +29,8 @@ final class URLInvocationLimiter {
     let currentTime = now()
     guard currentTime.timeIntervalSinceReferenceDate.isFinite else { return false }
     let cutoff = currentTime.addingTimeInterval(-window)
-    invocationTimes.removeAll { $0 < cutoff }
+    // Do not retain future entries after a backwards wall-clock shift.
+    invocationTimes.removeAll { $0 < cutoff || $0 > currentTime }
     guard invocationTimes.count < maximumInvocations else { return false }
     invocationTimes.append(currentTime)
     return true
