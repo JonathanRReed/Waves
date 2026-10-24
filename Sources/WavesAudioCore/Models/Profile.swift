@@ -24,8 +24,8 @@ public struct Profile: Identifiable, Codable, Hashable, Sendable {
     self.id = id
     self.name = name
     self.entries = entries
-    self.createdAt = createdAt
-    self.updatedAt = updatedAt
+    self.createdAt = createdAt.timeIntervalSinceReferenceDate.isFinite ? createdAt : .distantPast
+    self.updatedAt = updatedAt.timeIntervalSinceReferenceDate.isFinite ? updatedAt : .distantPast
   }
 
   /// The logical IDs of every app that belongs to this profile.
