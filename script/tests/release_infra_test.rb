@@ -134,11 +134,29 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
+  def native_dmg_workspace
+    # macOS TMPDIR may start with /var, a symlink to /private/var. Use a
+    # canonical mount path like production's explicit /private/tmp workspace.
+    File.realpath(Dir.mktmpdir("waves-native-detach"))
+  end
+
+  def test_dmg_attachment_native_workspace_resolves_temp_directory_alias
+    Dir.mktmpdir("waves-native-alias") do |root|
+      actual = File.join(root, "actual")
+      aliased = File.join(root, "alias")
+      Dir.mkdir(actual)
+      File.symlink(actual, aliased)
+      Dir.stub(:mktmpdir, aliased) do
+        assert_equal File.realpath(actual), native_dmg_workspace
+      end
+    end
+  end
+
   def test_dmg_attachment_native_macos_round_trip
     skip "requires native macOS hdiutil and kernel mounts" unless RUBY_PLATFORM.include?("darwin")
 
     root = File.expand_path("../..", __dir__)
-    directory = Dir.mktmpdir("waves-native-detach")
+    directory = native_dmg_workspace
     image = File.join(directory, "layout.dmg")
     mount = File.join(directory, "mount with spaces")
     Dir.mkdir(mount)
@@ -166,6 +184,26 @@ class ReleaseInfraTest < Minitest::Test
     _stdout, stderr, status = Open3.capture3("/bin/bash", "-c", probe)
     assert status.success?, stderr
     assert_equal "detached", WavesRelease::DmgAttachment.target!(mount, identity)
+  rescue WavesRelease::Error
+    begin
+      # Only report this fixture's image, never unrelated mounted images or
+      # opaque plist data such as aliases/bookmarks. Preserve the original error.
+      owned_images = WavesRelease::DmgAttachment.images!.select do |candidate|
+        File.identical?(candidate.fetch("image-path"), image)
+      end
+      diagnostic = {
+        "requestedMount" => mount,
+        "canonicalMount" => File.realpath(mount),
+        "fixtureImages" => owned_images.first(2).map do |candidate|
+          {"image-path" => candidate.fetch("image-path"),
+           "system-entities" => candidate.fetch("system-entities").first(8)}
+        end
+      }
+      warn "Native detach identity diagnostic: #{JSON.generate(diagnostic)}"
+    rescue StandardError => diagnostic_error
+      warn "Native detach identity diagnostic unavailable (#{diagnostic_error.class})."
+    end
+    raise
   ensure
     if directory
       safe_to_remove = !attach_attempted
