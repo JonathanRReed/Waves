@@ -143,7 +143,7 @@ class ReleaseInfraTest < Minitest::Test
     mount = File.join(directory, "mount with spaces")
     Dir.mkdir(mount)
     _stdout, stderr, status = Open3.capture3(
-      "/usr/bin/hdiutil", "create", "-size", "8m", "-fs", "HFS+", "-format", "UDRW",
+      "/usr/bin/hdiutil", "create", "-size", "8m", "-fs", "HFS+", "-type", "UDIF",
       "-volname", "WavesDetach#{Process.pid}", image
     )
     assert status.success?, stderr
