@@ -145,9 +145,13 @@ struct ControlCommandHandler {
       guard let delta = request.delta, delta.isFinite else {
         return .failure(id: request.id, .missingParameter)
       }
+      // Defensive check against non-finite app.desiredVolume state
+      let currentVolume = app.desiredVolume.isFinite ? app.desiredVolume : 0
+      let rawNewVolume = currentVolume + delta
+      let safeNewVolume = rawNewVolume.isFinite ? rawNewVolume : currentVolume
       // Waves owns the clamp so a fast dial sweep cannot overshoot, and the
       // resulting value comes back so the client never has to read first.
-      let clamped = max(0, min(1, app.desiredVolume + delta))
+      let clamped = max(0, min(1, safeNewVolume))
       store.setDesiredVolume(clamped, for: app)
       store.commitDesiredVolume(for: app)
       response.volume = clamped
