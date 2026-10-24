@@ -1332,7 +1332,9 @@ detach_dmg_with_retry() {
 mount_dmg() {
   require_command hdiutil "to inspect $DMG_PATH"
 
-  ACTIVE_MOUNT_DIR="$(mktemp -d)"
+  # Match construction's canonical mount root; TMPDIR may use /var aliases
+  # that differ from the paths reported by hdiutil and the kernel mount table.
+  ACTIVE_MOUNT_DIR="$(mktemp -d "/private/tmp/waves-dmg-mount.XXXXXX")"
   if ! /usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$ACTIVE_MOUNT_DIR" >/dev/null; then
     rm -rf "$ACTIVE_MOUNT_DIR"
     ACTIVE_MOUNT_DIR=""

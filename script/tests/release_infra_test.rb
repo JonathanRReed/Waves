@@ -507,6 +507,61 @@ class ReleaseInfraTest < Minitest::Test
     assert_includes stderr, "Not force-detaching or removing the mounted image"
   end
 
+  def test_dmg_verification_mount_uses_canonical_path_despite_aliased_tmpdir
+    root = File.expand_path("../..", __dir__)
+    source = File.read(File.join(root, "script/build_and_run.sh"))
+    function = source[/^mount_dmg\(\) \{.*?^\}/m]
+    refute_nil function
+    Dir.mktmpdir("waves-verification-mount") do |directory|
+      actual = File.realpath(directory)
+      aliased = File.join(actual, "tmp-alias")
+      File.symlink(actual, aliased)
+      log = File.join(actual, "attach.log")
+      hdiutil = File.join(actual, "hdiutil")
+      File.write(hdiutil, <<~BASH)
+        #!/bin/bash
+        [ "$#" -eq 6 ] && [ "$1" = attach ] && [ "$2" = "$DMG_PATH" ] &&
+          [ "$3" = -nobrowse ] && [ "$4" = -readonly ] && [ "$5" = -mountpoint ] || exit 90
+        printf '%s\\n' "$6" > "$ATTACH_LOG"
+        canonical=$(cd "$6" && pwd -P) || exit 91
+        if [ "$6" != "$canonical" ]; then
+          echo 'mountpoint retains a temporary-directory alias' >&2
+          exit 92
+        fi
+      BASH
+      FileUtils.chmod(0o700, hdiutil)
+      function = function.gsub("/usr/bin/hdiutil", Shellwords.escape(hdiutil))
+      probe = <<~BASH
+        set -euo pipefail
+        require_command() { :; }
+        mktemp() {
+          if [ "$#" -eq 1 ] && [ "$1" = -d ]; then
+            /usr/bin/mktemp -d "$TMPDIR/verification.XXXXXX"
+          elif [ "$#" -eq 2 ] && [ "$1" = -d ] &&
+               [ "$2" = /private/tmp/waves-dmg-mount.XXXXXX ]; then
+            # Map the macOS private root into this test's owned workspace.
+            /usr/bin/mktemp -d "$CANONICAL_TMP/waves-dmg-mount.XXXXXX"
+          else
+            return 93
+          fi
+        }
+        #{function}
+        mount_dmg
+        printf '%s\\n' "$ACTIVE_MOUNT_DIR"
+      BASH
+      stdout, stderr, status = Open3.capture3(
+        {"TMPDIR" => aliased, "CANONICAL_TMP" => actual, "ATTACH_LOG" => log,
+         "DMG_PATH" => File.join(actual, "fixture.dmg")},
+        "/bin/bash", "-c", probe
+      )
+      assert status.success?, stderr
+      mount = stdout.strip
+      assert_equal mount, File.read(log).strip
+      assert_equal File.realpath(mount), mount
+      assert_equal 0o700, File.stat(mount).mode & 0o777
+    end
+  end
+
   def test_dmg_verification_caller_keeps_mount_after_detach_failure
     [[5], [16, 16, 16, 16]].each do |statuses|
       _stdout, stderr, status, calls, _delays = run_production_dmg_detach(statuses, caller: :verification)
