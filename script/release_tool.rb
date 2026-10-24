@@ -15,6 +15,141 @@ require "yaml"
 module WavesRelease
   class Error < StandardError; end
 
+  # A missing mount point does not prove that its backing image detached.
+  # Capture the image/device identity before ejecting, then fail closed if the
+  # attachment registry or kernel mount table cannot confirm the same identity.
+  module DmgAttachment
+    module_function
+
+    def command!(*arguments, **options)
+      output, error, status = Open3.capture3(*arguments, **options)
+      raise Error, "Cannot inspect disk image state (#{arguments.first}): #{error.strip}" unless status.success?
+      output
+    end
+
+    def plist_dictionary!(element)
+      raise Error, "Invalid disk image plist dictionary" unless element && element.name == "dict"
+      fields = element.elements.to_a
+      raise Error, "Incomplete disk image plist dictionary" unless fields.length.even?
+      fields.each_slice(2).each_with_object({}) do |(key, value), result|
+        unless key.name == "key" && !result.key?(key.text)
+          raise Error, "Invalid or duplicate disk image plist key"
+        end
+        result[key.text] = value
+      end
+    end
+
+    def plist_string!(element)
+      unless element && element.name == "string" && !element.has_elements?
+        raise Error, "Invalid disk image plist string"
+      end
+      element.text.to_s
+    end
+
+    def images!
+      # hdiutil's XML includes data/date fields (aliases and bookmarks) that
+      # plutil cannot represent as JSON. Read only the identity fields, leaving
+      # those unrelated native plist values intact and uninterpreted.
+      require "rexml/document"
+      plist = command!("/usr/bin/hdiutil", "info", "-plist")
+      document = REXML::Document.new(plist)
+      root = document.root
+      unless root && root.name == "plist" && root.elements.to_a.length == 1
+        raise Error, "Invalid disk image plist"
+      end
+      array = plist_dictionary!(root.elements[1])["images"]
+      raise Error, "Invalid disk image registry" unless array && array.name == "array"
+      images = array.elements.map do |element|
+        fields = plist_dictionary!(element)
+        entities = fields["system-entities"]
+        raise Error, "Incomplete disk image identity" unless entities && entities.name == "array"
+        {"image-path" => plist_string!(fields["image-path"]), "system-entities" => entities.elements.map do |entity|
+          values = plist_dictionary!(entity)
+          result = {"dev-entry" => plist_string!(values["dev-entry"])}
+          result["mount-point"] = plist_string!(values["mount-point"]) if values.key?("mount-point")
+          result
+        end}
+      end
+      images.each do |image|
+        unless image["image-path"].start_with?("/") && !image["system-entities"].empty?
+          raise Error, "Incomplete disk image identity"
+        end
+        image["system-entities"].each do |entity|
+          unless entity["dev-entry"].match?(%r{\A/dev/disk[0-9]+(?:s[0-9]+)*\z})
+            raise Error, "Incomplete disk image device identity"
+          end
+        end
+      end
+      images
+    rescue REXML::ParseException => error
+      raise Error, "Invalid disk image plist: #{error.message}"
+    end
+
+    def mounts!
+      lines = command!("/sbin/mount").lines
+      raise Error, "Empty kernel mount table" if lines.empty?
+      lines.map do |line|
+        match = /\A(.+?) on (\/.*) \([^\n]+\)\n?\z/.match(line)
+        raise Error, "Unrecognized kernel mount record" unless match
+        {"device" => match[1], "path" => match[2]}
+      end
+    end
+
+    def devices(image)
+      image.fetch("system-entities").map { |entity| entity.fetch("dev-entry") }.sort
+    end
+
+    def same_device_family?(device, known_devices)
+      family = device[%r{\A(/dev/disk[0-9]+)(?:s[0-9]+)*\z}, 1]
+      family && known_devices.any? do |known|
+        known[%r{\A(/dev/disk[0-9]+)(?:s[0-9]+)*\z}, 1] == family
+      end
+    end
+
+    def snapshot!(mount_path)
+      images = images!
+      matches = images.select do |image|
+        image.fetch("system-entities").any? { |entity| entity["mount-point"] == mount_path }
+      end
+      raise Error, "Cannot identify exactly one image at #{mount_path}" unless matches.length == 1
+      image = matches.first
+      device = image.fetch("system-entities").first.fetch("dev-entry")
+      raise Error, "Cannot identify whole disk image device" unless device.match?(%r{\A/dev/disk[0-9]+\z})
+      mounted = mounts!.select { |entry| entry["path"] == mount_path }
+      expected = image.fetch("system-entities").select { |entity| entity["mount-point"] == mount_path }
+      unless mounted.length == 1 && expected.length == 1 && mounted.first["device"] == expected.first["dev-entry"]
+        raise Error, "Disk image and mount identities disagree at #{mount_path}"
+      end
+      {"image" => image.fetch("image-path"), "devices" => devices(image), "device" => device}
+    end
+
+    def target!(mount_path, identity)
+      images = images!
+      mounts = mounts!
+      related = images.select do |image|
+        image.fetch("image-path") == identity.fetch("image") ||
+          devices(image).any? { |device| same_device_family?(device, identity.fetch("devices")) } ||
+          image.fetch("system-entities").any? { |entity| entity["mount-point"] == mount_path }
+      end
+      mounted = mounts.select { |entry| entry["path"] == mount_path }
+      if related.empty?
+        unless mounted.empty? && mounts.none? { |entry| same_device_family?(entry["device"], identity.fetch("devices")) }
+          raise Error, "Disk image is absent but its mount/device is still in use"
+        end
+        return "detached"
+      end
+      unless related.length == 1 && related.first.fetch("image-path") == identity.fetch("image") &&
+          devices(related.first) == identity.fetch("devices") &&
+          mounted.all? { |entry| identity.fetch("devices").include?(entry["device"]) }
+        raise Error, "Disk image identity changed; refusing to detach an unrelated device"
+      end
+      # EBUSY can unmount the filesystem without ejecting the image device.
+      # The original device still belongs to this exact image, so retry it,
+      # not the now-invalid mount path. Never use force.
+      identity.fetch("device")
+    end
+  end
+
   module ReleaseAuthority
     PRINCIPAL = "waves-commit-signing".freeze
     PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPJaVZPTQXnIIPdGksw4PmO3yBLuqEkd+qE4SALWpFpQ waves-commit-signing".freeze
@@ -2763,6 +2898,18 @@ module WavesRelease
       metadata_path = File.join(root, "release/metadata.json")
       command = arguments.shift
       case command
+      when "dmg-attachment"
+        operation, mount_path, snapshot = arguments
+        raise Error, "usage: release_tool.rb dmg-attachment snapshot|target MOUNT [IDENTITY]" unless mount_path
+        case operation
+        when "snapshot"
+          puts JSON.generate(DmgAttachment.snapshot!(mount_path))
+        when "target"
+          raise Error, "Disk image identity is required" unless snapshot
+          puts DmgAttachment.target!(mount_path, StrictJSON.parse(snapshot, context: "disk image identity"))
+        else
+          raise Error, "Unknown disk image state operation"
+        end
       when "metadata"
         metadata = Metadata.load(metadata_path)
         field = arguments.shift

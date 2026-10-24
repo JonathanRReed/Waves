@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "cgi"
 require "base64"
 require "json"
 require "minitest/autorun"
@@ -104,7 +105,124 @@ class ReleaseInfraTest < Minitest::Test
     end
   end
 
-  def run_production_dmg_detach(statuses, caller: :helper)
+  def dmg_info_plist(images)
+    image_xml = images.map do |image|
+      path = image["image-path"]
+      entities = image.fetch("system-entities", []).map do |entity|
+        fields = entity.map { |key, value| "<key>#{CGI.escapeHTML(key)}</key><string>#{CGI.escapeHTML(value)}</string>" }.join
+        "<dict>#{fields}</dict>"
+      end.join
+      path_xml = path ? "<key>image-path</key><string>#{CGI.escapeHTML(path)}</string>" : ""
+      "<dict>#{path_xml}<key>image-alias</key><data>Ym9va21hcms=</data>" \
+        "<key>attach-time</key><date>2026-10-24T00:00:00Z</date>" \
+        "<key>system-entities</key><array>#{entities}</array></dict>"
+    end.join
+    %(<?xml version="1.0" encoding="UTF-8"?>\n) +
+      %(<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n) +
+      %(<plist version="1.0"><dict><key>images</key><array>#{image_xml}</array></dict></plist>\n)
+  end
+
+  def test_dmg_attachment_reads_xml_plist_with_data_and_date_fields
+    image = {"image-path" => "/tmp/layout & test.dmg", "system-entities" => [{"dev-entry" => "/dev/disk7"}]}
+    fixture = dmg_info_plist([image])
+    reader = lambda do |*arguments|
+      assert_equal ["/usr/bin/hdiutil", "info", "-plist"], arguments
+      fixture
+    end
+    WavesRelease::DmgAttachment.stub(:command!, reader) do
+      assert_equal [image], WavesRelease::DmgAttachment.images!
+    end
+  end
+
+  def native_dmg_workspace
+    # macOS TMPDIR may start with /var, a symlink to /private/var. Use a
+    # canonical mount path like production's explicit /private/tmp workspace.
+    File.realpath(Dir.mktmpdir("waves-native-detach"))
+  end
+
+  def test_dmg_attachment_native_workspace_resolves_temp_directory_alias
+    Dir.mktmpdir("waves-native-alias") do |root|
+      actual = File.join(root, "actual")
+      aliased = File.join(root, "alias")
+      Dir.mkdir(actual)
+      File.symlink(actual, aliased)
+      Dir.stub(:mktmpdir, aliased) do
+        assert_equal File.realpath(actual), native_dmg_workspace
+      end
+    end
+  end
+
+  def test_dmg_attachment_native_macos_round_trip
+    skip "requires native macOS hdiutil and kernel mounts" unless RUBY_PLATFORM.include?("darwin")
+
+    root = File.expand_path("../..", __dir__)
+    directory = native_dmg_workspace
+    image = File.join(directory, "layout.dmg")
+    mount = File.join(directory, "mount with spaces")
+    Dir.mkdir(mount)
+    _stdout, stderr, status = Open3.capture3(
+      "/usr/bin/hdiutil", "create", "-size", "8m", "-fs", "HFS+", "-type", "UDIF",
+      "-volname", "WavesDetach#{Process.pid}", image
+    )
+    assert status.success?, stderr
+    attach_attempted = true
+    _stdout, stderr, status = Open3.capture3(
+      "/usr/bin/hdiutil", "attach", image, "-noautoopen", "-mountpoint", mount
+    )
+    assert status.success?, stderr
+    identity = WavesRelease::DmgAttachment.snapshot!(mount)
+    helper = File.read(File.join(root, "script/build_and_run.sh"))[/detach_dmg_with_retry\(\) \{.*?\n\}/m]
+    refute_nil helper
+    probe = <<~BASH
+      set -euo pipefail
+      run_release_ruby() { /usr/bin/ruby --disable-gems "$@"; }
+      RELEASE_TOOL=#{Shellwords.escape(File.join(root, "script/release_tool.rb"))}
+      #{helper}
+      detach_dmg_with_retry #{Shellwords.escape(mount)}
+      test "$DMG_DETACH_IN_PROGRESS" = 0
+    BASH
+    _stdout, stderr, status = Open3.capture3("/bin/bash", "-c", probe)
+    assert status.success?, stderr
+    assert_equal "detached", WavesRelease::DmgAttachment.target!(mount, identity)
+  rescue WavesRelease::Error
+    begin
+      # Only report this fixture's image, never unrelated mounted images or
+      # opaque plist data such as aliases/bookmarks. Preserve the original error.
+      owned_images = WavesRelease::DmgAttachment.images!.select do |candidate|
+        File.identical?(candidate.fetch("image-path"), image)
+      end
+      diagnostic = {
+        "requestedMount" => mount,
+        "canonicalMount" => File.realpath(mount),
+        "fixtureImages" => owned_images.first(2).map do |candidate|
+          {"image-path" => candidate.fetch("image-path"),
+           "system-entities" => candidate.fetch("system-entities").first(8)}
+        end
+      }
+      warn "Native detach identity diagnostic: #{JSON.generate(diagnostic)}"
+    rescue StandardError => diagnostic_error
+      warn "Native detach identity diagnostic unavailable (#{diagnostic_error.class})."
+    end
+    raise
+  ensure
+    if directory
+      safe_to_remove = !attach_attempted
+      if identity
+        begin
+          safe_to_remove = WavesRelease::DmgAttachment.target!(mount, identity) == "detached"
+        rescue WavesRelease::Error
+          safe_to_remove = false
+        end
+      end
+      if safe_to_remove
+        FileUtils.remove_entry(directory)
+      else
+        warn "Native detach test retained unverified image workspace: #{directory}"
+      end
+    end
+  end
+
+  def run_production_dmg_detach(statuses, caller: :helper, attachment: :mounted)
     root = File.expand_path("../..", __dir__)
     script = File.read(File.join(root, "script/build_and_run.sh"))
     helper = script[/detach_dmg_with_retry\(\) \{.*?\n\}/m]
@@ -124,17 +242,85 @@ class ReleaseInfraTest < Minitest::Test
       File.write(results, statuses.join("\n") + "\n")
       hdiutil = File.join(directory, "hdiutil")
       sleeper = File.join(directory, "sleep")
+      mount_tool = File.join(directory, "mount")
+      release_tool = File.join(directory, "release_tool.rb")
+      File.write(mount_tool, <<~BASH)
+        #!/bin/bash
+        attempt=$(wc -l < "$DETACH_LOG" | tr -d ' ')
+        printf '/dev/disk1s1 on / (apfs, local)\\n'
+        if [ "$attempt" -gt 0 ] && [ "$(sed -n "${attempt}p" "$DETACH_STATUSES")" = 0 ]; then
+          [ "$ATTACHMENT" != zero_mount_error ] || exit 5
+          if [ "$ATTACHMENT" = zero_mounted ]; then
+            printf '/dev/disk7s1 on %s (hfs, local)\\n' "$MOUNT"
+          fi
+          exit 0
+        fi
+        if [ "$attempt" -eq 0 ] || [ "$ATTACHMENT" = mounted ]; then
+          printf '/dev/disk7s1 on %s (hfs, local)\\n' "$MOUNT"
+        elif [ "$ATTACHMENT" = unrelated_mount ]; then
+          printf '/dev/disk99s1 on %s (hfs, local)\\n' "$MOUNT"
+        elif [ "$ATTACHMENT" = mount_error ]; then
+          exit 5
+        elif [ "$ATTACHMENT" = descendant ]; then
+          printf '/dev/disk7s2 on /Volumes/Residual (hfs, local)\\n'
+        elif [ "$ATTACHMENT" = numeric_neighbor ]; then
+          printf '/dev/disk70s2 on /Volumes/Unrelated (hfs, local)\\n'
+        fi
+      BASH
+      source = File.read(File.join(root, "script/release_tool.rb"))
+      source = source.gsub('"/usr/bin/hdiutil"', hdiutil.inspect)
+                     .gsub('"/sbin/mount"', mount_tool.inspect)
+      File.write(release_tool, source)
+      image = {"image-path" => "/private/tmp/layout.dmg", "system-entities" => [
+        {"dev-entry" => "/dev/disk7", "content-hint" => "GUID_partition_scheme"},
+        {"dev-entry" => "/dev/disk7s1", "mount-point" => mount, "content-hint" => "Apple_HFS"}
+      ]}
+      File.write(File.join(directory, "before.plist"), dmg_info_plist([image]))
+      File.write(File.join(directory, "empty.plist"), dmg_info_plist([]))
+      after_image = Marshal.load(Marshal.dump(image))
+      after_image["system-entities"].last.delete("mount-point") unless attachment == :mounted
+      after_image["image-path"] = "/private/tmp/unrelated.dmg" if attachment == :unrelated_device
+      after = {"images" => [:detached, :unrelated_mount, :mount_error, :descendant, :numeric_neighbor].include?(attachment) ? [] : [after_image]}
+      after = {"images" => [{}]} if attachment == :malformed
+      File.write(File.join(directory, "after.plist"), dmg_info_plist(after.fetch("images")))
       File.write(hdiutil, <<~BASH)
         #!/bin/bash
+        if [ "$1" = info ] && [ "$2" = -plist ]; then
+          attempt=$(wc -l < "$DETACH_LOG" | tr -d ' ')
+          if [ "$attempt" -eq 0 ]; then
+            cat "$TEST_ROOT/before.plist"
+          elif [ "$(sed -n "${attempt}p" "$DETACH_STATUSES")" = 0 ]; then
+            [ "$ATTACHMENT" != zero_info_error ] || exit 5
+            if [ "$ATTACHMENT" = zero_mounted ]; then
+              cat "$TEST_ROOT/after.plist"
+            else
+              cat "$TEST_ROOT/empty.plist"
+            fi
+          else
+            [ "$ATTACHMENT" != info_error ] || exit 5
+            if [ "$ATTACHMENT" = detach_race ] && [ "$attempt" -ge 2 ]; then
+              cat "$TEST_ROOT/empty.plist"
+            else
+              cat "$TEST_ROOT/after.plist"
+            fi
+          fi
+          exit 0
+        fi
         if [ "$CALLER" = construction ]; then
           case "$1" in
             create) touch "${@: -1}"; exit 0 ;;
             attach) touch "$MOUNT/.DS_Store"; exit 0 ;;
           esac
         fi
-        [ "$#" -eq 2 ] && [ "$1" = detach ] && [ "$2" = "$MOUNT" ] || exit 90
+        { [ "$#" -eq 2 ] || { [ "$#" -eq 3 ] && [ "$3" = -quiet ]; }; } && [ "$1" = detach ] && { [ "$2" = "$MOUNT" ] || [ "$2" = /dev/disk7 ]; } || exit 90
         printf 'detach\n' >> "$DETACH_LOG"
         attempt=$(wc -l < "$DETACH_LOG" | tr -d ' ')
+        if [ "$ATTACHMENT" = interrupted ] && [ "$attempt" -eq 1 ]; then
+          kill -TERM "$PPID"
+        fi
+        if [ "$attempt" -gt 1 ] && [ "$ATTACHMENT" = unmounted ] && [ "$2" != /dev/disk7 ]; then
+          exit 1
+        fi
         exit "$(sed -n "${attempt}p" "$DETACH_STATUSES")"
       BASH
       File.write(sleeper, <<~BASH)
@@ -142,11 +328,22 @@ class ReleaseInfraTest < Minitest::Test
         [ "$#" -eq 1 ] || exit 91
         printf '%s\n' "$1" >> "$DELAY_LOG"
       BASH
-      FileUtils.chmod(0o700, [hdiutil, sleeper])
+      FileUtils.chmod(0o700, [hdiutil, sleeper, mount_tool])
       probe = helper.gsub("/usr/bin/hdiutil", Shellwords.escape(hdiutil))
                     .gsub("/bin/sleep", Shellwords.escape(sleeper))
+      probe = "run_release_ruby() { #{Shellwords.escape(RbConfig.ruby)} \"$@\"; }\n" +
+              "RELEASE_TOOL=#{Shellwords.escape(release_tool)}\n" + probe
       invocation = 'detach_dmg_with_retry "$MOUNT"'
-      if caller == :verification
+      if caller == :exit_cleanup
+        cleanup = production_cleanup.gsub("/usr/bin/hdiutil", Shellwords.escape(hdiutil))
+        probe += <<~BASH
+
+          SMOKE_PID="" ACTIVE_MOUNT_DIR="$MOUNT" ACTIVE_STAGING_DIR="" ACTIVE_SMOKE_HOME=""
+          ACTIVE_WRITABLE_DMG_DIR="" ACTIVE_WRITABLE_DMG=""
+          cleanup_isolated_distribution_build() { :; }
+          #{cleanup}
+        BASH
+      elsif caller == :verification
         function = script[/^unmount_dmg\(\) \{.*?^\}/m]
         refute_nil function
         probe += "\n#{function}\nACTIVE_MOUNT_DIR=\"$MOUNT\""
@@ -182,12 +379,97 @@ class ReleaseInfraTest < Minitest::Test
       end
       stdout, stderr, status = Open3.capture3(
         {"MOUNT" => mount, "DETACH_LOG" => calls, "DELAY_LOG" => delays,
-         "DETACH_STATUSES" => results, "TEST_ROOT" => directory, "CALLER" => caller.to_s},
+         "DETACH_STATUSES" => results, "TEST_ROOT" => directory, "CALLER" => caller.to_s, "ATTACHMENT" => attachment.to_s},
         "/bin/bash", "-c", "set -euo pipefail\n#{probe}\n#{invocation}"
       )
+      assert File.file?(marker), "detach must never delete mounted data"
       assert_equal "preserve me", File.read(marker), "detach must never delete mounted data"
       [stdout, stderr, status, File.readlines(calls).length, File.readlines(delays, chomp: true)]
     end
+  end
+
+  def test_dmg_detach_zero_status_requires_fresh_absence_evidence
+    [:zero_mounted, :zero_info_error, :zero_mount_error].each do |attachment|
+      _stdout, stderr, status, calls, _delays = run_production_dmg_detach(
+        [0], caller: :exit_cleanup, attachment: attachment
+      )
+      refute status.success?, "zero exit must not clear suppression for #{attachment}: #{stderr}"
+      assert_equal 1, calls
+    end
+  end
+
+  def test_dmg_detach_rejects_other_mounted_descendants_of_original_disk
+    _stdout, stderr, status, calls, _delays = run_production_dmg_detach([16, 0], attachment: :descendant)
+    refute status.success?, stderr
+    assert_equal 1, calls
+  end
+
+  def test_dmg_detach_does_not_confuse_disk7_with_disk70
+    _stdout, stderr, status, calls, _delays = run_production_dmg_detach([16], attachment: :numeric_neighbor)
+    assert status.success?, stderr
+    assert_equal 1, calls
+  end
+
+  def test_dmg_detach_exit_cleanup_does_not_retry_a_rejected_identity
+    _stdout, stderr, status, calls, _delays = run_production_dmg_detach(
+      [16, 0], caller: :exit_cleanup, attachment: :unrelated_device
+    )
+    refute status.success?, stderr
+    assert_equal 1, calls, "EXIT cleanup must not bypass an identity rejection"
+  end
+
+  def test_dmg_detach_exit_cleanup_is_suppressed_during_interruption
+    _stdout, stderr, status, calls, _delays = run_production_dmg_detach(
+      [16, 0], caller: :exit_cleanup, attachment: :interrupted
+    )
+    refute status.success?, stderr
+    assert_equal 1, calls, "EXIT cleanup must not retry a detach interrupted by TERM"
+  end
+
+  def test_dmg_detach_accepts_verified_completion_after_busy
+    _stdout, stderr, status, calls, delays = run_production_dmg_detach([16, 1], attachment: :detached)
+    assert status.success?, stderr
+    assert_equal 1, calls, "do not detach a vanished or reused mount path"
+    assert_equal ["1"], delays
+    assert_includes stderr, "Verified disk image is detached"
+  end
+
+  def test_dmg_detach_verifies_completion_when_device_disappears_during_retry
+    _stdout, stderr, status, calls, delays = run_production_dmg_detach([16, 1], attachment: :detach_race)
+    assert status.success?, stderr
+    assert_equal 2, calls
+    assert_equal ["1"], delays
+  end
+
+  def test_dmg_detach_retries_original_device_after_partial_unmount
+    _stdout, stderr, status, calls, delays = run_production_dmg_detach([16, 0], attachment: :unmounted)
+    assert status.success?, stderr
+    assert_equal 2, calls
+    assert_equal ["1"], delays
+  end
+
+  def test_dmg_detach_does_not_treat_unknown_or_unrelated_state_as_success
+    [:info_error, :malformed, :mount_error, :unrelated_device, :unrelated_mount].each do |attachment|
+      _stdout, stderr, status, calls, _delays = run_production_dmg_detach([16, 0], attachment: attachment)
+      refute status.success?, "must reject #{attachment}: #{stderr}"
+      assert_equal 1, calls, "must not detach an unverified device for #{attachment}"
+    end
+  end
+
+  def test_dmg_detach_does_not_ignore_arbitrary_error_even_if_image_disappears
+    [[1], [5], [16, 5]].each do |statuses|
+      attachment = statuses.length == 1 ? :detached : :detach_race
+      _stdout, _stderr, status, calls, _delays = run_production_dmg_detach(statuses, attachment: attachment)
+      assert_equal statuses.last, status.exitstatus
+      assert_equal statuses.length, calls
+    end
+  end
+
+  def test_dmg_detach_rejects_missing_device_error_while_original_image_remains
+    _stdout, _stderr, status, calls, delays = run_production_dmg_detach([16, 1])
+    assert_equal 1, status.exitstatus
+    assert_equal 2, calls
+    assert_equal ["1"], delays
   end
 
   def test_dmg_detach_success_does_not_retry
@@ -223,6 +505,61 @@ class ReleaseInfraTest < Minitest::Test
     assert_equal %w[1 2 3], delays
     assert_includes stderr, "exit 16, attempt 4/4"
     assert_includes stderr, "Not force-detaching or removing the mounted image"
+  end
+
+  def test_dmg_verification_mount_uses_canonical_path_despite_aliased_tmpdir
+    root = File.expand_path("../..", __dir__)
+    source = File.read(File.join(root, "script/build_and_run.sh"))
+    function = source[/^mount_dmg\(\) \{.*?^\}/m]
+    refute_nil function
+    Dir.mktmpdir("waves-verification-mount") do |directory|
+      actual = File.realpath(directory)
+      aliased = File.join(actual, "tmp-alias")
+      File.symlink(actual, aliased)
+      log = File.join(actual, "attach.log")
+      hdiutil = File.join(actual, "hdiutil")
+      File.write(hdiutil, <<~BASH)
+        #!/bin/bash
+        [ "$#" -eq 6 ] && [ "$1" = attach ] && [ "$2" = "$DMG_PATH" ] &&
+          [ "$3" = -nobrowse ] && [ "$4" = -readonly ] && [ "$5" = -mountpoint ] || exit 90
+        printf '%s\\n' "$6" > "$ATTACH_LOG"
+        canonical=$(cd "$6" && pwd -P) || exit 91
+        if [ "$6" != "$canonical" ]; then
+          echo 'mountpoint retains a temporary-directory alias' >&2
+          exit 92
+        fi
+      BASH
+      FileUtils.chmod(0o700, hdiutil)
+      function = function.gsub("/usr/bin/hdiutil", Shellwords.escape(hdiutil))
+      probe = <<~BASH
+        set -euo pipefail
+        require_command() { :; }
+        mktemp() {
+          if [ "$#" -eq 1 ] && [ "$1" = -d ]; then
+            /usr/bin/mktemp -d "$TMPDIR/verification.XXXXXX"
+          elif [ "$#" -eq 2 ] && [ "$1" = -d ] &&
+               [ "$2" = /private/tmp/waves-dmg-mount.XXXXXX ]; then
+            # Map the macOS private root into this test's owned workspace.
+            /usr/bin/mktemp -d "$CANONICAL_TMP/waves-dmg-mount.XXXXXX"
+          else
+            return 93
+          fi
+        }
+        #{function}
+        mount_dmg
+        printf '%s\\n' "$ACTIVE_MOUNT_DIR"
+      BASH
+      stdout, stderr, status = Open3.capture3(
+        {"TMPDIR" => aliased, "CANONICAL_TMP" => actual, "ATTACH_LOG" => log,
+         "DMG_PATH" => File.join(actual, "fixture.dmg")},
+        "/bin/bash", "-c", probe
+      )
+      assert status.success?, stderr
+      mount = stdout.strip
+      assert_equal mount, File.read(log).strip
+      assert_equal File.realpath(mount), mount
+      assert_equal 0o700, File.stat(mount).mode & 0o777
+    end
   end
 
   def test_dmg_verification_caller_keeps_mount_after_detach_failure

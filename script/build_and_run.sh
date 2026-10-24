@@ -544,7 +544,9 @@ cleanup() {
   fi
   SMOKE_PID=""
 
-  if [ -n "$ACTIVE_MOUNT_DIR" ]; then
+  # An interrupted or rejected identity-aware detach must not fall back to
+  # ejecting an unverified mount path. Retain the image for diagnosis instead.
+  if [ -n "$ACTIVE_MOUNT_DIR" ] && [ "${DMG_DETACH_IN_PROGRESS:-0}" != 1 ]; then
     if /usr/bin/hdiutil detach "$ACTIVE_MOUNT_DIR" -quiet >/dev/null 2>&1; then
       rm -rf -- "$ACTIVE_MOUNT_DIR"
       ACTIVE_MOUNT_DIR=""
@@ -1274,14 +1276,48 @@ detach_dmg_with_retry() {
   local mount_path="$1"
   local attempt=1
   local status=0
+  local identity target
+
+  # Arm before any inspection or detach; EXIT must stay fail-closed even if
+  # this function is interrupted before it can report an error.
+  DMG_DETACH_IN_PROGRESS=1
+  if ! identity="$(run_release_ruby "$RELEASE_TOOL" dmg-attachment snapshot "$mount_path")"; then
+    echo "Error: Cannot establish disk image identity; leaving it untouched: $mount_path" >&2
+    return 1
+  fi
 
   # Finder can briefly retain the volume after saving its layout. Retry only
   # EBUSY, with a bounded delay; never force-detach unsaved filesystem data.
   while true; do
-    if /usr/bin/hdiutil detach "$mount_path" >/dev/null; then
+    if ! target="$(run_release_ruby "$RELEASE_TOOL" dmg-attachment target "$mount_path" "$identity")"; then
+      echo "Error: Cannot verify disk image state; not detaching or removing it: $mount_path" >&2
+      return 1
+    fi
+    if [ "$target" = detached ]; then
+      echo "Verified disk image is detached: $mount_path" >&2
+      DMG_DETACH_IN_PROGRESS=0
       return 0
+    fi
+    if /usr/bin/hdiutil detach "$target" >/dev/null; then
+      if target="$(run_release_ruby "$RELEASE_TOOL" dmg-attachment target "$mount_path" "$identity")" &&
+         [ "$target" = detached ]; then
+        DMG_DETACH_IN_PROGRESS=0
+        return 0
+      fi
+      echo "Error: Detach returned success but image absence is unverified; retaining the image: $mount_path" >&2
+      return 1
     else
       status=$?
+    fi
+    # The device can finish ejecting between the state query and a retry.
+    # Exit 1 alone is not evidence: accept it only after EBUSY and a fresh,
+    # successful query proving both the image and its mounts are gone.
+    if [ "$status" -eq 1 ] && [ "$attempt" -gt 1 ] &&
+       target="$(run_release_ruby "$RELEASE_TOOL" dmg-attachment target "$mount_path" "$identity")" &&
+       [ "$target" = detached ]; then
+      echo "Verified disk image is detached after retry: $mount_path" >&2
+      DMG_DETACH_IN_PROGRESS=0
+      return 0
     fi
     if [ "$status" -ne 16 ] || [ "$attempt" -ge 4 ]; then
       echo "Error: hdiutil detach failed for $mount_path (exit $status, attempt $attempt/4). Not force-detaching or removing the mounted image." >&2
@@ -1296,7 +1332,9 @@ detach_dmg_with_retry() {
 mount_dmg() {
   require_command hdiutil "to inspect $DMG_PATH"
 
-  ACTIVE_MOUNT_DIR="$(mktemp -d)"
+  # Match construction's canonical mount root; TMPDIR may use /var aliases
+  # that differ from the paths reported by hdiutil and the kernel mount table.
+  ACTIVE_MOUNT_DIR="$(mktemp -d "/private/tmp/waves-dmg-mount.XXXXXX")"
   if ! /usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$ACTIVE_MOUNT_DIR" >/dev/null; then
     rm -rf "$ACTIVE_MOUNT_DIR"
     ACTIVE_MOUNT_DIR=""
