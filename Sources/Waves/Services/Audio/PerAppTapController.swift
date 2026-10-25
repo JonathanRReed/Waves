@@ -137,9 +137,11 @@ final class PerAppTapController: @unchecked Sendable {
     let safeAdaptiveGainDB = adaptiveGainDB.isFinite ? min(3, max(-18, adaptiveGainDB)) : 0
     self.adaptiveGain = Float(pow(10, Double(safeAdaptiveGainDB) / 20))
     self.callbackQueue = DispatchQueue(label: "com.waves.backend.tap.\(appID)", qos: .userInitiated)
+    let safeVolume = volume.isFinite ? max(0.0, min(1.0, volume)) : 1.0
+    let safeBoost = volumeBoost.isFinite ? max(1.0, min(4.0, volumeBoost)) : 1.0
     let initialState = TapRenderState(
-      volume: volume,
-      volumeBoost: volumeBoost,
+      volume: safeVolume,
+      volumeBoost: safeBoost,
       isMuted: muted ? 1 : 0,
       isActive: 1,
       peakLevel: 0,
@@ -218,8 +220,10 @@ final class PerAppTapController: @unchecked Sendable {
   }
 
   func apply(volume: Float, volumeBoost: Float, muted: Bool) {
-    let clampedVolume = max(0.0, min(1.0, volume))
-    let clampedBoost = max(1.0, min(4.0, volumeBoost))
+    let safeVolume = volume.isFinite ? volume : 1.0
+    let safeBoost = volumeBoost.isFinite ? volumeBoost : 1.0
+    let clampedVolume = max(0.0, min(1.0, safeVolume))
+    let clampedBoost = max(1.0, min(4.0, safeBoost))
     // Use async to avoid blocking the caller, especially important for real-time audio
     callbackQueue.async { [weak self] in
       self?.stateBox.writeVolumeAndMute(volume: clampedVolume, volumeBoost: clampedBoost, muted: muted)
@@ -227,7 +231,8 @@ final class PerAppTapController: @unchecked Sendable {
   }
 
   func setVolumeBoost(_ boost: Float) {
-    let clampedBoost = max(1.0, min(4.0, boost))
+    let safeBoost = boost.isFinite ? boost : 1.0
+    let clampedBoost = max(1.0, min(4.0, safeBoost))
     let currentState = stateBox.read()
     callbackQueue.async { [weak self] in
       self?.stateBox.writeVolumeAndMute(
