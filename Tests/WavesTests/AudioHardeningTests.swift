@@ -84,6 +84,18 @@ import WavesAudioCore
 }
 
 @Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
+func perAppTapControllerHandlesNonFiniteVolumeAndBoostSafely(_ nonFiniteValue: Float) throws {
+  let controller = try PerAppTapController.testingController(appID: "test.non-finite")
+
+  controller.apply(volume: nonFiniteValue, volumeBoost: nonFiniteValue, muted: false)
+  // Give async dispatch time to complete
+  let state1 = controller.getCurrentLevels()
+  #expect(state1.peak == 0)
+
+  controller.setVolumeBoost(nonFiniteValue)
+}
+
+@Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
 func diagnosticsExportFormatterHandlesNonFiniteAppVolumesSafely(_ volume: Float) {
   var app = AudioApp(
     id: "app.non-finite",
