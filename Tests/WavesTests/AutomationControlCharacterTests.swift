@@ -29,7 +29,9 @@ import WavesAudioCore
   // Verify rejection when profile name exceeds Profile.maxNameLength
   let oversizedName = String(repeating: "a", count: Profile.maxNameLength + 1)
   if let oversizedURL = URL(string: "waves://apply-profile?name=\(oversizedName)") {
-    guard case .rejected = parser.parse(oversizedURL) else {
+    if case .rejected = parser.parse(oversizedURL) {
+      // Expected rejection
+    } else {
       Issue.record("expected rejection for profile name exceeding max length")
     }
   }
