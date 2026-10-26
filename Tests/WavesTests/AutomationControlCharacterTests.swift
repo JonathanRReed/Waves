@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WavesAudioCore
 
 @testable import Waves
 
@@ -22,6 +23,16 @@ import Testing
     guard case .rejected = parser.parse(url) else {
       Issue.record("expected rejection for hostile command \(command)")
       continue
+    }
+  }
+
+  // Verify rejection when profile name exceeds Profile.maxNameLength
+  let oversizedName = String(repeating: "a", count: Profile.maxNameLength + 1)
+  if let oversizedURL = URL(string: "waves://apply-profile?name=\(oversizedName)") {
+    if case .rejected = parser.parse(oversizedURL) {
+      // Expected rejection
+    } else {
+      Issue.record("expected rejection for profile name exceeding max length")
     }
   }
   for _ in 0..<10 {
