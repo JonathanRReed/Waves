@@ -210,6 +210,39 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func controlCommandHandlerSafelyHandlesNonFiniteDesiredVolume() async throws {
+  let store = await makeHandlerStore()
+  let handler = ControlCommandHandler(store: store)
+  let session = ControlCommandHandler.Session(didHandshake: true)
+  let appID = try #require(store.controlApps().first?.id)
+
+  // Inject a non-finite desiredVolume on the session app
+  if let index = store.session.apps.firstIndex(where: { $0.logicalID == appID }) {
+    var corruptedApp = store.session.apps[index]
+    corruptedApp = AudioApp(
+      id: corruptedApp.id,
+      logicalID: corruptedApp.logicalID,
+      displayName: corruptedApp.displayName,
+      category: corruptedApp.category,
+      desiredVolume: .nan,
+      routingState: corruptedApp.routingState
+    )
+    store.session.apps[index] = corruptedApp
+  }
+
+  let apps = store.controlApps()
+  #expect(apps.first?.volume.isFinite == true)
+
+  let adjusted = await handler.handle(
+    ControlRequest(id: 100, cmd: .adjustVolume, app: appID, delta: -0.1),
+    session: session
+  )
+  #expect(adjusted.response.ok)
+  #expect(adjusted.response.volume?.isFinite == true)
+  #expect(adjusted.response.volume == 0.9)
+}
+
+@MainActor
 private func makeHandlerStore(
   initialStartupState: AppStartupState = .running,
   enableExternalControl: Bool = true
