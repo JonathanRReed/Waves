@@ -69,7 +69,7 @@ extension AppStore {
         name: app.displayName,
         running: app.pid != nil,
         muted: app.isMuted,
-        volume: app.desiredVolume,
+        volume: app.desiredVolume.isFinite ? max(0, min(1, app.desiredVolume)) : 1.0,
         live: isLive(app),
         managed: app.routingState == .managed
       )
