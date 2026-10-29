@@ -113,6 +113,18 @@ import Testing
   #expect(!rms.isNaN)
 }
 
+@Test func levelsWithNaNSampleResetsPeakAndSumToZero() {
+  // A NaN sample poisons sum to NaN while peak might remain finite from earlier
+  // finite samples. Both peak and sum must be reset to 0 so silence is reported.
+  let samples: [Float] = [0.8, Float.nan, -0.4]
+  let (peak, sum, count) = samples.withUnsafeBytes { raw in
+    TapDSP.levels(from: raw.baseAddress!, byteCount: raw.count, format: .float32)
+  }
+  #expect(peak == 0)
+  #expect(sum == 0)
+  #expect(count == 3)
+}
+
 @Test func levelsWithNonFiniteSamplesStayFinite() {
   // NaN/inf samples poison the peak/sum accumulators; the poisoned levels must
   // come back as 0, never NaN (a NaN level propagates into snapshots and makes

@@ -141,8 +141,10 @@ public enum TapDSP {
     // Non-finite input samples (NaN/inf from a misbehaving app) poison the
     // accumulators; NaN levels would propagate into snapshots and make every
     // JSONEncoder session save throw. Report silence for such buffers.
-    if !peak.isFinite { peak = 0 }
-    if !sum.isFinite { sum = 0 }
+    if !peak.isFinite || !sum.isFinite {
+      peak = 0
+      sum = 0
+    }
 
     return (peak, sum, sampleCount)
   }
