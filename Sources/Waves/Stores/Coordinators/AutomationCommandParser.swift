@@ -1,4 +1,5 @@
 import Foundation
+import WavesAudioCore
 
 enum AutomationCommand: Equatable, Sendable {
   case setVolume(appID: String, volume: Float)
@@ -104,7 +105,7 @@ final class AutomationCommandParser {
     case "apply-profile", "apply-preset":
       guard let profileName = queryValue(named: "name", in: components),
         !profileName.isEmpty,
-        profileName.count <= 256,
+        profileName.count <= Profile.maxNameLength,
         !containsControlCharacters(profileName)
       else {
         return presentedRejection("Profile command was invalid.")
