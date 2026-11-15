@@ -60,16 +60,25 @@ extension AppStore {
       )
       let result = await backend.applyAppIntent(intent)
       backendStatus = result.backendStatus
-      rows.append(
-        ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
-          resultingApp: result.resultingApp,
-          detail: result.detail
-        )
+      let row = ProfileRowApplyResult(
+        entryIndex: entryIndex,
+        appID: entry.appID,
+        generation: generation,
+        outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
+        resultingApp: result.resultingApp,
+        detail: result.detail
       )
+      // Later rows suspend. An edit to this app in the meantime builds its
+      // intent from the confirmed EQ, so the restored one is recorded now
+      // rather than when the whole profile is reconciled.
+      if let equalizer = entry.equalizer,
+        Self.profileRowRestoredSound(entry, row: row),
+        appIntentCoordinator.isCurrentProfile(generation),
+        !appIntentCoordinator.hasNewerGeneration(than: generation, for: entry.appID)
+      {
+        appIntentCoordinator.recordConfirmedEqualizer(equalizer, for: entry.appID)
+      }
+      rows.append(row)
     }
 
     return ProfileApplyResult(rows: rows, backendStatus: backendStatus)

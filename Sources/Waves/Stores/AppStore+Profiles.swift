@@ -271,8 +271,9 @@ extension AppStore {
     soundNotes: ProfileSoundNotes = ProfileSoundNotes(),
     failureTitle: String
   ) {
-    guard !profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult)
-      || !soundNotes.isEmpty
+    guard
+      !profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult)
+        || !soundNotes.isEmpty
     else {
       return
     }
@@ -779,6 +780,17 @@ extension AppStore {
   ) {
     let actionableRows = zip(profile.entries, result.rows).filter { entry, _ in entry.hasLevels }
     guard !actionableRows.isEmpty else {
+      // Dropping every unconnected output can leave nothing to apply; the
+      // skipped devices still have to be named.
+      guard soundNotes.isEmpty else {
+        showToast(
+          title: "Profile partly applied",
+          detail: soundNotes.sentences.joined(separator: " "),
+          kind: soundNotes.routerHeldSound ? .warning : .info,
+          duration: .seconds(4)
+        )
+        return
+      }
       showToast(
         title: "Profile selected",
         detail: "\(profile.name) — \(profile.entries.count) \(profile.entries.count == 1 ? "app" : "apps")",

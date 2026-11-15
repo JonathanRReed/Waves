@@ -2413,6 +2413,45 @@ private let profileTestHeadphones = AudioDevice(
 }
 
 @MainActor
+@Test func editDuringASoundProfileKeepsTheEqualizerAlreadyRestoredForThatApp() async {
+  let first = transactionTestApp(id: "apply.sound.first", desiredVolume: 0.8, targetDeviceUID: nil)
+  let second = transactionTestApp(id: "apply.sound.second", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(apps: [first, second], device: transactionTestDevice())
+  await fixture.backend.suspendIntent(callNumber: 2)
+  let savedEqualizer = profileTestEqualizer(gain: -6)
+  let profile = Profile(
+    name: "Movie",
+    entries: [
+      ProfileEntry(appID: first.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer),
+      ProfileEntry(appID: second.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer),
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  // The first app's row has landed; the second app's is still in flight.
+  await fixture.backend.waitUntilFirstIntentIsSuspended()
+  let restored = await fixture.backend.recordedIntents().first?.equalizerSettings
+  #expect(restored?.isEnabled == true)
+
+  let edit = Task { @MainActor in
+    await fixture.store.applyAppIntent(
+      forAppID: first.logicalID,
+      overrides: AppIntentOverrides(desiredVolume: 0.5),
+      reason: .userEdit
+    )
+  }
+  await waitUntil { await fixture.backend.recordedIntents().count == 3 }
+  await fixture.backend.resumeFirstIntent()
+  _ = await edit.value
+  await fixture.store.drainAppIntentTransactions()
+
+  // The volume change carries the EQ the profile just restored, not the old one.
+  let edited = await fixture.backend.recordedIntents().last { $0.appID == first.logicalID }
+  #expect(edited?.desiredVolume == 0.5)
+  #expect(edited?.equalizerSettings == restored)
+}
+
+@MainActor
 @Test func levelOnlyProfileLeavesEqualizerAndOutputAlone() async {
   let app = transactionTestApp(id: "apply.legacy", desiredVolume: 0.8, targetDeviceUID: profileTestHeadphones.id)
   let equalizer = profileTestEqualizer(gain: 5)
@@ -2476,6 +2515,35 @@ private let profileTestHeadphones = AudioDevice(
   #expect(
     fixture.store.toasts.contains {
       $0.title == "Profile partly applied" && $0.kind == .info
+        && $0.detail == "AirPods Pro isn't connected, so Test App kept its output."
+    })
+}
+
+@MainActor
+@Test func outputOnlyProfileStillNamesTheDevicesThatAreNotConnected() async {
+  let app = transactionTestApp(id: "apply.output-only", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
+  let profile = Profile(
+    name: "Desk",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        output: ProfileOutput(deviceUID: "device.airpods", deviceName: "AirPods Pro")
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  // With its only setting skipped the row has nothing left to apply, which
+  // used to read as a plain "Profile selected".
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile selected" })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied"
         && $0.detail == "AirPods Pro isn't connected, so Test App kept its output."
     })
 }
@@ -2883,7 +2951,7 @@ private actor TransactionBackend: AudioControlBackend {
   private var refreshSnapshot: AudioSessionSnapshot?
   private var outcomes: [AppIntentApplyOutcome]
   private var profileOutcomes: [ProfileRowApplyOutcome]
-  private let suspendFirstIntent: Bool
+  private var suspendedIntentCallNumber: Int?
   private let suspendFirstProfile: Bool
   private let resultGenerationOffset: UInt64
   private let extraOutputDevices: [AudioDevice]
@@ -2930,7 +2998,7 @@ private actor TransactionBackend: AudioControlBackend {
     self.refreshSnapshot = refreshSnapshot
     self.outcomes = outcomes
     self.profileOutcomes = profileOutcomes
-    self.suspendFirstIntent = suspendFirstIntent
+    self.suspendedIntentCallNumber = suspendFirstIntent ? 1 : nil
     self.suspendFirstProfile = suspendFirstProfile
     self.resultGenerationOffset = resultGenerationOffset
     self.extraOutputDevices = extraOutputDevices
@@ -2960,6 +3028,11 @@ private actor TransactionBackend: AudioControlBackend {
     await withCheckedContinuation { continuation in
       suspensionWaiters.append(continuation)
     }
+  }
+
+  /// Suspends the intent with this call number instead of the first.
+  func suspendIntent(callNumber: Int) {
+    suspendedIntentCallNumber = callNumber
   }
 
   func resumeFirstIntent() {
@@ -2992,7 +3065,7 @@ private actor TransactionBackend: AudioControlBackend {
       latestGenerationByAppID[intent.appID] = intent.generation
     }
 
-    if callNumber == 1, suspendFirstIntent {
+    if callNumber == suspendedIntentCallNumber {
       firstIntentIsSuspended = true
       let waiters = suspensionWaiters
       suspensionWaiters.removeAll()
