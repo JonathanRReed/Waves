@@ -84,6 +84,26 @@ import WavesAudioCore
 }
 
 @Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
+func perAppTapControllerFallsBackToUnityForNonFiniteVolumeAndBoost(_ nonFiniteValue: Float) throws {
+  // Clamping alone does not reject these: `min(4, .nan)` is 4, so a NaN boost
+  // used to become a 4x boost, and negative infinity became silence.
+  let controller = try PerAppTapController.testingController(appID: "test.non-finite")
+  controller.apply(volume: 0.4, volumeBoost: 2, muted: false)
+
+  controller.apply(volume: nonFiniteValue, volumeBoost: nonFiniteValue, muted: false)
+  var gains = controller.settledGainsForTesting()
+  #expect(gains.volume == 1)
+  #expect(gains.volumeBoost == 1)
+
+  controller.apply(volume: 0.4, volumeBoost: 2, muted: false)
+  _ = controller.settledGainsForTesting()
+  controller.setVolumeBoost(nonFiniteValue)
+  gains = controller.settledGainsForTesting()
+  #expect(gains.volume == 0.4)
+  #expect(gains.volumeBoost == 1)
+}
+
+@Test(arguments: [Float.nan, Float.infinity, -Float.infinity])
 func diagnosticsExportFormatterHandlesNonFiniteAppVolumesSafely(_ volume: Float) {
   var app = AudioApp(
     id: "app.non-finite",

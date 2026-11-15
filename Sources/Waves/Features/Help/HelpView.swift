@@ -29,14 +29,14 @@ struct HelpView: View {
         .font(.headline)
 
       Text(
-        "Review the 1.5 update, rerun the required Mac readiness guide, or take the optional tour on the live mixer. Your saved mix and preferences stay in place."
+        "Review what’s new, rerun the required Mac readiness guide, or take the optional tour on the live mixer. Your saved mix and preferences stay in place."
       )
       .font(.callout)
       .foregroundStyle(.secondary)
       .fixedSize(horizontal: false, vertical: true)
 
       HStack(spacing: 10) {
-        Button("What’s New in 1.5") {
+        Button("What’s New") {
           store.showWhatsNew()
         }
         .buttonStyle(.bordered)
@@ -80,7 +80,7 @@ struct HelpView: View {
       }
 
       Text(
-        "Adaptive Mix only turns apps down temporarily. It never pauses or mutes anything, and your manual levels stay put."
+        "Adaptive Mix changes levels temporarily. Loudness Balance can raise a quiet app by a few decibels. It never pauses or mutes anything, and your manual levels stay put."
       )
       .font(.caption)
       .foregroundStyle(.secondary)

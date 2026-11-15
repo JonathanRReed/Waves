@@ -1213,6 +1213,40 @@ func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async th
 }
 
 @MainActor
+@Test func capturingLevelsDuringAnAutomaticMuteSavesTheUsersOwnMuteState() async {
+  let app = transactionTestApp(id: "automation.capture", desiredVolume: 0.38)
+  let device = transactionTestDevice()
+  let durable = PersistedAppAudioIntent(
+    appID: app.logicalID,
+    desiredVolume: app.desiredVolume,
+    isMuted: false,
+    volumeBoost: app.volumeBoost
+  )
+  let fixture = makeTransactionFixture(apps: [app], device: device, intent: durable)
+
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: true)
+  #expect(fixture.store.session.apps.first?.isMuted == true)
+  #expect(fixture.store.session.apps.first?.muteSource == .autoConferencing)
+
+  // "Capture current levels" while the call has the app muted.
+  let saveResult = fixture.store.saveProfile(named: "During call", appIDs: [app.logicalID], captureLevels: true)
+  guard case .saved(let savedID) = saveResult else {
+    Issue.record("expected the profile to save, got \(saveResult)")
+    return
+  }
+  let captured = fixture.store.profiles.first { $0.id == savedID }?.entries.first
+  #expect(captured?.desiredVolume == 0.38)
+  #expect(captured?.isMuted == false)
+
+  // Applying a level-carrying profile takes the Reset Mix restore point.
+  fixture.store.applyProfile(
+    Profile(name: "Quiet", entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)])
+  )
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.mixRestorePoint?.entries.first?.isMuted == false)
+}
+
+@MainActor
 @Test func automaticMuteSurvivesRefreshNeverPersistsAndResumes() async {
   let app = transactionTestApp(id: "automation.refresh", desiredVolume: 0.38)
   let device = transactionTestDevice()

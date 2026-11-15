@@ -155,6 +155,51 @@ struct HostedUIInteractionTask9Tests {
   }
 
   @MainActor
+  @Test func recordingAnAppMuteShortcutKeepsItAndTheAppsOtherShortcuts() async throws {
+    // Drives the handlers the Settings row itself uses. Recording once ran the
+    // same callback as the row's remove button, which deleted the new binding
+    // and the app's volume shortcuts with it.
+    let fixture = try await makeTask9InteractionFixture(
+      app: task9InteractionApp(),
+      announcementPoster: AccessibilityAnnouncementPoster { _ in }
+    )
+    defer { fixture.cleanup() }
+    let store = fixture.store
+    let appID = fixture.app.logicalID
+    let draft = ControlSettingsDraft()
+    draft.addPendingApp(appID)
+    let volumeUpChord = HotkeyChord(keyCode: UInt16(kVK_ANSI_U), carbonModifiers: UInt32(cmdKey | optionKey))
+    guard case .success = store.assignHotkey(volumeUpChord, to: .volumeUpApp(appID)) else {
+      Issue.record("expected the volume shortcut to be assigned")
+      return
+    }
+
+    let muteRow = ControlSettingsView.shortcutRowHandlers(
+      action: .muteApp(appID),
+      binding: nil,
+      clearRemovesAppGroup: appID,
+      store: store,
+      draft: draft
+    )
+    let muteChord = HotkeyChord(keyCode: UInt16(kVK_ANSI_M), carbonModifiers: UInt32(cmdKey | optionKey))
+    #expect(muteRow.onRecord(muteChord) == nil)
+
+    #expect(Set(store.preferences.hotkeys.bindings.map(\.action)) == [.muteApp(appID), .volumeUpApp(appID)])
+    #expect(draft.pendingAppIDs.isEmpty)
+
+    // The row's remove button still takes the whole group with it.
+    let recorded = try #require(store.preferences.hotkeys.bindings.first { $0.action == .muteApp(appID) })
+    ControlSettingsView.shortcutRowHandlers(
+      action: .muteApp(appID),
+      binding: recorded,
+      clearRemovesAppGroup: appID,
+      store: store,
+      draft: draft
+    ).onClear()
+    #expect(store.preferences.hotkeys.bindings.isEmpty)
+  }
+
+  @MainActor
   @Test func hostedProfileDefaultActionShowsAndAnnouncesInvalidSaveFeedback() async throws {
     let announcements = Task9AnnouncementRecorder()
     let fixture = try await makeTask9InteractionFixture(

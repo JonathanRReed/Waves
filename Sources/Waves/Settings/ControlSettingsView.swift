@@ -200,26 +200,26 @@ struct ControlSettingsView: View {
       name,
       action: .muteApp(appID),
       canRemoveWhenUnset: true,
-      onRemoved: { removeAppShortcuts(appID) }
+      clearRemovesAppGroup: appID
     )
     shortcutRow("\(name) volume up", action: .volumeUpApp(appID))
     shortcutRow("\(name) volume down", action: .volumeDownApp(appID))
-  }
-
-  private func removeAppShortcuts(_ appID: String) {
-    draft.removePendingApp(appID)
-    for binding in store.preferences.hotkeys.bindings where binding.action.appID == appID {
-      store.removeHotkey(id: binding.id)
-    }
   }
 
   private func shortcutRow(
     _ title: String,
     action: HotkeyAction,
     canRemoveWhenUnset: Bool = false,
-    onRemoved: @escaping () -> Void = {}
+    clearRemovesAppGroup appID: String? = nil
   ) -> some View {
     let binding = store.preferences.hotkeys.bindings.first { $0.action == action }
+    let handlers = Self.shortcutRowHandlers(
+      action: action,
+      binding: binding,
+      clearRemovesAppGroup: appID,
+      store: store,
+      draft: draft
+    )
     return LabeledContent(title) {
       ShortcutRecorder(
         action: action,
@@ -227,21 +227,45 @@ struct ControlSettingsView: View {
         binding: binding,
         canRemoveWhenUnset: canRemoveWhenUnset,
         isUnavailable: binding.map(store.isHotkeyRejected) ?? false,
-        onRecord: { chord in
-          switch store.assignHotkey(chord, to: action, replacing: binding?.id) {
-          case .success:
-            // The row is a real binding now, so it no longer needs holding open.
-            onRemoved()
-            return nil
-          case .failure(let error):
-            return store.hotkeyMessage(for: error)
-          }
-        },
-        onClear: {
-          if let binding { store.removeHotkey(id: binding.id) }
-          onRemoved()
-        }
+        onRecord: handlers.onRecord,
+        onClear: handlers.onClear
       )
     }
+  }
+
+  /// The record and clear handlers for one shortcut row.
+  ///
+  /// The two do different things to an app's group. Recording releases only the
+  /// pending placeholder, because the new binding is now what keeps the group
+  /// listed. Clearing the mute row removes the whole group. They are built in
+  /// one place so a test can drive the same closures the row uses: when a single
+  /// callback served both, recording a mute shortcut deleted it, along with the
+  /// app's volume shortcuts.
+  static func shortcutRowHandlers(
+    action: HotkeyAction,
+    binding: HotkeyBinding?,
+    clearRemovesAppGroup appID: String?,
+    store: AppStore,
+    draft: ControlSettingsDraft
+  ) -> (onRecord: (HotkeyChord) -> String?, onClear: () -> Void) {
+    (
+      onRecord: { chord in
+        switch store.assignHotkey(chord, to: action, replacing: binding?.id) {
+        case .success:
+          if let appID { draft.removePendingApp(appID) }
+          return nil
+        case .failure(let error):
+          return store.hotkeyMessage(for: error)
+        }
+      },
+      onClear: {
+        if let binding { store.removeHotkey(id: binding.id) }
+        guard let appID else { return }
+        draft.removePendingApp(appID)
+        for binding in store.preferences.hotkeys.bindings where binding.action.appID == appID {
+          store.removeHotkey(id: binding.id)
+        }
+      }
+    )
   }
 }

@@ -718,6 +718,17 @@ extension AppStore {
     return visibleApps.filter { ids.contains($0.logicalID) }
   }
 
+  /// The mute the user chose for `app`, with an automatic conferencing mute set
+  /// aside.
+  ///
+  /// An automatic mute is session-only. A capture that copied `app.isMuted`
+  /// while a call had media muted would save that mute into a profile or a
+  /// restore point, and applying either later would mute the app for good.
+  func userMute(for app: AudioApp) -> Bool {
+    guard app.isMuted, app.muteSource == .autoConferencing else { return app.isMuted }
+    return preferences.appAudioIntents[app.logicalID]?.isMuted ?? false
+  }
+
   // MARK: - Mix restore point ("Reset Mix")
 
   /// Snapshots the current volume/mute/boost of every visible app, taken right
@@ -744,7 +755,7 @@ extension AppStore {
       return ProfileEntry(
         appID: app.logicalID,
         desiredVolume: app.desiredVolume,
-        isMuted: app.isMuted,
+        isMuted: userMute(for: app),
         volumeBoost: app.volumeBoost
       )
     }
@@ -864,7 +875,7 @@ extension AppStore {
           return ProfileEntry(
             appID: appID,
             desiredVolume: app.desiredVolume,
-            isMuted: app.isMuted,
+            isMuted: userMute(for: app),
             volumeBoost: app.volumeBoost
           )
         }
