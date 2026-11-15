@@ -107,10 +107,22 @@ import Testing
   )
 }
 
+@Test func aNewWhatsNewCardShowsOnceAfterUpdatingWithoutRerunningSetup() {
+  // Someone who dismissed the previous card and then updated.
+  var preferences = completedPreferences()
+  preferences.whatsNewDismissedVersion = OnboardingExperience.whatsNewVersion - 1
+  let context = { OnboardingLaunchContext(preferences: preferences, installLocation: .applications) }
+
+  #expect(OnboardingLaunchPolicy.decide(context()) == .mixer(showWhatsNew: true, showTourTip: false))
+
+  preferences.whatsNewDismissedVersion = OnboardingExperience.whatsNewVersion
+  #expect(OnboardingLaunchPolicy.decide(context()) == .mixer(showWhatsNew: false, showTourTip: false))
+}
+
 @Test func dismissedTourNeverStartsAutomatically() {
   var preferences = completedPreferences()
   preferences.guidedTourDismissedVersion = OnboardingExperience.currentVersion
-  preferences.whatsNewDismissedVersion = OnboardingExperience.currentVersion
+  preferences.whatsNewDismissedVersion = OnboardingExperience.whatsNewVersion
   preferences.deferredTourVersion = OnboardingExperience.currentVersion
 
   #expect(
@@ -126,7 +138,7 @@ import Testing
 
 @Test func deferredTourOffersOneTipWhenAnEligibleAppAppears() {
   var preferences = completedPreferences()
-  preferences.whatsNewDismissedVersion = OnboardingExperience.currentVersion
+  preferences.whatsNewDismissedVersion = OnboardingExperience.whatsNewVersion
   preferences.deferredTourVersion = OnboardingExperience.currentVersion
 
   #expect(
