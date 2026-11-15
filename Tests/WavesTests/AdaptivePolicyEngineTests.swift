@@ -225,3 +225,138 @@ private func policyInput(
     ) == -8
   )
 }
+
+// MARK: - Calls are not turned down by non-speech focus
+
+private func frontmostGame() -> AdaptiveMixInput {
+  var game = policyInput("game", contentType: .game, priority: .normal, rmsDBFS: -18)
+  game.isFrontmost = true
+  return game
+}
+
+private func speakingCall(priority: AdaptivePriority = .normal) -> AdaptiveMixInput {
+  policyInput("call", contentType: .meeting, priority: priority, rmsDBFS: -24, voiceRatio: 0.8)
+}
+
+@Test func speakingCallIsNotDuckedByFrontmostGameWithDefaultSettings() {
+  // Balanced strategy + Smart Hybrid promotes the frontmost game to
+  // Foreground, which used to hold a Normal call 4 dB down. Speech takes two
+  // analysis frames to register, so the loop leaves time for the release.
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: false, focusMode: .smartHybrid)
+  var gains: [String: Float] = [:]
+  for _ in 0..<20 {
+    gains = engine.update(inputs: [frontmostGame(), speakingCall()], elapsed: 0.1)
+  }
+
+  #expect(gains["call"] == 0)
+  #expect(gains["game"] == 0)
+}
+
+@Test func silentCallCanStillBeDuckedByFrontmostGame() {
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: false, focusMode: .smartHybrid)
+  let quietCall = policyInput("call", contentType: .meeting, priority: .normal, rmsDBFS: -80)
+  var gains: [String: Float] = [:]
+  for _ in 0..<5 {
+    gains = engine.update(inputs: [frontmostGame(), quietCall], elapsed: 0.1)
+  }
+
+  #expect(gains["call"] == Float(AdaptiveMixing.gentlePriorityReductionDB))
+}
+
+@Test func speakingCallStillYieldsToOtherSpeech() {
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: false, focusMode: .assignedPriorities)
+  let lecture = policyInput(
+    "lecture",
+    contentType: .lectureOrVoice,
+    priority: .foreground,
+    rmsDBFS: -24,
+    voiceRatio: 0.8
+  )
+  var gains: [String: Float] = [:]
+  for _ in 0..<5 {
+    gains = engine.update(inputs: [lecture, speakingCall()], elapsed: 0.1)
+  }
+
+  #expect(gains["call"] == Float(AdaptiveMixing.gentlePriorityReductionDB))
+}
+
+@Test func callTheUserPutInTheBackgroundStillDucksForMedia() {
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: false, focusMode: .smartHybrid)
+  var gains: [String: Float] = [:]
+  for _ in 0..<5 {
+    gains = engine.update(inputs: [frontmostGame(), speakingCall(priority: .background)], elapsed: 0.1)
+  }
+
+  #expect(gains["call"] == Float(AdaptiveMixing.strongPriorityReductionDB))
+}
+
+@Test func lectureFocusKeepsMeetingsInFront() {
+  #expect(
+    AdaptiveMixing.policy(for: .lectureFocus, contentType: .meeting).priority == .foreground
+  )
+}
+
+// MARK: - Pre-fader measurements
+
+@Test func turnedDownNonSpeechAppDoesNotTakeFocus() {
+  // -20 dBFS before the fader, 1% after it: -60 dBFS is below the activity
+  // threshold, so the frontmost app must not duck anyone.
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: false, focusMode: .followFrontApp)
+  var game = frontmostGame()
+  game.manualGain = 0.01
+  let music = policyInput("music", contentType: .music, priority: .normal, rmsDBFS: -20)
+
+  let gains = engine.update(inputs: [game, music], elapsed: 0.12)
+
+  #expect(gains["music"] == 0)
+}
+
+@Test func turnedDownCallStillTriggersSpeechFocus() {
+  // Measurements are pre-fader, so a call at 15% still counts as speaking.
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: false, focusMode: .assignedPriorities)
+  var call = speakingCall(priority: .foreground)
+  call.manualGain = 0.15
+  let music = policyInput("music", contentType: .music, priority: .background, rmsDBFS: -20)
+
+  _ = engine.update(inputs: [call, music], elapsed: 0.12)
+  let gains = engine.update(inputs: [call, music], elapsed: 0.12)
+
+  #expect(gains["music"] == Float(AdaptiveMixing.strongPriorityReductionDB))
+}
+
+// MARK: - Mode gating
+
+@Test func loudnessOnlyEngineNeverPriorityDucks() {
+  var engine = AdaptivePolicyEngine(
+    usesLoudnessCorrection: true,
+    usesPriorityDucking: false,
+    focusMode: .followFrontApp
+  )
+  let front = frontmostGame()
+  // At the loudness target, so the trim stays at 0 and only ducking could move it.
+  let music = policyInput("music", contentType: .music, priority: .background, rmsDBFS: -24)
+
+  var gains: [String: Float] = [:]
+  for _ in 0..<5 {
+    gains = engine.update(inputs: [front, music], elapsed: 0.1)
+  }
+
+  // A duck would be -10 dB; float rounding of -24 dBFS leaves a ~1e-7 dB trim.
+  #expect(abs(gains["music"] ?? -99) < 0.01)
+}
+
+@Test func loudnessBalanceNeverAddsGainOnTopOfTheUsersBoost() {
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: true, usesPriorityDucking: false)
+  // Quiet before the fader: on its own this earns the full upward trim.
+  var boosted = policyInput("boosted", contentType: .music, priority: .normal, rmsDBFS: -36)
+  boosted.manualGain = 4
+  let plain = policyInput("plain", contentType: .music, priority: .normal, rmsDBFS: -36)
+
+  var gains: [String: Float] = [:]
+  for _ in 0..<200 {
+    gains = engine.update(inputs: [boosted, plain], elapsed: 0.1)
+  }
+
+  #expect(gains["boosted"] == 0)
+  #expect((gains["plain"] ?? 0) > 2.9)
+}

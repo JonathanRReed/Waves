@@ -30,6 +30,9 @@ enum ControlProtocol {
 
 /// A command name. Closed set, so an unknown command is rejected by decoding
 /// rather than reaching any handler.
+///
+/// Protocol 1 only grows: new cases are appended, never renamed. `hello`
+/// advertises the whole set so a client can tell what this build accepts.
 enum ControlCommand: String, Codable, CaseIterable, Sendable {
   case hello
   case listApps = "list-apps"
@@ -40,6 +43,10 @@ enum ControlCommand: String, Codable, CaseIterable, Sendable {
   case toggleMute = "toggle-mute"
   case subscribe
   case unsubscribe
+  // Added in Waves 1.8.0.
+  case applyProfile = "apply-profile"
+  case refresh
+  case setBoost = "set-boost"
 }
 
 struct ControlRequest: Codable, Equatable, Sendable {
@@ -58,12 +65,16 @@ struct ControlRequest: Codable, Equatable, Sendable {
   /// which would race itself on a fast twist and overshoot.
   var delta: Float?
   var muted: Bool?
+  /// Boost multiplier for `set-boost`. Validated by the handler, never clamped.
+  var boost: Float?
+  /// Profile name for `apply-profile`, matched like `waves://apply-profile`.
+  var profile: String?
   /// Client name, for logging. Free text, bounded on decode.
   var client: String?
   var protocolVersion: Int?
 
   enum CodingKeys: String, CodingKey {
-    case id, cmd, app, volume, delta, muted, client
+    case id, cmd, app, volume, delta, muted, boost, profile, client
     case protocolVersion = "protocol"
   }
 
@@ -74,6 +85,8 @@ struct ControlRequest: Codable, Equatable, Sendable {
     volume: Float? = nil,
     delta: Float? = nil,
     muted: Bool? = nil,
+    boost: Float? = nil,
+    profile: String? = nil,
     client: String? = nil,
     protocolVersion: Int? = nil
   ) {
@@ -84,6 +97,8 @@ struct ControlRequest: Codable, Equatable, Sendable {
     self.volume = volume.flatMap { $0.isFinite ? $0 : nil }
     self.delta = delta.flatMap { $0.isFinite ? $0 : nil }
     self.muted = muted
+    self.boost = boost
+    self.profile = profile
     self.client = client.map { String($0.prefix(Self.maximumClientNameLength)) }
     self.protocolVersion = protocolVersion
   }
@@ -91,7 +106,11 @@ struct ControlRequest: Codable, Equatable, Sendable {
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     id = try container.decodeIfPresent(Int.self, forKey: .id)
-    cmd = try container.decode(ControlCommand.self, forKey: .cmd)
+    let rawCommand = try container.decode(String.self, forKey: .cmd)
+    guard let command = ControlCommand(rawValue: rawCommand) else {
+      throw ControlRequestDecodingError.unknownCommand
+    }
+    cmd = command
     let rawApp = try container.decodeIfPresent(String.self, forKey: .app)
     guard rawApp.map({ $0.count <= Self.maximumAppIDLength }) ?? true else {
       throw DecodingError.dataCorruptedError(
@@ -107,10 +126,19 @@ struct ControlRequest: Codable, Equatable, Sendable {
     let rawDelta = try container.decodeIfPresent(Float.self, forKey: .delta)
     delta = rawDelta.flatMap { $0.isFinite ? $0 : nil }
     muted = try container.decodeIfPresent(Bool.self, forKey: .muted)
+    boost = try container.decodeIfPresent(Float.self, forKey: .boost)
+    profile = try container.decodeIfPresent(String.self, forKey: .profile)
     let rawClient = try container.decodeIfPresent(String.self, forKey: .client)
     client = rawClient.map { String($0.prefix(Self.maximumClientNameLength)) }
     protocolVersion = try container.decodeIfPresent(Int.self, forKey: .protocolVersion)
   }
+}
+
+/// A well-formed request naming a command this build does not know. Kept
+/// apart from malformed input so a newer client gets `unknown-command`, which it
+/// can show, and is not penalised as though it were abusive.
+enum ControlRequestDecodingError: Error, Equatable {
+  case unknownCommand
 }
 
 // MARK: - Responses
@@ -126,6 +154,12 @@ enum ControlError: String, Codable, Equatable, Sendable {
   case audioNotRunning = "audio-not-running"
   case rateLimited = "rate-limited"
   case notPermitted = "not-permitted"
+  // Added in Waves 1.8.0.
+  case unknownCommand = "unknown-command"
+  case invalidParameter = "invalid-parameter"
+  case unknownProfile = "unknown-profile"
+  case routeUnavailable = "route-unavailable"
+  case notApplied = "not-applied"
 
   var message: String {
     switch self {
@@ -145,8 +179,32 @@ enum ControlError: String, Codable, Equatable, Sendable {
       "Too many commands. Slow down."
     case .notPermitted:
       "External control is turned off. Turn it on in Waves \u{25B8} Settings \u{25B8} Shortcuts & Automation."
+    case .unknownCommand:
+      "This version of Waves does not know that command. Update Waves to use it."
+    case .invalidParameter:
+      "A value in the request is outside the range Waves accepts."
+    case .unknownProfile:
+      "Waves does not have a profile with that name."
+    case .routeUnavailable:
+      "Waves can't change that for this app right now. Wave Link or route recovery controls its audio."
+    case .notApplied:
+      "Waves could not apply the change. Waves shows the details."
     }
   }
+}
+
+/// What one `apply-profile` did, counted over the profile's apps that carry
+/// levels.
+struct ControlProfileResult: Codable, Equatable, Sendable {
+  var name: String
+  /// Set now, or already at those levels.
+  var applied: Int
+  /// Not running; levels saved and applied when the app next opens.
+  var savedForLater: Int
+  /// Excluded from Waves, so deliberately left alone.
+  var skipped: Int
+  /// Could not be set, or a newer change replaced it first.
+  var failed: Int
 }
 
 /// One app, as the control surface describes it.
@@ -178,12 +236,18 @@ struct ControlResponse: Codable, Equatable, Sendable {
   var changed: ControlApp?
   var volume: Float?
   var muted: Bool?
+  var boost: Float?
+  var profile: ControlProfileResult?
+  /// Every command this build accepts, in `hello`. Absent from builds before
+  /// 1.8.0, which accept only the original nine.
+  var commands: [String]?
   /// Base64 PNG. Separate from `list-apps` because icons are the heaviest field
   /// and a client needs them once per app, not on every list.
   var icon: String?
 
   enum CodingKeys: String, CodingKey {
     case id, ok, error, message, event, app, apps, changed, volume, muted, icon
+    case boost, profile, commands
     case protocolVersion = "protocol"
     case appVersion = "appVersion"
     case build
@@ -254,7 +318,24 @@ struct ControlCodec {
   }
 
   static func decode(_ line: Data) -> ControlRequest? {
-    try? JSONDecoder().decode(ControlRequest.self, from: line)
+    if case let .request(request) = decodeRequest(line) { return request }
+    return nil
+  }
+
+  enum DecodeResult: Equatable {
+    case request(ControlRequest)
+    case unknownCommand
+    case malformed
+  }
+
+  static func decodeRequest(_ line: Data) -> DecodeResult {
+    do {
+      return .request(try JSONDecoder().decode(ControlRequest.self, from: line))
+    } catch ControlRequestDecodingError.unknownCommand {
+      return .unknownCommand
+    } catch {
+      return .malformed
+    }
   }
 
   static func requestIDPrefix(_ line: Data) -> Int? {

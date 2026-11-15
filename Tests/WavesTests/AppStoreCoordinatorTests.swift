@@ -7,7 +7,7 @@ import WavesAudioCore
 @MainActor
 @Test func automationParserProducesTypedCommandsAndBoundsRate() {
   var now = Date(timeIntervalSince1970: 1_000)
-  let parser = AutomationCommandParser(now: { now })
+  let parser = AutomationCommandParser(now: { now.timeIntervalSinceReferenceDate })
 
   #expect(
     parser.parse(URL(string: "waves://set-volume?app=com.example.music&volume=0.42")!)
@@ -231,6 +231,55 @@ private func coordinatorIntentResult(generation: UInt64) -> AppIntentApplyResult
   #expect(reset.elapsed == 1)
   #expect(reset.visibleGains.isEmpty)
   #expect(reset.backendGains == [:])
+}
+
+/// Runs two seconds of passes with a frontmost game (promoted to Foreground by
+/// Smart Hybrid) and a full-scale music app, and returns the music app's gain.
+@MainActor
+private func musicGainAfterTwoSeconds(mode: AdaptiveMixMode) -> Float? {
+  let clock = CoordinatorTestMonotonicClock(now: 100)
+  let coordinator = AdaptiveMixCoordinator(now: clock.read)
+  func app(_ id: String, _ category: AppCategory) -> AudioApp {
+    AudioApp(id: "\(id).runtime", logicalID: id, displayName: id, category: category, routingState: .managed)
+  }
+  let input = AdaptiveMixPassInput(
+    mode: mode,
+    focusMode: .smartHybrid,
+    apps: [
+      AdaptiveMixAppInput(
+        app: app("game", .unknown),
+        policy: AdaptiveAppPolicy(contentType: .game, priority: .normal),
+        levels: AdaptiveAnalysisLevels(rms: 0.0631, voiceBandEnergy: 0),
+        isFrontmost: true
+      ),
+      AdaptiveMixAppInput(
+        app: app("music", .media),
+        policy: AdaptiveAppPolicy(contentType: .music, priority: .normal),
+        levels: AdaptiveAnalysisLevels(rms: 1, voiceBandEnergy: 0),
+        isFrontmost: false
+      ),
+    ]
+  )
+  var gains: [String: Float] = [:]
+  for _ in 0..<20 {
+    if let published = coordinator.evaluate(input).backendGains { gains = published }
+    clock.advance(by: 0.1)
+  }
+  return gains["music"]
+}
+
+@MainActor
+@Test func adaptiveMixModeSelectsWhichGainLayersRun() throws {
+  let speechFocus = try #require(musicGainAfterTwoSeconds(mode: .speechFocus))
+  let loudnessBalance = try #require(musicGainAfterTwoSeconds(mode: .loudnessBalance))
+  let both = try #require(musicGainAfterTwoSeconds(mode: .both))
+
+  // Speech Focus: the priority duck only; no loudness trim on a 0 dBFS source.
+  #expect(speechFocus == Float(AdaptiveMixing.gentlePriorityReductionDB))
+  // Loudness Balance: the trim only (about -2 dB after two seconds), no duck.
+  #expect(loudnessBalance < -1 && loudnessBalance > -3)
+  // Both: the duck and the trim together.
+  #expect(both < Float(AdaptiveMixing.gentlePriorityReductionDB) - 1)
 }
 
 @MainActor

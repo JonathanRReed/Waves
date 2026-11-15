@@ -175,3 +175,23 @@ import Testing
   #expect(int16Samples.contains { $0 != 0 })
   #expect(int32Samples.contains { $0 != 0 })
 }
+
+@Test func boostingEqualizerDoesNotClipFloatOutput() {
+  // The tap clamps once, after the user's volume and the adaptive gain, so a
+  // boost that a lower volume would bring back into range is not clipped here.
+  var settings = EqualizerSettings(isEnabled: true, mode: .simple)
+  settings.setGain(12, at: 1)
+  let processor = EqualizerDSP(sampleRate: 48_000, channelCount: 1, settings: settings)
+  let center = EqualizerBandCatalog.bands(for: .simple)[1].frequency
+  var samples = (0..<24_000).map { frame in
+    Float(0.9 * sin(2 * Double.pi * center * Double(frame) / 48_000))
+  }
+
+  samples.withUnsafeMutableBytes { bytes in
+    processor.process(bytes.baseAddress!, byteCount: bytes.count, format: .float32, bufferChannelCount: 1)
+  }
+
+  #expect(samples.allSatisfy { $0.isFinite })
+  let settledPeak = samples.dropFirst(4_800).map { abs($0) }.max() ?? 0
+  #expect(settledPeak > 1.5)
+}

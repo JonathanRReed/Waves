@@ -156,6 +156,9 @@ public struct AdaptiveMixInput: Hashable, Sendable {
   public var rms: Float
   public var voiceBandEnergy: Float
   public var isFrontmost: Bool
+  /// The user's volume times boost. `rms` and `voiceBandEnergy` are measured
+  /// before it, so only the non-speech audibility check multiplies it back in.
+  public var manualGain: Float
 
   public init(
     appID: String,
@@ -164,7 +167,8 @@ public struct AdaptiveMixInput: Hashable, Sendable {
     isMuted: Bool,
     rms: Float,
     voiceBandEnergy: Float,
-    isFrontmost: Bool = false
+    isFrontmost: Bool = false,
+    manualGain: Float = 1
   ) {
     self.appID = appID
     self.policy = policy
@@ -173,6 +177,7 @@ public struct AdaptiveMixInput: Hashable, Sendable {
     self.rms = rms.isFinite ? max(0, rms) : 0
     self.voiceBandEnergy = voiceBandEnergy.isFinite ? max(0, voiceBandEnergy) : 0
     self.isFrontmost = isFrontmost
+    self.manualGain = manualGain.isFinite ? max(0, manualGain) : 1
   }
 }
 
@@ -183,7 +188,6 @@ public enum AdaptiveMixing {
   public static let speechActivationFrameCount = 2
   public static let speechHangDuration: TimeInterval = 0.6
 
-  public static let speechDuckDB = -10.0
   public static let speechDuckAttackDuration: TimeInterval = 0.12
   public static let speechDuckReleaseDuration: TimeInterval = 0.9
 
@@ -243,11 +247,11 @@ public enum AdaptiveMixing {
     case .lectureFocus:
       let priority: AdaptivePriority
       switch contentType {
-      case .lectureOrVoice:
+      case .lectureOrVoice, .meeting:
         priority = .foreground
       case .music:
         priority = .background
-      case .meeting, .videoOrMedia, .game, .other:
+      case .videoOrMedia, .game, .other:
         priority = .normal
       }
       return AdaptiveAppPolicy(contentType: contentType, priority: priority)
@@ -342,68 +346,6 @@ public enum AdaptiveMixing {
     return voiceBandEnergy / fullBandEnergy
   }
 
-  /// Resolves automatic roles without guessing for neutral app categories.
-  public static func resolvedRole(
-    _ configuredRole: AdaptiveAppRole,
-    category: AppCategory
-  ) -> AdaptiveAppRole {
-    guard configuredRole == .auto else { return configuredRole }
-
-    switch category {
-    case .conferencing:
-      return .voice
-    case .media:
-      return .media
-    case .browser, .communication, .system, .unknown:
-      return .auto
-    }
-  }
-
-  public static func isSpeechDuckEligible(
-    role: AdaptiveAppRole,
-    category: AppCategory
-  ) -> Bool {
-    resolvedRole(role, category: category) == .media
-  }
-
-  public static func isLoudnessBalanceEligible(
-    role: AdaptiveAppRole,
-    category: AppCategory
-  ) -> Bool {
-    resolvedRole(role, category: category) != .ignore
-  }
-
-  /// Combines the enabled temporary gain layers without changing manual gain.
-  public static func combinedGainDB(
-    mode: AdaptiveMixMode,
-    role: AdaptiveAppRole,
-    category: AppCategory,
-    speechDuckDB: Double,
-    loudnessTrimDB: Double
-  ) -> Double {
-    guard mode != .off else { return 0 }
-
-    let resolved = resolvedRole(role, category: category)
-    guard resolved != .ignore else { return 0 }
-
-    let safeDuck = speechDuckDB.isFinite ? speechDuckDB : 0
-    let safeTrim = loudnessTrimDB.isFinite ? loudnessTrimDB : 0
-    let gain: Double
-
-    switch mode {
-    case .off:
-      return 0
-    case .speechFocus:
-      gain = resolved == .media ? safeDuck : 0
-    case .loudnessBalance:
-      gain = safeTrim
-    case .both:
-      gain = safeTrim + (resolved == .media ? safeDuck : 0)
-    }
-
-    return min(maximumCombinedGainDB, max(minimumCombinedGainDB, gain))
-  }
-
   static func elapsedDuration(_ elapsed: TimeInterval) -> TimeInterval {
     guard elapsed.isFinite, elapsed > 0 else { return 0 }
     return elapsed
@@ -484,48 +426,6 @@ public struct SpeechDetectionState: Hashable, Sendable {
       isSpeechActive = false
     }
     return isSpeechActive
-  }
-}
-
-/// Smooth attack and release state for the fixed speech duck.
-public struct SpeechDuckingState: Hashable, Sendable {
-  public private(set) var currentGainDB: Double
-
-  public init(currentGainDB: Double = 0) {
-    let safeGain = currentGainDB.isFinite ? currentGainDB : 0
-    self.currentGainDB = min(0, max(AdaptiveMixing.speechDuckDB, safeGain))
-  }
-
-  @discardableResult
-  public mutating func update(
-    isSpeechActive: Bool,
-    isEligible: Bool,
-    elapsed: TimeInterval
-  ) -> Double {
-    let target = isSpeechActive && isEligible ? AdaptiveMixing.speechDuckDB : 0
-    let duration = AdaptiveMixing.elapsedDuration(elapsed)
-
-    if target < currentGainDB {
-      let rate =
-        abs(AdaptiveMixing.speechDuckDB)
-        / AdaptiveMixing.speechDuckAttackDuration
-      currentGainDB = AdaptiveMixing.move(
-        currentGainDB,
-        toward: target,
-        maximumChange: rate * duration
-      )
-    } else {
-      let rate =
-        abs(AdaptiveMixing.speechDuckDB)
-        / AdaptiveMixing.speechDuckReleaseDuration
-      currentGainDB = AdaptiveMixing.move(
-        currentGainDB,
-        toward: target,
-        maximumChange: rate * duration
-      )
-    }
-
-    return currentGainDB
   }
 }
 
@@ -647,8 +547,12 @@ public struct AdaptivePolicyGainState: Hashable, Sendable {
 /// Stateful, deterministic coordinator for the 1.2 content and priority model.
 /// Audio samples never enter this value. It consumes only transient RMS and
 /// voice-band energy measurements and emits temporary per-app gain values.
+///
+/// `usesPriorityDucking` is Speech Focus and `usesLoudnessCorrection` is
+/// Loudness Balance; each layer runs only when its mode is on.
 public struct AdaptivePolicyEngine: Sendable {
   public var usesLoudnessCorrection: Bool
+  public var usesPriorityDucking: Bool
   public var focusMode: AdaptiveFocusMode
   private var speechDetectionStates: [String: SpeechDetectionState] = [:]
   private var loudnessTrimStates: [String: LoudnessTrimState] = [:]
@@ -656,9 +560,11 @@ public struct AdaptivePolicyEngine: Sendable {
 
   public init(
     usesLoudnessCorrection: Bool = true,
+    usesPriorityDucking: Bool = true,
     focusMode: AdaptiveFocusMode = .smartHybrid
   ) {
     self.usesLoudnessCorrection = usesLoudnessCorrection
+    self.usesPriorityDucking = usesPriorityDucking
     self.focusMode = focusMode
   }
 
@@ -679,8 +585,10 @@ public struct AdaptivePolicyEngine: Sendable {
 
     var activePriorityRanks: [Int] = []
     activePriorityRanks.reserveCapacity(inputs.count)
+    var speakingPriorityRanks: [Int] = []
     var effectivePriorities: [String: AdaptivePriority] = [:]
     effectivePriorities.reserveCapacity(inputs.count)
+    var speakingAppIDs: Set<String> = []
 
     for input in inputs {
       let routeIsEligible = input.isManaged && !input.isMuted
@@ -694,10 +602,13 @@ public struct AdaptivePolicyEngine: Sendable {
         )
         speechDetectionStates[input.appID] = state
         isActive = routeIsEligible && detected
+        if isActive { speakingAppIDs.insert(input.appID) }
       } else {
+        // Measurements are pre-fader; whether a non-speech app is audible
+        // enough to take focus still depends on the user's own level.
         isActive =
           routeIsEligible
-          && AdaptiveMixing.decibels(forAmplitude: Double(input.rms))
+          && AdaptiveMixing.decibels(forAmplitude: Double(input.rms * input.manualGain))
             >= AdaptiveMixing.activityThresholdDBFS
       }
 
@@ -705,16 +616,14 @@ public struct AdaptivePolicyEngine: Sendable {
       effectivePriorities[input.appID] = effectivePriority
       if isActive, let focusRank = effectivePriority.focusRank {
         activePriorityRanks.append(focusRank)
+        if speakingAppIDs.contains(input.appID) {
+          speakingPriorityRanks.append(focusRank)
+        }
       }
     }
 
-    let focusPriority: AdaptivePriority?
-    switch activePriorityRanks.max() {
-    case 2: focusPriority = .foreground
-    case 1: focusPriority = .normal
-    case 0: focusPriority = .background
-    default: focusPriority = nil
-    }
+    let focusPriority = Self.focusPriority(rank: activePriorityRanks.max())
+    let speechFocusPriority = Self.focusPriority(rank: speakingPriorityRanks.max())
 
     var result: [String: Float] = [:]
     result.reserveCapacity(inputs.count)
@@ -727,10 +636,14 @@ public struct AdaptivePolicyEngine: Sendable {
       }
 
       let routeIsEligible = input.isManaged && !input.isMuted
+      // An app carrying speech is only turned down for other speech, unless
+      // the user explicitly put it in the background.
+      let isProtectedSpeech =
+        speakingAppIDs.contains(input.appID) && input.policy.priority != .background
       let priorityGain =
-        routeIsEligible
+        usesPriorityDucking && routeIsEligible
         ? AdaptiveMixing.priorityAttenuationDB(
-          focus: focusPriority,
+          focus: isProtectedSpeech ? speechFocusPriority : focusPriority,
           app: effectivePriorities[input.appID] ?? input.policy.priority
         )
         : 0
@@ -738,12 +651,15 @@ public struct AdaptivePolicyEngine: Sendable {
       let loudnessGain: Double
       if usesLoudnessCorrection {
         var state = loudnessTrimStates[input.appID] ?? LoudnessTrimState()
-        loudnessGain = state.update(
+        let trim = state.update(
           rms: Double(input.rms),
           isEligible: routeIsEligible,
           elapsed: elapsed
         )
         loudnessTrimStates[input.appID] = state
+        // The measurement is pre-fader, so a quiet source reads as quiet even
+        // when the user has boosted it. Never add gain on top of their boost.
+        loudnessGain = input.manualGain > 1 ? min(0, trim) : trim
       } else {
         loudnessTrimStates.removeValue(forKey: input.appID)
         loudnessGain = 0
@@ -759,6 +675,15 @@ public struct AdaptivePolicyEngine: Sendable {
       result[input.appID] = Float(gain)
     }
     return result
+  }
+
+  private static func focusPriority(rank: Int?) -> AdaptivePriority? {
+    switch rank {
+    case 2: .foreground
+    case 1: .normal
+    case 0: .background
+    default: nil
+    }
   }
 
   private func effectivePriority(

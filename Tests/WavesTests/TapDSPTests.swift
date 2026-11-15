@@ -154,3 +154,51 @@ import Testing
   #expect(count == 2)
   #expect(abs(peak - 1.0) < 1e-3)
 }
+
+@Test func gainRampMovesLinearlyPerFrameAndSharesEachFrameAcrossChannels() {
+  var samples = [Float](repeating: 1, count: 8)  // 4 interleaved stereo frames
+  samples.withUnsafeMutableBytes { raw in
+    TapDSP.applyGain(
+      raw.baseAddress!,
+      byteCount: raw.count,
+      format: .float32,
+      channelsPerFrame: 2,
+      from: 1,
+      to: 0.5,
+      clampsFloat: true
+    )
+  }
+  #expect(samples == [0.875, 0.875, 0.75, 0.75, 0.625, 0.625, 0.5, 0.5])
+}
+
+@Test func unclampedGainStageLeavesHeadroomForTheFinalStage() {
+  var samples: [Float] = [1.5, -1.5]
+  samples.withUnsafeMutableBytes { raw in
+    TapDSP.applyGain(
+      raw.baseAddress!,
+      byteCount: raw.count,
+      format: .float32,
+      channelsPerFrame: 1,
+      from: 0.9,
+      to: 0.9,
+      clampsFloat: false
+    )
+  }
+  #expect(samples == [1.5 * 0.9, -1.5 * 0.9])
+}
+
+@Test func int16GainRampSaturatesAndLandsOnTheTarget() {
+  var samples: [Int16] = [10_000, 10_000, 10_000, Int16.max]
+  samples.withUnsafeMutableBytes { raw in
+    TapDSP.applyGain(
+      raw.baseAddress!,
+      byteCount: raw.count,
+      format: .int16,
+      channelsPerFrame: 1,
+      from: 1,
+      to: 2,
+      clampsFloat: false
+    )
+  }
+  #expect(samples == [12_500, 15_000, 17_500, Int16.max])
+}

@@ -131,6 +131,8 @@ private struct BiquadDelayState {
 
 /// Stateful, allocation-free render processor after initialization.
 ///
+/// Float output is not clamped to ±1; integer output saturates.
+///
 /// Create and update this object on the controller's serial callback queue.
 /// `process` performs no allocation or locking. Channel state remains separate
 /// for interleaved and non-interleaved tap buffers.
@@ -209,7 +211,9 @@ public final class EqualizerDSP {
         bufferChannelCount: localChannelCount,
         channelOffset: channelOffset,
         read: { Double(pointer[$0]) },
-        write: { pointer[$0] = Float(max(-1, min(1, $1))) }
+        // Not clamped: a later gain stage may bring a boosted sample back into
+        // range, and the tap's final stage clamps.
+        write: { pointer[$0] = Float($1) }
       )
     case .int16:
       let pointer = data.assumingMemoryBound(to: Int16.self)

@@ -15,6 +15,9 @@ final class AppStore {
   /// reconciliation. Retained so diagnostics/tests can inspect every source row in
   /// its original order instead of reducing a mixed apply to one boolean.
   var lastProfileApplyResult: ProfileApplyResult?
+  /// Whether saving settings failed for `lastProfileApplyResult`. A failed save
+  /// rolls back the levels kept for apps that were not running.
+  var lastProfileSettingsSaveFailed = false
   /// The profile the user last selected, used to highlight it in the UI and —
   /// for membership-only grouping profiles — to scope the main window. Not
   /// persisted; a fresh launch starts with no active profile.
@@ -115,6 +118,8 @@ final class AppStore {
   var shutdownTask: Task<AppShutdownResult, Never>?
   var shutdownResult: AppShutdownResult?
   var ownedOperationTasks: [UUID: Task<Void, Never>] = [:]
+  /// The refresh in flight, so an external caller can wait for its outcome.
+  @ObservationIgnored var refreshTask: Task<Bool, Never>?
   var hasStartedAudioBackend = false
   // Captured once at init from DeviceVolumePresetsStore.load(); consumed (and
   // toasted) the first time start() runs so a corrupt-file recovery is
