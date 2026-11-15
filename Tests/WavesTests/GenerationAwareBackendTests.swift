@@ -1386,3 +1386,217 @@ private let waveLinkRecoveryControllerFactory: WorkspaceAudioControlBackend.Cont
     )
   )
 }
+
+// MARK: - Wave Link changes that are not confirmed, or are overtaken
+
+/// Answers each bridge apply from a script and can hold the first apply
+/// inside the bridge until released.
+private actor ScriptedWaveLinkController: WaveLinkControlling {
+  enum Step: Sendable {
+    case confirm
+    case fail(WaveLinkControlBridgeError)
+  }
+
+  private var steps: [Step]
+  private let holdsFirstApply: Bool
+  private var isReleased = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  private var isCurrentChecks: [@Sendable () async -> Bool] = []
+  private(set) var requestedVolumes: [Float] = []
+
+  init(steps: [Step], holdsFirstApply: Bool = false) {
+    self.steps = steps
+    self.holdsFirstApply = holdsFirstApply
+  }
+
+  func release() {
+    isReleased = true
+    waiter?.resume()
+    waiter = nil
+  }
+
+  func requestCount() -> Int { requestedVolumes.count }
+
+  func isCurrent(apply index: Int) async -> Bool {
+    await isCurrentChecks[index]()
+  }
+
+  func apply(bundleIdentifier: String, volume: Float, isMuted: Bool) async throws
+    -> WaveLinkControlConfirmation
+  {
+    try await apply(
+      bundleIdentifier: bundleIdentifier, volume: volume, isMuted: isMuted,
+      allowsChannelRelocation: true, isCurrent: { true })
+  }
+
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool,
+    allowsChannelRelocation: Bool,
+    isCurrent: @escaping @Sendable () async -> Bool
+  ) async throws -> WaveLinkControlConfirmation {
+    requestedVolumes.append(volume)
+    isCurrentChecks.append(isCurrent)
+    if holdsFirstApply, requestedVolumes.count == 1, !isReleased {
+      await withCheckedContinuation { waiter = $0 }
+    }
+    switch steps.removeFirst() {
+    case .confirm:
+      return WaveLinkControlConfirmation(
+        channelID: "dedicated", channelName: "Dedicated", appliedVolume: volume, isMuted: isMuted)
+    case .fail(let error):
+      throw error
+    }
+  }
+}
+
+private func waveLinkBridgedBackend(
+  app: AudioApp,
+  bridge: any WaveLinkControlling
+) -> WorkspaceAudioControlBackend {
+  WorkspaceAudioControlBackend(
+    testingSnapshot: testSnapshot(apps: [app]),
+    verifiedRouterConflictProvider: { _ in
+      VerifiedRouterConflict(
+        routerName: "Elgato Wave Link",
+        kind: .unattributableTapFallback,
+        detail: "Wave Link owns active Core Audio output.",
+        supportsBridgeControl: true
+      )
+    },
+    waveLinkController: bridge
+  )
+}
+
+private func waveLinkTestApp(desiredVolume: Float, isMuted: Bool = false) -> AudioApp {
+  AudioApp(
+    id: "runtime.browser",
+    logicalID: "com.example.browser",
+    pid: 101,
+    bundleID: "com.example.browser",
+    displayName: "Browser",
+    category: .media,
+    isActive: true,
+    desiredVolume: desiredVolume,
+    appliedVolume: desiredVolume,
+    isMuted: isMuted,
+    routingState: .managed,
+    compatibility: .supported
+  )
+}
+
+private func waveLinkVolumeIntent(
+  _ volume: Float,
+  isMuted: Bool = false,
+  generation: UInt64
+) -> AppRouteIntent {
+  AppRouteIntent(
+    appID: "com.example.browser",
+    desiredVolume: volume,
+    isMuted: isMuted,
+    volumeBoost: 1,
+    equalizerSettings: EqualizerSettings(),
+    targetDeviceUID: nil,
+    generation: generation,
+    reason: .userEdit
+  )
+}
+
+@Test func unconfirmedWaveLinkChangeShowsTheLevelWaveLinkReported() async {
+  // Rolling the row back to 100% while Wave Link plays 55% would make the
+  // next change from Waves send the stale 100%.
+  let bridge = ScriptedWaveLinkController(steps: [
+    .fail(
+      .unconfirmed(
+        .readBackMismatch("Requested 0.1, muted false; received 0.55, muted false."),
+        observed: WaveLinkChannelState(level: 0.55, isMuted: false)))
+  ])
+  let backend = waveLinkBridgedBackend(app: waveLinkTestApp(desiredVolume: 1), bridge: bridge)
+
+  let result = await backend.applyAppIntent(waveLinkVolumeIntent(0.1, generation: 1))
+  let row = await backend.currentSnapshot().apps[0]
+
+  #expect(result.outcome == .failed)
+  #expect(result.detail?.contains("received 0.55") == true)
+  #expect(row.desiredVolume == 0.55)
+  #expect(!row.isMuted)
+  #expect(row.appliedVolume == nil)
+  #expect(row.notes?.contains("did not confirm") == true)
+}
+
+@Test(arguments: [
+  (rowVolume: 0.3 as Float, rowMuted: false, requested: 0.9 as Float, requestedMuted: true),
+  (rowVolume: 0.8 as Float, rowMuted: true, requested: 0.1 as Float, requestedMuted: false),
+])
+func unconfirmedWaveLinkChangeWithoutAReadingKeepsTheQuieterLevelAndAnyMute(
+  testCase: (rowVolume: Float, rowMuted: Bool, requested: Float, requestedMuted: Bool)
+) async {
+  let bridge = ScriptedWaveLinkController(steps: [
+    .fail(.unconfirmed(.unavailable("Wave Link did not answer within the request time limit."), observed: nil))
+  ])
+  let backend = waveLinkBridgedBackend(
+    app: waveLinkTestApp(desiredVolume: testCase.rowVolume, isMuted: testCase.rowMuted),
+    bridge: bridge
+  )
+
+  let result = await backend.applyAppIntent(
+    waveLinkVolumeIntent(testCase.requested, isMuted: testCase.requestedMuted, generation: 1))
+  let row = await backend.currentSnapshot().apps[0]
+
+  #expect(result.outcome == .failed)
+  #expect(row.desiredVolume == min(testCase.rowVolume, testCase.requested))
+  #expect(row.isMuted)
+}
+
+@Test func waveLinkChangeThatNeverReachedWaveLinkKeepsTheRowsLevel() async {
+  let bridge = ScriptedWaveLinkController(steps: [.fail(.unverifiedLoopbackPeer)])
+  let backend = waveLinkBridgedBackend(
+    app: waveLinkTestApp(desiredVolume: 0.7, isMuted: true), bridge: bridge)
+
+  let result = await backend.applyAppIntent(waveLinkVolumeIntent(0.2, generation: 1))
+  let row = await backend.currentSnapshot().apps[0]
+
+  #expect(result.outcome == .failed)
+  #expect(row.desiredVolume == 0.7)
+  #expect(row.isMuted)
+}
+
+@Test func overtakenWaveLinkChangeStillRecordsWhatWaveLinkConfirmed() async {
+  // 20% -> 100% reaches Wave Link while a newer 50% waits. The newer change
+  // then fails before reaching Wave Link, so Wave Link still plays 100%. The
+  // row must say 100%, not the 20% it showed before either change.
+  let bridge = ScriptedWaveLinkController(
+    steps: [.confirm, .fail(.unverifiedLoopbackPeer)],
+    holdsFirstApply: true
+  )
+  let backend = waveLinkBridgedBackend(app: waveLinkTestApp(desiredVolume: 0.2), bridge: bridge)
+
+  let first = Task { await backend.applyAppIntent(waveLinkVolumeIntent(1, generation: 1)) }
+  #expect(await pollCondition { await bridge.requestCount() == 1 })
+  let second = Task { await backend.applyAppIntent(waveLinkVolumeIntent(0.5, generation: 2)) }
+  #expect(await pollCondition { await bridge.isCurrent(apply: 0) == false })
+  await bridge.release()
+
+  #expect(await first.value.outcome == .superseded)
+  #expect(await second.value.outcome == .failed)
+  #expect(await bridge.requestedVolumes == [1, 0.5])
+  #expect(await backend.currentSnapshot().apps[0].desiredVolume == 1)
+}
+
+@Test func waveLinkApplyLearnsWhenANewerIntentReplacesIt() async {
+  let bridge = ScriptedWaveLinkController(steps: [.confirm, .confirm], holdsFirstApply: true)
+  let backend = waveLinkBridgedBackend(app: waveLinkTestApp(desiredVolume: 1), bridge: bridge)
+
+  let first = Task { await backend.applyAppIntent(waveLinkVolumeIntent(0.1, generation: 1)) }
+  #expect(await pollCondition { await bridge.requestCount() == 1 })
+  #expect(await bridge.isCurrent(apply: 0))
+
+  let second = Task { await backend.applyAppIntent(waveLinkVolumeIntent(0.4, generation: 2)) }
+  #expect(await pollCondition { await bridge.isCurrent(apply: 0) == false })
+  await bridge.release()
+
+  #expect(await first.value.outcome == .superseded)
+  #expect(await second.value.outcome == .applied)
+  #expect(await backend.currentSnapshot().apps[0].desiredVolume == 0.4)
+}
