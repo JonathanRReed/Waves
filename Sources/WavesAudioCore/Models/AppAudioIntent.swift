@@ -21,9 +21,9 @@ public struct PersistedAppAudioIntent: Codable, Hashable, Sendable {
     targetDeviceUID: String? = nil
   ) {
     self.appID = String(appID.prefix(256))
-    self.desiredVolume = Self.normalizedVolume(desiredVolume)
+    self.desiredVolume = LevelRange.volume.sanitized(desiredVolume)
     self.isMuted = isMuted
-    self.volumeBoost = Self.normalizedBoost(volumeBoost)
+    self.volumeBoost = LevelRange.boost.sanitized(volumeBoost)
     self.equalizerSettings = equalizerSettings
     self.targetDeviceUID = targetDeviceUID.map { String($0.prefix(256)) }
   }
@@ -41,23 +41,17 @@ public struct PersistedAppAudioIntent: Codable, Hashable, Sendable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     self.init(
       appID: try container.decode(String.self, forKey: .appID),
-      desiredVolume: try container.decodeIfPresent(Float.self, forKey: .desiredVolume) ?? 1,
+      // Decoded as Double so a value too large for Float is clamped instead of
+      // failing the whole preferences file.
+      desiredVolume: LevelRange.volume.sanitized(
+        try container.decodeIfPresent(Double.self, forKey: .desiredVolume)),
       isMuted: try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false,
-      volumeBoost: try container.decodeIfPresent(Float.self, forKey: .volumeBoost) ?? 1,
+      volumeBoost: LevelRange.boost.sanitized(
+        try container.decodeIfPresent(Double.self, forKey: .volumeBoost)),
       equalizerSettings: try container.decodeIfPresent(EqualizerSettings.self, forKey: .equalizerSettings)
         ?? EqualizerSettings(),
       targetDeviceUID: try container.decodeIfPresent(String.self, forKey: .targetDeviceUID)
     )
-  }
-
-  private static func normalizedVolume(_ value: Float) -> Float {
-    let finite = value.isFinite ? value : 1
-    return max(0, min(1, finite))
-  }
-
-  private static func normalizedBoost(_ value: Float) -> Float {
-    let finite = value.isFinite ? value : 1
-    return max(1, min(4, finite))
   }
 }
 

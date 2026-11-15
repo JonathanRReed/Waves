@@ -2696,6 +2696,573 @@ func appTerminationImmediatelyClearsWaveLinkOutputActivity(isActive: Bool) async
   #expect(fixture.store.session.apps.allSatisfy { $0.isActive })
 }
 
+// MARK: - Profiles that restore EQ and output (1.8)
+
+private func profileTestEqualizer(gain: Float, role: AdaptiveAppRole = .auto) -> EqualizerSettings {
+  var settings = EqualizerSettings(isEnabled: true, adaptiveRole: role)
+  settings.setGain(gain, at: 0)
+  return settings
+}
+
+private let profileTestHeadphones = AudioDevice(
+  id: "device.headphones",
+  name: "Studio Headphones",
+  kind: .display
+)
+
+@MainActor
+@Test func capturingAMixIncludesEqualizerAndOutputOnlyWhenAsked() async {
+  let app = transactionTestApp(id: "capture.sound", desiredVolume: 0.5, targetDeviceUID: profileTestHeadphones.id)
+  let equalizer = profileTestEqualizer(gain: 4)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.5,
+      equalizerSettings: equalizer,
+      targetDeviceUID: profileTestHeadphones.id
+    ),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  fixture.store.availableDevices = [transactionTestDevice(), profileTestHeadphones]
+
+  let levelsOnly = fixture.store.saveProfile(named: "Levels", appIDs: [app.logicalID], captureLevels: true)
+  let full = fixture.store.saveProfile(
+    named: "Everything",
+    appIDs: [app.logicalID],
+    captureLevels: true,
+    includeEqualizer: true,
+    includeOutput: true
+  )
+
+  let levelsEntry = fixture.store.profiles.first { $0.id == levelsOnly.savedProfileID }?.entries.first
+  #expect(levelsEntry?.desiredVolume == 0.5)
+  #expect(levelsEntry?.equalizer == nil)
+  #expect(levelsEntry?.output == nil)
+
+  let fullEntry = fixture.store.profiles.first { $0.id == full.savedProfileID }?.entries.first
+  #expect(fullEntry?.equalizer == equalizer)
+  #expect(
+    fullEntry?.output == ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: "Studio Headphones"))
+}
+
+@MainActor
+@Test func saveCurrentMixCapturesOnlyAppsWavesManagesAndTheUsersOwnMute() async {
+  let managed = transactionTestApp(id: "mix.managed", desiredVolume: 0.3)
+  // Not media, so call automation leaves it alone and it stays untouched.
+  let untouched = AudioApp(
+    id: "mix.untouched.runtime",
+    logicalID: "mix.untouched",
+    pid: 43,
+    bundleID: "mix.untouched",
+    displayName: "Untouched",
+    category: .system,
+    isActive: true,
+    desiredVolume: 1,
+    routingState: .monitorOnly,
+    compatibility: .supported
+  )
+  let fixture = makeTransactionFixture(
+    apps: [managed, untouched],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: managed.logicalID, desiredVolume: 0.3, isMuted: false)
+  )
+
+  #expect(fixture.store.currentMixAppIDs == [managed.logicalID])
+
+  // A call has the managed app muted right now; the saved mix keeps the
+  // user's own (unmuted) state, never the automatic mute.
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: true)
+  #expect(fixture.store.session.apps.first { $0.logicalID == managed.logicalID }?.muteSource == .autoConferencing)
+
+  let result = fixture.store.saveCurrentMix(named: "Evening", includeEqualizer: true, includeOutput: false)
+  let profile = fixture.store.profiles.first { $0.id == result.savedProfileID }
+  #expect(profile?.entries.map(\.appID) == [managed.logicalID])
+  #expect(profile?.entries.first?.desiredVolume == 0.3)
+  #expect(profile?.entries.first?.isMuted == false)
+  #expect(profile?.entries.first?.equalizer != nil)
+  #expect(profile?.entries.first?.output == nil)
+  #expect(fixture.store.activeProfileID == profile?.id)
+}
+
+@MainActor
+@Test func saveCurrentMixWithNothingManagedExplainsWhatToDo() async {
+  var untouched = transactionTestApp(id: "mix.none", desiredVolume: 1)
+  untouched.routingState = .monitorOnly
+  let fixture = makeTransactionFixture(apps: [untouched], device: transactionTestDevice())
+  let profilesBefore = fixture.store.profiles
+
+  #expect(fixture.store.saveCurrentMix(named: "Empty", includeEqualizer: true, includeOutput: false) == .noMixToSave)
+  #expect(fixture.store.saveCurrentMix(named: " ", includeEqualizer: true, includeOutput: false) == .blankName)
+  #expect(fixture.store.profiles == profilesBefore)
+  #expect(ProfileSaveResult.noMixToSave.message?.contains("Change an app's volume") == true)
+}
+
+@MainActor
+@Test func soundProfileSendsOneCompleteIntentPerAppAndPersistsEqualizerAndOutput() async {
+  let app = transactionTestApp(id: "apply.sound", desiredVolume: 0.8, targetDeviceUID: nil)
+  let currentRole = AdaptiveAppRole.media
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      equalizerSettings: EqualizerSettings(adaptiveRole: currentRole)
+    ),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  let savedEqualizer = profileTestEqualizer(gain: -6, role: .auto)
+  let profile = Profile(
+    name: "Movie",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.4,
+        isMuted: false,
+        volumeBoost: 1,
+        equalizer: savedEqualizer,
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  // Level, EQ, and route travel together in a single intent, so the app never
+  // plays at the new level through the old EQ or the reverse.
+  let intents = await fixture.backend.recordedIntents()
+  #expect(await fixture.backend.recordedProfileCalls().isEmpty)
+  #expect(intents.count == 1)
+  var expectedEqualizer = savedEqualizer
+  expectedEqualizer.adaptiveRole = currentRole
+  #expect(intents.first?.desiredVolume == 0.4)
+  #expect(intents.first?.equalizerSettings == expectedEqualizer)
+  #expect(intents.first?.targetDeviceUID == profileTestHeadphones.id)
+
+  let durable = fixture.store.preferences.appAudioIntents[app.logicalID]
+  #expect(durable?.equalizerSettings == expectedEqualizer)
+  #expect(durable?.targetDeviceUID == profileTestHeadphones.id)
+  #expect(fixture.store.preferences.appEqualizerSettings[app.logicalID] == expectedEqualizer)
+  #expect(fixture.store.toasts.contains { $0.title == "Profile applied" })
+
+  // The next direct volume change is built from the restored EQ, not the old one.
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(desiredVolume: 0.5),
+    reason: .userEdit
+  )
+  #expect(await fixture.backend.recordedIntents().last?.equalizerSettings == expectedEqualizer)
+}
+
+@MainActor
+@Test func editDuringASoundProfileKeepsTheEqualizerAlreadyRestoredForThatApp() async {
+  let first = transactionTestApp(id: "apply.sound.first", desiredVolume: 0.8, targetDeviceUID: nil)
+  let second = transactionTestApp(id: "apply.sound.second", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [first, second],
+    device: transactionTestDevice(),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  await fixture.backend.suspendIntent(callNumber: 2)
+  let savedEqualizer = profileTestEqualizer(gain: -6)
+  let headphones = ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+  let profile = Profile(
+    name: "Movie",
+    entries: [
+      ProfileEntry(appID: first.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer, output: headphones),
+      ProfileEntry(appID: second.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer),
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  // The first app's row has landed; the second app's is still in flight.
+  await fixture.backend.waitUntilFirstIntentIsSuspended()
+  let restored = await fixture.backend.recordedIntents().first?.equalizerSettings
+  #expect(restored?.isEnabled == true)
+
+  let edit = Task { @MainActor in
+    await fixture.store.applyAppIntent(
+      forAppID: first.logicalID,
+      overrides: AppIntentOverrides(desiredVolume: 0.5),
+      reason: .userEdit
+    )
+  }
+  await waitUntil { await fixture.backend.recordedIntents().count == 3 }
+  await fixture.backend.resumeFirstIntent()
+  _ = await edit.value
+  await fixture.store.drainAppIntentTransactions()
+
+  // The volume change carries the EQ and output the profile just restored,
+  // not the old ones.
+  let edited = await fixture.backend.recordedIntents().last { $0.appID == first.logicalID }
+  #expect(edited?.desiredVolume == 0.5)
+  #expect(edited?.equalizerSettings == restored)
+  #expect(edited?.targetDeviceUID == profileTestHeadphones.id)
+}
+
+@MainActor
+@Test func levelOnlyProfileLeavesEqualizerAndOutputAlone() async {
+  let app = transactionTestApp(id: "apply.legacy", desiredVolume: 0.8, targetDeviceUID: profileTestHeadphones.id)
+  let equalizer = profileTestEqualizer(gain: 5)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      equalizerSettings: equalizer,
+      targetDeviceUID: profileTestHeadphones.id
+    ),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+
+  fixture.store.applyProfile(
+    Profile(name: "Quiet", entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)]))
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(await fixture.backend.recordedProfileCalls().count == 1)
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.desiredVolume == 0.2)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.equalizerSettings == equalizer)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == profileTestHeadphones.id)
+}
+
+@MainActor
+@Test func disconnectedSavedOutputIsSkippedAndNamedWhileTheRestApplies() async {
+  let app = transactionTestApp(id: "apply.absent", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8)
+  )
+  let equalizer = profileTestEqualizer(gain: 3)
+  let profile = Profile(
+    name: "Desk",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.5,
+        equalizer: equalizer,
+        output: ProfileOutput(deviceUID: "device.airpods", deviceName: "AirPods Pro")
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  #expect(!intents.contains { $0.targetDeviceUID == "device.airpods" })
+  #expect(intents.first?.targetDeviceUID == nil)
+  #expect(intents.first?.desiredVolume == 0.5)
+  #expect(intents.first?.equalizerSettings.activeGainsDB == equalizer.activeGainsDB)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == nil)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied" && $0.kind == .info
+        && $0.detail == "AirPods Pro isn't connected, so Test App kept its output."
+    })
+}
+
+@MainActor
+@Test func linkAppliedProfileSetsLevelsAndEqualizerButNeverMovesTheOutput() async {
+  let app = transactionTestApp(id: "apply.link", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  let equalizer = profileTestEqualizer(gain: -6)
+  let profile = Profile(
+    name: "Speakers",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.4,
+        equalizer: equalizer,
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+  fixture.store.preferences.enableURLScheme = true
+  fixture.store.profiles = [profile]
+
+  // Anything that can open a URL can send this, so it must not be able to
+  // move a call or music onto another device.
+  fixture.store.handleURLScheme(URL(string: "waves://apply-profile?name=Speakers")!)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  #expect(intents.first?.desiredVolume == 0.4)
+  #expect(intents.first?.equalizerSettings.activeGainsDB == equalizer.activeGainsDB)
+  #expect(intents.first?.targetDeviceUID == nil)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == nil)
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied"
+        && $0.detail == "Links can't move apps to another output, so Test App kept its output."
+    })
+
+  // The same profile applied by the user does move it.
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  #expect(await fixture.backend.recordedIntents().last?.targetDeviceUID == profileTestHeadphones.id)
+}
+
+@MainActor
+@Test func outputOnlyProfileStillNamesTheDevicesThatAreNotConnected() async {
+  let app = transactionTestApp(id: "apply.output-only", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
+  let profile = Profile(
+    name: "Desk",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        output: ProfileOutput(deviceUID: "device.airpods", deviceName: "AirPods Pro")
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  // With its only setting skipped the row has nothing left to apply, which
+  // used to read as a plain "Profile selected".
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile selected" })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied"
+        && $0.detail == "AirPods Pro isn't connected, so Test App kept its output."
+    })
+}
+
+@MainActor
+@Test func excludedAppNeverReceivesAProfilesEqualizerOrOutput() async {
+  let app = transactionTestApp(id: "apply.excluded", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    excludedAppIDs: [app.logicalID],
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  let profile = Profile(
+    name: "Loud",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.5,
+        equalizer: profileTestEqualizer(gain: 6),
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.allSatisfy { $0.isExcluded })
+  #expect(!intents.contains { $0.targetDeviceUID == profileTestHeadphones.id })
+  #expect(fixture.store.lastProfileApplyResult?.rows.first?.outcome == .excluded)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID] == nil)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
+  #expect(fixture.store.toasts.contains { $0.detail?.contains("1 excluded") == true })
+}
+
+@MainActor
+@Test func waveLinkAppGetsTheLevelButIsToldItsEqualizerAndOutputStayInWaveLink() async {
+  let app = transactionTestApp(id: "apply.wavelink", desiredVolume: 0.8, targetDeviceUID: nil)
+  let originalEqualizer = profileTestEqualizer(gain: 1)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      equalizerSettings: originalEqualizer
+    ),
+    extraOutputDevices: [profileTestHeadphones],
+    waveLinkAppIDs: [app.logicalID]
+  )
+  let profile = Profile(
+    name: "Stream",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.5,
+        equalizer: profileTestEqualizer(gain: 8),
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.5)
+  let durable = fixture.store.preferences.appAudioIntents[app.logicalID]
+  #expect(durable?.desiredVolume == 0.5)
+  #expect(durable?.equalizerSettings == originalEqualizer)
+  #expect(durable?.targetDeviceUID == nil)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied" && $0.kind == .warning
+        && $0.detail == "Wave Link controls Test App, so its EQ and output weren't changed."
+    })
+}
+
+@MainActor
+@Test func waveLinkAppKeepsItsEqualizerWhenAProfileOnlyRestoresEqualizer() async {
+  let app = transactionTestApp(id: "apply.wavelink-eq", desiredVolume: 0.8, targetDeviceUID: nil)
+  let originalEqualizer = profileTestEqualizer(gain: 1)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      equalizerSettings: originalEqualizer
+    ),
+    waveLinkAppIDs: [app.logicalID]
+  )
+
+  fixture.store.applyProfile(
+    Profile(
+      name: "Bright",
+      entries: [
+        ProfileEntry(appID: app.logicalID, desiredVolume: 0.5, equalizer: profileTestEqualizer(gain: 8))
+      ]
+    ))
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.desiredVolume == 0.5)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.equalizerSettings == originalEqualizer)
+  #expect(
+    fixture.store.toasts.contains {
+      $0.detail == "Wave Link controls Test App, so its EQ wasn't changed."
+    })
+}
+
+@MainActor
+@Test func refusedRowForARunningAppIsNotReportedAsSavedForLater() async {
+  let app = transactionTestApp(id: "apply.refused", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8),
+    extraOutputDevices: [profileTestHeadphones],
+    waveLinkAppIDs: [app.logicalID]
+  )
+  // Same level, new output: Wave Link refuses the whole row.
+  let profile = Profile(
+    name: "Route only",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.8,
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.lastProfileApplyResult?.rows.first?.outcome == .unsupported)
+  #expect(fixture.store.session.apps.contains { $0.logicalID == app.logicalID })
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == nil)
+  #expect(!fixture.store.toasts.contains { $0.detail?.contains("saved for later") == true })
+  #expect(fixture.store.toasts.contains { $0.detail?.contains("Wave Link controls Test App") == true })
+}
+
+@MainActor
+@Test func resetMixAfterASoundProfileRestoresLevelsButNotEqualizer() async {
+  let app = transactionTestApp(id: "reset.sound", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8)
+  )
+  let equalizer = profileTestEqualizer(gain: -4)
+  fixture.store.applyProfile(
+    Profile(
+      name: "Night",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.3, equalizer: equalizer)]
+    ))
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.mixRestorePoint?.entries.first?.equalizer == nil)
+  #expect(fixture.store.mixRestorePoint?.entries.first?.output == nil)
+
+  fixture.store.resetMix()
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.8)
+  #expect(
+    fixture.store.preferences.appAudioIntents[app.logicalID]?.equalizerSettings.activeGainsDB
+      == equalizer.activeGainsDB)
+  #expect(fixture.store.toasts.contains { $0.title == "Mix reset" })
+}
+
+@MainActor
+@Test func defaultProfileAtStartupNamesASkippedOutput() async {
+  let app = transactionTestApp(id: "startup.absent", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8)
+  )
+  let profile = Profile(
+    name: "Baseline",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.6,
+        output: ProfileOutput(deviceUID: "device.gone", deviceName: "Desk Speakers")
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile, purpose: .defaultAtStartup)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(!(await fixture.backend.recordedIntents()).contains { $0.targetDeviceUID == "device.gone" })
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.6)
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Default profile partly applied" && $0.kind == .info
+        && $0.detail == "Desk Speakers isn't connected, so Test App kept its output."
+    })
+}
+
+@MainActor
+@Test func saveCurrentMixRequestIsConsumedOnce() async {
+  let fixture = makeTransactionFixture(apps: [], device: transactionTestDevice())
+  #expect(!fixture.store.consumeSaveCurrentMixRequest())
+  let token = fixture.store.saveCurrentMixToken
+  fixture.store.requestSaveCurrentMix()
+  #expect(fixture.store.saveCurrentMixToken != token)
+  #expect(fixture.store.consumeSaveCurrentMixRequest())
+  #expect(!fixture.store.consumeSaveCurrentMixRequest())
+}
+
 private func transactionTestApp(
   id: String = "test.app",
   pid: Int32 = 42,
@@ -2780,6 +3347,8 @@ private func makeTransactionFixture(
     duration in try await Task.sleep(for: duration)
   },
   profileStore: TransactionProfilesStore = TransactionProfilesStore(),
+  extraOutputDevices: [AudioDevice] = [],
+  waveLinkAppIDs: Set<String> = [],
   microphoneActivityMonitor: (any MicrophoneActivityMonitoring)? = nil,
   callEndHoldSleep: @escaping @Sendable (Duration) async throws -> Void = {
     duration in try await Task.sleep(for: duration)
@@ -2794,7 +3363,9 @@ private func makeTransactionFixture(
     profileOutcomes: profileOutcomes,
     suspendFirstIntent: suspendFirstIntent,
     suspendFirstProfile: suspendFirstProfile,
-    resultGenerationOffset: resultGenerationOffset
+    resultGenerationOffset: resultGenerationOffset,
+    extraOutputDevices: extraOutputDevices,
+    waveLinkAppIDs: waveLinkAppIDs
   )
   let preferencesStore = TransactionPreferencesStore()
   // Transaction tests must not react to conferencing apps on the test desktop.
@@ -2886,9 +3457,13 @@ private actor TransactionBackend: AudioControlBackend {
   private var refreshSnapshot: AudioSessionSnapshot?
   private var outcomes: [AppIntentApplyOutcome]
   private var profileOutcomes: [ProfileRowApplyOutcome]
-  private let suspendFirstIntent: Bool
+  private var suspendedIntentCallNumber: Int?
   private let suspendFirstProfile: Bool
   private let resultGenerationOffset: UInt64
+  private let extraOutputDevices: [AudioDevice]
+  /// Apps Wave Link mixes: like the real bridge, only volume and mute reach
+  /// them, and a change that is purely boost or output is refused.
+  private let waveLinkAppIDs: Set<String>
   private var intents: [AppRouteIntent] = []
   private var profileCalls: [(profile: Profile, generation: UInt64)] = []
   private var latestGenerationByAppID: [String: UInt64] = [:]
@@ -2921,15 +3496,19 @@ private actor TransactionBackend: AudioControlBackend {
     profileOutcomes: [ProfileRowApplyOutcome],
     suspendFirstIntent: Bool,
     suspendFirstProfile: Bool,
-    resultGenerationOffset: UInt64
+    resultGenerationOffset: UInt64,
+    extraOutputDevices: [AudioDevice] = [],
+    waveLinkAppIDs: Set<String> = []
   ) {
     self.snapshot = snapshot
     self.refreshSnapshot = refreshSnapshot
     self.outcomes = outcomes
     self.profileOutcomes = profileOutcomes
-    self.suspendFirstIntent = suspendFirstIntent
+    self.suspendedIntentCallNumber = suspendFirstIntent ? 1 : nil
     self.suspendFirstProfile = suspendFirstProfile
     self.resultGenerationOffset = resultGenerationOffset
+    self.extraOutputDevices = extraOutputDevices
+    self.waveLinkAppIDs = waveLinkAppIDs
   }
 
   func recordedIntents() -> [AppRouteIntent] { intents }
@@ -2955,6 +3534,11 @@ private actor TransactionBackend: AudioControlBackend {
     await withCheckedContinuation { continuation in
       suspensionWaiters.append(continuation)
     }
+  }
+
+  /// Suspends the intent with this call number instead of the first.
+  func suspendIntent(callNumber: Int) {
+    suspendedIntentCallNumber = callNumber
   }
 
   func resumeFirstIntent() {
@@ -2987,7 +3571,7 @@ private actor TransactionBackend: AudioControlBackend {
       latestGenerationByAppID[intent.appID] = intent.generation
     }
 
-    if callNumber == 1, suspendFirstIntent {
+    if callNumber == suspendedIntentCallNumber {
       firstIntentIsSuspended = true
       let waiters = suspensionWaiters
       suspensionWaiters.removeAll()
@@ -3007,6 +3591,38 @@ private actor TransactionBackend: AudioControlBackend {
         resultingApp: snapshot.apps.first { $0.logicalID == intent.appID },
         backendStatus: snapshot.backendStatus,
         detail: "A newer deterministic transaction superseded this intent."
+      )
+    }
+
+    if waveLinkAppIDs.contains(intent.appID),
+      let index = snapshot.apps.firstIndex(where: { $0.logicalID == intent.appID })
+    {
+      completedIntents += 1
+      let previous = snapshot.apps[index]
+      snapshot.apps[index].routingState = .monitorOnly
+      snapshot.apps[index].routeHealthContext = .waveLinkBridge
+      let levelChanged =
+        intent.desiredVolume != previous.desiredVolume || intent.isMuted != previous.isMuted
+      let otherChanged =
+        intent.volumeBoost != previous.volumeBoost || intent.targetDeviceUID != previous.targetDeviceUID
+      if otherChanged, !levelChanged {
+        return AppIntentApplyResult(
+          appID: intent.appID,
+          generation: intent.generation,
+          outcome: .unavailable,
+          resultingApp: snapshot.apps[index],
+          backendStatus: snapshot.backendStatus,
+          detail: "Boost, EQ, and output routing stay in Wave Link."
+        )
+      }
+      snapshot.apps[index].desiredVolume = intent.desiredVolume
+      snapshot.apps[index].isMuted = intent.isMuted
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .applied,
+        resultingApp: snapshot.apps[index],
+        backendStatus: snapshot.backendStatus
       )
     }
 
@@ -3219,7 +3835,7 @@ private actor TransactionBackend: AudioControlBackend {
     return await diagnosticsReport()
   }
   func availableOutputDevices() async -> [AudioDevice] {
-    snapshot.currentDevice.map { [$0] } ?? []
+    (snapshot.currentDevice.map { [$0] } ?? []) + extraOutputDevices
   }
   func setDefaultOutputDevice(uid: String) async throws {
     snapshot.currentDevice = AudioDevice(id: uid, name: "Selected", kind: .virtual)

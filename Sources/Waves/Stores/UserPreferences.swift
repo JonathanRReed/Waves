@@ -252,11 +252,9 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
   var volumeBoost: Float
 
   init(desiredVolume: Float = 1.0, isMuted: Bool = false, volumeBoost: Float = 1.0) {
-    let finiteVolume = desiredVolume.isFinite ? desiredVolume : 1.0
-    self.desiredVolume = max(0.0, min(1.0, finiteVolume))
+    self.desiredVolume = LevelRange.volume.sanitized(desiredVolume)
     self.isMuted = isMuted
-    let finiteBoost = volumeBoost.isFinite ? volumeBoost : 1.0
-    self.volumeBoost = max(1.0, min(4.0, finiteBoost))
+    self.volumeBoost = LevelRange.boost.sanitized(volumeBoost)
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -267,10 +265,16 @@ struct AppVolumeSettings: Codable, Hashable, Sendable {
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    let desiredVolume = try container.decodeIfPresent(Float.self, forKey: .desiredVolume) ?? 1.0
+    // Decoded as Double so a value too large for Float is clamped like any
+    // other out-of-range number instead of failing the whole presets file.
+    let desiredVolume = try container.decodeIfPresent(Double.self, forKey: .desiredVolume)
     let isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
-    let volumeBoost = try container.decodeIfPresent(Float.self, forKey: .volumeBoost) ?? 1.0
-    self.init(desiredVolume: desiredVolume, isMuted: isMuted, volumeBoost: volumeBoost)
+    let volumeBoost = try container.decodeIfPresent(Double.self, forKey: .volumeBoost)
+    self.init(
+      desiredVolume: LevelRange.volume.sanitized(desiredVolume),
+      isMuted: isMuted,
+      volumeBoost: LevelRange.boost.sanitized(volumeBoost)
+    )
   }
 
   func encode(to encoder: Encoder) throws {

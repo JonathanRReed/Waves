@@ -15,49 +15,89 @@ public enum TapSampleFormat: Hashable, Sendable {
 /// here). All functions are safe to call on the realtime audio thread: no
 /// allocation, locking, or Objective-C dispatch.
 public enum TapDSP {
-  /// Scales `byteCount` bytes of interleaved samples in place by `gain`,
-  /// clamping to each format's valid range so boost cannot emit out-of-range
-  /// samples that clip harshly downstream. A gain of exactly 1.0 leaves every
-  /// finite sample bit-for-bit unchanged — but float32 buffers are still
-  /// scanned at unity gain, because the non-finite-sample sanitization below
-  /// must run unconditionally: the caller has already `memcpy`'d the input
-  /// straight into the output buffer before this call, and 100% volume with
-  /// no boost (gain == 1.0) is the default, most common configuration, not
-  /// an edge case worth skipping.
+  /// Scales `byteCount` bytes of samples in place by a constant `gain`,
+  /// clamping to each format's valid range. A gain of exactly 1.0 leaves every
+  /// finite sample bit-for-bit unchanged; non-finite float samples always
+  /// become silence.
   public static func scale(
     _ data: UnsafeMutableRawPointer,
     byteCount: Int,
     format: TapSampleFormat,
     gain: Float
   ) {
+    applyGain(
+      data,
+      byteCount: byteCount,
+      format: format,
+      channelsPerFrame: 1,
+      from: gain,
+      to: gain,
+      clampsFloat: gain != 1.0
+    )
+  }
+
+  /// Multiplies interleaved samples in place by a gain that moves linearly
+  /// from `startGain` to `endGain` across the buffer's frames, so a gain change
+  /// never lands as a step. The per-frame gain never leaves the range between
+  /// the two endpoints. With `rampFrameCount`, the gain lands on `endGain`
+  /// after that many frames and holds it for the rest of the buffer.
+  ///
+  /// Float samples are clamped to ±1 only when `clampsFloat` is set, so earlier
+  /// stages of the chain can pass headroom on to the final one. Integer
+  /// samples always saturate, because the type cannot hold more. With both
+  /// gains exactly 1.0 and no clamp, finite float samples stay bit-for-bit
+  /// unchanged. Non-finite float samples become silence unconditionally: the
+  /// caller has already copied the app's input into the output buffer, and a
+  /// NaN would otherwise reach the device.
+  public static func applyGain(
+    _ data: UnsafeMutableRawPointer,
+    byteCount: Int,
+    format: TapSampleFormat,
+    channelsPerFrame: Int,
+    from startGain: Float,
+    to endGain: Float,
+    rampFrameCount: Int? = nil,
+    clampsFloat: Bool
+  ) {
+    let channels = max(1, channelsPerFrame)
+    let isUnity = startGain == 1.0 && endGain == 1.0
+    // A settled gain is the steady state for every managed app, so it skips
+    // the per-sample frame arithmetic a ramp needs.
+    let isRamp = startGain != endGain
+
     switch format {
     case .float32:
       let pointer = data.assumingMemoryBound(to: Float.self)
       let count = byteCount / MemoryLayout<Float>.size
+      let frameCount = max(1, min(count / channels, rampFrameCount ?? .max))
       for index in 0..<count {
         let sample = pointer[index]
-        // A NaN sample survives the clamp as -1.0 — a full-scale pop. Replace
-        // non-finite input with silence instead, regardless of gain.
         guard sample.isFinite else {
           pointer[index] = 0
           continue
         }
-        guard gain != 1.0 else { continue }
-        pointer[index] = min(1.0, max(-1.0, sample * gain))
+        guard !isUnity || clampsFloat else { continue }
+        let gain = isRamp ? rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount) : endGain
+        let scaled = sample * gain
+        pointer[index] = clampsFloat ? min(1.0, max(-1.0, scaled)) : scaled
       }
     case .int16:
       // Integer samples can't encode NaN/Inf, so unity gain really is a no-op.
-      guard gain != 1.0 else { return }
+      guard !isUnity else { return }
       let pointer = data.assumingMemoryBound(to: Int16.self)
       let count = byteCount / MemoryLayout<Int16>.size
+      let frameCount = max(1, min(count / channels, rampFrameCount ?? .max))
       for index in 0..<count {
+        let gain = isRamp ? rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount) : endGain
         pointer[index] = scaleSigned16(pointer[index], gain: gain)
       }
     case .int32:
-      guard gain != 1.0 else { return }
+      guard !isUnity else { return }
       let pointer = data.assumingMemoryBound(to: Int32.self)
       let count = byteCount / MemoryLayout<Int32>.size
+      let frameCount = max(1, min(count / channels, rampFrameCount ?? .max))
       for index in 0..<count {
+        let gain = isRamp ? rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount) : endGain
         pointer[index] = scaleSigned32(pointer[index], gain: gain)
       }
     case .unknown:
@@ -65,33 +105,13 @@ public enum TapDSP {
     }
   }
 
-  /// Applies the fixed manual DSP order. Headroom must attenuate the source
-  /// before a boosting EQ can saturate its typed-sample output; user volume and
-  /// boost remain after EQ so their existing semantics are unchanged.
-  public static func processEqualized(
-    _ data: UnsafeMutableRawPointer,
-    byteCount: Int,
-    format: TapSampleFormat,
-    equalizer: EqualizerDSP,
-    equalizerHeadroomGain: Float,
-    manualGain: Float,
-    bufferChannelCount: Int,
-    channelOffset: Int = 0
-  ) {
-    scale(
-      data,
-      byteCount: byteCount,
-      format: format,
-      gain: equalizerHeadroomGain
-    )
-    equalizer.process(
-      data,
-      byteCount: byteCount,
-      format: format,
-      bufferChannelCount: bufferChannelCount,
-      channelOffset: channelOffset
-    )
-    scale(data, byteCount: byteCount, format: format, gain: manualGain)
+  /// The gain for `frame` of a linear ramp that lands on `end` at the last
+  /// frame, kept between the endpoints so rounding can never overshoot.
+  @inline(__always)
+  private static func rampGain(from start: Float, to end: Float, frame: Int, of frameCount: Int) -> Float {
+    guard start != end, frame + 1 < frameCount else { return end }
+    let gain = start + (end - start) * Float(frame + 1) / Float(frameCount)
+    return min(max(start, end), max(min(start, end), gain))
   }
 
   /// Computes peak magnitude, sum-of-squares, and sample count over a buffer,

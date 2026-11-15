@@ -4,6 +4,8 @@ import WavesAudioCore
 enum AutomationCommand: Equatable, Sendable {
   case setVolume(appID: String, volume: Float)
   case setMuted(appID: String, isMuted: Bool)
+  case toggleMute(appID: String)
+  case setBoost(appID: String, boost: Float)
   case applyProfile(name: String)
   case refresh
 }
@@ -26,25 +28,33 @@ enum AutomationCommandParseResult: Equatable, Sendable {
 /// application or audio state.
 @MainActor
 final class AutomationCommandParser {
-  typealias Clock = @MainActor @Sendable () -> Date
+  /// Seconds on a monotonic clock. Tests inject their own.
+  typealias Clock = @MainActor @Sendable () -> TimeInterval
+
+  static let maximumRequests = 10
+  static let requestWindow: TimeInterval = 60
+  static let throttleNotificationInterval: TimeInterval = 5
+  static let defaultClock: Clock = { MonotonicClock.seconds() }
 
   private let now: Clock
-  private let maximumRequests: Int
-  private let requestWindow: TimeInterval
   private let throttleNotificationInterval: TimeInterval
-  private var acceptedRequestTimes: [Date] = []
-  private var lastThrottleNotification: Date?
+  private var acceptedRequests: SlidingWindowQuota
+  private var lastThrottleNotification: TimeInterval?
   private(set) var invocationCount = 0
 
   init(
-    maximumRequests: Int = 10,
-    requestWindow: TimeInterval = 60,
-    throttleNotificationInterval: TimeInterval = 5,
-    now: @escaping Clock = Date.init
+    maximumRequests: Int = AutomationCommandParser.maximumRequests,
+    requestWindow: TimeInterval = AutomationCommandParser.requestWindow,
+    throttleNotificationInterval: TimeInterval = AutomationCommandParser.throttleNotificationInterval,
+    now: @escaping Clock = AutomationCommandParser.defaultClock
   ) {
-    self.maximumRequests = max(0, maximumRequests)
-    self.requestWindow = requestWindow.isFinite ? max(0, requestWindow) : 60
-    self.throttleNotificationInterval = throttleNotificationInterval.isFinite ? max(0, throttleNotificationInterval) : 5
+    acceptedRequests = SlidingWindowQuota(
+      limit: maximumRequests,
+      window: requestWindow.isFinite ? max(0, requestWindow) : Self.requestWindow
+    )
+    self.throttleNotificationInterval =
+      throttleNotificationInterval.isFinite
+      ? max(0, throttleNotificationInterval) : Self.throttleNotificationInterval
     self.now = now
   }
 
@@ -64,7 +74,7 @@ final class AutomationCommandParser {
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
       let host = components.host?.lowercased(),
       !host.isEmpty,
-      !containsControlCharacters(host)
+      !Self.containsControlCharacters(host)
     else {
       return .rejected(
         AutomationCommandRejection(
@@ -74,27 +84,16 @@ final class AutomationCommandParser {
     }
     switch host {
     case "set-volume":
-      guard let appID = queryValue(named: "app", in: components),
-        !appID.isEmpty,
-        let volumeValue = queryValue(named: "volume", in: components),
-        appID.count <= 256,
-        !containsControlCharacters(appID),
-        volumeValue.count <= 32,
-        let volume = Float(volumeValue),
-        volume.isFinite,
-        volume >= 0,
-        volume <= 1
+      guard let appID = validAppID(in: components),
+        let volume = LevelRange.volume.validated(text: queryValue(named: "volume", in: components))
       else {
         return presentedRejection("Set-volume command was invalid.")
       }
       validated = .setVolume(appID: appID, volume: volume)
 
     case "mute":
-      guard let appID = queryValue(named: "app", in: components),
-        !appID.isEmpty,
+      guard let appID = validAppID(in: components),
         let muteValue = queryValue(named: "muted", in: components),
-        appID.count <= 256,
-        !containsControlCharacters(appID),
         muteValue.count <= 16,
         let shouldMute = Bool(muteValue)
       else {
@@ -102,11 +101,25 @@ final class AutomationCommandParser {
       }
       validated = .setMuted(appID: appID, isMuted: shouldMute)
 
+    case "toggle-mute":
+      guard let appID = validAppID(in: components) else {
+        return presentedRejection("Toggle-mute command was invalid.")
+      }
+      validated = .toggleMute(appID: appID)
+
+    case "set-boost":
+      // Refused outside 1...4, never clamped: a URL must not be able to ask
+      // for more boost than the mixer offers.
+      guard let appID = validAppID(in: components),
+        let boost = LevelRange.boost.validated(text: queryValue(named: "boost", in: components))
+      else {
+        return presentedRejection("Set-boost command was invalid.")
+      }
+      validated = .setBoost(appID: appID, boost: boost)
+
     case "apply-profile", "apply-preset":
       guard let profileName = queryValue(named: "name", in: components),
-        !profileName.isEmpty,
-        profileName.count <= Profile.maxNameLength,
-        !containsControlCharacters(profileName)
+        Self.isAcceptableProfileName(profileName)
       else {
         return presentedRejection("Profile command was invalid.")
       }
@@ -119,25 +132,23 @@ final class AutomationCommandParser {
       return presentedRejection("Unknown command: \(String(host.prefix(64)))")
     }
 
-    guard acceptRequest() else {
-      let currentTime = now()
-      let shouldNotify: Bool
-      if currentTime.timeIntervalSinceReferenceDate.isFinite {
-        shouldNotify =
-          lastThrottleNotification.map {
-            currentTime.timeIntervalSince($0) >= throttleNotificationInterval || currentTime < $0
-          } ?? true
-        if shouldNotify { lastThrottleNotification = currentTime }
-      } else {
-        shouldNotify = false
+    let reading = now()
+    guard acceptedRequests.admit(at: reading) else {
+      // A non-finite reading is refused and never starts a notification
+      // cooldown; time otherwise only moves forward (see SlidingWindowQuota).
+      guard let currentTime = acceptedRequests.observe(reading) else {
+        return .throttled(shouldNotify: false)
       }
+      let shouldNotify =
+        lastThrottleNotification.map { currentTime - $0 >= throttleNotificationInterval } ?? true
+      if shouldNotify { lastThrottleNotification = currentTime }
       return .throttled(shouldNotify: shouldNotify)
     }
     return .accepted(validated)
   }
 
   func reset() {
-    acceptedRequestTimes.removeAll()
+    acceptedRequests.reset()
     lastThrottleNotification = nil
   }
 
@@ -145,15 +156,18 @@ final class AutomationCommandParser {
     reset()
   }
 
-  private func acceptRequest() -> Bool {
-    let currentTime = now()
-    guard currentTime.timeIntervalSinceReferenceDate.isFinite else { return false }
-    let cutoff = currentTime.addingTimeInterval(-requestWindow)
-    // Do not retain future entries after a backwards wall-clock shift.
-    acceptedRequestTimes.removeAll { $0 < cutoff || $0 > currentTime }
-    guard acceptedRequestTimes.count < maximumRequests else { return false }
-    acceptedRequestTimes.append(currentTime)
-    return true
+  /// Shared with the control socket so both surfaces accept the same names.
+  static func isAcceptableProfileName(_ name: String) -> Bool {
+    !name.isEmpty && name.count <= Profile.maxNameLength && !Self.containsControlCharacters(name)
+  }
+
+  private func validAppID(in components: URLComponents) -> String? {
+    guard let appID = queryValue(named: "app", in: components),
+      !appID.isEmpty,
+      appID.count <= 256,
+      !Self.containsControlCharacters(appID)
+    else { return nil }
+    return appID
   }
 
   private func queryValue(named name: String, in components: URLComponents) -> String? {
@@ -164,7 +178,7 @@ final class AutomationCommandParser {
     .rejected(AutomationCommandRejection(message: message, shouldPresent: true))
   }
 
-  private func containsControlCharacters(_ string: String) -> Bool {
+  private static func containsControlCharacters(_ string: String) -> Bool {
     string.unicodeScalars.contains { scalar in
       switch scalar.value {
       case 0x00...0x1F, 0x7F...0x9F, 0x2028, 0x2029, 0x202A...0x202E, 0x2066...0x2069:

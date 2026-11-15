@@ -1,43 +1,78 @@
 import Foundation
 
+/// Counts admissions inside a trailing window of monotonic time.
+///
+/// Time only moves forward here: a reading earlier than one already seen is
+/// treated as the latest one. With the production monotonic clock that never
+/// happens; with an injected clock it means stepping backwards can neither
+/// reopen a spent quota nor make old admissions look like future ones.
+struct SlidingWindowQuota {
+  private let limit: Int
+  private let window: TimeInterval
+  private var admissions: [TimeInterval] = []
+  private var latest: TimeInterval?
+
+  init(limit: Int, window: TimeInterval) {
+    self.limit = max(0, limit)
+    self.window = window
+  }
+
+  /// The time this quota treats as now, or nil for a non-finite reading,
+  /// which callers must treat as a refusal.
+  mutating func observe(_ reading: TimeInterval) -> TimeInterval? {
+    guard reading.isFinite else { return nil }
+    let now = max(latest ?? reading, reading)
+    latest = now
+    return now
+  }
+
+  mutating func admit(at reading: TimeInterval) -> Bool {
+    guard let now = observe(reading) else { return false }
+    let cutoff = now - window
+    admissions.removeAll { $0 < cutoff }
+    guard admissions.count < limit else { return false }
+    admissions.append(now)
+    return true
+  }
+
+  mutating func reset() {
+    admissions.removeAll()
+  }
+}
+
 /// A separate invocation-level bound for the URL entry point. It runs before
 /// parsing or setup UI, while `AutomationCommandParser` retains its existing
 /// accepted-mutation quota behind those gates.
 @MainActor
 final class URLInvocationLimiter {
-  typealias Clock = @MainActor @Sendable () -> Date
+  /// Seconds on a monotonic clock. Tests inject their own.
+  typealias Clock = @MainActor @Sendable () -> TimeInterval
 
   static let maximumInvocations = 30
   static let window: TimeInterval = 60
+  static let defaultClock: Clock = { MonotonicClock.seconds() }
 
-  private let maximumInvocations: Int
-  private let window: TimeInterval
   private let now: Clock
-  private var invocationTimes: [Date] = []
+  private var quota: SlidingWindowQuota
 
   init(
     maximumInvocations: Int = URLInvocationLimiter.maximumInvocations,
     window: TimeInterval = URLInvocationLimiter.window,
-    now: @escaping Clock = Date.init
+    now: @escaping Clock = URLInvocationLimiter.defaultClock
   ) {
-    self.maximumInvocations = max(0, maximumInvocations)
-    self.window = window.isFinite ? max(0, window) : URLInvocationLimiter.window
+    quota = SlidingWindowQuota(
+      limit: maximumInvocations,
+      window: window.isFinite ? max(0, window) : URLInvocationLimiter.window
+    )
     self.now = now
   }
 
   func allow() -> Bool {
-    let currentTime = now()
-    guard currentTime.timeIntervalSinceReferenceDate.isFinite else { return false }
-    let cutoff = currentTime.addingTimeInterval(-window)
-    // Do not retain future entries after a backwards wall-clock shift.
-    invocationTimes.removeAll { $0 < cutoff || $0 > currentTime }
-    guard invocationTimes.count < maximumInvocations else { return false }
-    invocationTimes.append(currentTime)
-    return true
+    quota.admit(at: now())
   }
 
   func reset() {
-    invocationTimes.removeAll()
+    quota.reset()
   }
 }
 

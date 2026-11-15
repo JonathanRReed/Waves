@@ -242,6 +242,10 @@ struct HelpView: View {
           keys: "⌘N"
         )
         shortcutRow(
+          action: "Save current mix",
+          keys: "⇧⌘S"
+        )
+        shortcutRow(
           action: "Open Settings",
           keys: "⌘,"
         )
@@ -275,6 +279,16 @@ struct HelpView: View {
           description: "Mute or unmute"
         )
         urlSchemeRow(
+          scheme: "waves://toggle-mute",
+          params: "app=APP_ID",
+          description: "Toggle mute"
+        )
+        urlSchemeRow(
+          scheme: "waves://set-boost",
+          params: "app=APP_ID&boost=2",
+          description: "Set boost (1-4)"
+        )
+        urlSchemeRow(
           scheme: "waves://apply-profile",
           params: "name=Focus",
           description: "Apply a named profile"
@@ -291,6 +305,12 @@ struct HelpView: View {
       )
       .font(.caption)
       .foregroundStyle(.secondary)
+
+      Link(
+        "Recipes for the Shortcuts app",
+        destination: URL(string: "https://github.com/JonathanRReed/Waves/blob/main/docs/SHORTCUTS.md")!
+      )
+      .font(.caption)
     }
     .padding(16)
     .wavesCard(cornerRadius: 12)
@@ -309,7 +329,7 @@ struct HelpView: View {
           "Waves listens on a private Unix socket for your macOS user. It does not open a network port"
         )
         bullet(
-          "The repository's wavesctl tool lists apps, changes volume or mute, reads icons, and watches state changes using protocol version 1"
+          "The wavesctl tool inside Waves (Waves.app/Contents/Helpers/wavesctl) lists apps, changes volume, mute or boost, applies profiles, and watches state changes using protocol version 1"
         )
         bullet(
           "The Stream Deck companion is a separate app and is not bundled with Waves. It controls only routes Waves reports as managed"
@@ -334,6 +354,9 @@ struct HelpView: View {
       VStack(alignment: .leading, spacing: 8) {
         bullet("A profile is a group of apps you use together, like Work or Gaming")
         bullet("Use the + in the sidebar's Profiles section to create one")
+        bullet(
+          "Save Current Mix, in the menu bar's profile menu or the sidebar, saves what you hear now as a profile in one step"
+        )
         bullet("Pick which apps belong, and optionally capture their current levels")
         bullet("Select a profile in the sidebar to focus just those apps")
         bullet("Profiles that carry levels show an Apply Levels button")
@@ -347,7 +370,7 @@ struct HelpView: View {
       }
 
       Text(
-        "Membership-only profiles just group apps. Capture levels to also save each app's volume, mute, and boost."
+        "Membership-only profiles just group apps. Capture levels to also save each app's volume, mute, and boost, and choose whether to include its EQ and output device. An output that isn't connected when you apply the profile is skipped. Reset Mix restores levels only, not EQ or outputs. A profile applied by a waves:// link sets levels and EQ but never moves an app to another output."
       )
       .font(.caption)
       .foregroundStyle(.secondary)

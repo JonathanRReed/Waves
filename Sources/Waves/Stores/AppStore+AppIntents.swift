@@ -50,23 +50,38 @@ extension AppStore {
         overrides: AppIntentOverrides(
           desiredVolume: entry.desiredVolume,
           isMuted: entry.isMuted,
-          volumeBoost: entry.volumeBoost
+          volumeBoost: entry.volumeBoost,
+          equalizerSettings: entry.equalizer,
+          targetDeviceUID: entry.output?.deviceUID,
+          replacesTargetDevice: entry.output != nil
         ),
         generation: generation,
         reason: reason
       )
       let result = await backend.applyAppIntent(intent)
       backendStatus = result.backendStatus
-      rows.append(
-        ProfileRowApplyResult(
-          entryIndex: entryIndex,
-          appID: entry.appID,
-          generation: generation,
-          outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
-          resultingApp: result.resultingApp,
-          detail: result.detail
-        )
+      let row = ProfileRowApplyResult(
+        entryIndex: entryIndex,
+        appID: entry.appID,
+        generation: generation,
+        outcome: ProfileRowApplyOutcome(appIntentOutcome: result.outcome),
+        resultingApp: result.resultingApp,
+        detail: result.detail
       )
+      // Later rows suspend. An edit to this app in the meantime builds its
+      // intent from the confirmed app and EQ, so what this row restored is
+      // recorded now rather than when the whole profile is reconciled.
+      if appIntentCoordinator.isCurrentProfile(generation),
+        !appIntentCoordinator.hasNewerGeneration(than: generation, for: entry.appID)
+      {
+        if row.outcome == .applied || row.outcome == .noChange, let app = row.resultingApp {
+          appIntentCoordinator.recordConfirmedApp(app)
+        }
+        if let equalizer = entry.equalizer, Self.profileRowRestoredSound(entry, row: row) {
+          appIntentCoordinator.recordConfirmedEqualizer(equalizer, for: entry.appID)
+        }
+      }
+      rows.append(row)
     }
 
     return ProfileApplyResult(rows: rows, backendStatus: backendStatus)
@@ -746,15 +761,19 @@ extension AppStore {
     )
   }
 
-  func setVolumeBoost(_ boost: Float, for app: AudioApp) {
-    guard requireAudioRunning() else { return }
-    guard !isExcluded(app) else { return }
-    let finiteBoost = boost.isFinite ? boost : 1.0
-    let clampedBoost = max(1, min(4, finiteBoost))
-    startAppIntentTransaction(
+  @discardableResult
+  func setVolumeBoost(
+    _ boost: Float,
+    for app: AudioApp,
+    reason: AppRouteIntentReason = .userEdit
+  ) -> Task<AppIntentApplyResult, Never>? {
+    guard requireAudioRunning() else { return nil }
+    guard !isExcluded(app) else { return nil }
+    let clampedBoost = LevelRange.boost.sanitized(boost)
+    return startAppIntentTransaction(
       forAppID: app.logicalID,
       overrides: AppIntentOverrides(volumeBoost: clampedBoost),
-      reason: .userEdit,
+      reason: reason,
       persistencePolicy: .acceptedUserIntent(updateDevicePreset: true),
       feedbackPolicy: .directControl(
         successTitle: "Boost updated",

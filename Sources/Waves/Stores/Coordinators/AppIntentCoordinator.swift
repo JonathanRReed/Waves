@@ -473,6 +473,15 @@ final class AppIntentCoordinator {
     currentProfileGeneration == generation
   }
 
+  /// The newest profile batch while it is still running, so a caller that
+  /// started it can wait for its result.
+  var currentProfileTask: (generation: UInt64, task: Task<Void, Never>)? {
+    guard let generation = currentProfileGeneration, let task = profileTasks[generation] else {
+      return nil
+    }
+    return (generation, task)
+  }
+
   func claimDurableMutation(for appID: String, generation: UInt64) {
     durableMutationGenerations[appID] = generation
   }

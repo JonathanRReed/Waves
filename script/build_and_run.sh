@@ -472,6 +472,7 @@ fi
 sign_runtime_item() {
   local target="$1"
   local entitlements="${2:-}"
+  local identifier="${3:-}"
   local identity="-"
   local args=(--force)
 
@@ -481,6 +482,9 @@ sign_runtime_item() {
   fi
   if [ -n "$entitlements" ]; then
     args+=(--entitlements "$entitlements")
+  fi
+  if [ -n "$identifier" ]; then
+    args+=(--identifier "$identifier")
   fi
 
   if [ -n "$SIGN_IDENTITY" ]; then
@@ -501,6 +505,13 @@ APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
+# The bundled command-line client. Contents/Helpers is Apple's documented home
+# for helper tools: codesign seals it as nested code, and it stays out of
+# Contents/MacOS, where only the app's own executable belongs.
+CLI_NAME="wavesctl"
+APP_HELPERS="$APP_CONTENTS/Helpers"
+APP_CLI="$APP_HELPERS/$CLI_NAME"
+CLI_IDENTIFIER="$BUNDLE_ID.$CLI_NAME"
 SPARKLE_FRAMEWORK_NAME="Sparkle.framework"
 SPARKLE_FRAMEWORK="$APP_FRAMEWORKS/$SPARKLE_FRAMEWORK_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
@@ -847,6 +858,7 @@ build_app_bundle() {
     build_output_dir="$WAVES_RELEASE_SCRATCH_ROOT/universal/release"
     mkdir -p "$build_output_dir"
     lipo -create "$arm64_bin_dir/$APP_NAME" "$x86_64_bin_dir/$APP_NAME" -output "$build_output_dir/$APP_NAME"
+    lipo -create "$arm64_bin_dir/$CLI_NAME" "$x86_64_bin_dir/$CLI_NAME" -output "$build_output_dir/$CLI_NAME"
 
     # Bundle.module resources are architecture-independent, and Sparkle's macOS
     # XCFramework slice is already universal. Use the arm64 build output copies.
@@ -861,13 +873,18 @@ build_app_bundle() {
   sparkle_framework_source="$build_output_dir/$SPARKLE_FRAMEWORK_NAME"
 
   rm -rf "$APP_BUNDLE"
-  mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS"
+  mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS" "$APP_HELPERS"
 
   if ! cp "$build_binary" "$APP_BINARY"; then
     echo "Error: Failed to copy binary to $APP_BINARY" >&2
     exit 1
   fi
   chmod +x "$APP_BINARY"
+  if ! cp "$build_output_dir/$CLI_NAME" "$APP_CLI"; then
+    echo "Error: Failed to copy $CLI_NAME to $APP_CLI" >&2
+    exit 1
+  fi
+  chmod 755 "$APP_CLI"
 
   if [ ! -d "$sparkle_framework_source" ]; then
     echo "Error: Sparkle framework not found at $sparkle_framework_source" >&2
@@ -1072,6 +1089,9 @@ SPARKLE_ENTITLEMENTS_PLIST
     sign_runtime_item "$sparkle_version/Autoupdate"
     sign_runtime_item "$sparkle_version/Updater.app"
     sign_runtime_item "$SPARKLE_FRAMEWORK"
+    # The client needs no entitlements: it only connects to a socket in the
+    # user's own Library. Signed before the bundle so the bundle seals it.
+    sign_runtime_item "$APP_CLI" "" "$CLI_IDENTIFIER"
     sign_runtime_item "$APP_BUNDLE" "$entitlements"
     if command -v xattr >/dev/null 2>&1; then
       xattr -cr "$APP_BUNDLE"
@@ -1092,6 +1112,8 @@ validate_app_bundle() {
   local label="$2"
   local contents="$bundle_path/Contents"
   local binary="$contents/MacOS/$APP_NAME"
+  local cli="$contents/Helpers/$CLI_NAME"
+  local cli_signature
   local resources="$contents/Resources"
   local frameworks="$contents/Frameworks"
   local sparkle_framework="$frameworks/$SPARKLE_FRAMEWORK_NAME"
@@ -1205,6 +1227,23 @@ validate_app_bundle() {
   require_universal_binary "$binary" "$label executable"
   require_universal_binary "$sparkle_framework/Versions/Current/Sparkle" "$label Sparkle framework"
   validate_minimum_os "$binary" "$label executable"
+
+  if [ ! -x "$cli" ] || [ -L "$cli" ]; then
+    echo "Error: $label is missing its $CLI_NAME helper at $cli." >&2
+    exit 1
+  fi
+  require_universal_binary "$cli" "$label $CLI_NAME helper"
+  validate_minimum_os "$cli" "$label $CLI_NAME helper"
+  /usr/bin/codesign --verify --strict "$cli"
+  cli_signature="$(/usr/bin/codesign -dvvv "$cli" 2>&1 || true)"
+  if ! printf '%s\n' "$cli_signature" | grep -Fxq "Identifier=$CLI_IDENTIFIER"; then
+    echo "Error: $label $CLI_NAME helper is not signed as $CLI_IDENTIFIER." >&2
+    exit 1
+  fi
+  if /usr/bin/codesign -d --entitlements :- "$cli" 2>/dev/null | grep -q "<key>"; then
+    echo "Error: $label $CLI_NAME helper must not carry entitlements." >&2
+    exit 1
+  fi
   if [[ "$(otool -L "$binary")" != *"@rpath/Sparkle.framework/Versions/B/Sparkle"* ]]; then
     echo "Error: $label executable is not linked to the embedded Sparkle framework." >&2
     exit 1
@@ -1644,6 +1683,7 @@ notarize_release() {
 
 publication_check() {
   local signature_info
+  local cli_signature_info
   local dmg_signature_info
   local requirement_info
   local designated_requirement
@@ -1668,6 +1708,17 @@ publication_check() {
   fi
   if ! printf '%s\n' "$signature_info" | grep -Eq '^CodeDirectory .*flags=.*\(runtime\)'; then
     echo "Error: $APP_BUNDLE is not signed with the hardened runtime." >&2
+    exit 1
+  fi
+  cli_signature_info="$(/usr/bin/codesign -dvvv "$APP_CLI" 2>&1 || true)"
+  if ! printf '%s\n' "$cli_signature_info" | grep -Fxq "Authority=$CANONICAL_SIGN_IDENTITY" \
+    || ! printf '%s\n' "$cli_signature_info" | grep -Fxq "TeamIdentifier=$CANONICAL_SIGN_TEAM" \
+    || ! printf '%s\n' "$cli_signature_info" | grep -Fq "Timestamp="; then
+    echo "Error: $APP_CLI is not signed and timestamped by the canonical Waves Developer ID identity and team." >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$cli_signature_info" | grep -Eq '^CodeDirectory .*flags=.*\(runtime\)'; then
+    echo "Error: $APP_CLI is not signed with the hardened runtime." >&2
     exit 1
   fi
   requirement_info="$(/usr/bin/codesign -dr - "$APP_BUNDLE" 2>&1 || true)"
@@ -1752,6 +1803,18 @@ package_smoke() {
   stop_smoke_process "$smoke_pid"
   append_system_smoke_log "$smoke_pid"
   SMOKE_PID=""
+
+  # The bundled client must launch from the mounted image under its own
+  # signature, print its help, and fail cleanly when Waves is not listening.
+  if ! "$mounted_app/Contents/Helpers/$CLI_NAME" --help >>"$SMOKE_LOG_PATH" 2>&1; then
+    echo "Error: Packaged $CLI_NAME --help failed. See $SMOKE_LOG_PATH." >&2
+    exit 1
+  fi
+  if WAVES_CONTROL_SOCKET="$ACTIVE_SMOKE_HOME/absent.sock" \
+    "$mounted_app/Contents/Helpers/$CLI_NAME" apps >>"$SMOKE_LOG_PATH" 2>&1; then
+    echo "Error: Packaged $CLI_NAME reported success without a running Waves." >&2
+    exit 1
+  fi
   if [ -e "$smoke_session" ]; then
     echo "Error: Packaged $APP_NAME wrote a session before first-run privacy consent." >&2
     exit 1

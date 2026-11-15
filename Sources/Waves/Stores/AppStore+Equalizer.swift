@@ -94,12 +94,6 @@ extension AppStore {
     }
   }
 
-  func setAdaptiveRole(_ role: AdaptiveAppRole, for app: AudioApp) {
-    updateEqualizerSettings(for: app) { settings in
-      settings.adaptiveRole = role
-    }
-  }
-
   /// The policy for an app: the stored one, or the deterministic default derived
   /// from its legacy role and category.
   ///

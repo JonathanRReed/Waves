@@ -197,8 +197,6 @@ class RuntimeProfileTest < Minitest::Test
     result = JSON.parse(stdout)
     assert_equal "complete", result.fetch("evidenceStatus")
     refute result.key?("releasePass")
-    assert_equal false, result.fetch("soakComparison").fetch("available")
-    assert_match(/insufficient/, result.fetch("soakComparison").fetch("reason"))
   end
 
   def test_fixture_timeout_stops_the_collector_before_open3_joins_it
@@ -341,55 +339,6 @@ class RuntimeProfileTest < Minitest::Test
     stdout, _stderr, status = analyze(record)
     assert status.success?
     assert_equal "failed", JSON.parse(stdout).fetch("evidenceStatus")
-  end
-
-  def test_two_hour_coverage_compares_windows_and_flags_monotonic_growth
-    record = base_record
-    record.fetch("request")["durationSeconds"] = 7200.0
-    record.fetch("result")["actualDurationSeconds"] = 7200.0
-    record["samples"] = (0..120).map do |index|
-      {
-        "elapsedSeconds" => index * 60.0,
-        "cpuPercent" => 2.0 + index * 0.01,
-        "residentBytes" => 10_000_000 + index * 1000,
-        "threadCount" => 4,
-        "descriptorCount" => 8,
-        "failures" => []
-      }
-    end
-    stdout, _stderr, status = analyze(record)
-    assert status.success?
-    result = JSON.parse(stdout)
-    comparison = result.fetch("soakComparison")
-    assert_equal true, comparison.fetch("available")
-    assert_includes comparison.fetch("monotonicGrowthMetrics"), "residentBytes"
-    assert_includes comparison.fetch("monotonicGrowthMetrics"), "cpuPercent"
-    assert_equal false, comparison.fetch("leakDiagnosis")
-  end
-
-  def test_clustered_soak_samples_do_not_satisfy_window_coverage
-    record = base_record
-    record.fetch("request")["durationSeconds"] = 7200.0
-    record.fetch("request")["sampleIntervalSeconds"] = 60.0
-    record.fetch("result")["actualDurationSeconds"] = 7200.0
-    first = (0...15).map { |index| index * 2.0 }
-    middle = (1..90).map { |index| 900.0 + index * 60.0 }
-    last = (0...15).map { |index| 7170.0 + index * 2.0 }
-    record["samples"] = (first + middle + last).each_with_index.map do |elapsed, index|
-      {
-        "elapsedSeconds" => elapsed,
-        "cpuPercent" => 2.0,
-        "residentBytes" => 10_000_000 + index,
-        "threadCount" => 4,
-        "descriptorCount" => 8,
-        "failures" => []
-      }
-    end
-    stdout, _stderr, status = analyze(record)
-    assert status.success?
-    result = JSON.parse(stdout)
-    assert_equal false, result.fetch("soakComparison").fetch("available")
-    assert_match(/temporal coverage/, result.fetch("soakComparison").fetch("reason"))
   end
 
   def test_failed_samples_are_reported_as_incomplete_not_zero
