@@ -1323,12 +1323,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       ?? EqualizerSettings()
 
     // Reuse the live tap for parameter-only changes as long as it already covers
-    // every process we'd tap now. A target-device change explicitly forces a new
-    // controller, while volume/mute/boost/EQ changes stay on the current route.
+    // every process we'd tap now and renders where the route should play. A
+    // target-device change explicitly forces a new controller, while
+    // volume/mute/boost/EQ changes stay on the current route. A route left on
+    // an old default (its move was overtaken by this very edit) is moved now.
     if !forceRebuild,
       let controller = controllers[app.id],
       controller.isActive,
-      controller.covers(targetProcessFamily)
+      controller.covers(targetProcessFamily),
+      isRouteOnItsExpectedDevice(app)
     {
       try ensureRouteWorkCurrent(generationContext, repairContext)
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
@@ -1407,6 +1410,25 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     // A freshly-created process tap proves capture is currently authorized.
     captureAuthorization = .authorized
+  }
+
+  /// False only when the live route is known to render to a device other than
+  /// the one it should play on now: its pinned target, or the current default.
+  /// Unknown either way (no recorded binding, or no readable default) counts
+  /// as true, so nothing is rebuilt on a guess. Cheap enough for every volume
+  /// edit: a pinned route reads nothing, a default-following one reads the
+  /// default device's UID.
+  func isRouteOnItsExpectedDevice(_ app: AudioApp) -> Bool {
+    guard let bound = routeOutputBindingByRuntimeID[app.id]?.deviceUID else { return true }
+    let expected =
+      routeOutputBindingProvider.map { $0(app)?.deviceUID }
+      ?? (app.targetDeviceUID ?? (try? currentDefaultOutputDeviceUID()))
+    guard let expected else { return true }
+    return bound == expected
+  }
+
+  func routeOutputBindingForTesting(runtimeID: String) -> RouteOutputBinding? {
+    routeOutputBindingByRuntimeID[runtimeID]
   }
 
   /// Disposes a replacement that was built but not installed. It never left

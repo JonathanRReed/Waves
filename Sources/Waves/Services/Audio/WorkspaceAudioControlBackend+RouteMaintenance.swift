@@ -157,16 +157,7 @@ extension WorkspaceAudioControlBackend {
         var reported = error
         if mode == .rehome {
           releaseRoute(runtimeID: app.id)
-          switch error {
-          case BackendError.noActiveAudioStream, BackendError.noAudioCapability:
-            // Not a route failure: the app has nothing to tap right now, and
-            // markRouteError already classifies these.
-            break
-          default:
-            reported = BackendError.managedRouteUnavailable(
-              "Waves couldn't move \(app.displayName) to the new output device, so it now plays at its own volume. \(error.localizedDescription)"
-            )
-          }
+          reported = failedMoveError(for: app, error)
         }
         if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
           markRouteError(at: index, error: reported)
@@ -184,6 +175,21 @@ extension WorkspaceAudioControlBackend {
     // reattach that leaves some apps in .error must keep the badge red.
     refreshGlobalRouteHealth(latestError: lastError)
     snapshot.updatedAt = .now
+  }
+
+  /// What a route that could not be moved to its new output reports once it
+  /// has been released.
+  func failedMoveError(for app: AudioApp, _ error: Error) -> Error {
+    switch error {
+    case BackendError.noActiveAudioStream, BackendError.noAudioCapability:
+      // Not a route failure: the app has nothing to tap right now, and
+      // markRouteError already classifies these.
+      return error
+    default:
+      return BackendError.managedRouteUnavailable(
+        "Waves couldn't move \(app.displayName) to the new output device, so it now plays at its own volume. \(error.localizedDescription)"
+      )
+    }
   }
 
   /// Disposes an app's controller and forgets its per-route bookkeeping.
@@ -478,11 +484,15 @@ extension WorkspaceAudioControlBackend {
 
       let app = snapshot.apps[index]
       let shouldForceRebuild = forceRebuildIDs.contains(app.logicalID) || forceRebuildIDs.contains(app.id)
+      // A live route bound to a device it should no longer play on, such as
+      // the old default after a move that newer work overtook, is moved here.
+      let isMisbound = controllers[app.id] != nil && !isRouteOnItsExpectedDevice(app)
 
       do {
         let processTarget = try resolveProcessTarget(for: app)
         let processObjectIDs = processTarget.processObjectIDs
         if !shouldForceRebuild,
+          !isMisbound,
           let controller = controllers[app.id],
           controller.isActive,
           controller.covers(
@@ -500,7 +510,7 @@ extension WorkspaceAudioControlBackend {
           for: app,
           toVolume: app.desiredVolume,
           muted: app.isMuted,
-          forceRebuild: shouldForceRebuild,
+          forceRebuild: shouldForceRebuild || isMisbound,
           repairContext: makeRepairContext(for: app),
           preservesGeometryRecovery: geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
           origin: .automatic,
@@ -537,6 +547,21 @@ extension WorkspaceAudioControlBackend {
       } catch is IntentBackendStoppedError {
         return
       } catch {
+        if isMisbound {
+          // Same policy as a failed move on a default-output change: release
+          // the route so the app is audible, and say why.
+          releaseRoute(runtimeID: app.id)
+          let reported = failedMoveError(for: app, error)
+          if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+            markRouteError(at: currentIndex, error: reported)
+            snapshot.apps[currentIndex].appliedVolume = nil
+            snapshot.apps[currentIndex].peakLevel = 0
+            snapshot.apps[currentIndex].rmsLevel = 0
+          }
+          lastError = reported.localizedDescription
+          changed = true
+          continue
+        }
         if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
           var recovery = geometryRecoveryByRuntimeID[app.id]
         {

@@ -276,6 +276,77 @@ final class BudgetBox {
   #expect(fixture.events.overlaps.isEmpty)
 }
 
+// MARK: - A move to a new default is never lost to newer work
+
+@Test func aVolumeEditThatOvertakesAMoveToTheNewDefaultStillMovesTheRoute() async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(apps: [routeTestApp()], retryPause: { _ in await gate.pause() })
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // The default changes from the built-in output to headphones. The move's
+  // first creation fails and it pauses before retrying.
+  fixture.devices.defaultUID = "headphones"
+  fixture.events.failNextCreations(1)
+  let move = Task { try await backend.restoreDefaultFollowingRoutesForTesting() }
+  await gate.waitUntilPaused()
+
+  // A volume edit lands meanwhile and supersedes the move.
+  let edit = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.2, generation: 10))
+  #expect(edit.outcome == .applied)
+  await gate.release()
+  _ = try await move.value
+
+  // The edit itself moved the route rather than leaving it on the old device.
+  #expect(await backend.routeOutputBindingForTesting(runtimeID: "app.a")?.deviceUID == "headphones")
+  #expect(fixture.events.values == ["fail app.a", "create app.a #2", "stop #1"])
+  #expect(fixture.events.overlaps.isEmpty)
+  let app = try #require(await backend.currentSnapshot().apps.first)
+  #expect(app.routingState == .managed)
+  #expect(app.appliedVolume == 0.2)
+}
+
+@Test func maintenanceMovesARouteLeftOnADeviceItShouldNoLongerPlayOn() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // The default changed but no pass moved the route (the event was consumed
+  // by work that was then overtaken).
+  fixture.devices.defaultUID = "headphones"
+  for tick in 0..<20 {
+    await backend.updateAudioLevels(at: .seconds(10 + tick))
+  }
+
+  #expect(await backend.routeOutputBindingForTesting(runtimeID: "app.a")?.deviceUID == "headphones")
+  #expect(fixture.events.creations == 1)
+  #expect(await backend.currentSnapshot().apps.first?.routingState == .managed)
+
+  // Once moved, maintenance leaves it alone.
+  for tick in 20..<40 {
+    await backend.updateAudioLevels(at: .seconds(10 + tick))
+  }
+  #expect(fixture.events.creations == 1)
+}
+
+@Test func aRouteMaintenanceCannotMoveIsReleasedAndSaysWhy() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.devices.defaultUID = "headphones"
+  fixture.events.failNextCreations(3)
+
+  for tick in 0..<20 {
+    await backend.updateAudioLevels(at: .seconds(10 + tick))
+  }
+
+  #expect(fixture.events.values.suffix(2) == ["audible #1", "stop #1"])
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  let app = try #require(await backend.currentSnapshot().apps.first)
+  #expect(app.routingState == .error)
+  #expect(app.notes?.contains("plays at its own volume") == true)
+}
+
 // MARK: - Item 3: a device that was both the default and a pinned target
 
 @Test func deviceChangePlanReconcilesPinnedRoutesInTheSamePassAsADefaultChange() {
