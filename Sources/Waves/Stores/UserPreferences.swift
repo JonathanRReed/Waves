@@ -9,6 +9,11 @@ struct UserPreferences: Codable, Sendable {
   var sortMode: SortMode = .name
   var customAppOrder: [String] = []
   var autoPauseMusicForConferencing = true
+  /// How `autoPauseMusicForConferencing` decides a call is on.
+  var callDetectionMode: CallDetectionMode = .frontmostCallApp
+  /// Logical IDs of the apps whose microphone use counts as a call. Nil until
+  /// microphone mode is first chosen, when Waves fills in the call apps it knows.
+  var callDetectionAppIDs: [String]?
   var enableKeyboardShortcuts = false
   /// Every keyboard shortcut, as data.
   ///
@@ -110,6 +115,8 @@ struct UserPreferences: Codable, Sendable {
     case sortMode
     case customAppOrder
     case autoPauseMusicForConferencing
+    case callDetectionMode
+    case callDetectionAppIDs
     case enableKeyboardShortcuts
     case hotkeys
     case hotkeyMigrationVersion
@@ -161,6 +168,8 @@ struct UserPreferences: Codable, Sendable {
     customAppOrder = try value(.customAppOrder, defaults.customAppOrder)
     autoPauseMusicForConferencing = try value(
       .autoPauseMusicForConferencing, defaults.autoPauseMusicForConferencing)
+    callDetectionMode = try value(.callDetectionMode, defaults.callDetectionMode)
+    callDetectionAppIDs = try container.decodeIfPresent([String].self, forKey: .callDetectionAppIDs)
     enableKeyboardShortcuts = try value(.enableKeyboardShortcuts, defaults.enableKeyboardShortcuts)
     hotkeys = try value(.hotkeys, defaults.hotkeys)
     hotkeyMigrationVersion = try value(.hotkeyMigrationVersion, defaults.hotkeyMigrationVersion)
