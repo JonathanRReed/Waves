@@ -466,6 +466,96 @@ import WavesAudioCore
   )
 }
 
+@Test @MainActor func renderedInterfacePolishRowsInLightAndDark() async throws {
+  let fixture = try await makeRenderedUIFixture()
+  // Adaptive Mix holding the music back and lifting the lecture.
+  fixture.store.adaptiveGainsDBByAppID = ["music.background": -6.3, "edu.lecture": 2.2]
+  fixture.store.preferences.appEqualizerSettings["music.background"] = EqualizerSettings(isEnabled: true)
+  fixture.store.session.apps[0].volumeBoost = 2
+  let apps = Array(fixture.store.session.apps.prefix(3))
+
+  for appearance in [WavesAppearance.light, .dark] {
+    let rows = ZStack {
+      WavesBackground()
+      HStack(alignment: .top, spacing: 24) {
+        VStack(alignment: .leading, spacing: 4) {
+          ForEach(apps) { app in MixerRowView(app: app) }
+        }
+        .frame(width: 760)
+        VStack(alignment: .leading, spacing: 10) {
+          ForEach(apps) { app in MenuBarAppRow(app: app) }
+        }
+        .padding(8)
+        .frame(width: MenuBarLayout.panelWidth - 24)
+      }
+      .padding(24)
+    }
+    .environment(fixture.store)
+    .wavesTheme(palette: .waves, appearance: appearance)
+    .frame(width: 1180, height: 230)
+    try renderEvidence(
+      rows,
+      filename: "polish-rows-\(appearance.rawValue).png",
+      size: NSSize(width: 1180, height: 230),
+      appearance: appearance
+    )
+  }
+}
+
+@Test @MainActor func renderedMenuBarPanelWithIndicatorsAndOverflow() async throws {
+  let fixture = try await makeRenderedUIFixture(snapshot: compactMenuSnapshot())
+  fixture.store.session.apps[0].volumeBoost = 3
+  fixture.store.preferences.appEqualizerSettings[fixture.store.session.apps[1].logicalID] =
+    EqualizerSettings(isEnabled: true)
+  fixture.store.adaptiveGainsDBByAppID = [fixture.store.session.apps[1].logicalID: -4.4]
+  for appearance in [WavesAppearance.light, .dark] {
+    let panel = ZStack(alignment: .top) {
+      WavesBackground()
+      MenuBarMixerView()
+    }
+    .environment(fixture.store)
+    .wavesTheme(palette: .waves, appearance: appearance)
+    .frame(width: MenuBarLayout.panelWidth, height: 760)
+    try renderEvidence(
+      panel,
+      filename: "polish-menu-\(appearance.rawValue).png",
+      size: NSSize(width: MenuBarLayout.panelWidth, height: 760),
+      appearance: appearance
+    )
+  }
+}
+
+@Test @MainActor func renderedUnroutableBannerOffersExcludeAll() async throws {
+  let apps = ["Menu Helper", "Clipboard Tool", "Sync Agent"].map { name in
+    AudioApp(
+      id: name, displayName: name, category: .unknown, routingState: .error,
+      hasNoAudioCapability: true, compatibility: .supported)
+  }
+  for appearance in [WavesAppearance.light, .dark] {
+    let banner = ZStack {
+      WavesBackground()
+      UnroutableAppsBanner(apps: apps) {}.padding(18)
+    }
+    .wavesTheme(palette: .waves, appearance: appearance)
+    .frame(width: 760, height: 110)
+    try renderEvidence(
+      banner, filename: "polish-exclude-all-\(appearance.rawValue).png",
+      size: NSSize(width: 760, height: 110), appearance: appearance)
+  }
+}
+
+@Test @MainActor func renderedDiagnosticsPaneOffersReportAProblem() async throws {
+  let fixture = try await makeRenderedUIFixture()
+  let settings = SettingsView(initialPane: .diagnostics)
+    .environment(fixture.store)
+    .environment(UpdaterService())
+    .wavesTheme(palette: .waves, appearance: .light)
+    .frame(width: 840, height: 680)
+  try renderEvidence(
+    settings, filename: "polish-diagnostics-light.png",
+    size: NSSize(width: 840, height: 680), appearance: .light)
+}
+
 @Test func primarySurfaceAccessibilityAndKeyboardContractsMatchRenderedControls() {
   for pane in SettingsPane.allCases {
     #expect(pane.accessibilityLabel == "\(pane.title) settings, \(pane.subtitle)")
@@ -482,8 +572,8 @@ import WavesAudioCore
   #expect(MixerRowAccessibility.outputDeviceMenuLabel == "Output Device")
 
   #expect(MixerKeyboardCommand.toggleMute.updatedMute(for: app) == true)
-  #expect(MixerKeyboardCommand.increaseVolume.updatedVolume(for: app) == 0.67)
-  #expect(MixerKeyboardCommand.decreaseVolume.updatedVolume(for: app) == 0.57)
+  #expect(MixerKeyboardCommand.increaseVolume.updatedVolume(for: app) == 0.7)
+  #expect(MixerKeyboardCommand.decreaseVolume.updatedVolume(for: app) == 0.54)
   #expect(MixerKeyboardCommand.cycleBoost.updatedBoost(for: app) == 2)
   #expect(MixerKeyboardCommand.togglePin.updatedPin(for: app) == true)
 

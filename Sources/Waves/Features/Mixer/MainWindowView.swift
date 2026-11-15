@@ -1050,8 +1050,10 @@ enum MixerKeyboardCommand: Equatable, Sendable {
 
   func updatedVolume(for app: AudioApp) -> Float? {
     switch self {
-    case .increaseVolume: min(1, app.desiredVolume + 0.05)
-    case .decreaseVolume: max(0, app.desiredVolume - 0.05)
+    // The same tapered step as the slider's VoiceOver adjustment, so = and -
+    // move the thumb an even distance and the sound by an audible amount.
+    case .increaseVolume: VolumeTaper.steppedVolume(from: app.desiredVolume, increasing: true)
+    case .decreaseVolume: VolumeTaper.steppedVolume(from: app.desiredVolume, increasing: false)
     case .toggleMute, .cycleBoost, .togglePin: nil
     }
   }
@@ -1071,9 +1073,12 @@ enum MixerKeyboardCommand: Equatable, Sendable {
 /// paragraph repeated verbatim on every such row. Neutral in tone: these apps
 /// are working as expected (menu-bar utilities, CLI tools), not broken, so this
 /// isn't styled as an error/warning.
-private struct UnroutableAppsBanner: View {
+struct UnroutableAppsBanner: View {
   let apps: [AudioApp]
   let onExcludeAll: () -> Void
+  // Excluding one app stays immediate. Excluding several at once asks first,
+  // naming how many.
+  @State private var isConfirmingExcludeAll = false
 
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
@@ -1090,13 +1095,45 @@ private struct UnroutableAppsBanner: View {
 
       Spacer(minLength: 10)
 
-      Button(apps.count == 1 ? "Exclude" : "Exclude All", action: onExcludeAll)
+      Button(apps.count == 1 ? "Exclude" : "Exclude All\u{2026}", action: requestExclusion)
         .buttonStyle(.bordered)
         .controlSize(.small)
     }
     .padding(10)
     .wavesCard()
     .accessibilityElement(children: .combine)
+    .confirmationDialog(
+      Self.confirmationTitle(count: apps.count),
+      isPresented: $isConfirmingExcludeAll,
+      titleVisibility: .visible
+    ) {
+      Button(Self.confirmationButton(count: apps.count)) { onExcludeAll() }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(Self.confirmationMessage)
+    }
+  }
+
+  static func confirmationTitle(count: Int) -> String {
+    "Exclude \(count) apps from Waves?"
+  }
+
+  static func confirmationButton(count: Int) -> String {
+    "Exclude \(count) Apps"
+  }
+
+  static let confirmationMessage =
+    "Waves stops trying to manage them and this notice goes away. To undo, choose Manage with Waves from an app's menu."
+
+  /// Whether the button acts at once or asks first.
+  static func asksBeforeExcluding(count: Int) -> Bool { count > 1 }
+
+  private func requestExclusion() {
+    if Self.asksBeforeExcluding(count: apps.count) {
+      isConfirmingExcludeAll = true
+    } else {
+      onExcludeAll()
+    }
   }
 
   private var title: String {

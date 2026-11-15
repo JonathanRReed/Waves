@@ -3,7 +3,7 @@ import WavesAudioCore
 
 enum MenuBarRowAccessibility {
   static func moreActionsLabel(for app: AudioApp) -> String {
-    "More actions for \(app.displayName)"
+    MixerRowAccessibility.moreActionsLabel(for: app)
   }
 
   static func volumeValue(for app: AudioApp) -> String {
@@ -31,6 +31,27 @@ struct MenuBarAppRow: View {
 
         RoutingStateDot(app: app)
 
+        // Boost and EQ are only reachable through More here, so say when they
+        // are on, in the main window's colors.
+        if app.volumeBoost > 1 {
+          Text("\(Int(app.volumeBoost))x")
+            .font(.caption2.monospacedDigit().weight(.semibold))
+            .foregroundStyle(theme.accent)
+            .fixedSize()
+            .help("Boost is \(Int(app.volumeBoost))x")
+            .accessibilityLabel("Boost \(Int(app.volumeBoost))x")
+        }
+
+        if equalizerIsEnabled {
+          Image(systemName: "slider.horizontal.3")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(theme.accent)
+            .help("Equalizer is on")
+            .accessibilityLabel("Equalizer on")
+        }
+
+        AdaptiveGainTag(appID: app.logicalID, appName: app.displayName)
+
         Spacer(minLength: 4)
 
         Text(MenuBarRowAccessibility.volumeValue(for: app))
@@ -55,36 +76,14 @@ struct MenuBarAppRow: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
+        .fixedSize()
+        .wavesHoverHighlight()
         .accessibilityLabel(MenuBarRowAccessibility.moreActionsLabel(for: app))
-        .help("More controls")
+        .help(MixerRowAccessibility.moreActionsHelp)
       }
 
-      Slider(
-        value: Binding(
-          get: { Double(app.desiredVolume) },
-          set: { newValue in
-            store.setDesiredVolume(Float(newValue), for: app)
-          }
-        ),
-        in: 0...1,
-        onEditingChanged: { isEditing in
-          if !isEditing {
-            store.commitDesiredVolume(for: app)
-          }
-        }
-      )
-      .controlSize(.small)
-      .tint(theme.accent)
-      .padding(.leading, 28)
-      .help(volumeSemantics.help)
-      .accessibilityLabel(volumeSemantics.label)
-      .accessibilityValue(volumeSemantics.value ?? "")
-      .accessibilityHint(volumeSemantics.hint)
-      .accessibilitySortPriority(volumeSemantics.sortPriority)
-      .accessibilityAdjustableAction { direction in
-        adjustVolume(direction)
-      }
-      .disabled(!volumeSemantics.isEnabled)
+      TaperedVolumeSlider(app: app, semantics: volumeSemantics)
+        .padding(.leading, 28)
     }
     .overlay(alignment: .bottomLeading) {
       if showsLevelMeter {
@@ -114,7 +113,7 @@ struct MenuBarAppRow: View {
         .frame(width: 22, height: 22)
         .contentShape(Rectangle())
     }
-    .buttonStyle(.borderless)
+    .buttonStyle(.wavesIcon)
     .help(muteSemantics.help)
     .accessibilityLabel(muteSemantics.label)
     .accessibilityValue(muteSemantics.value ?? "")
@@ -122,10 +121,6 @@ struct MenuBarAppRow: View {
     .accessibilitySortPriority(muteSemantics.sortPriority)
     .sensoryFeedback(.selection, trigger: app.isMuted)
     .disabled(!muteSemantics.isEnabled)
-  }
-
-  private var routePolicy: MixerRouteControlPolicy {
-    MixerRouteControlPolicy(app: app)
   }
 
   private var volumeSemantics: MixerControlAccessibilitySemantics {
@@ -153,29 +148,13 @@ struct MenuBarAppRow: View {
       app: app,
       isExcluded: false,
       isRecovering: store.isRecovering,
-      equalizerIsEnabled: store.equalizerSettings(for: app).isEnabled
+      equalizerIsEnabled: equalizerIsEnabled
     )
   }
 
+  private var equalizerIsEnabled: Bool { store.equalizerSettings(for: app).isEnabled }
+
   private var showsLevelMeter: Bool {
     !app.isMuted && (app.routingState == .managed || app.routingState == .live)
-  }
-
-  private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
-    guard routePolicy.allowsAudioControl else { return }
-    let step: Float = 0.05
-    let nextValue: Float
-
-    switch direction {
-    case .increment:
-      nextValue = min(app.desiredVolume + step, 1)
-    case .decrement:
-      nextValue = max(app.desiredVolume - step, 0)
-    @unknown default:
-      return
-    }
-
-    store.setDesiredVolume(nextValue, for: app)
-    store.commitDesiredVolume(for: app)
   }
 }

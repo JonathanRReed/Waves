@@ -32,7 +32,7 @@ struct MenuBarHeader: View {
           .font(.callout)
           .frame(width: 22, height: 22)
       }
-      .buttonStyle(.borderless)
+      .buttonStyle(.wavesIcon)
       .disabled(store.isRefreshing)
       .accessibilityLabel(
         store.isRefreshing ? "Refreshing app list, in progress" : "Refresh app list"

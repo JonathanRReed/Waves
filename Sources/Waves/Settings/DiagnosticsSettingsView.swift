@@ -41,8 +41,17 @@ struct DiagnosticsSettingsView: View {
         }
         .disabled(store.diagnostics == nil)
         .help("Copies a plain-text route health report for a bug report.")
+        // Not gated on loaded checks: reporting matters most when they fail.
+        Button {
+          store.reportProblem()
+        } label: {
+          Label("Report a Problem\u{2026}", systemImage: "exclamationmark.bubble")
+        }
+        .help(ProblemReport.explanation)
       } header: {
         Text("Repair")
+      } footer: {
+        Text(ProblemReport.explanation)
       }
 
       if let diagnostics = store.diagnostics {
