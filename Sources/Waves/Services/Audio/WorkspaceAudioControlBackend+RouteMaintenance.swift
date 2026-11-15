@@ -115,10 +115,20 @@ extension WorkspaceAudioControlBackend {
     // Iterate by logicalID and re-resolve the row after every await — a stale
     // index would trap or write onto the wrong app. Rows that vanished are
     // skipped.
-    let targetLogicalIDs = snapshot.apps.map(\.logicalID).filter { logicalIDs.contains($0) }
-    for logicalID in targetLogicalIDs {
+    //
+    // Each route's authorization is captured here, before any route in the
+    // batch suspends. A route whose app was excluded, yielded to another
+    // router, or otherwise changed while an earlier route was being rebuilt
+    // fails its context check and is skipped; building a fresh context at
+    // its turn would have authorized it from the changed row.
+    let targets = snapshot.apps
+      .filter { logicalIDs.contains($0.logicalID) }
+      .map { (logicalID: $0.logicalID, context: makeRepairContext(for: $0)) }
+    for (logicalID, repairContext) in targets {
       guard !isShuttingDown else { return }
-      guard let app = snapshot.apps.first(where: { $0.logicalID == logicalID }) else { continue }
+      guard isRepairCurrent(repairContext),
+        let app = snapshot.apps.first(where: { $0.logicalID == logicalID })
+      else { continue }
 
       if let conflict = competingAudioRouterConflict(
         for: app,
@@ -136,7 +146,7 @@ extension WorkspaceAudioControlBackend {
           toVolume: app.desiredVolume,
           muted: app.isMuted,
           forceRebuild: mode == .rehome,
-          repairContext: makeRepairContext(for: app),
+          repairContext: repairContext,
           origin: origin,
           routerActivity: routerActivity
         )
@@ -468,15 +478,18 @@ extension WorkspaceAudioControlBackend {
     now: Duration
   ) async {
     guard !isShuttingDown else { return }
-    let managedIDs = snapshot.apps
+    // Authorization is captured per route at selection, as in
+    // `reattachRoutes`: an app excluded or yielded while an earlier route in
+    // this pass was suspended must not be rebuilt from its changed row.
+    let selected = snapshot.apps
       .filter { $0.routingState == .managed || forceRebuildIDs.contains($0.logicalID) || forceRebuildIDs.contains($0.id) }
-      .map(\.logicalID)
-    guard !managedIDs.isEmpty else { return }
+      .map { (appID: $0.logicalID, context: makeRepairContext(for: $0)) }
+    guard !selected.isEmpty else { return }
 
     var changed = false
     var lastError: String?
 
-    for appID in managedIDs {
+    for (appID, repairContext) in selected {
       guard !isShuttingDown else { return }
       guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
         continue
@@ -489,6 +502,8 @@ extension WorkspaceAudioControlBackend {
       let isMisbound = controllers[app.id] != nil && !isRouteOnItsExpectedDevice(app)
 
       do {
+        // Overtaken while an earlier route in this pass was suspended.
+        guard isRepairCurrent(repairContext) else { throw IntentSupersededError() }
         let processTarget = try resolveProcessTarget(for: app)
         let processObjectIDs = processTarget.processObjectIDs
         if !shouldForceRebuild,
@@ -511,7 +526,7 @@ extension WorkspaceAudioControlBackend {
           toVolume: app.desiredVolume,
           muted: app.isMuted,
           forceRebuild: shouldForceRebuild || isMisbound,
-          repairContext: makeRepairContext(for: app),
+          repairContext: repairContext,
           preservesGeometryRecovery: geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
           origin: .automatic,
           routerActivity: routerActivity

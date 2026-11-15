@@ -1104,9 +1104,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// Everything that can make background route work (maintenance, device
   /// changes, reattachment) stale while it is suspended. Background work has
   /// no intent generation of its own, so it records the newest accepted one,
-  /// the controller it set out to replace, and the output it was aimed at.
-  /// Any change to these means newer intent (an edit, an exclusion, an output
-  /// choice) or newer route work landed first, and the repair must not install.
+  /// the controller it set out to replace, the output it was aimed at, and
+  /// the routing state that made it eligible. Any change to these means newer
+  /// intent (an edit, an exclusion, an output choice), a yield to another
+  /// router, or newer route work landed first, and the repair must not start
+  /// or install. A batch captures every route's context when it selects the
+  /// route, not when the route's turn comes.
   struct RouteRepairContext: Sendable {
     let logicalID: String
     let runtimeID: String
@@ -1114,6 +1117,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let lifecycleEpoch: UInt64
     let incumbent: ObjectIdentifier?
     let targetDeviceUID: String?
+    let routingState: RoutingState
   }
 
   struct IntentSupersededError: Error {}
@@ -1142,7 +1146,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       acceptedGeneration: latestAcceptedGenerationByLogicalID[app.logicalID],
       lifecycleEpoch: lifecycleEpoch,
       incumbent: controllers[app.id].map(ObjectIdentifier.init),
-      targetDeviceUID: app.targetDeviceUID
+      targetDeviceUID: app.targetDeviceUID,
+      routingState: app.routingState
     )
   }
 
@@ -1152,7 +1157,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       controllers[context.runtimeID].map(ObjectIdentifier.init) == context.incumbent,
       let app = snapshot.apps.first(where: { $0.logicalID == context.logicalID }),
       app.id == context.runtimeID,
-      app.targetDeviceUID == context.targetDeviceUID
+      app.targetDeviceUID == context.targetDeviceUID,
+      app.routingState == context.routingState
     else { return false }
     return true
   }

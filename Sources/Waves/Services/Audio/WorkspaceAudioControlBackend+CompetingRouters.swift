@@ -310,6 +310,14 @@ extension WorkspaceAudioControlBackend {
     )
   }
 
+  func yieldRouteToRouterForTesting(logicalID: String) {
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else { return }
+    suspendManagedRouteForConflict(
+      at: index,
+      conflict: VerifiedRouterConflict(routerName: "Router", kind: .publicTapMembership, detail: "Yielded.")
+    )
+  }
+
   func suspendManagedRouteForConflict(at index: Int, conflict: VerifiedRouterConflict) {
     let app = snapshot.apps[index]
     if let controller = controllers.removeValue(forKey: app.id) {

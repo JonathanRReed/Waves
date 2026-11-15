@@ -347,6 +347,125 @@ final class BudgetBox {
   #expect(app.notes?.contains("plays at its own volume") == true)
 }
 
+// MARK: - Queued repairs carry the authorization they were selected with
+
+@Test func aMoveCannotRecreateAnAppExcludedWhileAnEarlierRouteWasRetrying() async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(
+    apps: [routeTestApp(id: "app.a"), routeTestApp(id: "app.b")],
+    retryPause: { _ in await gate.pause() }
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // The default changes; app.a's move fails once and pauses.
+  fixture.devices.defaultUID = "headphones"
+  fixture.events.failNextCreations(1)
+  let move = Task { try await backend.restoreDefaultFollowingRoutesForTesting() }
+  await gate.waitUntilPaused()
+  let exclusion = await backend.applyAppIntent(
+    routeIntent(appID: "app.b", volume: 0.5, generation: 10, isExcluded: true)
+  )
+  #expect(exclusion.outcome == .excluded)
+  await gate.release()
+  _ = try await move.value
+
+  // app.b's route is released by the exclusion itself and never rebuilt.
+  #expect(fixture.events.values == ["fail app.a", "audible #2", "stop #2", "create app.a #3", "stop #1"])
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  let excluded = try #require(await backend.currentSnapshot().apps.first { $0.id == "app.b" })
+  #expect(excluded.routingState == .monitorOnly)
+}
+
+@Test func aFormatRebuildBatchCannotRecreateAnAppYieldedToAnotherRouter() async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(
+    apps: [routeTestApp(id: "app.a"), routeTestApp(id: "app.b")],
+    retryPause: { _ in await gate.pause() }
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // Both routes are on the built-in output, which changes rate. app.a's
+  // rebuild fails once and pauses; meanwhile app.b is yielded to a router.
+  fixture.devices.set("builtin", .alive(rate96))
+  fixture.events.failNextCreations(1)
+  let revalidation = Task { await backend.revalidateRouteFormatsForTesting(at: .seconds(10)) }
+  await gate.waitUntilPaused()
+  await backend.yieldRouteToRouterForTesting(logicalID: "app.b")
+  await gate.release()
+  await revalidation.value
+
+  #expect(fixture.events.creations == 1)
+  #expect(fixture.events.values.contains("create app.a #3"))
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  let yielded = try #require(await backend.currentSnapshot().apps.first { $0.id == "app.b" })
+  #expect(yielded.routingState == .monitorOnly)
+}
+
+@Test func aReattachCannotCaptureARouteWithNoControllerThatWasYieldedMeanwhile() async throws {
+  let gate = RetryGate()
+  // Two routes pinned to a DAC that was unplugged: no controllers, in error.
+  let fixture = RouteFixture(
+    apps: [
+      routeTestApp(id: "app.a", routingState: .error, targetDeviceUID: "usb-dac"),
+      routeTestApp(id: "app.b", routingState: .error, targetDeviceUID: "usb-dac"),
+    ],
+    retryPause: { _ in await gate.pause() }
+  )
+  let backend = fixture.backend
+
+  // The DAC comes back; app.a's reattach fails once and pauses. app.b is
+  // yielded to a router meanwhile, which changes neither its generation nor
+  // its (absent) controller, only its routing state.
+  fixture.events.failNextCreations(1)
+  let reattach = Task {
+    await backend.applyDeviceChangePlanForTesting(
+      DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+      availableDeviceUIDs: ["builtin", "usb-dac"]
+    )
+  }
+  await gate.waitUntilPaused()
+  await backend.yieldRouteToRouterForTesting(logicalID: "app.b")
+  await gate.release()
+  await reattach.value
+
+  #expect(fixture.events.values == ["fail app.a", "create app.a #1"])
+  let yielded = try #require(await backend.currentSnapshot().apps.first { $0.id == "app.b" })
+  #expect(yielded.routingState == .monitorOnly)
+}
+
+@Test func maintenanceCannotRecreateAnAppExcludedWhileAnEarlierRouteWasRetrying() async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(
+    apps: [routeTestApp(id: "app.a"), routeTestApp(id: "app.b")],
+    retryPause: { _ in await gate.pause() }
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // Both routes are on the old default; the maintenance pass moves them.
+  fixture.devices.defaultUID = "headphones"
+  fixture.events.failNextCreations(1)
+  let maintenance = Task {
+    for tick in 0..<20 {
+      await backend.updateAudioLevels(at: .seconds(10 + tick))
+    }
+  }
+  await gate.waitUntilPaused()
+  let exclusion = await backend.applyAppIntent(
+    routeIntent(appID: "app.b", volume: 0.5, generation: 10, isExcluded: true)
+  )
+  #expect(exclusion.outcome == .excluded)
+  await gate.release()
+  await maintenance.value
+
+  #expect(fixture.events.creations == 1)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  let excluded = try #require(await backend.currentSnapshot().apps.first { $0.id == "app.b" })
+  #expect(excluded.routingState == .monitorOnly)
+}
+
 // MARK: - Item 3: a device that was both the default and a pinned target
 
 @Test func deviceChangePlanReconcilesPinnedRoutesInTheSamePassAsADefaultChange() {
@@ -936,6 +1055,10 @@ final class RouteFixture: @unchecked Sendable {
         )
       ),
       captureAuthorization: .authorized,
+      // A pass captures this once, before it suspends, as production does.
+      verifiedRouterActivityProvider: {
+        VerifiedRouterActivitySnapshot(routers: [], processObjects: [], routerBundleIdentifiers: [])
+      },
       routerObservationNativeCalls: RouterObservationListenerNativeCalls(
         add: { _, _ in noErr },
         remove: { _, _ in noErr }
