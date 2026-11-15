@@ -544,6 +544,18 @@ import WavesAudioCore
   }
 }
 
+@Test @MainActor func renderedDiagnosticsPaneOffersReportAProblem() async throws {
+  let fixture = try await makeRenderedUIFixture()
+  let settings = SettingsView(initialPane: .diagnostics)
+    .environment(fixture.store)
+    .environment(UpdaterService())
+    .wavesTheme(palette: .waves, appearance: .light)
+    .frame(width: 840, height: 680)
+  try renderEvidence(
+    settings, filename: "polish-diagnostics-light.png",
+    size: NSSize(width: 840, height: 680), appearance: .light)
+}
+
 @Test func primarySurfaceAccessibilityAndKeyboardContractsMatchRenderedControls() {
   for pane in SettingsPane.allCases {
     #expect(pane.accessibilityLabel == "\(pane.title) settings, \(pane.subtitle)")

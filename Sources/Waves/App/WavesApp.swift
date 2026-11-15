@@ -131,6 +131,11 @@ struct WavesApp: App {
           TapGesture().onEnded {
             store.requestSettingsPane(.help)
           })
+
+        Button("Report a Problem\u{2026}") {
+          store.reportProblem()
+        }
+        .help(ProblemReport.explanation)
       }
     }
 

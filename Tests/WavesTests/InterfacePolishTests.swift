@@ -424,3 +424,52 @@ func polishApp(
   #expect(UnroutableAppsBanner.confirmationTitle(count: 3) == "Exclude 3 apps from Waves?")
   #expect(UnroutableAppsBanner.confirmationButton(count: 3) == "Exclude 3 Apps")
 }
+
+// MARK: - Report a Problem
+
+@Test func problemReportURLCarriesOnlyTheVersions() throws {
+  let metadata = DiagnosticsMetadata(
+    bundleInfo: [
+      "CFBundleShortVersionString": "1.8.0",
+      "CFBundleVersion": "24",
+      "WavesSourceRevision": "abc1234",
+    ],
+    operatingSystemVersion: "Version 26.1 (Build 25B78)"
+  )
+  let url = ProblemReport.issueURL(metadata: metadata)
+  let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+  #expect(components.scheme == "https")
+  #expect(components.host == "github.com")
+  #expect(components.path == "/JonathanRReed/Waves/issues/new")
+  #expect(components.queryItems?.map(\.name) == ["body"])
+  let body = try #require(components.queryItems?.first?.value)
+  #expect(body.contains("What happened?"))
+  #expect(body.contains("What did you expect?"))
+  #expect(body.contains("paste them here"))
+  #expect(body.contains("Waves 1.8.0 (24), macOS Version 26.1 (Build 25B78)"))
+  // Nothing else about the build or the machine.
+  #expect(!body.contains("abc1234"))
+  #expect(!url.absoluteString.contains(NSUserName()))
+  #expect(!url.absoluteString.contains(Host.current().localizedName ?? "\u{0}"))
+}
+
+@MainActor
+@Test func reportAProblemCopiesTheSameDiagnosticsAndOpensTheIssue() async throws {
+  let fixture = try await makePolishFixture(apps: [polishApp()])
+  defer { fixture.cleanup() }
+  let pasteboard = NSPasteboard(name: NSPasteboard.Name("waves-report-\(UUID().uuidString)"))
+  defer { pasteboard.releaseGlobally() }
+  var opened: [URL] = []
+  fixture.store.reportProblem(pasteboard: pasteboard) { url in
+    opened.append(url)
+    return true
+  }
+  #expect(pasteboard.string(forType: .string) == fixture.store.diagnosticsExportText)
+  #expect(opened.count == 1)
+  #expect(opened.first?.path == "/JonathanRReed/Waves/issues/new")
+  #expect(fixture.store.toasts.last?.title == "Diagnostics copied")
+
+  fixture.store.reportProblem(pasteboard: pasteboard) { _ in false }
+  #expect(fixture.store.toasts.last?.title == "Could not open GitHub")
+  #expect(pasteboard.string(forType: .string) == fixture.store.diagnosticsExportText)
+}
