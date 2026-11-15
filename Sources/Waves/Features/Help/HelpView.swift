@@ -274,6 +274,16 @@ struct HelpView: View {
           description: "Mute or unmute"
         )
         urlSchemeRow(
+          scheme: "waves://toggle-mute",
+          params: "app=APP_ID",
+          description: "Toggle mute"
+        )
+        urlSchemeRow(
+          scheme: "waves://set-boost",
+          params: "app=APP_ID&boost=2",
+          description: "Set boost (1-4)"
+        )
+        urlSchemeRow(
           scheme: "waves://apply-profile",
           params: "name=Focus",
           description: "Apply a named profile"
@@ -290,6 +300,12 @@ struct HelpView: View {
       )
       .font(.caption)
       .foregroundStyle(.secondary)
+
+      Link(
+        "Recipes for the Shortcuts app",
+        destination: URL(string: "https://github.com/JonathanRReed/Waves/blob/main/docs/SHORTCUTS.md")!
+      )
+      .font(.caption)
     }
     .padding(16)
     .wavesCard(cornerRadius: 12)
@@ -308,7 +324,7 @@ struct HelpView: View {
           "Waves listens on a private Unix socket for your macOS user. It does not open a network port"
         )
         bullet(
-          "The repository's wavesctl tool lists apps, changes volume or mute, reads icons, and watches state changes using protocol version 1"
+          "The wavesctl tool inside Waves (Waves.app/Contents/Helpers/wavesctl) lists apps, changes volume, mute or boost, applies profiles, and watches state changes using protocol version 1"
         )
         bullet(
           "The Stream Deck companion is a separate app and is not bundled with Waves. It controls only routes Waves reports as managed"

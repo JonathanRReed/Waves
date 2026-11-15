@@ -5,6 +5,40 @@ public enum WavesControlProtocol {
   public static let version = 1
   public static let maximumLineBytes = 64 * 1024
   public static let ioTimeoutSeconds: TimeInterval = 5
+  /// `apply-profile` and `refresh` reply only once Waves has finished, which
+  /// can take several seconds when apps need new routes.
+  public static let longCommandTimeoutSeconds: TimeInterval = 25
+  /// What every protocol-1 server accepts. A `hello` reply without a
+  /// `commands` list comes from a Waves older than 1.8.0, which accepts only these.
+  public static let baseCommands: Set<String> = [
+    "hello", "list-apps", "get-icon", "set-volume", "adjust-volume", "set-mute", "toggle-mute",
+    "subscribe", "unsubscribe",
+  ]
+}
+
+/// What a connected Waves accepts, read from its `hello` reply.
+public struct WavesControlCapabilities: Equatable, Sendable {
+  public let commands: Set<String>
+
+  public init(hello: [String: WavesControlJSONValue]) {
+    if let advertised = hello["commands"]?.arrayValue?.compactMap(\.stringValue) {
+      commands = Set(advertised)
+    } else {
+      commands = WavesControlProtocol.baseCommands
+    }
+  }
+
+  public func supports(_ command: String) -> Bool {
+    commands.contains(command)
+  }
+
+  /// A message to show instead of sending a command this Waves cannot run.
+  /// Sending it anyway would get `malformed-request` from an older Waves and
+  /// count toward closing the connection.
+  public func unsupportedMessage(for command: String) -> String? {
+    guard !supports(command) else { return nil }
+    return "This version of Waves does not support `\(command)`. Update Waves to use it."
+  }
 }
 
 public enum WavesControlJSONValue: Equatable, Sendable {
@@ -48,8 +82,12 @@ public enum WavesCTLCommand: Equatable, Sendable {
   case nudge(app: String, delta: Double)
   case mute(app: String, muted: Bool)
   case toggle(app: String)
+  case boost(app: String, value: Double)
+  case profile(name: String)
+  case refresh
   case watch
   case raw([String: WavesControlJSONValue])
+  case help
 
   public static func parse(_ arguments: [String]) throws -> WavesCTLCommand {
     guard let command = arguments.first else {
@@ -57,6 +95,10 @@ public enum WavesCTLCommand: Equatable, Sendable {
     }
 
     switch command {
+    case "help", "--help", "-h":
+      guard arguments.count == 1 else { throw WavesCTLValidationError.usage(WavesCTLUsage.text) }
+      return .help
+
     case "apps":
       guard arguments.count == 1 else { throw WavesCTLValidationError.usage(WavesCTLUsage.text) }
       return .apps
@@ -101,6 +143,26 @@ public enum WavesCTLCommand: Equatable, Sendable {
       }
       return .toggle(app: arguments[1])
 
+    case "boost":
+      let boostUsage = "usage: wavesctl boost <app-id> <1..4>"
+      guard arguments.count == 3 else { throw WavesCTLValidationError.usage(boostUsage) }
+      guard let value = Double(arguments[2]), value.isFinite, (1...4).contains(value) else {
+        throw WavesCTLValidationError.usage(boostUsage)
+      }
+      return .boost(app: arguments[1], value: value)
+
+    case "profile":
+      // Joined so `wavesctl profile Deep Work` works without quotes.
+      let name = arguments.dropFirst().joined(separator: " ")
+      guard !name.isEmpty else {
+        throw WavesCTLValidationError.usage("usage: wavesctl profile <name>")
+      }
+      return .profile(name: name)
+
+    case "refresh":
+      guard arguments.count == 1 else { throw WavesCTLValidationError.usage("usage: wavesctl refresh") }
+      return .refresh
+
     case "watch":
       guard arguments.count == 1 else { throw WavesCTLValidationError.usage("usage: wavesctl watch") }
       return .watch
@@ -114,6 +176,24 @@ public enum WavesCTLCommand: Equatable, Sendable {
 
     default:
       throw WavesCTLValidationError.usage(WavesCTLUsage.text)
+    }
+  }
+
+  /// The protocol command this sends, for checking it against the server's
+  /// capabilities. Nil for `help`, and for `raw`, which sends exactly what it
+  /// is given.
+  public var serverCommand: String? {
+    switch self {
+    case .help, .raw: nil
+    default: requestObject()["cmd"]?.stringValue
+    }
+  }
+
+  /// How long to wait for the reply.
+  public var ioTimeoutSeconds: TimeInterval {
+    switch self {
+    case .profile, .refresh: WavesControlProtocol.longCommandTimeoutSeconds
+    default: WavesControlProtocol.ioTimeoutSeconds
     }
   }
 
@@ -140,6 +220,17 @@ public enum WavesCTLCommand: Equatable, Sendable {
       ]
     case .toggle(let app):
       return ["id": .number(Double(id)), "cmd": .string("toggle-mute"), "app": .string(app)]
+    case .boost(let app, let value):
+      return [
+        "id": .number(Double(id)), "cmd": .string("set-boost"), "app": .string(app),
+        "boost": .number(value),
+      ]
+    case .profile(let name):
+      return ["id": .number(Double(id)), "cmd": .string("apply-profile"), "profile": .string(name)]
+    case .refresh:
+      return ["id": .number(Double(id)), "cmd": .string("refresh")]
+    case .help:
+      return [:]
     case .watch:
       return ["id": .number(Double(id)), "cmd": .string("subscribe")]
     case .raw(let object):
@@ -203,13 +294,22 @@ public enum WavesCTLUsage {
       mute   <app-id>            Mute an app
       unmute <app-id>            Unmute an app
       toggle <app-id>            Toggle an app's mute
+      boost  <app-id> <1..4>     Set an app's boost (Waves 1.8 or later)
+      profile <name>             Apply a profile by name (Waves 1.8 or later)
+      refresh                    Rescan running apps (Waves 1.8 or later)
       watch                      Subscribe and print state changes until interrupted
       raw '<json>'               Send one raw request line
+      help                       Show this help
+
+    App IDs come from `wavesctl apps`. Volume is 0 to 1; boost is 1 to 4.
 
     The socket path can be overridden with WAVES_CONTROL_SOCKET.
 
     If this cannot connect, check that Waves is running and that
     Settings > Shortcuts & Automation > "Allow external control" is on.
+
+    To run it from any terminal, link the copy inside Waves onto your PATH:
+      sudo ln -sf /Applications/Waves.app/Contents/Helpers/wavesctl /usr/local/bin/wavesctl
     """
 }
 
@@ -337,6 +437,7 @@ public final class WavesControlSocketClient {
 
   public init(
     path: String,
+    ioTimeoutSeconds: TimeInterval = WavesControlProtocol.ioTimeoutSeconds,
     system: some WavesControlSocketSystem = DarwinWavesControlSocketSystem()
   ) throws {
     self.system = system
@@ -344,8 +445,8 @@ public final class WavesControlSocketClient {
     self.fd = fd
     do {
       try system.setNoSIGPIPE(fd)
-      try system.setTimeout(fd, option: SO_RCVTIMEO, seconds: WavesControlProtocol.ioTimeoutSeconds)
-      try system.setTimeout(fd, option: SO_SNDTIMEO, seconds: WavesControlProtocol.ioTimeoutSeconds)
+      try system.setTimeout(fd, option: SO_RCVTIMEO, seconds: ioTimeoutSeconds)
+      try system.setTimeout(fd, option: SO_SNDTIMEO, seconds: ioTimeoutSeconds)
       try system.connect(fd, path: path)
     } catch {
       system.close(fd)

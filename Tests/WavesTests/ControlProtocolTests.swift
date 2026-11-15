@@ -144,6 +144,7 @@ func controlRequestDecodeSanitizesNonFiniteFloatStrings(_ value: String) throws 
   for error in [
     ControlError.unsupportedProtocol, .malformedRequest, .missingParameter,
     .unknownApp, .appExcluded, .audioNotRunning, .rateLimited, .notPermitted,
+    .unknownCommand, .invalidParameter, .unknownProfile, .routeUnavailable, .notApplied,
   ] {
     #expect(!error.message.isEmpty)
     #expect(error.message.hasSuffix("."), "\(error.rawValue) should read as a sentence")
@@ -159,16 +160,18 @@ func controlRequestDecodeSanitizesNonFiniteFloatStrings(_ value: String) throws 
   #expect(
     ControlCommand.allCases.map(\.rawValue) == [
       "hello", "list-apps", "get-icon", "set-volume", "adjust-volume", "set-mute", "toggle-mute",
-      "subscribe", "unsubscribe",
+      "subscribe", "unsubscribe", "apply-profile", "refresh", "set-boost",
     ])
   #expect(ControlEvent.allCases.map(\.rawValue) == ["app-changed", "apps-changed"])
   #expect(
     [
       ControlError.unsupportedProtocol, .malformedRequest, .missingParameter, .unknownApp, .appExcluded,
-      .audioNotRunning, .rateLimited, .notPermitted,
+      .audioNotRunning, .rateLimited, .notPermitted, .unknownCommand, .invalidParameter, .unknownProfile,
+      .routeUnavailable, .notApplied,
     ].map(\.rawValue) == [
       "unsupported-protocol", "malformed-request", "missing-parameter", "unknown-app", "app-excluded",
-      "audio-not-running", "rate-limited", "not-permitted",
+      "audio-not-running", "rate-limited", "not-permitted", "unknown-command", "invalid-parameter",
+      "unknown-profile", "route-unavailable", "not-applied",
     ])
 
   let hello = try #require(
@@ -252,6 +255,40 @@ func controlRequestDecodeSanitizesNonFiniteFloatStrings(_ value: String) throws 
   var granted = 0
   while limiter.allow(now: 3_600) { granted += 1 }
   #expect(granted == ControlRateLimiter.burst)
+}
+
+@Test func rateLimiterDoesNotRefillTwiceWhenTheClockStepsBackAndReturns() {
+  var limiter = ControlRateLimiter(now: 100)
+  while limiter.allow(now: 100) {}
+
+  // Back a minute, then forward to where it was: no real time passed.
+  // 1.5 tokens' worth of real time: exactly one more request.
+  let oneAndAHalfTokens = 1.5 / ControlRateLimiter.refillPerSecond
+  let allowed = [40, 100, 100 + oneAndAHalfTokens, 100 + oneAndAHalfTokens].map { limiter.allow(now: $0) }
+  #expect(allowed == [false, false, true, false], "a backwards step must not bank the interval it skipped")
+}
+
+@Test func inboundAdmissionDoesNotRefillTwiceWhenTheClockStepsBackAndReturns() {
+  var admission = ControlInboundAdmission(
+    frameBurst: 2,
+    frameRefillPerSecond: 1,
+    byteBurst: 1_000_000,
+    byteRefillPerSecond: 1_000_000,
+    maximumAbuseStrikes: 100,
+    now: 100
+  )
+  let frame = Data(#"{"cmd":"hello"}"#.utf8)
+  var admitted: [Bool] = []
+  for now: TimeInterval in [100, 100, 100, 40, 100, 101, 101] {
+    if case .request = admission.classify(frame, now: now) {
+      admitted.append(true)
+    } else {
+      admitted.append(false)
+    }
+  }
+  // The fifth reading returns to 100 after a step back to 40: no real time
+  // passed, so nothing may have been refilled.
+  #expect(admitted == [true, true, false, false, false, true, false])
 }
 
 @Test(arguments: [Double.nan, Double.infinity, -Double.infinity])

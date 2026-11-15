@@ -713,26 +713,12 @@ func diagnosticsExportFormatterPreservesFiniteVolumeClampingAndTruncation(
   )
 
   protected.withUnsafeMutableBytes { bytes in
-    TapDSP.processEqualized(
-      bytes.baseAddress!,
-      byteCount: bytes.count,
-      format: .float32,
-      equalizer: protectedEQ,
-      equalizerHeadroomGain: headroomGain,
-      manualGain: 1,
-      bufferChannelCount: 1
-    )
+    TapDSP.scale(bytes.baseAddress!, byteCount: bytes.count, format: .float32, gain: headroomGain)
+    protectedEQ.process(bytes.baseAddress!, byteCount: bytes.count, format: .float32, bufferChannelCount: 1)
   }
   unprotected.withUnsafeMutableBytes { bytes in
-    TapDSP.processEqualized(
-      bytes.baseAddress!,
-      byteCount: bytes.count,
-      format: .float32,
-      equalizer: unprotectedEQ,
-      equalizerHeadroomGain: 1,
-      manualGain: 1,
-      bufferChannelCount: 1
-    )
+    TapDSP.scale(bytes.baseAddress!, byteCount: bytes.count, format: .float32, gain: 1)
+    unprotectedEQ.process(bytes.baseAddress!, byteCount: bytes.count, format: .float32, bufferChannelCount: 1)
   }
 
   let settledProtected = protected.dropFirst(2_048)

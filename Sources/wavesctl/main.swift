@@ -35,13 +35,23 @@ do {
   fail("Invalid command.\n\n\(usage)", code: 2)
 }
 
+if command == .help {
+  print(usage)
+  exit(0)
+}
+
 do {
-  let client = try WavesControlSocketClient(path: socketPath)
-  describe(
-    try client.request([
-      "id": .number(0), "cmd": .string("hello"), "client": .string("wavesctl"),
-      "protocol": .number(1),
-    ]))
+  let client = try WavesControlSocketClient(path: socketPath, ioTimeoutSeconds: command.ioTimeoutSeconds)
+  let hello = try client.request([
+    "id": .number(0), "cmd": .string("hello"), "client": .string("wavesctl"),
+    "protocol": .number(1),
+  ])
+  describe(hello)
+  if let serverCommand = command.serverCommand,
+    let message = WavesControlCapabilities(hello: hello).unsupportedMessage(for: serverCommand)
+  {
+    fail(WavesCTLTerminalText.sanitized(message))
+  }
 
   switch command {
   case .apps:
@@ -90,6 +100,32 @@ do {
     let response = try client.request(command.request(id: 1))
     describe(response)
     print("muted: \(response["muted"]?.boolValue ?? false)")
+
+  case .boost(_, let requested):
+    let response = try client.request(command.request(id: 1))
+    describe(response)
+    print("boost: \(response["boost"]?.numberValue ?? requested)x")
+
+  case .profile:
+    let response = try client.request(command.request(id: 1))
+    let counts = response["profile"]?.objectValue
+    if let counts {
+      let parts = [("applied", "applied"), ("savedForLater", "saved for later"), ("skipped", "skipped"), ("failed", "failed")]
+        .compactMap { key, label -> String? in
+          guard let count = counts[key]?.numberValue, count > 0 else { return nil }
+          return "\(Int(count)) \(label)"
+        }
+      emit("profile: \(counts["name"]?.stringValue ?? "?")\(parts.isEmpty ? "" : " (" + parts.joined(separator: ", ") + ")")")
+    }
+    describe(response)
+
+  case .refresh:
+    let response = try client.request(command.request(id: 1))
+    describe(response)
+    print("refreshed: \(response["apps"]?.arrayValue?.count ?? 0) apps")
+
+  case .help:
+    print(usage)
 
   case .watch:
     describe(try client.request(command.request(id: 1)))
