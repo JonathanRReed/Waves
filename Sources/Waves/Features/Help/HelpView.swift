@@ -300,6 +300,12 @@ struct HelpView: View {
       )
       .font(.caption)
       .foregroundStyle(.secondary)
+
+      Link(
+        "Recipes for the Shortcuts app",
+        destination: URL(string: "https://github.com/JonathanRReed/Waves/blob/main/docs/SHORTCUTS.md")!
+      )
+      .font(.caption)
     }
     .padding(16)
     .wavesCard(cornerRadius: 12)
