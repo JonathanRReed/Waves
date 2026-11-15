@@ -318,7 +318,7 @@ struct HelpView: View {
           "Waves listens on a private Unix socket for your macOS user. It does not open a network port"
         )
         bullet(
-          "The repository's wavesctl tool lists apps, changes volume or mute, reads icons, and watches state changes using protocol version 1"
+          "The wavesctl tool inside Waves (Waves.app/Contents/Helpers/wavesctl) lists apps, changes volume, mute or boost, applies profiles, and watches state changes using protocol version 1"
         )
         bullet(
           "The Stream Deck companion is a separate app and is not bundled with Waves. It controls only routes Waves reports as managed"

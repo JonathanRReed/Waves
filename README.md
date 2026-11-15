@@ -88,7 +88,17 @@ waves://refresh
 
 Volume ranges from 0.0 to 1.0 and boost from 1 to 4; values outside those ranges are refused. `apply-preset` remains a deprecated alias for `apply-profile`.
 
-External socket control is a separate opt-in. It listens at `~/Library/Application Support/Waves/control.sock`, accepts only the same macOS user, and opens no network port. Bundled `wavesctl` and the separately versioned Stream Deck companion use protocol version 1 to list apps, set volume, mute or boost, apply profiles, refresh, read icons, and watch state. Client authors: see [docs/CONTROL_PROTOCOL.md](docs/CONTROL_PROTOCOL.md).
+External socket control is a separate opt-in. It listens at `~/Library/Application Support/Waves/control.sock`, accepts only the same macOS user, and opens no network port. `wavesctl`, bundled inside the app, and the separately versioned Stream Deck companion use protocol version 1 to list apps, set volume, mute or boost, apply profiles, refresh, read icons, and watch state. Client authors: see [docs/CONTROL_PROTOCOL.md](docs/CONTROL_PROTOCOL.md).
+
+`wavesctl` lives at `/Applications/Waves.app/Contents/Helpers/wavesctl`. Waves never installs anything outside its own bundle; to run it by name from Terminal, link it onto your `PATH` yourself:
+
+```sh
+sudo mkdir -p /usr/local/bin
+sudo ln -sf /Applications/Waves.app/Contents/Helpers/wavesctl /usr/local/bin/wavesctl
+wavesctl help
+```
+
+Remove the link with `sudo rm /usr/local/bin/wavesctl`. If you prefer not to use `sudo`, link it into any directory already on your `PATH`, such as `~/.local/bin`.
 
 ## Wave Link and route problems
 

@@ -309,7 +309,7 @@ public enum WavesCTLUsage {
     Settings > Shortcuts & Automation > "Allow external control" is on.
 
     To run it from any terminal, link the copy inside Waves onto your PATH:
-      ln -s /Applications/Waves.app/Contents/Helpers/wavesctl /usr/local/bin/wavesctl
+      sudo ln -sf /Applications/Waves.app/Contents/Helpers/wavesctl /usr/local/bin/wavesctl
     """
 }
 
