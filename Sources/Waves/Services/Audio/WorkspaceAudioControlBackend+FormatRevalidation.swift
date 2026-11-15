@@ -8,14 +8,16 @@ import WavesAudioCore
 extension WorkspaceAudioControlBackend {
   static let formatEventDebounce: Duration = .milliseconds(500)
 
-  /// The device `app`'s route renders to and that device's current format.
-  /// Read before the controller is built, so a format change that lands
-  /// during creation is seen as a change afterwards rather than absorbed.
+  /// The device `app`'s route would render to now and that device's current
+  /// format. Creation records the binding of the attempt that succeeded.
   func currentOutputBinding(for app: AudioApp) -> RouteOutputBinding? {
     if let routeOutputBindingProvider { return routeOutputBindingProvider(app) }
-    guard let deviceUID = app.targetDeviceUID ?? (try? currentDefaultOutputDeviceUID()),
-      case .alive(let signature) = deviceFormatObservation(uid: deviceUID)
-    else { return nil }
+    guard let deviceUID = app.targetDeviceUID ?? (try? currentDefaultOutputDeviceUID()) else { return nil }
+    return outputBinding(forDeviceUID: deviceUID)
+  }
+
+  func outputBinding(forDeviceUID deviceUID: String) -> RouteOutputBinding? {
+    guard case .alive(let signature) = deviceFormatObservation(uid: deviceUID) else { return nil }
     return RouteOutputBinding(deviceUID: deviceUID, signature: signature)
   }
 

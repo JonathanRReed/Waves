@@ -1348,13 +1348,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     try ensureRouteWorkCurrent(generationContext, repairContext)
-    let outputBinding = currentOutputBinding(for: app)
     // Make before break. The replacement is built and started silent while
     // the incumbent keeps playing; both taps keep the app's own output muted,
     // so the user hears the incumbent alone. Nothing touches the incumbent
     // until the replacement is authorized to take over, so work that fails,
     // or is overtaken while suspended in creation, leaves it exactly as it was.
-    let controller = try await createControllerWithRetry(
+    let (controller, outputBinding) = try await createControllerWithRetry(
       for: app,
       processTarget: processTarget,
       equalizerSettings: stagedEqualizer,
@@ -1456,7 +1455,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     generationContext: IntentGenerationContext?,
     repairContext: RouteRepairContext?,
     origin: RouteWorkOrigin
-  ) async throws -> PerAppTapController {
+  ) async throws -> (PerAppTapController, RouteOutputBinding?) {
     let maxRetries = 3
     var lastError: Error?
     var currentProcessTarget = processTarget
@@ -1466,7 +1465,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       do {
         try ensureRouteWorkCurrent(generationContext, repairContext)
         try spendRouteRebuildBudget(origin)
-        let controller = try createController(
+        let created = try createController(
           for: app,
           processTarget: currentProcessTarget,
           equalizerSettings: equalizerSettings
@@ -1474,7 +1473,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         if attempt > 1 {
           logger.info("Successfully created controller for \(app.displayName) on attempt \(attempt)")
         }
-        return controller
+        return created
       } catch let superseded as IntentSupersededError {
         throw superseded
       } catch let refused as RouteRebuildCeilingError {
@@ -1510,11 +1509,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
   }
 
+  /// Builds and starts one controller. Also returns the output device it
+  /// renders to and that device's format, read for this attempt before the
+  /// tap exists: each attempt resolves the default itself, so a binding read
+  /// once before the retries could describe a device an earlier, failed
+  /// attempt used. A format change that lands during creation is then seen
+  /// as a change afterwards rather than absorbed.
   private func createController(
     for app: AudioApp,
     processTarget: ResolvedProcessTarget,
     equalizerSettings: EqualizerSettings
-  ) throws -> PerAppTapController {
+  ) throws -> (PerAppTapController, RouteOutputBinding?) {
     try ensureAcceptingOperations()
 
     // Every new renderer starts silent. `applyRoute` un-mutes it only once it
@@ -1523,13 +1528,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     silentApp.isMuted = true
     if let controllerFactory {
       try revalidateProcessTarget(processTarget, for: app)
-      return try controllerFactory(
+      let outputBinding = currentOutputBinding(for: app)
+      let controller = try controllerFactory(
         silentApp,
         processTarget.processObjectIDs,
         equalizerSettings,
         managedAudioEqualizerSettings,
         adaptiveGainDBByAppID[app.logicalID] ?? 0
       )
+      return (controller, outputBinding)
     }
 
     if #available(macOS 14.2, *) {
@@ -1547,6 +1554,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       } else {
         outputDeviceUID = try currentDefaultOutputDeviceUID()
       }
+      let binding = outputBinding(forDeviceUID: outputDeviceUID)
 
       let tapDescription = CATapDescription(
         stereoMixdownOfProcesses: processTarget.processObjectIDs
@@ -1659,7 +1667,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         throw error
       }
 
-      return controller
+      return (controller, binding)
     }
 
     throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")

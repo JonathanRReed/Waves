@@ -347,6 +347,36 @@ final class BudgetBox {
   #expect(app.notes?.contains("plays at its own volume") == true)
 }
 
+// MARK: - The recorded binding is the successful attempt's
+
+@Test func aRetriedCreationRecordsTheDeviceAndFormatItActuallyUsed() async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(
+    apps: [routeTestApp(targetDeviceUID: "usb-dac")],
+    retryPause: { _ in await gate.pause() }
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // The user unpins the app; its first creation on the default fails.
+  fixture.events.failNextCreations(1)
+  let unpin = Task {
+    await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 10))
+  }
+  await gate.waitUntilPaused()
+  // The default changes while the retry waits. The committed row still looks
+  // pinned, so no device-change pass would move this route.
+  fixture.devices.defaultUID = "headphones"
+  await gate.release()
+  #expect(await unpin.value.outcome == .applied)
+  #expect(await backend.routeOutputBindingForTesting(runtimeID: "app.a")?.deviceUID == "headphones")
+
+  // So a rate change on the device it really plays on is noticed.
+  fixture.devices.set("headphones", .alive(rate96))
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+  #expect(fixture.events.creations == 2)
+}
+
 // MARK: - Queued repairs carry the authorization they were selected with
 
 @Test func aMoveCannotRecreateAnAppExcludedWhileAnEarlierRouteWasRetrying() async throws {
