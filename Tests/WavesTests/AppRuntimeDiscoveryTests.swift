@@ -800,7 +800,10 @@ private func processFamilyApplication(
   let targetProcess = try fixture.launch(fixture.targetExecutable)
   let exactHelperProcess = try fixture.launch(fixture.exactHelperExecutable)
   let childIdentifierProcess = try fixture.launch(fixture.childIdentifierExecutable)
-  let target = try #require(waitForRuntimeIdentity(pid: targetProcess.processIdentifier))
+  let target = try #require(
+    waitForRuntimeIdentity(pid: targetProcess.processIdentifier),
+    "fixture process: \(fixtureProcessState(targetProcess))"
+  )
   let exactHelper = try #require(
     waitForRuntimeIdentity(pid: exactHelperProcess.processIdentifier)
   )
@@ -1038,6 +1041,14 @@ private final class RuntimeSigningProcessFixture {
 
 private enum RuntimeSigningFixtureError: Error {
   case commandFailed(String)
+}
+
+/// Says whether a fixture process is still alive, so a missing identity can be
+/// told apart from a fixture the system refused to run.
+private func fixtureProcessState(_ process: Process) -> String {
+  guard !process.isRunning else { return "still running" }
+  let reason = process.terminationReason == .uncaughtSignal ? "signal" : "exit"
+  return "ended by \(reason) \(process.terminationStatus)"
 }
 
 private func waitForRuntimeIdentity(pid: pid_t) -> AppRuntimeIdentity? {
