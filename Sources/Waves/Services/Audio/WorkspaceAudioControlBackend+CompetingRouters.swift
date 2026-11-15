@@ -45,6 +45,7 @@ extension WorkspaceAudioControlBackend {
     // instead of reported as applied.
     let dspChangeRequested =
       intent.volumeBoost != previousApp.volumeBoost
+      || intent.equalizerSettings != (equalizerSettingsByAppID[logicalID] ?? EqualizerSettings())
       || intent.targetDeviceUID != previousApp.targetDeviceUID
     let audioChangeRequested =
       intent.desiredVolume != previousApp.desiredVolume

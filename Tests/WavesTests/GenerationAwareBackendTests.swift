@@ -1600,3 +1600,24 @@ func unconfirmedWaveLinkChangeWithoutAReadingKeepsTheQuieterLevelAndAnyMute(
   #expect(await second.value.outcome == .applied)
   #expect(await backend.currentSnapshot().apps[0].desiredVolume == 0.4)
 }
+
+@Test func bridgeRefusesAnEqualizerOnlyChangeInsteadOfClaimingItApplied() async {
+  let bridge = ScriptedWaveLinkController(steps: [.confirm])
+  let backend = waveLinkBridgedBackend(app: waveLinkTestApp(desiredVolume: 0.5), bridge: bridge)
+  let result = await backend.applyAppIntent(
+    AppRouteIntent(
+      appID: "com.example.browser",
+      desiredVolume: 0.5,
+      isMuted: false,
+      volumeBoost: 1,
+      equalizerSettings: EqualizerSettings(isEnabled: true, simpleGainsDB: [6, 0, -3]),
+      targetDeviceUID: nil,
+      generation: 1,
+      reason: .userEdit
+    )
+  )
+
+  #expect(result.outcome == .unavailable)
+  #expect(result.detail?.contains("Boost, EQ, and output routing stay in Wave Link") == true)
+  #expect(await bridge.requestCount() == 0)
+}
