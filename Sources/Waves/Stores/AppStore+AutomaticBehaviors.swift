@@ -155,7 +155,20 @@ extension AppStore {
       // Act only on edges, like the frontmost mode below: an app the user
       // unmutes by hand during a call stays unmuted until the next call.
       let isCallActive = microphoneCall.isActive
-      guard isCallActive != microphoneCall.lastApplied else { return }
+      let chosenAppAdded = microphoneCall.chosenAppAdded
+      microphoneCall.chosenAppAdded = false
+      guard isCallActive != microphoneCall.lastApplied else {
+        // Mid-call, a newly chosen call app is unmuted if an automatic mute
+        // caught it. Nothing new is muted, so manual unmutes still stand.
+        if isCallActive, chosenAppAdded {
+          await applyAutomaticConferencingTransition(
+            isConferencingActive: true,
+            sparing: Set(callDetectionAppIDs),
+            mutesMedia: false
+          )
+        }
+        return
+      }
       microphoneCall.lastApplied = isCallActive
       await applyAutomaticConferencingTransition(
         isConferencingActive: isCallActive,
@@ -185,15 +198,18 @@ extension AppStore {
   ///
   /// `sparing` names the call apps themselves: never muted by this, and
   /// unmuted if an earlier automatic mute caught one.
+  ///
+  /// `mutesMedia` is false for a pass that only releases spared apps.
   func applyAutomaticConferencingTransition(
     isConferencingActive: Bool,
-    sparing sparedAppIDs: Set<String> = []
+    sparing sparedAppIDs: Set<String> = [],
+    mutesMedia: Bool = true
   ) async {
     guard requireAudioRunning() else { return }
     var mutedNames: [String] = []
     var unmutedNames: [String] = []
 
-    if isConferencingActive {
+    if isConferencingActive, mutesMedia {
       let musicApps = visibleApps.filter {
         $0.category == .media && !$0.isMuted && !isExcluded($0)
           && !sparedAppIDs.contains($0.logicalID)

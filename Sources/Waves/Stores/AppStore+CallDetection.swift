@@ -30,6 +30,9 @@ struct MicrophoneCallState {
   var appIDs: [String] = []
   /// The state the last automatic pass acted on, so passes act only on edges.
   var lastApplied: Bool?
+  /// An app was added to the chosen list since the last pass. During a call
+  /// it must be unmuted if an automatic mute caught it.
+  var chosenAppAdded = false
   var endHoldTask: Task<Void, Never>?
 }
 
@@ -149,6 +152,10 @@ extension AppStore {
     preferences.callDetectionAppIDs = ids
     persistPreferences()
     microphoneActivityChanged()
+    if isChosen, microphoneCall.isActive {
+      microphoneCall.chosenAppAdded = true
+      checkAutoPauseMusic()
+    }
   }
 
   /// Starts the microphone monitor only while microphone mode is on and audio

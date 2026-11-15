@@ -1684,6 +1684,26 @@ private func muteState(_ store: AppStore, _ appID: String) -> (isMuted: Bool, so
 }
 
 @MainActor
+@Test func addingAMutedAppToTheCallAppsDuringACallUnmutesOnlyThatApp() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The user takes calls in this app too. It must not stay muted until the
+  // call that is already running ends.
+  store.setCallDetectionApp("com.example.music", isChosen: true)
+  await settleCallDetection(store)
+
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(muteState(store, "com.example.music")?.source == .user)
+  #expect(muteState(store, "com.example.call")?.isMuted == false)
+  _ = await store.shutdown()
+}
+
+@MainActor
 @Test func microphoneCallIgnoresAppsThatWereNotChosen() async {
   let (fixture, monitor, _) = makeMicrophoneCallFixture(chosenAppIDs: ["com.example.other"])
   let store = fixture.store
