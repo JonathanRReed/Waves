@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "version": "1.7.3",
-  "build": 21,
+  "version": "1.7.4",
+  "build": 22,
   "minimumMacOSVersion": "14.2",
   "bundleIdentifier": "com.jonathanreed.Waves",
   "developerID": {
@@ -22,14 +22,19 @@
     "keychainAccount": "com.jonathanreed.Waves",
     "publicEDKey": "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
   },
+  "benchmarkDeferral": {
+    "version": "1.7.4",
+    "build": 22,
+    "approvedOn": "2026-11-14",
+    "reason": "Jonathan approved deferring fresh performance comparisons for Waves 1.7.4 build 22. The release Mac was under heavy unrelated load, so measurements taken then would not be meaningful. The only render-path change since 1.7.3 is one finite-value check in level metering."
+  },
   "releaseDeferral": {
-    "version": "1.7.3",
-    "build": 21,
-    "approvedOn": "2026-10-03",
-    "reason": "Jonathan authorized publishing Waves 1.7.3 build 21 with older macOS runtime testing and the hands-on Stream Deck and device matrix deferred until later. Available Macs run macOS 27; local runtime, companion protocol, signing and package checks remain required.",
+    "version": "1.7.4",
+    "build": 22,
+    "approvedOn": "2026-11-14",
+    "reason": "Jonathan approved publishing Waves 1.7.4 build 22 with the macOS 15 runtime test and the hands-on Stream Deck and device matrix deferred. No macOS 15 Mac is available. He reported Wave Link control working on his own hardware with Waves 1.7.3; the 1.7.4 build was not run against Wave Link before publication. Local runtime, companion protocol, signing and package checks remain required.",
     "platforms": [
-      "sequoiaAppleSilicon",
-      "tahoeAppleSilicon"
+      "sequoiaAppleSilicon"
     ],
     "gates": [
       "remoteElgato"

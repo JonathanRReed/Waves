@@ -6,6 +6,8 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-11-14
+
 ### Fixed
 - Keep an app-specific mute shortcut after recording it in Settings. Recording
   one removed it immediately, along with that app's volume shortcuts.

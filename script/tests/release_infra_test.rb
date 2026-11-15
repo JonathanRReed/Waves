@@ -14,8 +14,8 @@ require_relative "../release_tool"
 require_relative "../../release/elgato-handoff/finalize-receipt"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.7.3"
-  BUILD = 21
+  VERSION = "1.7.4"
+  BUILD = 22
   DEFERRAL_VERSION = "1.7.2"
   DEFERRAL_BUILD = 20
   RELEASE_TAG = "v#{VERSION}"
@@ -1084,11 +1084,13 @@ class ReleaseInfraTest < Minitest::Test
   def test_tracked_metadata_does_not_carry_forward_old_release_deferrals
     metadata = WavesRelease::Metadata.load(File.expand_path("../../release/metadata.json", __dir__))
 
-    refute metadata.key?("benchmarkDeferral")
+    benchmark = metadata.fetch("benchmarkDeferral")
+    assert_equal VERSION, benchmark.fetch("version")
+    assert_equal BUILD, benchmark.fetch("build")
     deferral = metadata.fetch("releaseDeferral")
     assert_equal VERSION, deferral.fetch("version")
     assert_equal BUILD, deferral.fetch("build")
-    assert_equal %w[sequoiaAppleSilicon tahoeAppleSilicon], deferral.fetch("platforms")
+    assert_equal ["sequoiaAppleSilicon"], deferral.fetch("platforms")
     assert_equal ["remoteElgato"], deferral.fetch("gates")
   end
 

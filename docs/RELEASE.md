@@ -8,14 +8,13 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-Version 1.7.3 build 21 is the latest published release. GitHub published it
-on 2026-10-04 with signed and notarized universal artifacts and sealed evidence,
-and the site appcast, site download, and Homebrew tap point at it. Its macOS 15,
-macOS 26, and physical Stream Deck deferrals apply only to 1.7.3 and do not
-qualify a later candidate.
+`release/metadata.json` on this revision describes Waves 1.7.4 build 22. Whether
+a version is published is decided by its signed `vX.Y.Z` tag, the GitHub
+release, and the Sparkle appcast, never by this document. Version 1.7.3 build 21
+was published on 2026-10-04; its deferrals apply only to 1.7.3.
 
-Source changes on `main` after the `v1.7.3` tag are unreleased. They are listed
-under `[Unreleased]` in `CHANGELOG.md` and are not published until a new
+Source changes on `main` after the latest release tag are unreleased. They are
+listed under `[Unreleased]` in `CHANGELOG.md` and are not published until a new
 candidate passes its candidate and publication gates.
 
 The separately versioned Stream Deck companion at
@@ -46,9 +45,9 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
-Jonathan approved deferring fresh macOS 15 and macOS 26 runtime testing and the
-hands-on Stream Deck and device matrix for 1.7.3 build 21 on 2026-10-03.
-The metadata records that approval for this release
+Jonathan approved deferring the macOS 15 runtime test, the hands-on Stream Deck
+and device matrix, and fresh performance comparisons for 1.7.4 build 22 on
+2026-11-14. The metadata records that approval for this release
 only. It does not inherit earlier release deferrals. Tests, security,
 sanitizers, stability, local QA, platform coverage, package verification,
 Developer ID signing, notarization, stapling, Gatekeeper, provenance, and
