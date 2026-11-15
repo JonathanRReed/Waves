@@ -1,10 +1,9 @@
 # Homebrew cask template for Waves.
 #
-# Release tooling validates `version` and replaces the intentionally invalid
-# checksum placeholder in a generated dist/waves.rb on the maintainer Mac; the
-# published cask lives in the JonathanRReed/homebrew-tap repository (see
-# docs/RELEASE.md, "Release Channels Checklist"). Nothing mutates this
-# repository template.
+# Release tooling checks that `version` matches release/metadata.json and that
+# the checksum stays an invalid placeholder. The published cask, with the real
+# checksum, lives in the JonathanRReed/homebrew-tap repository; see
+# docs/RELEASE.md, "Update the Homebrew Tap". Nothing mutates this template.
 cask "waves" do
   version "1.7.4"
   sha256 "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"

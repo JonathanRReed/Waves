@@ -8,10 +8,12 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-`release/metadata.json` on this revision describes Waves 1.7.4 build 22. Whether
-a version is published is decided by its signed `vX.Y.Z` tag, the GitHub
-release, and the Sparkle appcast, never by this document. Version 1.7.3 build 21
-was published on 2026-10-04; its deferrals apply only to 1.7.3.
+The latest published release is Waves 1.7.4 build 22, published on 2026-11-14
+from signed tag `v1.7.4` at revision `88196a37fef2ffd4def1f42c0f1e40473d5d11a3`.
+`release/metadata.json` on this revision still describes it. Whether a version
+is published is decided by its signed `vX.Y.Z` tag, the GitHub release, and the
+Sparkle appcast, never by this document; `script/verify-publication.rb` checks
+all four public channels.
 
 Source changes on `main` after the latest release tag are unreleased. They are
 listed under `[Unreleased]` in `CHANGELOG.md` and are not published until a new
@@ -28,12 +30,46 @@ and automatic recovery. This remote result remains required before claiming
 verified physical Elgato compatibility. Any publication waiver is bound to one
 release's evidence and does not carry forward.
 
-Each sealed evidence manifest must identify the exact revision and clean-tree
-state, absence of untracked build inputs, source-archive and build-recipe hashes,
-toolchain, test counts, performance comparison, package identities,
-architectures, hashes, signatures, notarization, Gatekeeper result, local QA,
-and remote Elgato result. A source build or local package check cannot substitute
-for any missing field.
+## Evidence gates
+
+Each sealed evidence manifest identifies the exact revision and clean-tree
+state, absence of untracked build inputs, source-archive and build-recipe
+hashes, toolchain, and these results, all against the exact candidate:
+
+- `tests`: passed and failed counts for the ordinary Swift suite, the rendered
+  UI cases, and the Thread Sanitizer harness.
+- `performance`: launch time, idle CPU, steady memory, and active mixing
+  against the previous release, each within 10 percent or an approved
+  exception. Comparisons are optional: with `benchmarkDeferral` in metadata,
+  every metric is recorded as `deferred` with the approved reason.
+- `platforms`: native, Rosetta, macOS 26, and macOS 15 runs, with macOS 15
+  deferrable through `releaseDeferral`; a physical macOS 14 host is recorded
+  honestly as unavailable.
+- `package`: identity, universal architectures, deployment floor, app, DMG
+  and dSYM hashes, Developer ID, hardened runtime, notarization bound to the
+  DMG, stapling, and Gatekeeper.
+- `gates`: `localQA`, `securityScan`, `sanitizer`, `routeLifecycleStress`,
+  `socketStress`, `boundedRuntimeCheck`, `updater`, `renderedUI`,
+  `pluginTypecheck`, `pluginUnitTests`, `pluginValidation`, `pluginPackage`,
+  `pluginLiveSocket`, `packageVerification`, and `remoteElgato`, which is
+  deferrable through `releaseDeferral`.
+- `externalReceipts`: the security-review receipt, and the remote Elgato
+  receipt unless that gate is deferred, both bound to the revision and DMG.
+
+`boundedRuntimeCheck` is a short run of the signed candidate in an isolated
+home: an owned audio fixture plays, the candidate discovers and manages it and
+applies volume and mute changes over the control socket, then it stays up and
+answers requests with the audio stopped. It records the whole seconds of the
+active and idle phases in `activeSeconds` and `idleSeconds`. It is not a soak.
+The release owner retired the 4-, 12- and 72-hour soaks and the 30-run launch
+protocol on 2026-11-14; no release requires them. For 1.7.4 the harness was
+`dist/release-1.7.4-preparation/run-qa.py` on the release Mac, which is not
+tracked.
+
+Evidence never records a check as passed that was not run. A check that cannot
+run is deferred through `release/metadata.json` with the owner's approval, or
+the release waits. A source build or local package check cannot substitute for
+any missing field.
 
 `release/metadata.json` is the only release value and trust-policy authority. Its strict reader
 rejects malformed JSON, duplicate or unknown keys, noncanonical versions and
@@ -45,13 +81,46 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
-Jonathan approved deferring the macOS 15 runtime test, the hands-on Stream Deck
-and device matrix, and fresh performance comparisons for 1.7.4 build 22 on
-2026-11-14. The metadata records that approval for this release
-only. It does not inherit earlier release deferrals. Tests, security,
+For 1.7.4 build 22, Jonathan approved deferring the macOS 15 runtime test, the
+hands-on Stream Deck and device matrix, and fresh performance comparisons on
+2026-11-14. The metadata records that approval for that release only; a new
+version and build must not inherit it. Tests, security,
 sanitizers, stability, local QA, platform coverage, package verification,
 Developer ID signing, notarization, stapling, Gatekeeper, provenance, and
 artifact validation must be recorded against the exact candidate.
+
+## Publish sequence
+
+This is the order 1.7.4 was published in. Each step is detailed below.
+
+1. Prepare metadata, `CHANGELOG.md`, the cask template version, and the
+   `VERSION` and `BUILD` constants and tracked-deferral assertions in
+   `script/tests/release_infra_test.rb`. Merge to `main` with a plain
+   `git push` (`script/release_git` strips credentials) and wait for CI on the
+   exact revision.
+2. `build_and_run.sh --notarize`, then `--publication-check` and
+   `--package-smoke` on the same package.
+3. Run the bounded runtime check, the Rosetta launch and the companion checks
+   against the signed candidate. Assemble `dist/release-evidence-input.json`
+   and the security-review receipt, citing the CI run for counts that came
+   from CI.
+4. Seal candidate evidence and run `release-gate.sh candidate`.
+5. Collect the remote Elgato receipt, or record its approved deferral.
+6. Seal publication evidence, generate the tag envelope, create the signed
+   tag with `git tag -s vX.Y.Z -F dist/release-tag-annotation.txt`, and run
+   `WAVES_RELEASE_TAG=vX.Y.Z ./script/release-gate.sh publication`.
+7. `git push origin vX.Y.Z`, then
+   `gh release create vX.Y.Z --verify-tag --latest --notes-file <notes>` with
+   `Waves.dmg`, `Waves.dmg.sha256`, `Waves.app.dSYM.zip`, the sealed
+   publication evidence and its sidecar, `release-source-identity.json`,
+   `notary-log.json`, and the receipt files.
+8. Download the DMG back from the release and sign the appcast over it.
+9. Fetch and rebase the website and tap checkouts before editing or deploying
+   either. 1.7.4's first site deploy came from a stale checkout and briefly
+   put an old page design live.
+10. Update and deploy the site, then update and push the tap.
+11. Run `./script/verify-publication.rb`. The release is finished when it
+    passes.
 
 ## Protected command environment
 
@@ -255,7 +324,7 @@ test "$(cut -d ' ' -f 1 dist/Waves.dmg.sha256)" = \
 /usr/bin/unzip -t dist/Waves.app.dSYM.zip
 ```
 
-Task 12 must then assemble the complete evidence input and seal the exact local
+Then assemble the complete evidence input and seal the exact local
 candidate. Candidate sealing allows only remote Elgato to remain pending and
 always records `publicationEligible: false`:
 
@@ -287,7 +356,7 @@ that checkout's exact lowercase revision. The output directory must not exist.
   /ABSOLUTE/PATH/TO/dist/release-evidence.candidate.json \
   /ABSOLUTE/PATH/TO/com.jonathanreed.waves.streamDeckPlugin \
   PLUGIN_40_CHARACTER_REVISION \
-  /ABSOLUTE/PATH/TO/Waves-1.7.3-21-Elgato-Handoff
+  /ABSOLUTE/PATH/TO/Waves-X.Y.Z-BUILD-Elgato-Handoff
 ```
 
 The command reruns the complete candidate gate, privately snapshots and
@@ -348,21 +417,6 @@ exact revision rather than a tag and cannot access signing credentials, sign,
 notarize, upload a candidate, or create a release. The maintainer Mac remains
 the only Waves release-signing authority.
 
-The generated cask is a release artifact; the workflow does not replace the
-checksum placeholder in the repository. Audit the generated file before
-publishing it to a tap:
-
-```bash
-brew audit --cask ./waves.rb
-```
-
-The template URL points to GitHub Releases and assumes the DMG is publicly
-fetchable. If the repository or release remains private, a standard public
-Homebrew cask cannot download that authenticated artifact. Do not publish the
-cask to a public tap until the release asset has an intentionally public,
-stable URL; this checklist does not change repository visibility or distribution
-policy.
-
 ## Publish the Appcast
 
 After the GitHub release is public, sign **the published disk image**, not a
@@ -405,10 +459,7 @@ The Sparkle account is intentionally not created or migrated by these scripts.
 Candidate building, Developer ID signing, notarization, and candidate gates do
 not require it. Appcast publication fails closed until a separately authorized
 Keychain setup provisions that exact account with the matching private key.
-
-```bash
-cp dist/appcast.xml ../Waves-site/public/appcast.xml
-```
+The finished `dist/appcast.xml` goes to the site in the next section.
 
 The script also refuses a build number that is not strictly greater than every
 build already in the appcast, since Sparkle compares `sparkle:version`
@@ -422,9 +473,19 @@ already happened. The 1.4.0 publish touched only `public/appcast.xml` and
 the whole release. Sparkle offered 1.4.0 to existing users while the site still
 described 1.3.0.
 
-Three files, every time:
+Bring the site checkout up to date first. 1.7.4's first deploy came from a
+checkout that was behind the site repository and briefly put an old page design
+live:
 
 ```bash
+git -C ../Waves-site fetch origin && git -C ../Waves-site rebase origin/main
+```
+
+Then four files, every time (`src/lib/content-dates.json` carries the dates for
+`/` and `/changelog/`):
+
+```bash
+cp dist/appcast.xml ../Waves-site/public/appcast.xml
 cp CHANGELOG.md ../Waves-site/src/data/CHANGELOG.md
 ```
 
@@ -444,11 +505,13 @@ head -12 ../Waves-site/src/data/CHANGELOG.md
 grep -c "sparkle:version" ../Waves-site/public/appcast.xml
 ```
 
-Review the site change, then deploy the site through its normal release process
-(`bun run build && npx wrangler deploy`), and verify what is actually live —
-not what you uploaded:
+Run the site's own gate, push, and deploy. The site's `Deploy` workflow deploys
+after its CI passes on `main`; if that CI is failing, deploy by hand from the
+rebased checkout. Then verify what is actually live, not what you uploaded:
 
 ```bash
+bun install --frozen-lockfile && bun run check && bun test && bun run release:check && bun run build
+npx wrangler deploy
 curl -s https://waves.jonathanrreed.com/appcast.xml | grep -m1 shortVersionString
 curl -s https://waves.jonathanrreed.com/ | grep -o "releases/download/v[0-9.]*/Waves.dmg" | sort -u
 ```
@@ -461,18 +524,23 @@ which is a separate repository from the `Casks/waves.rb` template in this one.
 Updating only the template updates nobody: the tap sat on 1.3.0 for the whole
 1.4.0 release, so every `brew install` served a two-releases-old build.
 
-After GitHub publishes the DMG and you download it back, update the tap's
-`Casks/waves.rb` with the published version and checksum:
+After GitHub publishes the DMG and you download it back, fetch and rebase the
+tap checkout, then update its `Casks/waves.rb` with the published version and
+checksum. Keep its other stanzas the same as this repository's template:
 
 ```bash
+git -C ../homebrew-tap fetch origin && git -C ../homebrew-tap rebase origin/main
 published_sha="$(shasum -a 256 /tmp/waves-release/Waves.dmg | cut -d ' ' -f 1)"
-/usr/bin/ruby -e 'path = ARGV.fetch(0); version = ARGV.fetch(1); sha = ARGV.fetch(2); text = File.read(path); text.sub!(/^  version ".*"$/, "  version \"#{version}\"") or abort "version line missing"; text.sub!(/^  sha256 ".*"$/, "  sha256 \"#{sha}\"") or abort "sha256 line missing"; File.write(path, text)' ../homebrew-tap/Casks/waves.rb 1.7.2 "$published_sha"
+/usr/bin/ruby -e 'path = ARGV.fetch(0); version = ARGV.fetch(1); sha = ARGV.fetch(2); text = File.read(path); text.sub!(/^  version ".*"$/, "  version \"#{version}\"") or abort "version line missing"; text.sub!(/^  sha256 ".*"$/, "  sha256 \"#{sha}\"") or abort "sha256 line missing"; File.write(path, text)' ../homebrew-tap/Casks/waves.rb X.Y.Z "$published_sha"
 ```
 
-Then confirm it parses and the checksum is the one users will fetch:
+Push it, then audit the published cask. `brew audit` does not accept a path and
+reads Homebrew's own clone of the tap, so update that clone first:
 
 ```bash
-ruby -c ../homebrew-tap/Casks/waves.rb && brew audit --cask ../homebrew-tap/Casks/waves.rb
+ruby -c ../homebrew-tap/Casks/waves.rb
+git -C "$(brew --repo jonathanrreed/tap)" pull --ff-only
+brew audit --cask --online --strict jonathanrreed/tap/waves
 ```
 
 ## Release Channels Checklist
@@ -484,6 +552,7 @@ Each has been missed at least once:
 - [ ] `appcast.xml` on the site — Sparkle
 - [ ] `site.ts` and `src/data/CHANGELOG.md` on the site — the download button
 - [ ] `Casks/waves.rb` in the tap repo — Homebrew
+- [ ] `./script/verify-publication.rb` passes
 
 ## Verify Every Channel
 
