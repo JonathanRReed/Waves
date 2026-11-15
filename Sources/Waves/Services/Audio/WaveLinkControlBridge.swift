@@ -680,7 +680,12 @@ actor WaveLinkControlBridge: WaveLinkControlling {
       }
       throw problem
     } catch is CancellationError {
-      throw CancellationError()
+      // A newer edit cancels this task while it waits. The change was already
+      // sent, so what Wave Link last showed still has to reach the row.
+      throw WaveLinkControlBridgeError.unconfirmed(
+        .readBackMismatch("A newer change replaced this one before Wave Link confirmed it."),
+        observed: observed
+      )
     } catch let error as WaveLinkControlBridgeError {
       throw WaveLinkControlBridgeError.unconfirmed(error, observed: observed)
     } catch {

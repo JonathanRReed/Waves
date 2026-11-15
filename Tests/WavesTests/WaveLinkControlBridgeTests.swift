@@ -894,6 +894,25 @@ func waveLinkBridgeConfirmsALargeStepThatWaveLinkReachesOverSeveralReads(
   #expect(await bridge.currentStatus().phase == .failed)
 }
 
+@Test func waveLinkBridgeKeepsWhatWaveLinkShowedWhenItsWaitIsCancelled() async throws {
+  let rpc = WaveLinkRPCStub(channels: [browserChannel(level: 0.2)], readBackLevel: 0.55)
+  let bridge = WaveLinkControlBridge(
+    request: { method, params in try await rpc.request(method: method, params: params) },
+    // A newer edit cancels the task while it waits for the next read.
+    sleep: { _ in throw CancellationError() }
+  )
+
+  await #expect(
+    throws: WaveLinkControlBridgeError.unconfirmed(
+      .readBackMismatch("A newer change replaced this one before Wave Link confirmed it."),
+      observed: WaveLinkChannelState(level: 0.55, isMuted: false)
+    )
+  ) {
+    try await bridge.apply(bundleIdentifier: "com.example.browser", volume: 1, isMuted: false)
+  }
+  #expect(await rpc.setRequests.count == 1)
+}
+
 @Test func waveLinkBridgeConfirmsAReadBackInTheSameWholePercent() async throws {
   // Waves sends whole percents, and Wave Link stores whole percents. A value
   // it reports a fraction of a percent away names the same level.
@@ -1025,7 +1044,11 @@ private func sharedAndEmptyChannels() -> [WaveLinkChannel] {
 private final class CallCount: @unchecked Sendable {
   private let lock = NSLock()
   private var count = 0
-  func next() -> Int { lock.withLock { count += 1; return count } }
+  func next() -> Int {
+    lock.withLock {
+      count += 1; return count
+    }
+  }
 }
 
 /// Fails the given call of one method, counting from 1, and passes every
