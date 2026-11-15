@@ -1244,6 +1244,22 @@ func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async th
   )
   await fixture.store.drainAppIntentTransactions()
   #expect(fixture.store.mixRestorePoint?.entries.first?.isMuted == false)
+
+  // Reset Mix while the call is still on: the level comes back, the automatic
+  // mute stays and is still owned by call automation, and nothing durable
+  // records a mute.
+  fixture.store.resetMix()
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.38)
+  #expect(fixture.store.session.apps.first?.isMuted == true)
+  #expect(fixture.store.session.apps.first?.muteSource == .autoConferencing)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.isMuted == false)
+
+  // The call ends and automation resumes the app.
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: false)
+  #expect(fixture.store.session.apps.first?.isMuted == false)
+  #expect(fixture.store.session.apps.first?.muteSource == .user)
 }
 
 @MainActor

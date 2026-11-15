@@ -179,15 +179,17 @@ func waveLinkChannelInitializerPreservesRawFiniteLevel(_ level: Float) {
 }
 
 @Test(arguments: ["NaN", "Infinity", "-Infinity", "-0.1", "1.1"])
-func waveLinkChannelDecodeRejectsInvalidLevels(_ value: String) {
+func waveLinkChannelDecodeFlagsInvalidLevelsWithoutFailingTheList(_ value: String) throws {
+  // One channel with an unexpected level must not make the whole channel list
+  // undecodable. It is flagged so it can never confirm a change.
   let decoder = JSONDecoder()
   decoder.nonConformingFloatDecodingStrategy = .convertFromString(
     positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
   let literal = Float(value)?.isFinite == true ? value : "\"\(value)\""
-  let data = Data("{\"id\":\"channel-browser\",\"level\":\(literal)}".utf8)
-  #expect(throws: DecodingError.self) {
-    try decoder.decode(WaveLinkChannel.self, from: data)
-  }
+  let data = Data("{\"id\":\"channel-browser\",\"level\":\(literal),\"isMuted\":false}".utf8)
+  let channel = try decoder.decode(WaveLinkChannel.self, from: data)
+  #expect(!channel.reportsValidState)
+  #expect(channel.level.isFinite)
 }
 
 @Test(arguments: [0 as Float, 0.35 as Float, 1 as Float])
@@ -212,20 +214,52 @@ func waveLinkChannelDecodeRetainsDefaultForUnreportedHardwareLevel(_ json: Strin
   #"{"id":"browser","type":"Software","isMuted":false}"#,
   #"{"id":"browser","type":"software","level":null,"isMuted":false}"#,
 ])
-func waveLinkChannelDecodeRequiresReportedSoftwareLevel(_ json: String) {
-  #expect(throws: DecodingError.self) {
-    try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
-  }
+func waveLinkChannelDecodeFlagsAnUnreportedSoftwareLevel(_ json: String) throws {
+  let channel = try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
+  #expect(!channel.reportsValidState)
 }
 
 @Test(arguments: [
   #"{"id":"browser","type":"Software","level":0.5}"#,
   #"{"id":"browser","type":"software","level":0.5,"isMuted":null}"#,
 ])
-func waveLinkChannelDecodeRequiresReportedSoftwareMute(_ json: String) {
-  #expect(throws: DecodingError.self) {
-    try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
-  }
+func waveLinkChannelDecodeFlagsAnUnreportedSoftwareMute(_ json: String) throws {
+  let channel = try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
+  #expect(!channel.reportsValidState)
+}
+
+@Test func waveLinkChannelDecodeAcceptsAFullyReportedChannel() throws {
+  let json = #"{"id":"browser","type":"Software","level":0.35,"isMuted":true}"#
+  let channel = try JSONDecoder().decode(WaveLinkChannel.self, from: Data(json.utf8))
+  #expect(channel.reportsValidState)
+  #expect(channel.level == 0.35)
+  #expect(channel.isMuted)
+}
+
+@Test func waveLinkBridgeControlsAnAppWhenOtherChannelsReportUnexpectedLevels() async throws {
+  // Wave Link returns every channel in one list. A hardware channel or another
+  // app's channel with a level outside 0...1 must not stop Waves controlling
+  // the app whose own channel reports a valid state.
+  let rpc = WaveLinkRPCStub(
+    channels: [
+      .init(id: "mic", name: "Wave:3", type: "Hardware", level: 1.5, isMuted: false, apps: []),
+      .init(
+        id: "channel-music", name: "Music", type: "Software", level: 2,
+        isMuted: false, apps: [.init(id: "com.example.music")]),
+      .init(
+        id: "channel-browser", name: "Browser", type: "Software", level: 1,
+        isMuted: false, apps: [.init(id: "com.example.browser")]),
+    ]
+  )
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    try await rpc.request(method: method, params: params)
+  })
+
+  let confirmation = try await bridge.apply(
+    bundleIdentifier: "com.example.browser", volume: 0.5, isMuted: false)
+
+  #expect(confirmation.appliedVolume == 0.5)
+  #expect(await rpc.setRequests.map(\.id) == ["channel-browser"])
 }
 
 @Test(arguments: [(requested: 0 as Float, received: -0.1 as Float), (requested: 1 as Float, received: 2 as Float)])

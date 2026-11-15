@@ -137,6 +137,14 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
   let type: String
   var level: Float
   var isMuted: Bool
+  /// False when Wave Link left out this channel's level or mute state, or sent
+  /// a level that is not a finite value from 0 to 1. `level` and `isMuted` then
+  /// hold placeholders, so the channel must not confirm a requested change.
+  ///
+  /// The channel still decodes. Every channel arrives in one list, and failing
+  /// the list over one channel Waves never touches would take every Wave Link
+  /// control down with it.
+  let reportsValidState: Bool
   var apps: [WaveLinkChannelApp]
   // Older responses can omit mix metadata. An explicit empty list means the
   // channel has no output mix and must not be chosen as a relocation target.
@@ -156,8 +164,15 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     self.type = type
     self.level = level
     self.isMuted = isMuted
+    self.reportsValidState = level.isFinite && (0...1).contains(level)
     self.apps = apps
     self.mixes = mixes
+  }
+
+  /// `reportsValidState` is derived while decoding and is not part of the wire
+  /// format.
+  private enum CodingKeys: String, CodingKey {
+    case id, name, type, level, isMuted, apps, mixes
   }
 
   init(from decoder: Decoder) throws {
@@ -165,37 +180,16 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
     id = try container.decode(String.self, forKey: .id)
     name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
     type = try container.decodeIfPresent(String.self, forKey: .type) ?? ""
-    let isSoftwareChannel = type.caseInsensitiveCompare("software") == .orderedSame
     let reportedLevel = try container.decodeIfPresent(Float.self, forKey: .level)
-    // Hardware listings may omit a level. A software channel must report its
-    // actual level so an omitted readback cannot falsely confirm full scale.
-    guard reportedLevel != nil || !isSoftwareChannel else {
-      throw DecodingError.dataCorruptedError(
-        forKey: .level,
-        in: container,
-        debugDescription: "software channel must report its level"
-      )
-    }
-    let rawLevel = reportedLevel ?? 1
-    // A peer readback must be validated as received. Clamping an invalid
-    // boundary value could falsely confirm that our requested level applied.
-    guard rawLevel.isFinite, (0...1).contains(rawLevel) else {
-      throw DecodingError.dataCorruptedError(
-        forKey: .level,
-        in: container,
-        debugDescription: "channel level must be finite and between 0 and 1"
-      )
-    }
-    level = rawLevel
     let reportedMute = try container.decodeIfPresent(Bool.self, forKey: .isMuted)
-    guard reportedMute != nil || !isSoftwareChannel else {
-      throw DecodingError.dataCorruptedError(
-        forKey: .isMuted,
-        in: container,
-        debugDescription: "software channel must report its mute state"
-      )
-    }
+    // Hardware listings may omit a level, so a missing value falls back to the
+    // same placeholders as before. `reportsValidState` records that they are
+    // placeholders: an omitted or out-of-range readback must never confirm that
+    // a requested level or mute applied.
+    let levelIsValid = reportedLevel.map { $0.isFinite && (0...1).contains($0) } ?? false
+    level = reportedLevel.flatMap { $0.isFinite ? $0 : nil } ?? 1
     isMuted = reportedMute ?? false
+    reportsValidState = levelIsValid && reportedMute != nil
     // Hardware channels omit `apps` entirely; software channels list them.
     apps = try container.decodeIfPresent([WaveLinkChannelApp].self, forKey: .apps) ?? []
     mixes = try container.decodeIfPresent([WaveLinkChannelMix].self, forKey: .mixes)
@@ -482,6 +476,11 @@ actor WaveLinkControlBridge: WaveLinkControlling {
     else {
       throw WaveLinkControlBridgeError.readBackMismatch(
         "The dedicated app channel disappeared after the update."
+      )
+    }
+    guard confirmed.reportsValidState else {
+      throw WaveLinkControlBridgeError.readBackMismatch(
+        "Wave Link did not report a valid level and mute state for the channel after the update."
       )
     }
     guard abs(confirmed.level - channelVolume) <= 0.001, confirmed.isMuted == isMuted else {

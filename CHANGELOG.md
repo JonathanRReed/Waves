@@ -17,10 +17,11 @@ All notable changes to Waves are documented here. The format follows
 - Report silence for a level-meter buffer that contains a non-finite sample
   instead of keeping a peak from the samples before it.
 - Reject URL automation profile names longer than a profile name can be.
-- Reject non-finite volume, boost, timestamp, and duration values in control,
-  automation, Wave Link, metering, diagnostics, and profile inputs.
-- Recover the URL and socket automation quotas after the system clock moves
-  backward.
+- Guard control, automation, metering, diagnostics, and profile handling
+  against non-finite volume, boost, timestamp, and duration values.
+- Do not confirm a Wave Link level or mute change when Wave Link's reply leaves
+  out the channel's level or mute state, or reports a level outside its range.
+- Recover the URL automation quotas after the system clock moves backward.
 - Release tooling: recover from a busy disk-image detach and confirm the image
   is detached before cleaning up.
 

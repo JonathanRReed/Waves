@@ -775,9 +775,23 @@ extension AppStore {
   func resetMix() {
     guard requireAudioRunning() else { return }
     guard let restorePoint = mixRestorePoint else { return }
+    // An app that call automation has muted right now keeps that mute, and
+    // automation keeps ownership of it so it still resumes when the call ends.
+    // Sending the restore point's "not muted" as an explicit unmute would play
+    // media over a call that is still in progress. Dropping the mute from the
+    // row leaves the automatic mute alone and restores the rest of the row.
+    let entries = restorePoint.entries.map { entry -> ProfileEntry in
+      guard entry.isMuted == false,
+        let app = session.apps.first(matchingAppKey: entry.appID),
+        app.isMuted, app.muteSource == .autoConferencing
+      else { return entry }
+      var entry = entry
+      entry.isMuted = nil
+      return entry
+    }
     let restoreProfile = Profile(
       name: restorePoint.profileName,
-      entries: restorePoint.entries
+      entries: entries
     )
     applyProfile(restoreProfile, purpose: .mixReset)
   }
