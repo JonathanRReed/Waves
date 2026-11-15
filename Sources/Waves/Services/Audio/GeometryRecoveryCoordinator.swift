@@ -89,6 +89,17 @@ struct GeometryRecoveryCoordinator: Sendable {
     return scheduleNextAttemptOrExhaust(at: now)
   }
 
+  /// The rebuild was overtaken by newer work for the same route before it
+  /// could install. It is not a failed attempt; retry on the next tick.
+  mutating func abandonRecovery(at now: Duration) -> GeometryRecoveryAction {
+    guard recoveryInProgress else { return .none }
+    recoveryInProgress = false
+    attempts = max(0, attempts - 1)
+    scheduledRecoveryAt = now
+    health = .recovering
+    return .scheduleRecovery(at: now)
+  }
+
   /// Advances the verification window. Returns `.recovered` once the rebuilt
   /// route has rendered mismatch-free for the whole window.
   mutating func advance(to now: Duration) -> GeometryRecoveryAction {

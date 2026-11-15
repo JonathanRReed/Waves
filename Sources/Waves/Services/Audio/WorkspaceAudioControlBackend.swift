@@ -51,6 +51,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
   var levelUpdateTask: Task<Void, Never>?
   var routeMaintenanceTick = 0
+  var routeRebuildBudget = RouteRebuildBudget()
+  /// The output device and format each live route was built for.
+  var routeOutputBindingByRuntimeID: [String: RouteOutputBinding] = [:]
+  var devicesSeenNotAlive: Set<String> = []
+  let deviceFormatListeners: DeviceFormatListenerLifecycle
+  var wakeObserver: WakeObserverToken?
+  let routeBudgetClock: @Sendable () -> Duration
   var geometryRecoveryByRuntimeID: [String: GeometryRecoveryCoordinator] = [:]
   var routerConflictObservationByRuntimeID: [String: RouterConflictObservationDebouncer] = [:]
   var routerObservationListenerFailureDetail: String?
@@ -104,6 +111,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   typealias RuntimeIdentityProvider = @Sendable (pid_t) -> AppRuntimeIdentity?
   typealias ProcessObjectTranslator = @Sendable (pid_t) throws -> AudioObjectID?
   typealias CaptureAuthorizationProbe = @Sendable () -> CaptureAuthorizationResult
+  /// Waits between controller-creation retries. Tests replace it with a gate so
+  /// newer work can be interleaved deterministically while a repair is paused.
+  typealias ControllerRetryPause = @Sendable (_ nanoseconds: UInt64) async throws -> Void
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
   let routeMaintenanceOverride: RouteMaintenanceOverride?
@@ -132,6 +142,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let captureAuthorizationProbe: CaptureAuthorizationProbe?
   let applicationCaptureProvider: (@Sendable () async -> AppRuntimeDiscovery.Capture)?
   let processLifetimeLiveness: @Sendable (AppProcessLifetimeIdentity) -> Bool
+  let controllerRetryPause: ControllerRetryPause
+  let routeOutputBindingProvider: (@Sendable (AudioApp) -> RouteOutputBinding?)?
+  let deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
@@ -163,6 +176,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.captureAuthorizationProbe = nil
     self.applicationCaptureProvider = nil
     self.processLifetimeLiveness = RuntimeProcessIdentity.mayStillBeRunning
+    self.routeBudgetClock = Self.monotonicRouteTime
+    self.controllerRetryPause = { try await Task.sleep(nanoseconds: $0) }
+    self.routeOutputBindingProvider = nil
+    self.deviceFormatObservationProvider = nil
+    self.deviceFormatListeners = DeviceFormatListenerLifecycle(
+      nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.device-format"))
+    )
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
     )
@@ -190,7 +210,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     processObjectTranslator: ProcessObjectTranslator? = nil,
     captureAuthorizationProbe: CaptureAuthorizationProbe? = nil,
     applicationCaptureProvider: (@Sendable () async -> AppRuntimeDiscovery.Capture)? = nil,
-    processLifetimeLiveness: @escaping @Sendable (AppProcessLifetimeIdentity) -> Bool = RuntimeProcessIdentity.mayStillBeRunning
+    processLifetimeLiveness: @escaping @Sendable (AppProcessLifetimeIdentity) -> Bool = RuntimeProcessIdentity.mayStillBeRunning,
+    routeBudgetClock: (@Sendable () -> Duration)? = nil,
+    controllerRetryPause: ControllerRetryPause? = nil,
+    routeOutputBindingProvider: (@Sendable (AudioApp) -> RouteOutputBinding?)? = nil,
+    deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)? = nil,
+    deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     self.deviceChangeEvents = stream
@@ -215,6 +240,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.captureAuthorizationProbe = captureAuthorizationProbe
     self.applicationCaptureProvider = applicationCaptureProvider
     self.processLifetimeLiveness = processLifetimeLiveness
+    self.routeBudgetClock = routeBudgetClock ?? Self.monotonicRouteTime
+    self.controllerRetryPause = controllerRetryPause ?? { try await Task.sleep(nanoseconds: $0) }
+    self.routeOutputBindingProvider = routeOutputBindingProvider
+    self.deviceFormatObservationProvider = deviceFormatObservationProvider
+    self.deviceFormatListeners = DeviceFormatListenerLifecycle(
+      nativeCalls: deviceFormatListenerNativeCalls
+        ?? .live(on: DispatchQueue(label: "com.waves.backend.device-format"))
+    )
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: routerObservationNativeCalls
         ?? .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
@@ -257,8 +290,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     retainCleanupDegradations(addRouterObservationListeners())
   }
 
-  func reattachRoutesForTesting(_ logicalIDs: Set<String>) async {
-    await reattachRoutes(forLogicalIDs: logicalIDs)
+  func reattachRoutesForTesting(
+    _ logicalIDs: Set<String>,
+    origin: RouteWorkOrigin = .userInitiated
+  ) async {
+    await reattachRoutes(forLogicalIDs: logicalIDs, origin: origin)
   }
 
   func flagGeometryMismatchForTesting(runtimeID: String) {
@@ -393,6 +429,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     staleRouteTicks.removeAll()
     lastRenderTickByAppID.removeAll()
     geometryRecoveryByRuntimeID.removeAll()
+    routeOutputBindingByRuntimeID.removeAll()
+    devicesSeenNotAlive.removeAll()
     routerConflictObservationByRuntimeID.removeAll()
     routeMaintenanceTick = 0
     routerObservationListenerFailureDetail = nil
@@ -620,6 +658,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           forceRebuild: forceRebuild,
           equalizerSettings: intent.equalizerSettings,
           generationContext: generationContext,
+          origin: .userInitiated,
           routerActivity: routerActivity
         )
       }
@@ -958,6 +997,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
 
     retainCleanupDegradations(disposeControllers(keeping: []))
+    // An explicit repair is the user's say-so to try again: it must not
+    // inherit a cooldown that automatic work ran into.
+    routeRebuildBudget.resetForUserRecovery()
     // buildSnapshot (and the subsequent reattachRoutes) is the single source of
     // route-health truth here: it recomputes backendStatus from scratch, so any
     // isRouteRecoveryHealthy/lastError assignment made before it would be
@@ -966,7 +1008,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
 
     if !managedLogicalIDs.isEmpty {
-      await reattachRoutes(forLogicalIDs: managedLogicalIDs)
+      await reattachRoutes(forLogicalIDs: managedLogicalIDs, origin: .userInitiated)
     }
 
     return snapshot
@@ -991,11 +1033,33 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   func autoRestoreDevice() async throws -> AudioSessionSnapshot {
     try ensureAcceptingOperations()
-    // Only routes that follow the system default were built on the device
-    // that just changed. A route pinned to its own output device keeps its
-    // live tap: rebuilding it would interrupt audio on a device that did not
-    // move, and a pinned device that disappeared is handled by the inventory
-    // reconciliation instead.
+    return try await restoreDefaultFollowingRoutes {
+      await self.buildSnapshot(merging: self.snapshot)
+    }
+  }
+
+  func restoreDefaultFollowingRoutesForTesting() async throws -> AudioSessionSnapshot {
+    try await restoreDefaultFollowingRoutes { self.snapshot }
+  }
+
+  /// Moves every route that follows the system default onto the new default.
+  ///
+  /// Make before break: no controller is disposed up front. Disposing first
+  /// released each app's tap before its replacement existed, so every managed
+  /// app played at its own full level until the new route took over, then
+  /// dropped back. Each route is now rebuilt in place by `applyRoute`, which
+  /// silences the outgoing renderer, builds and starts the replacement, and
+  /// only then disposes the old controller. See `reattachRoutes(_:mode:)` for
+  /// what happens when the replacement cannot be built.
+  ///
+  /// Only routes that follow the system default were built on the device
+  /// that just changed. A route pinned to its own output device keeps its
+  /// live tap: rebuilding it would interrupt audio on a device that did not
+  /// move, and a pinned device that disappeared is handled by the inventory
+  /// reconciliation instead.
+  private func restoreDefaultFollowingRoutes(
+    rebuildSnapshot: () async -> AudioSessionSnapshot
+  ) async throws -> AudioSessionSnapshot {
     let managedLogicalIDs = Set(
       snapshot.apps
         .filter {
@@ -1004,15 +1068,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         }
         .map(\.logicalID)
     )
-    let pinnedRuntimeIDs = Set(snapshot.apps.filter { $0.targetDeviceUID != nil }.map(\.id))
 
-    retainCleanupDegradations(disposeControllers(keeping: pinnedRuntimeIDs))
-    snapshot = await buildSnapshot(merging: snapshot)
+    snapshot = await rebuildSnapshot()
     try ensureAcceptingOperations()
     snapshot.updatedAt = .now
 
     if !managedLogicalIDs.isEmpty {
-      await reattachRoutes(forLogicalIDs: managedLogicalIDs)
+      await reattachRoutes(forLogicalIDs: managedLogicalIDs, origin: .automatic, mode: .rehome)
     }
 
     return snapshot
@@ -1027,6 +1089,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let logicalID: String
     let generation: UInt64
     let lifecycleEpoch: UInt64
+  }
+
+  /// Everything that can make background route work (maintenance, device
+  /// changes, reattachment) stale while it is suspended. Background work has
+  /// no intent generation of its own, so it records the newest accepted one,
+  /// the controller it set out to replace, and the output it was aimed at.
+  /// Any change to these means newer intent (an edit, an exclusion, an output
+  /// choice) or newer route work landed first, and the repair must not install.
+  struct RouteRepairContext: Sendable {
+    let logicalID: String
+    let runtimeID: String
+    let acceptedGeneration: UInt64?
+    let lifecycleEpoch: UInt64
+    let incumbent: ObjectIdentifier?
+    let targetDeviceUID: String?
   }
 
   struct IntentSupersededError: Error {}
@@ -1046,6 +1123,42 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   func ensureGenerationCurrent(_ context: IntentGenerationContext) throws {
     guard isStarted, !isShuttingDown else { throw IntentBackendStoppedError() }
     guard isGenerationCurrent(context) else { throw IntentSupersededError() }
+  }
+
+  func makeRepairContext(for app: AudioApp) -> RouteRepairContext {
+    RouteRepairContext(
+      logicalID: app.logicalID,
+      runtimeID: app.id,
+      acceptedGeneration: latestAcceptedGenerationByLogicalID[app.logicalID],
+      lifecycleEpoch: lifecycleEpoch,
+      incumbent: controllers[app.id].map(ObjectIdentifier.init),
+      targetDeviceUID: app.targetDeviceUID
+    )
+  }
+
+  func isRepairCurrent(_ context: RouteRepairContext) -> Bool {
+    guard context.lifecycleEpoch == lifecycleEpoch,
+      latestAcceptedGenerationByLogicalID[context.logicalID] == context.acceptedGeneration,
+      controllers[context.runtimeID].map(ObjectIdentifier.init) == context.incumbent,
+      let app = snapshot.apps.first(where: { $0.logicalID == context.logicalID }),
+      app.id == context.runtimeID,
+      app.targetDeviceUID == context.targetDeviceUID
+    else { return false }
+    return true
+  }
+
+  /// One check for whichever context the route work carries.
+  func ensureRouteWorkCurrent(
+    _ generationContext: IntentGenerationContext?,
+    _ repairContext: RouteRepairContext?
+  ) throws {
+    if let generationContext {
+      try ensureGenerationCurrent(generationContext)
+    }
+    if let repairContext {
+      guard isStarted, !isShuttingDown else { throw IntentBackendStoppedError() }
+      guard isRepairCurrent(repairContext) else { throw IntentSupersededError() }
+    }
   }
 
   func supersededResult(
@@ -1173,6 +1286,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     forceRebuild: Bool = false,
     equalizerSettings: EqualizerSettings? = nil,
     generationContext: IntentGenerationContext? = nil,
+    repairContext: RouteRepairContext? = nil,
+    preservesGeometryRecovery: Bool = false,
+    origin: RouteWorkOrigin,
     routerActivity: VerifiedRouterActivitySnapshot? = nil
   ) async throws {
     try ensureAcceptingOperations()
@@ -1183,9 +1299,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       throw BackendError.unsupportedOperation(conflict.detail)
     }
 
-    if let generationContext {
-      try ensureGenerationCurrent(generationContext)
-    }
+    try ensureRouteWorkCurrent(generationContext, repairContext)
     let processTarget = try resolveProcessTarget(for: app)
     let processObjectIDs = processTarget.processObjectIDs
     let targetProcessFamily = TargetProcessFamily(
@@ -1206,9 +1320,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       controller.isActive,
       controller.covers(targetProcessFamily)
     {
-      if let generationContext {
-        try ensureGenerationCurrent(generationContext)
-      }
+      try ensureRouteWorkCurrent(generationContext, repairContext)
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       controller.setEqualizer(stagedEqualizer)
       controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
@@ -1216,18 +1328,34 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       return
     }
 
-    if let generationContext {
-      try ensureGenerationCurrent(generationContext)
+    try ensureRouteWorkCurrent(generationContext, repairContext)
+    let outputBinding = currentOutputBinding(for: app)
+    // Make before break. The outgoing renderer goes silent before its
+    // replacement is built: its tap keeps the app's own output muted, so
+    // for the creation window the app is quieter than set, never louder,
+    // and two renderers never play the same app at once.
+    let silencedIncumbent = controllers[app.id].flatMap { $0.isActive ? $0 : nil }
+    silencedIncumbent?.apply(volume: volume, volumeBoost: app.volumeBoost, muted: true)
+    let controller: PerAppTapController
+    do {
+      controller = try await createControllerWithRetry(
+        for: app,
+        processTarget: processTarget,
+        equalizerSettings: stagedEqualizer,
+        generationContext: generationContext,
+        repairContext: repairContext,
+        origin: origin
+      )
+    } catch {
+      restoreSilencedIncumbent(silencedIncumbent, runtimeID: app.id)
+      throw error
     }
-    let controller = try await createControllerWithRetry(
-      for: app,
-      processTarget: processTarget,
-      equalizerSettings: stagedEqualizer,
-      generationContext: generationContext
-    )
 
     do {
       try ensureAcceptingOperations()
+      // Background work was suspended in creation retries; newer intent or
+      // newer route work for this app wins and this controller is discarded.
+      try ensureRouteWorkCurrent(nil, repairContext)
       if let generationContext {
         try ensureGenerationCurrent(generationContext)
         if let installedGeneration = controllerGenerationByRuntimeID[app.id],
@@ -1242,6 +1370,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
 
       let replacedController = controllers.updateValue(controller, forKey: app.id)
+      // A fresh controller starts with a fresh geometry-recovery budget. Only
+      // the rebuild the coordinator itself asked for carries it over, so that
+      // rebuild's verification window and attempt count still apply.
+      if !preservesGeometryRecovery {
+        geometryRecoveryByRuntimeID.removeValue(forKey: app.id)
+      }
+      routeOutputBindingByRuntimeID[app.id] = outputBinding
       if let generationContext {
         controllerGenerationByRuntimeID[app.id] = generationContext.generation
       } else {
@@ -1259,15 +1394,29 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       captureAuthorization = .authorized
     } catch {
       retainCleanupDegradations(disposeController(controller))
+      restoreSilencedIncumbent(silencedIncumbent, runtimeID: app.id)
       throw error
     }
+  }
+
+  /// Gives a still-installed incumbent back the app's committed levels. A
+  /// failed intent never committed, and newer intent that reused this
+  /// controller while the replacement was being built already committed its
+  /// own, so the snapshot row is the right source either way.
+  private func restoreSilencedIncumbent(_ incumbent: PerAppTapController?, runtimeID: String) {
+    guard let incumbent, controllers[runtimeID] === incumbent,
+      let app = snapshot.apps.first(where: { $0.id == runtimeID })
+    else { return }
+    incumbent.apply(volume: app.desiredVolume, volumeBoost: app.volumeBoost, muted: app.isMuted)
   }
 
   private func createControllerWithRetry(
     for app: AudioApp,
     processTarget: ResolvedProcessTarget,
     equalizerSettings: EqualizerSettings,
-    generationContext: IntentGenerationContext?
+    generationContext: IntentGenerationContext?,
+    repairContext: RouteRepairContext?,
+    origin: RouteWorkOrigin
   ) async throws -> PerAppTapController {
     let maxRetries = 3
     var lastError: Error?
@@ -1276,9 +1425,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     for attempt in 1...maxRetries {
       try ensureAcceptingOperations()
       do {
-        if let generationContext {
-          try ensureGenerationCurrent(generationContext)
-        }
+        try ensureRouteWorkCurrent(generationContext, repairContext)
+        try spendRouteRebuildBudget(origin)
         let controller = try createController(
           for: app,
           processTarget: currentProcessTarget,
@@ -1290,20 +1438,19 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         return controller
       } catch let superseded as IntentSupersededError {
         throw superseded
+      } catch let refused as RouteRebuildCeilingError {
+        logger.warning("Automatic route rebuild for \(app.displayName, privacy: .public) refused: rebuild ceiling active")
+        throw refused
       } catch {
         lastError = error
         logger.warning("Failed to create controller for \(app.displayName) on attempt \(attempt): \(error.localizedDescription)")
 
         if attempt < maxRetries {
           let backoffMs = UInt64(100 * Int(pow(4.0, Double(attempt - 1))))
-          if let generationContext {
-            try ensureGenerationCurrent(generationContext)
-          }
-          try await Task.sleep(nanoseconds: backoffMs * 1_000_000)
+          try ensureRouteWorkCurrent(generationContext, repairContext)
+          try await controllerRetryPause(backoffMs * 1_000_000)
           try ensureAcceptingOperations()
-          if let generationContext {
-            try ensureGenerationCurrent(generationContext)
-          }
+          try ensureRouteWorkCurrent(generationContext, repairContext)
 
           // Re-resolve process object IDs after suspension. A transient resolution
           // failure is left for the next retry to report with the friendly error.
@@ -1317,9 +1464,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
     }
 
-    if let generationContext {
-      try ensureGenerationCurrent(generationContext)
-    }
+    try ensureRouteWorkCurrent(generationContext, repairContext)
     logger.error("Giving up on managed route for \(app.displayName) after \(maxRetries) attempts: \(lastError?.localizedDescription ?? "unknown error")")
     throw BackendError.managedRouteUnavailable(
       "Waves couldn't take over audio for \(app.displayName). If this keeps happening, check that audio capture is allowed in System Settings › Privacy & Security."

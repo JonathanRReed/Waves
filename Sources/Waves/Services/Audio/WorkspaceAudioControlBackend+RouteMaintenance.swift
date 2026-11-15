@@ -89,7 +89,21 @@ extension WorkspaceAudioControlBackend {
     }
   }
 
-  func reattachRoutes(forLogicalIDs logicalIDs: Set<String>) async {
+  enum ReattachMode {
+    /// Build a route where one is missing or no longer covers the app.
+    case attach
+    /// Rebuild every route on the current default output (make before break).
+    /// A route that cannot be rebuilt is released rather than left on the old
+    /// device: the 1.7.0 policy is that a failed recovery restores the app's
+    /// own audibility and says why.
+    case rehome
+  }
+
+  func reattachRoutes(
+    forLogicalIDs logicalIDs: Set<String>,
+    origin: RouteWorkOrigin,
+    mode: ReattachMode = .attach
+  ) async {
     guard !isShuttingDown else { return }
     // A reattach is one coherent setup pass. Capture router activity before
     // any await so every route sees the same verified Security/Core Audio view.
@@ -121,6 +135,9 @@ extension WorkspaceAudioControlBackend {
           for: app,
           toVolume: app.desiredVolume,
           muted: app.isMuted,
+          forceRebuild: mode == .rehome,
+          repairContext: makeRepairContext(for: app),
+          origin: origin,
           routerActivity: routerActivity
         )
         if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
@@ -130,11 +147,36 @@ extension WorkspaceAudioControlBackend {
           snapshot.apps[index].notes = nil
           snapshot.apps[index].routeHealthContext = nil
         }
+      } catch is IntentSupersededError {
+        // Newer intent or route work for this app landed while the reattach
+        // was suspended; that work owns the route now.
+        continue
+      } catch is IntentBackendStoppedError {
+        return
       } catch {
-        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
-          markRouteError(at: index, error: error)
+        var reported = error
+        if mode == .rehome {
+          releaseRoute(runtimeID: app.id)
+          switch error {
+          case BackendError.noActiveAudioStream, BackendError.noAudioCapability:
+            // Not a route failure: the app has nothing to tap right now, and
+            // markRouteError already classifies these.
+            break
+          default:
+            reported = BackendError.managedRouteUnavailable(
+              "Waves couldn't move \(app.displayName) to the new output device, so it now plays at its own volume. \(error.localizedDescription)"
+            )
+          }
         }
-        lastError = error.localizedDescription
+        if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
+          markRouteError(at: index, error: reported)
+          if mode == .rehome {
+            snapshot.apps[index].appliedVolume = nil
+            snapshot.apps[index].peakLevel = 0
+            snapshot.apps[index].rmsLevel = 0
+          }
+        }
+        lastError = reported.localizedDescription
       }
     }
 
@@ -142,6 +184,18 @@ extension WorkspaceAudioControlBackend {
     // reattach that leaves some apps in .error must keep the badge red.
     refreshGlobalRouteHealth(latestError: lastError)
     snapshot.updatedAt = .now
+  }
+
+  /// Disposes an app's controller and forgets its per-route bookkeeping.
+  func releaseRoute(runtimeID: String) {
+    if let controller = controllers.removeValue(forKey: runtimeID) {
+      retainCleanupDegradations(disposeController(controller))
+    }
+    controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
+    staleRouteTicks.removeValue(forKey: runtimeID)
+    lastRenderTickByAppID.removeValue(forKey: runtimeID)
+    geometryRecoveryByRuntimeID.removeValue(forKey: runtimeID)
+    routeOutputBindingByRuntimeID.removeValue(forKey: runtimeID)
   }
 
   func startLevelUpdateTask() {
@@ -181,6 +235,13 @@ extension WorkspaceAudioControlBackend {
       let activity = verifiedRouterActivityProvider?()
       memoizedRouterActivity = .some(activity)
       return activity
+    }
+    // Geometry-recovery state belongs to a live controller. Any path that
+    // retired the controller (exclusion, router yield, app quit) retires its
+    // coordinator too, so a relaunched app or a rebuilt route never inherits
+    // a spent recovery budget.
+    if geometryRecoveryByRuntimeID.keys.contains(where: { controllers[$0] == nil }) {
+      geometryRecoveryByRuntimeID = geometryRecoveryByRuntimeID.filter { controllers[$0.key] != nil }
     }
     let routerReleasedRouteIDs = observeCompetingRouterConflicts(
       at: now,
@@ -232,13 +293,7 @@ extension WorkspaceAudioControlBackend {
             // The rebuilt route keeps mismatching. Its tap mutes the app while
             // the callback renders silence, so keeping it alive would leave the
             // app inaudible; release it and report the failure instead.
-            if let failed = controllers.removeValue(forKey: appID) {
-              retainCleanupDegradations(disposeController(failed))
-            }
-            controllerGenerationByRuntimeID.removeValue(forKey: appID)
-            staleRouteTicks.removeValue(forKey: snapshot.apps[index].logicalID)
-            lastRenderTickByAppID.removeValue(forKey: snapshot.apps[index].logicalID)
-            geometryRecoveryByRuntimeID.removeValue(forKey: appID)
+            releaseRoute(runtimeID: appID)
             markRouteError(
               at: index,
               error: BackendError.managedRouteUnavailable(recovery.exhaustedDetail)
@@ -378,7 +433,7 @@ extension WorkspaceAudioControlBackend {
   /// `now` is the same clock the level tick used for its debouncers and
   /// recovery decisions, so a rebuild's verification window is measured on
   /// the tick clock rather than a second, unrelated one.
-  private func performRouteMaintenance(
+  func performRouteMaintenance(
     forceRebuildIDs: Set<String> = [],
     geometryRecoveryIDs: Set<String> = [],
     routerActivity: VerifiedRouterActivitySnapshot? = nil,
@@ -446,6 +501,9 @@ extension WorkspaceAudioControlBackend {
           toVolume: app.desiredVolume,
           muted: app.isMuted,
           forceRebuild: shouldForceRebuild,
+          repairContext: makeRepairContext(for: app),
+          preservesGeometryRecovery: geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
+          origin: .automatic,
           routerActivity: routerActivity
         )
 
@@ -465,6 +523,19 @@ extension WorkspaceAudioControlBackend {
           geometryRecoveryByRuntimeID[app.id] = recovery
         }
         changed = true
+      } catch is IntentSupersededError {
+        // A user edit, an exclusion, or an output change overtook this repair
+        // while it was suspended. It proved nothing about the route, so a
+        // geometry attempt is handed back rather than counted.
+        if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
+          var recovery = geometryRecoveryByRuntimeID[app.id]
+        {
+          _ = recovery.abandonRecovery(at: now)
+          geometryRecoveryByRuntimeID[app.id] = recovery
+        }
+        continue
+      } catch is IntentBackendStoppedError {
+        return
       } catch {
         if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
           var recovery = geometryRecoveryByRuntimeID[app.id]
@@ -472,12 +543,18 @@ extension WorkspaceAudioControlBackend {
           let action = recovery.finishRecovery(succeeded: false, at: now)
           geometryRecoveryByRuntimeID[app.id] = recovery
           if case .exhausted = action {
-            let exhaustion = BackendError.managedRouteUnavailable(
-              "Audio route recovery failed after 3 attempts. Refresh the route or restart Waves."
-            )
+            let exhaustion = BackendError.managedRouteUnavailable(recovery.exhaustedDetail)
+            // Same outcome as a mismatch that exhausts on the level tick: the
+            // controller that kept mismatching mutes the app while rendering
+            // silence, so release it (the app is audible again) and drop the
+            // spent coordinator so the next controller starts with a full one.
+            releaseRoute(runtimeID: app.id)
             if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
               markRouteError(at: currentIndex, error: exhaustion)
               snapshot.apps[currentIndex].routeHealthContext = .geometryRecoveryExhausted
+              snapshot.apps[currentIndex].appliedVolume = nil
+              snapshot.apps[currentIndex].peakLevel = 0
+              snapshot.apps[currentIndex].rmsLevel = 0
             }
             lastError = exhaustion.localizedDescription
             changed = true
@@ -503,6 +580,38 @@ extension WorkspaceAudioControlBackend {
   }
 
   private func monotonicRouteTime() -> Duration {
+    Self.monotonicRouteTime()
+  }
+
+  @Sendable static func monotonicRouteTime() -> Duration {
     .nanoseconds(Int64(clamping: DispatchTime.now().uptimeNanoseconds))
+  }
+
+  /// Gate for every native controller creation attempt. User-initiated work is
+  /// counted and always allowed; automatic work is refused while the
+  /// backend-wide ceiling is active (see `RouteRebuildBudget`).
+  func spendRouteRebuildBudget(_ origin: RouteWorkOrigin) throws {
+    guard
+      routeRebuildBudget.request(
+        origin,
+        liveRouteCount: controllers.count,
+        at: routeBudgetClock()
+      )
+    else { throw RouteRebuildCeilingError() }
+  }
+
+  var routeRebuildBudgetSummary: String {
+    routeRebuildBudget.diagnosticsSummary(liveRouteCount: controllers.count, at: routeBudgetClock())
+  }
+
+  var isRouteRebuildCeilingActive: Bool {
+    routeRebuildBudget.isCeilingActive(liveRouteCount: controllers.count, at: routeBudgetClock())
+  }
+}
+
+/// Automatic route work was refused by the backend-wide rebuild ceiling.
+struct RouteRebuildCeilingError: LocalizedError {
+  var errorDescription: String? {
+    "Waves paused automatic audio route rebuilds because too many happened in a short time. Use Recover Routes to try again now."
   }
 }

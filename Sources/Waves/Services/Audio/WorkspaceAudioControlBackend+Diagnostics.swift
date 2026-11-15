@@ -77,6 +77,12 @@ extension WorkspaceAudioControlBackend {
       ))
     checks.append(
       DiagnosticsCheck(
+        title: "Route rebuild budget",
+        status: isRouteRebuildCeilingActive ? .warning : .informational,
+        detail: routeRebuildBudgetSummary
+      ))
+    checks.append(
+      DiagnosticsCheck(
         title: "Support matrix",
         status: .informational,
         detail: snapshot.supportMatrix.coverageSummary

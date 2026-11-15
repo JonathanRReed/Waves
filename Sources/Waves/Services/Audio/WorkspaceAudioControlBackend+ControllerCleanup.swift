@@ -57,6 +57,8 @@ extension WorkspaceAudioControlBackend {
       controllerGenerationByRuntimeID.removeValue(forKey: appID)
       staleRouteTicks.removeValue(forKey: appID)
       lastRenderTickByAppID.removeValue(forKey: appID)
+      geometryRecoveryByRuntimeID.removeValue(forKey: appID)
+      routeOutputBindingByRuntimeID.removeValue(forKey: appID)
     }
     return degradations
   }

@@ -208,6 +208,11 @@ final class PerAppTapController: @unchecked Sendable {
     return (state.volume, state.volumeBoost)
   }
 
+  func settledIsMutedForTesting() -> Bool {
+    callbackQueue.sync {}
+    return stateBox.read().isMuted != 0
+  }
+
   var isActive: Bool {
     stateBox.read().isActive != 0
       && (testingIsActive || (ioProcID != nil && aggregateDeviceID != .unknown))

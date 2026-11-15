@@ -127,7 +127,7 @@ func appIdentityCollisionRetainsTheManagedController(kind: String) async throws 
 
   let rejected = await fixture.backend.applyAppIntent(collisionIntent(generation: 1))
   #expect(rejected.outcome == .unsupported)
-  await fixture.backend.reattachRoutes(forLogicalIDs: [retained.logicalID])
+  await fixture.backend.reattachRoutes(forLogicalIDs: [retained.logicalID], origin: .userInitiated)
   #expect(fixture.events.values.isEmpty)
   #expect(fixture.controller.isActive)
 

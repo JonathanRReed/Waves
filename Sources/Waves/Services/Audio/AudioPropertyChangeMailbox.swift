@@ -7,6 +7,9 @@ struct AudioPropertyChanges: OptionSet, Sendable {
   static let defaultOutput = Self(rawValue: 1 << 0)
   static let deviceInventory = Self(rawValue: 1 << 1)
   static let routerObservation = Self(rawValue: 1 << 2)
+  /// Nominal rate, output stream configuration, or alive state of a device.
+  static let deviceFormat = Self(rawValue: 1 << 3)
+  static let wake = Self(rawValue: 1 << 4)
 
   static func outputChanges(in addresses: UnsafeBufferPointer<AudioObjectPropertyAddress>) -> Self {
     var changes: Self = []
