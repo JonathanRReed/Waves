@@ -45,6 +45,7 @@ extension WorkspaceAudioControlBackend {
     // instead of reported as applied.
     let dspChangeRequested =
       intent.volumeBoost != previousApp.volumeBoost
+      || intent.equalizerSettings != (equalizerSettingsByAppID[logicalID] ?? EqualizerSettings())
       || intent.targetDeviceUID != previousApp.targetDeviceUID
     let audioChangeRequested =
       intent.desiredVolume != previousApp.desiredVolume
@@ -89,8 +90,20 @@ extension WorkspaceAudioControlBackend {
         bundleIdentifier: bundleIdentifier,
         volume: intent.desiredVolume,
         isMuted: intent.isMuted,
-        allowsChannelRelocation: intent.reason != .automation
+        allowsChannelRelocation: intent.reason != .automation,
+        isCurrent: { [weak self] in
+          await self?.isGenerationCurrent(generationContext) ?? false
+        }
       )
+      if !isGenerationCurrent(generationContext),
+        let index = waveLinkBridgedRowIndex(logicalID: logicalID, context: generationContext)
+      {
+        // A newer intent replaced this one, but Wave Link now holds this
+        // value. Record it so a failure of the newer intent leaves the row
+        // showing what Wave Link actually has.
+        snapshot.apps[index].desiredVolume = confirmation.appliedVolume
+        snapshot.apps[index].isMuted = confirmation.isMuted
+      }
       try ensureGenerationCurrent(generationContext)
 
       guard let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else {
@@ -153,6 +166,11 @@ extension WorkspaceAudioControlBackend {
       )
     } catch {
       guard isGenerationCurrent(generationContext) else {
+        if case .unconfirmed(_, let observed) = error as? WaveLinkControlBridgeError,
+          let index = waveLinkBridgedRowIndex(logicalID: logicalID, context: generationContext)
+        {
+          reconcileUnconfirmedWaveLinkChange(at: index, intent: intent, observed: observed)
+        }
         clearStagedIntentIfCurrent(intent, logicalID: logicalID)
         return supersededResult(for: intent, logicalID: logicalID)
       }
@@ -164,8 +182,12 @@ extension WorkspaceAudioControlBackend {
         ) {
           return reclaimed
         }
-        snapshot.apps[currentIndex].desiredVolume = previousApp.desiredVolume
-        snapshot.apps[currentIndex].isMuted = previousApp.isMuted
+        // A change Wave Link never received leaves the row's last confirmed
+        // level and mute in place. One it may have received is reconciled
+        // with what Wave Link reported.
+        if case .unconfirmed(_, let observed) = error as? WaveLinkControlBridgeError {
+          reconcileUnconfirmedWaveLinkChange(at: currentIndex, intent: intent, observed: observed)
+        }
         snapshot.apps[currentIndex].appliedVolume = nil
         snapshot.apps[currentIndex].routingState = .monitorOnly
         snapshot.apps[currentIndex].routeHealthContext = .waveLinkBridge
@@ -198,6 +220,44 @@ extension WorkspaceAudioControlBackend {
         "\(app.displayName) shares a Wave Link channel with other apps, so Waves left it alone. Move it to its own Wave Link channel, or change its level here yourself, to control it from Waves."
     default:
       return error.localizedDescription
+    }
+  }
+
+  /// The row for `logicalID` while Wave Link still controls it in the session
+  /// that started the apply, so a late bridge result may update it.
+  private func waveLinkBridgedRowIndex(
+    logicalID: String,
+    context: IntentGenerationContext
+  ) -> Int? {
+    guard context.lifecycleEpoch == lifecycleEpoch, !isShuttingDown,
+      let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }),
+      snapshot.apps[index].routeHealthContext == .waveLinkBridge,
+      controllers[snapshot.apps[index].id]?.isActive != true
+    else { return nil }
+    return index
+  }
+
+  /// Makes the row agree with Wave Link after a change it may have applied
+  /// but did not confirm. Rolling the row back to its old level could show a
+  /// level Wave Link no longer plays, and the next change from Waves would
+  /// then send that stale level.
+  ///
+  /// When Wave Link reported a valid state, the row shows it. When it did not,
+  /// Waves cannot know which value Wave Link holds, so the row keeps the
+  /// quieter of the two levels and stays muted if either side was muted: the
+  /// next change sent from this row can then never raise or unmute the app
+  /// beyond what the user chose.
+  private func reconcileUnconfirmedWaveLinkChange(
+    at index: Int,
+    intent: AppRouteIntent,
+    observed: WaveLinkChannelState?
+  ) {
+    if let observed {
+      snapshot.apps[index].desiredVolume = observed.level
+      snapshot.apps[index].isMuted = observed.isMuted
+    } else {
+      snapshot.apps[index].desiredVolume = min(snapshot.apps[index].desiredVolume, intent.desiredVolume)
+      snapshot.apps[index].isMuted = snapshot.apps[index].isMuted || intent.isMuted
     }
   }
 

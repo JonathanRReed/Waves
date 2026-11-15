@@ -368,6 +368,66 @@ struct WaveLinkLoopbackSessionTests {
     await session.close()
   }
 
+  @Test(arguments: [WaveLinkLevelResponse.late(reads: 3), .ramp(reads: 4)])
+  func waveLinkBridgeConfirmsALargeStepThatTheServerAppliesOverSeveralReads(
+    _ response: WaveLinkLevelResponse
+  ) async throws {
+    let server = try TestJSONRPCServer(
+      channels: [Self.browserChannel(level: 1)],
+      levelResponse: response
+    )
+    defer { server.close() }
+    let bridge = Self.bridge(over: makeTestWaveLinkSession(server: server))
+
+    let confirmation = try await bridge.apply(
+      bundleIdentifier: "com.example.browser", volume: 0.1, isMuted: false)
+
+    #expect(abs(confirmation.appliedVolume - 0.1) < 0.0001)
+    #expect(server.receivedMethods.filter { $0 == "setChannel" }.count == 1)
+    let params = try #require(server.receivedSetChannelParams.first)
+    #expect(params["id"] as? String == "channel-browser")
+    #expect(params["isMuted"] as? Bool == false)
+    #expect(abs(((params["level"] as? NSNumber)?.floatValue ?? -1) - 0.1) < 0.0001)
+  }
+
+  @Test func waveLinkBridgeReportsWhatTheServerShowsWhenAStepNeverLands() async throws {
+    let server = try TestJSONRPCServer(
+      channels: [Self.browserChannel(level: 1)],
+      levelResponse: .late(reads: 50)
+    )
+    defer { server.close() }
+    let bridge = Self.bridge(over: makeTestWaveLinkSession(server: server))
+
+    await #expect(
+      throws: WaveLinkControlBridgeError.unconfirmed(
+        .readBackMismatch("Requested 0.1, muted false; received 1.0, muted false."),
+        observed: WaveLinkChannelState(level: 1, isMuted: false))
+    ) {
+      try await bridge.apply(bundleIdentifier: "com.example.browser", volume: 0.1, isMuted: false)
+    }
+    #expect(
+      server.receivedMethods.filter { $0 == "getChannels" }.count
+        == 2 + WaveLinkControlBridge.confirmationDelays.count)
+  }
+
+  private static func browserChannel(level: Float) -> [String: Any] {
+    [
+      "id": "channel-browser", "name": "Browser", "type": "Software", "level": level,
+      "isMuted": false, "apps": [["id": "com.example.browser"]],
+      "mixes": [["id": "personal", "level": 1, "isMuted": false]],
+    ]
+  }
+
+  /// The production bridge over a real loopback session, without waiting
+  /// between read-backs: the server's late and ramp modes advance per read.
+  private static func bridge(over session: WaveLinkLoopbackSession) -> WaveLinkControlBridge {
+    WaveLinkControlBridge(
+      request: { method, params in try await session.request(method: method, params: params) },
+      validatePeer: { try await session.connect() },
+      finishSequence: { await session.endSequence() },
+      sleep: { _ in }
+    )
+  }
 }
 
 private func makeTestWaveLinkSession(
@@ -428,8 +488,20 @@ private final class TestTCPListener {
 }
 
 /// A minimal WebSocket JSON-RPC server that answers `getApplicationInfo` with
-/// a configurable payload, applies bounded test behavior to `getChannels`,
-/// and records what it saw.
+/// a configurable payload, keeps a channel list that `setChannel` and
+/// `addToChannel` change, applies bounded test behavior to `getChannels`, and
+/// records what it saw.
+///
+/// It is as strict as real Wave Link 3 is known to be, so a request Wave Link
+/// would refuse fails here too:
+/// - It refuses the WebSocket upgrade without the `streamdeck://` origin,
+///   which Wave Link 3 requires as its credential.
+/// - It answers explicit `null` params with Invalid params. Real Wave Link 3
+///   does; Waves 1.7.0 and 1.7.1 shipped sending them because an earlier
+///   fixture accepted them.
+/// - It answers methods it does not know with Method not found, and a change
+///   without a params object or naming no listed channel with Invalid params,
+///   instead of an empty success.
 private final class TestJSONRPCServer: @unchecked Sendable {
   enum GetChannelsBehavior {
     case notificationsThenReply(count: Int, payloadBytes: Int, intervalMicroseconds: useconds_t)
@@ -438,11 +510,18 @@ private final class TestJSONRPCServer: @unchecked Sendable {
 
   let port: UInt16
   var receivedMethods: [String] { lock.withLock { recordedMethods } }
+  /// The `setChannel` params received, in order.
+  var receivedSetChannelParams: [[String: Any]] { lock.withLock { recordedSetChannelParams } }
   var lastOrigin: String? { lock.withLock { recordedOrigin } }
   private let applicationInfo: String
   private let handshakeDelayMicroseconds: useconds_t
   private let redirectLocation: String?
   private let getChannelsBehavior: GetChannelsBehavior
+  private let levelResponse: WaveLinkLevelResponse
+  private var channels: [[String: Any]]
+  /// A `setChannel` that is still taking effect, for the late and ramp modes.
+  private var settling: (channelID: String, from: Float, to: Float, reads: Int)?
+  private var recordedSetChannelParams: [[String: Any]] = []
   private let listener: Int32
   private let queue = DispatchQueue(label: "waves.tests.wavelink-server")
   private let workers = DispatchGroup()
@@ -460,8 +539,12 @@ private final class TestJSONRPCServer: @unchecked Sendable {
       count: 1,
       payloadBytes: 0,
       intervalMicroseconds: 0
-    )
+    ),
+    channels: [[String: Any]] = [],
+    levelResponse: WaveLinkLevelResponse = .immediate
   ) throws {
+    self.channels = channels
+    self.levelResponse = levelResponse
     self.applicationInfo = applicationInfo
     self.handshakeDelayMicroseconds = handshakeDelayMicroseconds
     self.redirectLocation = redirectLocation
@@ -549,17 +632,24 @@ private final class TestJSONRPCServer: @unchecked Sendable {
     guard let request = readHTTPRequest(client) else { return }
     let headers = request.split(separator: "\r\n").dropFirst()
     var key: String?
+    var origin: String?
     for header in headers {
       let parts = header.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
       guard parts.count == 2 else { continue }
       switch parts[0].lowercased() {
       case "sec-websocket-key": key = parts[1]
       case "origin":
+        origin = parts[1]
         lock.withLock { recordedOrigin = parts[1] }
       default: break
       }
     }
     guard let key else { return }
+    guard origin == "streamdeck://" else {
+      let response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+      _ = TestWebSocketFraming.writeAll(Data(response.utf8), to: client)
+      return
+    }
     if let redirectLocation {
       let response = "HTTP/1.1 302 Found\r\nLocation: \(redirectLocation)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
       _ = TestWebSocketFraming.writeAll(Data(response.utf8), to: client)
@@ -587,20 +677,76 @@ private final class TestJSONRPCServer: @unchecked Sendable {
         )
         continue
       }
+      let idText = (id as? NSNumber).map { "\($0)" } ?? "null"
       let result: String
       switch method {
       case "getApplicationInfo": result = applicationInfo
       case "getChannels":
         guard performGetChannelsBehavior(on: client) else { return }
-        result = #"{"channels":[]}"#
-      default: result = "{}"
+        result = listChannels()
+      case "setChannel", "addToChannel":
+        guard let params = object["params"] as? [String: Any],
+          lock.withLock({ change(method, params) })
+        else {
+          _ = TestWebSocketFraming.writeTextFrame(
+            #"{"jsonrpc":"2.0","id":\#(idText),"error":{"code":-32602,"message":"Invalid params"}}"#,
+            to: client
+          )
+          continue
+        }
+        result = "{}"
+      default:
+        _ = TestWebSocketFraming.writeTextFrame(
+          #"{"jsonrpc":"2.0","id":\#(idText),"error":{"code":-32601,"message":"Method not found"}}"#,
+          to: client
+        )
+        continue
       }
-      let idText = (id as? NSNumber).map { "\($0)" } ?? "null"
       _ = TestWebSocketFraming.writeTextFrame(
         #"{"jsonrpc":"2.0","id":\#(idText),"result":\#(result)}"#,
         to: client
       )
     }
+  }
+
+  /// The channel list, advancing a settling level by one read.
+  private func listChannels() -> String {
+    lock.withLock {
+      if var settling, let index = channels.firstIndex(where: { $0["id"] as? String == settling.channelID }) {
+        settling.reads += 1
+        self.settling = settling
+        channels[index]["level"] = levelResponse.level(from: settling.from, to: settling.to, afterReads: settling.reads)
+      }
+      let data = (try? JSONSerialization.data(withJSONObject: ["channels": channels])) ?? Data()
+      return String(decoding: data, as: UTF8.self)
+    }
+  }
+
+  /// Applies a change under `lock`. Returns false for params Wave Link could
+  /// not act on.
+  private func change(_ method: String, _ params: [String: Any]) -> Bool {
+    if method == "setChannel" {
+      guard let id = params["id"] as? String,
+        let index = channels.firstIndex(where: { $0["id"] as? String == id })
+      else { return false }
+      recordedSetChannelParams.append(params)
+      if let isMuted = params["isMuted"] as? Bool { channels[index]["isMuted"] = isMuted }
+      if let level = (params["level"] as? NSNumber)?.floatValue {
+        let from = (channels[index]["level"] as? NSNumber)?.floatValue ?? 1
+        settling = (id, from, level, 0)
+        channels[index]["level"] = levelResponse.level(from: from, to: level, afterReads: 0)
+      }
+      return true
+    }
+    guard let appID = params["appId"] as? String, let channelID = params["channelId"] as? String,
+      let target = channels.firstIndex(where: { $0["id"] as? String == channelID })
+    else { return false }
+    for index in channels.indices {
+      let apps = (channels[index]["apps"] as? [[String: Any]]) ?? []
+      channels[index]["apps"] = apps.filter { $0["id"] as? String != appID }
+    }
+    channels[target]["apps"] = ((channels[target]["apps"] as? [[String: Any]]) ?? []) + [["id": appID]]
+    return true
   }
 
   private func performGetChannelsBehavior(on client: Int32) -> Bool {
