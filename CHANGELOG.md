@@ -6,6 +6,8 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-15
+
 ### Added
 - Profiles can save each app's EQ and output device as well as its levels. You
   choose both when saving. Applying a profile skips a saved output that is not
