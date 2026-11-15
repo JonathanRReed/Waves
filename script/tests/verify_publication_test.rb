@@ -11,13 +11,20 @@ require_relative "../verify-publication"
 class VerifyPublicationTest < Minitest::Test
   VERSION = "1.7.4"
   BUILD = "22"
-  DMG = "canned disk image bytes"
+  # RFC 8032 section 7.1, test 2: a one-byte message, its public key and its
+  # signature stand in for the DMG, the pinned Sparkle key and the appcast.
+  DMG = "\x72".b
+  PUBLIC_KEY = ["3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"].pack("H*")
+  SIGNATURE = Base64.strict_encode64(
+    ["92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da" \
+     "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"].pack("H*")
+  )
   SHA = Digest::SHA256.hexdigest(DMG)
   API = "https://api.github.com/repos/JonathanRReed/Waves/releases"
   DMG_URL = "https://github.com/JonathanRReed/Waves/releases/download/v1.7.4/Waves.dmg"
   SITE = "https://waves.jonathanrreed.com"
 
-  def appcast(version: VERSION, build: BUILD, url: DMG_URL, length: DMG.bytesize, signature: Base64.strict_encode64("s" * 64))
+  def appcast(version: VERSION, build: BUILD, url: DMG_URL, length: DMG.bytesize, signature: SIGNATURE)
     <<~XML
       <?xml version="1.0" encoding="utf-8"?>
       <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel>
@@ -40,7 +47,8 @@ class VerifyPublicationTest < Minitest::Test
       "#{SITE}/appcast.xml" => appcast,
       "#{SITE}/" => %(<a href="https://github.com/JonathanRReed/Waves/releases/download/v1.7.4/Waves.dmg">Download</a>),
       "#{SITE}/changelog/" => %(<h2 id="v1-7-4">1.7.4</h2><h2 id="v1-7-3">1.7.3</h2>),
-      WavesPublication::CASK_URL => %(cask "waves" do\n  version "1.7.4"\n  sha256 "#{SHA}"\nend\n),
+      WavesPublication::CASK_URL => %(cask "waves" do\n  version "1.7.4"\n  sha256 "#{SHA}"\n) +
+        %(  url "https://github.com/JonathanRReed/Waves/releases/download/v\#{version}/Waves.dmg"\nend\n),
     }
   end
 
@@ -52,7 +60,7 @@ class VerifyPublicationTest < Minitest::Test
 
       value
     end
-    status = WavesPublication.run([VERSION, BUILD], out: out, fetch: fetch)
+    status = WavesPublication.run([VERSION, BUILD], out: out, fetch: fetch, public_key: PUBLIC_KEY)
     [status, out.string]
   end
 
@@ -98,6 +106,8 @@ class VerifyPublicationTest < Minitest::Test
       appcast(url: DMG_URL.sub("v1.7.4", "v1.7.3")) => /enclosure URL/,
       appcast(length: DMG.bytesize + 1) => /enclosure length/,
       appcast(signature: "") => /edSignature/,
+      appcast(signature: Base64.strict_encode64("\0" * 64)) => /does not verify/,
+      appcast(signature: Base64.strict_encode64(Base64.strict_decode64(SIGNATURE).tap { |raw| raw.setbyte(40, raw.getbyte(40) ^ 1) })) => /does not verify/,
     }.each do |feed, pattern|
       canned = responses
       canned["#{SITE}/appcast.xml"] = feed
@@ -123,6 +133,10 @@ class VerifyPublicationTest < Minitest::Test
     canned = responses
     canned[WavesPublication::CASK_URL] = canned[WavesPublication::CASK_URL].sub(%(version "1.7.4"), %(version "1.7.3"))
     assert_only_failure(canned, "Homebrew tap", /1\.7\.3/)
+
+    canned = responses
+    canned[WavesPublication::CASK_URL] = canned[WavesPublication::CASK_URL].sub('v#{version}', "v1.7.3")
+    assert_only_failure(canned, "Homebrew tap", /cask url resolves to/)
   end
 
   def test_unreachable_channel_is_reported_and_others_still_run
@@ -135,11 +149,19 @@ class VerifyPublicationTest < Minitest::Test
     assert_match(/\APASS  Site changelog/, output.lines.grep(/Site changelog/).first)
   end
 
+  def test_signature_from_another_key_fails
+    other_key = ["d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"].pack("H*")
+    out = StringIO.new
+    status = WavesPublication.run([VERSION, BUILD], out: out, fetch: ->(url) { responses.fetch(url) }, public_key: other_key)
+    assert_equal 1, status, out.string
+    assert_match(/\AFAIL  Appcast\s.*does not verify/, out.string.lines.grep(/Appcast/).first)
+  end
+
   def test_rejects_malformed_arguments
     _out, err = capture_io do
-      assert_equal 2, WavesPublication.run(["1.7"], fetch: ->(_) { flunk "fetched" })
-      assert_equal 2, WavesPublication.run(["1.7", "22"], fetch: ->(_) { flunk "fetched" })
-      assert_equal 2, WavesPublication.run(["1.7.4", "0"], fetch: ->(_) { flunk "fetched" })
+      assert_equal 2, WavesPublication.run(["1.7"], fetch: ->(_) { flunk "fetched" }, public_key: PUBLIC_KEY)
+      assert_equal 2, WavesPublication.run(["1.7", "22"], fetch: ->(_) { flunk "fetched" }, public_key: PUBLIC_KEY)
+      assert_equal 2, WavesPublication.run(["1.7.4", "0"], fetch: ->(_) { flunk "fetched" }, public_key: PUBLIC_KEY)
     end
     assert_match(/usage/, err)
   end

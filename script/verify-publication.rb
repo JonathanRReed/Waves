@@ -25,6 +25,82 @@ module WavesPublication
   class Failure < StandardError; end
   Check = Struct.new(:name, :passed, :detail)
 
+  # Ed25519 signature verification (RFC 8032), so the appcast signature can be
+  # checked against the downloaded DMG with only the pinned public key. The
+  # system Ruby's OpenSSL has no Ed25519. Verification handles no secrets, so
+  # plain integer arithmetic is enough.
+  module Ed25519
+    P = 2**255 - 19
+    L = 2**252 + 27_742_317_777_372_353_535_851_937_790_883_648_493
+    D = -121_665 * 121_666.pow(P - 2, P) % P
+    SQRT_M1 = 2.pow((P - 1) / 4, P)
+
+    module_function
+
+    def recover_x(y, sign)
+      return nil if y >= P
+
+      x2 = (y * y - 1) * (D * y * y + 1).pow(P - 2, P) % P
+      return sign.zero? ? 0 : nil if x2.zero?
+
+      x = x2.pow((P + 3) / 8, P)
+      x = x * SQRT_M1 % P unless ((x * x - x2) % P).zero?
+      return nil unless ((x * x - x2) % P).zero?
+
+      (x & 1) == sign ? x : P - x
+    end
+
+    def integer(bytes)
+      bytes.reverse.unpack1("H*").to_i(16)
+    end
+
+    def point(bytes)
+      y = integer(bytes)
+      sign = y >> 255
+      y &= (1 << 255) - 1
+      x = recover_x(y, sign)
+      x && [x, y, 1, x * y % P]
+    end
+
+    def add(p, q)
+      a = (p[1] - p[0]) * (q[1] - q[0]) % P
+      b = (p[1] + p[0]) * (q[1] + q[0]) % P
+      c = 2 * p[3] * q[3] * D % P
+      d = 2 * p[2] * q[2] % P
+      e, f, g, h = b - a, d - c, d + c, b + a
+      [e * f % P, g * h % P, f * g % P, e * h % P]
+    end
+
+    def multiply(scalar, p)
+      q = [0, 1, 1, 0]
+      while scalar.positive?
+        q = add(q, p) if scalar.odd?
+        p = add(p, p)
+        scalar >>= 1
+      end
+      q
+    end
+
+    BASE_Y = 4 * 5.pow(P - 2, P) % P
+    BASE_X = recover_x(BASE_Y, 0)
+    BASE = [BASE_X, BASE_Y, 1, BASE_X * BASE_Y % P].freeze
+
+    def valid?(public_key, message, signature)
+      public_key, signature = public_key.b, signature.b
+      return false unless public_key.bytesize == 32 && signature.bytesize == 64
+
+      a = point(public_key)
+      r = point(signature[0, 32])
+      s = integer(signature[32, 32])
+      return false unless a && r && s < L
+
+      h = integer(Digest::SHA512.digest(signature[0, 32] + public_key + message.b)) % L
+      left = multiply(s, BASE)
+      right = add(r, multiply(h, a))
+      ((left[0] * right[2] - right[0] * left[2]) % P).zero? && ((left[1] * right[2] - right[1] * left[2]) % P).zero?
+    end
+  end
+
   module_function
 
   # Unauthenticated GET that follows HTTPS redirects and returns the body.
@@ -48,7 +124,11 @@ module WavesPublication
     end
   end
 
-  def verify(version:, build:, fetch: method(:fetch))
+  def pinned_public_key
+    Base64.strict_decode64(JSON.parse(File.read(METADATA)).fetch("sparkle").fetch("publicEDKey"))
+  end
+
+  def verify(version:, build:, fetch: method(:fetch), public_key: pinned_public_key)
     tag = "v#{version}"
     dmg_url = "https://github.com/#{REPOSITORY}/releases/download/#{tag}/Waves.dmg"
     checks = []
@@ -77,7 +157,7 @@ module WavesPublication
 
     attempt.call("GitHub DMG") do
       bytes = fetch.call(dmg_url)
-      dmg = {sha256: Digest::SHA256.hexdigest(bytes), size: bytes.bytesize}
+      dmg = {sha256: Digest::SHA256.hexdigest(bytes), size: bytes.bytesize, bytes: bytes}
       sidecar = fetch.call("#{dmg_url}.sha256").split.first
       require_that.call(sidecar == dmg[:sha256], "Waves.dmg.sha256 says #{sidecar.inspect}, downloaded DMG is #{dmg[:sha256]}")
       "#{dmg[:size]} bytes, sha256 #{dmg[:sha256]}, matches Waves.dmg.sha256"
@@ -100,7 +180,9 @@ module WavesPublication
       signature = enclosure.attribute("edSignature", SPARKLE_NS)&.value.to_s
       decoded = Base64.strict_decode64(signature) rescue ""
       require_that.call(decoded.bytesize == 64, "enclosure has no 64-byte sparkle:edSignature")
-      "newest item is #{found}, enclosure matches the release DMG and is EdDSA-signed"
+      require_that.call(Ed25519.valid?(public_key, dmg[:bytes], decoded),
+                        "sparkle:edSignature does not verify over the downloaded DMG with the pinned Sparkle key")
+      "newest item is #{found}, enclosure matches the release DMG and its EdDSA signature verifies"
     end
 
     attempt.call("Site download") do
@@ -120,6 +202,8 @@ module WavesPublication
       cask_version = cask[/^\s*version\s+"([^"]+)"/, 1]
       cask_sha = cask[/^\s*sha256\s+"([^"]+)"/, 1]
       require_that.call(cask_version == version, "cask version is #{cask_version.inspect}")
+      cask_url = cask[/^\s*url\s+"([^"]+)"/, 1].to_s.gsub('#{version}', cask_version)
+      require_that.call(cask_url == dmg_url, "cask url resolves to #{cask_url.inspect}, expected #{dmg_url}")
       require_that.call(dmg, "cask checksum not compared because the DMG did not download")
       require_that.call(cask_sha == dmg[:sha256], "cask sha256 #{cask_sha.inspect} differs from the downloaded DMG")
       "cask is #{version} with the downloaded DMG's sha256"
@@ -128,7 +212,7 @@ module WavesPublication
     checks
   end
 
-  def run(arguments, out: $stdout, fetch: method(:fetch))
+  def run(arguments, out: $stdout, fetch: method(:fetch), public_key: pinned_public_key)
     case arguments.length
     when 0
       metadata = JSON.parse(File.read(METADATA))
@@ -144,7 +228,7 @@ module WavesPublication
       return 2
     end
 
-    checks = verify(version: version, build: build, fetch: fetch)
+    checks = verify(version: version, build: build, fetch: fetch, public_key: public_key)
     checks.each { |check| out.puts "#{check.passed ? 'PASS' : 'FAIL'}  #{check.name.ljust(15)} #{check.detail}" }
     failed = checks.count { |check| !check.passed }
     out.puts(failed.zero? ? "Waves #{version} build #{build} is live on all four channels." : "#{failed} check(s) failed for Waves #{version} build #{build}.")
