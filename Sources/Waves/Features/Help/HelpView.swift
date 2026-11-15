@@ -16,6 +16,7 @@ struct HelpView: View {
         urlSchemeSection
         externalControlSection
         profilesSection
+        callsSection
         troubleshootingSection
       }
       .padding(20)
@@ -347,6 +348,32 @@ struct HelpView: View {
 
       Text(
         "Membership-only profiles just group apps. Capture levels to also save each app's volume, mute, and boost."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
+    .padding(16)
+    .wavesCard(cornerRadius: 12)
+  }
+
+  private var callsSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Muting Media During Calls")
+        .font(.headline)
+
+      VStack(alignment: .leading, spacing: 8) {
+        bullet("Turn on Mute media during calls in Settings > Mixer. Waves mutes music and video apps for the call and unmutes them when it ends")
+        bullet(
+          "When a call app is in front: Zoom, Teams, Webex, or FaceTime has to be the app you're using. Switching to another app unmutes media, and browser calls aren't detected"
+        )
+        bullet(
+          "When a chosen app is using the microphone: pick the apps you take calls in, including a browser. Media stays muted while any of them uses the microphone, whichever app is in front, and comes back about two seconds after it stops"
+        )
+        bullet("The call app itself is never muted, and anything you mute or unmute yourself stays that way")
+      }
+
+      Text(
+        "In microphone mode, Waves asks macOS which apps are using the microphone. It never listens to, records, or stores microphone audio, and it needs no microphone permission."
       )
       .font(.caption)
       .foregroundStyle(.secondary)

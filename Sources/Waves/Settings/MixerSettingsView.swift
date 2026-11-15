@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WavesAudioCore
 
@@ -137,14 +138,36 @@ struct MixerSettingsView: View {
             set: { store.setAutoPauseMusicEnabled($0) }
           )
         ) {
-          Text("Mute media during video calls")
-          Text("Mutes media apps while a known video call app is in front. Calls in a browser aren't detected.")
+          Text("Mute media during calls")
+          Text("Mutes music and video apps while you're on a call, and unmutes them when it ends.")
         }
         .disabled(!store.isAudioRunning)
+
+        Picker(
+          "Detect a call",
+          selection: Binding(
+            get: { store.preferences.callDetectionMode },
+            set: { store.setCallDetectionMode($0) }
+          )
+        ) {
+          ForEach(CallDetectionMode.allCases) { mode in
+            Text(mode.displayName).tag(mode)
+          }
+        }
+        .pickerStyle(.radioGroup)
+        .disabled(!store.isAudioRunning || !store.preferences.autoPauseMusicForConferencing)
+
+        if store.preferences.autoPauseMusicForConferencing,
+          store.preferences.callDetectionMode == .microphoneInUse
+        {
+          CallAppsList()
+        }
       } header: {
         Text("Calls")
       } footer: {
-        Text("Adaptive Mix, Sidechain Focus, and equalizers live in the main window under Sound.")
+        Text(
+          "In front: works with Zoom, Teams, Webex, and FaceTime, but media comes back when you switch to another app, and browser calls aren't detected. Microphone: works with any app you choose, including a browser, but any microphone use by that app counts as a call. Waves only asks macOS which apps are using the microphone and never listens to it."
+        )
       }
     }
   }
@@ -174,6 +197,74 @@ struct MixerSettingsView: View {
     }
   }
 
+}
+
+/// The apps whose microphone use counts as a call, with Remove buttons and an
+/// Add menu offering any app Waves has seen, or any installed app.
+private struct CallAppsList: View {
+  @Environment(AppStore.self) private var store
+
+  var body: some View {
+    let chosen = store.callDetectionAppIDs
+    if chosen.isEmpty {
+      Text("No apps chosen. Add the app you take calls in.")
+        .foregroundStyle(.secondary)
+    }
+    ForEach(chosen, id: \.self) { appID in
+      let name = appName(appID)
+      HStack {
+        Text(name)
+        Spacer()
+        Button("Remove") { store.setCallDetectionApp(appID, isChosen: false) }
+          .buttonStyle(.borderless)
+          .controlSize(.small)
+          .accessibilityLabel("Remove \(name) from call apps")
+      }
+    }
+    Menu {
+      ForEach(addableApps) { app in
+        Button(app.displayName) { store.setCallDetectionApp(app.logicalID, isChosen: true) }
+      }
+      if addableApps.isEmpty {
+        Text("Every app Waves has seen is already chosen")
+      }
+      Divider()
+      Button("Choose App…") { chooseApp() }
+    } label: {
+      Label("Add App", systemImage: "plus")
+    }
+    .menuStyle(.borderlessButton)
+    .fixedSize()
+    .accessibilityLabel("Add a call app")
+    .disabled(!store.isAudioRunning)
+  }
+
+  private var addableApps: [AudioApp] {
+    let chosen = Set(store.callDetectionAppIDs)
+    return store.visibleApps
+      .filter { !chosen.contains($0.logicalID) }
+      .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+  }
+
+  private func appName(_ appID: String) -> String {
+    FriendlyAppName.resolve(appID, in: store.session.apps)
+  }
+
+  /// For a call app that hasn't run since Waves started, such as a browser.
+  private func chooseApp() {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.application]
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+    panel.prompt = "Choose"
+    panel.message = "Pick the app you take calls in."
+    guard panel.runModal() == .OK,
+      let url = panel.url,
+      let bundleID = Bundle(url: url)?.bundleIdentifier
+    else { return }
+    store.setCallDetectionApp(bundleID, isChosen: true)
+  }
 }
 
 /// Shows what the Wave Link control bridge last saw and offers a read-only

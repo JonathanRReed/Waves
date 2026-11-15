@@ -15,6 +15,13 @@ no account, analytics, or telemetry.
   loudness and voice-band energy values, never audio samples.
 - **Running applications.** Waves lists your running apps (names and icons) so it
   can show them in the mixer.
+- **Which apps are using the microphone (only if you turn it on).** When "Mute
+  media during calls" is set to detect a call "When a chosen app is using the
+  microphone", Waves asks macOS which apps currently have the microphone in use,
+  so it can mute media while an app you chose is on a call. It never listens to,
+  records, or stores microphone audio, and it needs no microphone permission.
+  Diagnostics you copy while this mode is on say whether a call was detected and
+  by which app.
 - **Audio output devices.** Waves reads available output devices to show the
   current device and, optionally, switch it.
 - **Keyboard shortcuts.** Waves registers the exact key combinations you assign
