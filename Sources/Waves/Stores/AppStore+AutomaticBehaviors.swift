@@ -157,19 +157,26 @@ extension AppStore {
       let isCallActive = microphoneCall.isActive
       let chosenAppAdded = microphoneCall.chosenAppAdded
       microphoneCall.chosenAppAdded = false
+      let mediaAppIDs = Set(
+        visibleApps.filter { $0.category == .media && !isExcluded($0) }.map(\.logicalID))
       guard isCallActive != microphoneCall.lastApplied else {
-        // Mid-call, a newly chosen call app is unmuted if an automatic mute
-        // caught it. Nothing new is muted, so manual unmutes still stand.
-        if isCallActive, chosenAppAdded {
-          await applyAutomaticConferencingTransition(
-            isConferencingActive: true,
-            sparing: Set(callDetectionAppIDs),
-            mutesMedia: false
-          )
-        }
+        guard isCallActive else { return }
+        // Mid-call: a newly chosen call app is unmuted if an automatic mute
+        // caught it, and a media app that appeared since the call started is
+        // muted. Apps already decided about are left alone, so manual unmutes
+        // still stand.
+        let newMediaAppIDs = mediaAppIDs.subtracting(microphoneCall.consideredMediaAppIDs)
+        guard chosenAppAdded || !newMediaAppIDs.isEmpty else { return }
+        microphoneCall.consideredMediaAppIDs.formUnion(mediaAppIDs)
+        await applyAutomaticConferencingTransition(
+          isConferencingActive: true,
+          sparing: Set(callDetectionAppIDs),
+          mutingOnly: newMediaAppIDs
+        )
         return
       }
       microphoneCall.lastApplied = isCallActive
+      microphoneCall.consideredMediaAppIDs = isCallActive ? mediaAppIDs : []
       await applyAutomaticConferencingTransition(
         isConferencingActive: isCallActive,
         sparing: Set(callDetectionAppIDs)
@@ -199,20 +206,22 @@ extension AppStore {
   /// `sparing` names the call apps themselves: never muted by this, and
   /// unmuted if an earlier automatic mute caught one.
   ///
-  /// `mutesMedia` is false for a pass that only releases spared apps.
+  /// `mutingOnly` limits which media apps a mid-call pass may mute; nil means
+  /// every media app.
   func applyAutomaticConferencingTransition(
     isConferencingActive: Bool,
     sparing sparedAppIDs: Set<String> = [],
-    mutesMedia: Bool = true
+    mutingOnly: Set<String>? = nil
   ) async {
     guard requireAudioRunning() else { return }
     var mutedNames: [String] = []
     var unmutedNames: [String] = []
 
-    if isConferencingActive, mutesMedia {
+    if isConferencingActive {
       let musicApps = visibleApps.filter {
         $0.category == .media && !$0.isMuted && !isExcluded($0)
           && !sparedAppIDs.contains($0.logicalID)
+          && (mutingOnly?.contains($0.logicalID) ?? true)
       }
       for app in musicApps {
         let result = await applyAppIntent(
@@ -226,8 +235,10 @@ extension AppStore {
           feedbackPolicy: .none,
           optimistic: false
         )
-        guard (result.outcome == .applied || result.outcome == .noChange),
-          result.resultingApp?.isMuted == true,
+        // Ownership follows what happened, not the outcome: a router can
+        // apply the mute and still fail to confirm the rest of the request,
+        // and that mute must be released when the call ends.
+        guard result.resultingApp?.isMuted == true,
           session.apps.first(matchingAppKey: app.logicalID)?.isMuted == true,
           appIntentCoordinator.isCurrent(result.generation, for: app.logicalID)
         else {

@@ -1704,6 +1704,96 @@ private func muteState(_ store: AppStore, _ appID: String) -> (isMuted: Bool, so
 }
 
 @MainActor
+@Test func aCallMuteThatLandedWithoutConfirmationIsStillReleasedWhenTheCallEnds() async {
+  let (fixture, monitor, clock) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  // The router mutes the app but does not confirm the rest of the request.
+  await fixture.backend.failIntentsButApplyMute(for: ["com.example.music"])
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  #expect(muteState(store, "com.example.music")?.source == .autoConferencing)
+
+  // It is Waves's mute, not the user's, so it is not captured as theirs.
+  let music = store.session.apps.first { $0.logicalID == "com.example.music" }
+  #expect(music.map(store.userMute(for:)) == false)
+
+  await fixture.backend.failIntentsButApplyMute(for: [])
+  monitor.emit([])
+  let hold = store.microphoneCall.endHoldTask
+  await clock.expire()
+  await hold?.value
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func aBoostChangeDuringACallDoesNotSaveTheAutomaticMute() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.source == .autoConferencing)
+
+  // A boost change (from the mixer, the socket or a link) during the call.
+  let music = store.session.apps.first { $0.logicalID == "com.example.music" }!
+  _ = await store.setVolumeBoost(2, for: music, reason: .automation)?.value
+  await settleCallDetection(store)
+  await store.drainPersistenceTasks()
+
+  let durable = store.preferences.appAudioIntents["com.example.music"]
+  #expect(durable?.volumeBoost == 2)
+  #expect(durable?.isMuted == false)
+  let preset = store.deviceVolumePresets.getVolumeSettings(
+    for: "com.example.music", deviceID: transactionTestDevice().id)
+  #expect(preset?.isMuted != true)
+  // The call's mute itself is untouched.
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func aMediaAppThatAppearsDuringACallIsMutedWithoutRemutingAManualUnmute() async {
+  let music = callTestApp(id: "com.example.music", pid: 10, category: .media, displayName: "Music Player")
+  let call = callTestApp(id: "com.example.call", pid: 20, category: .conferencing, displayName: "Call")
+  let video = callTestApp(id: "com.example.video", pid: 30, category: .media, displayName: "Video")
+  let monitor = FakeMicrophoneActivityMonitor()
+  let clock = ManualHoldClock()
+  let fixture = makeTransactionFixture(
+    apps: [music, call],
+    device: transactionTestDevice(),
+    refreshApps: [music, call, video],
+    microphoneActivityMonitor: monitor,
+    callEndHoldSleep: clock.sleep
+  )
+  let store = fixture.store
+  store.preferences.autoPauseMusicForConferencing = true
+  store.preferences.callDetectionMode = .microphoneInUse
+  store.preferences.callDetectionAppIDs = ["com.example.call"]
+
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The user unmutes the music by hand, then another media app starts.
+  store.setMuted(false, for: store.session.apps.first { $0.logicalID == "com.example.music" }!)
+  await settleCallDetection(store)
+  store.refresh()
+  await settleCallDetection(store)
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+
+  #expect(muteState(store, "com.example.video")?.isMuted == true)
+  #expect(muteState(store, "com.example.video")?.source == .autoConferencing)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  _ = await store.shutdown()
+}
+
+@MainActor
 @Test func microphoneCallIgnoresAppsThatWereNotChosen() async {
   let (fixture, monitor, _) = makeMicrophoneCallFixture(chosenAppIDs: ["com.example.other"])
   let store = fixture.store
@@ -2925,6 +3015,31 @@ private let profileTestHeadphones = AudioDevice(
 }
 
 @MainActor
+@Test func saveCurrentMixWaitsForAProfileThatIsStillApplying() async {
+  let app = transactionTestApp(id: "capture.mid-apply", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8),
+    suspendFirstProfile: true
+  )
+  let profile = Profile(name: "Quiet", entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)])
+
+  fixture.store.applyProfile(profile)
+  await fixture.backend.waitUntilFirstProfileIsSuspended()
+  // Mid-apply, rows and confirmed EQ can disagree, so nothing is captured.
+  #expect(
+    fixture.store.saveCurrentMix(named: "Now", includeEqualizer: true, includeOutput: false)
+      == .profileStillApplying)
+
+  await fixture.backend.resumeFirstProfile()
+  await fixture.store.drainAppIntentTransactions()
+  #expect(
+    fixture.store.saveCurrentMix(named: "Now", includeEqualizer: true, includeOutput: false)
+      .savedProfileID != nil)
+}
+
+@MainActor
 @Test func levelOnlyProfileLeavesEqualizerAndOutputAlone() async {
   let app = transactionTestApp(id: "apply.legacy", desiredVolume: 0.8, targetDeviceUID: profileTestHeadphones.id)
   let equalizer = profileTestEqualizer(gain: 5)
@@ -3484,6 +3599,9 @@ private actor TransactionBackend: AudioControlBackend {
   /// Apps Wave Link mixes: like the real bridge, only volume and mute reach
   /// them, and a change that is purely boost or output is refused.
   private let waveLinkAppIDs: Set<String>
+  /// Apps for which a router applies the mute but does not confirm the rest of
+  /// the request, so the intent comes back failed with the mute in place.
+  private var muteLandsButIntentFailsAppIDs: Set<String> = []
   private var intents: [AppRouteIntent] = []
   private var profileCalls: [(profile: Profile, generation: UInt64)] = []
   private var latestGenerationByAppID: [String: UInt64] = [:]
@@ -3554,6 +3672,10 @@ private actor TransactionBackend: AudioControlBackend {
     await withCheckedContinuation { continuation in
       suspensionWaiters.append(continuation)
     }
+  }
+
+  func failIntentsButApplyMute(for appIDs: Set<String>) {
+    muteLandsButIntentFailsAppIDs = appIDs
   }
 
   /// Suspends the intent with this call number instead of the first.
@@ -3643,6 +3765,21 @@ private actor TransactionBackend: AudioControlBackend {
         outcome: .applied,
         resultingApp: snapshot.apps[index],
         backendStatus: snapshot.backendStatus
+      )
+    }
+
+    if muteLandsButIntentFailsAppIDs.contains(intent.appID),
+      let index = snapshot.apps.firstIndex(where: { $0.logicalID == intent.appID })
+    {
+      completedIntents += 1
+      snapshot.apps[index].isMuted = intent.isMuted
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .failed,
+        resultingApp: snapshot.apps[index],
+        backendStatus: snapshot.backendStatus,
+        detail: "The router did not confirm the requested level."
       )
     }
 

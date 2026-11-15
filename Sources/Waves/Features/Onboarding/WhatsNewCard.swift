@@ -29,7 +29,7 @@ struct WhatsNewCard: View {
 
       VStack(alignment: .leading, spacing: 8) {
         whatsNewLine("Save Current Mix, with EQ and outputs in profiles", symbol: "square.stack.3d.up.fill")
-        whatsNewLine("Call muting that works with Discord, Slack, and browsers", symbol: "phone.fill")
+        whatsNewLine("Call muting that can follow the microphone", symbol: "phone.fill")
         whatsNewLine("Sliders that follow loudness, and click-free changes", symbol: "speaker.wave.2.fill")
         whatsNewLine("Shortcuts recipes and a bundled command-line tool", symbol: "keyboard")
       }

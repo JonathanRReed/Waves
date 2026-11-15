@@ -13,8 +13,8 @@ All notable changes to Waves are documented here. The format follows
 - Save Current Mix, in the menu bar's profile menu and the sidebar (Shift-
   Command-S), saves what is playing now as a profile in one step.
 - "Mute media during calls" can detect a call when an app you choose is using
-  the microphone, whichever app is in front, so calls in Discord, Slack and a
-  browser can count. It is off until you pick it. Waves only asks macOS which
+  the microphone, whichever app is in front, so calls in apps such as Discord,
+  Slack or Chrome can count. It is off until you pick it in Settings > Mixer. Waves only asks macOS which
   apps are using the microphone; it never listens to, records or stores
   microphone audio and needs no new permission.
 - Mixer rows show when Adaptive Mix is turning an app up or down, and by how
@@ -38,8 +38,9 @@ All notable changes to Waves are documented here. The format follows
 
 ### Changed
 - Volume sliders follow how loud things sound: half-way is about half as loud.
-  Percentages, profiles and automation values are unchanged. Keyboard and
-  VoiceOver volume steps are now audible across the whole range.
+  Percentages, profiles and automation values are unchanged. Keyboard,
+  global-shortcut and VoiceOver volume steps follow the same curve, so each
+  step is audible across the whole range.
 - Adaptive Mix does only what the selected mode says. Loudness Balance no
   longer lowers other apps when one is in front.
 - Loudness Balance and Speech Focus measure an app before your volume slider,
@@ -52,8 +53,12 @@ All notable changes to Waves are documented here. The format follows
   your call" and "Unmuted after your call", and turning it off unmutes at once.
 - A profile applied by a `waves://` link sets levels and EQ but never moves an
   app to another output. `wavesctl profile` and the app itself do.
-- Boost set by automation follows the mixer's rules: 1x to 4x only, and never
-  for excluded apps or apps whose audio Wave Link controls.
+- Boost set by automation follows the mixer's rules: 1x, 2x, 3x or 4x only, and
+  never for excluded apps or apps whose audio Wave Link controls.
+- Settings > Mixer flags a Wave Link channel that did not report a valid level
+  or mute.
+- The Homebrew cask declares that Waves updates itself, so `brew upgrade` leaves
+  it to the in-app updater.
 - Excluding several apps at once asks first.
 - The menu-bar icon keeps one width, and the menu bar's "more in Waves" link no
   longer scrolls out of sight. Icon buttons and equalizer chips highlight on
@@ -64,26 +69,37 @@ All notable changes to Waves are documented here. The format follows
   URLs, and CI also runs the tests on macOS 15.
 
 ### Fixed
-- Start the control socket on macOS 15 and earlier. It has been unable to start
-  there since 1.5.0, which stopped the Stream Deck plugin and `wavesctl` from
-  connecting.
+- Start the control socket on macOS 15. It has been unable to start there since
+  1.5.0, which stopped the Stream Deck plugin and `wavesctl` from connecting.
+  The same fix applies to macOS 14, which was not run.
 - A voice call is no longer turned down because a game or browser is in front,
   unless you gave the call app Background priority yourself.
 - Boost together with an Adaptive Mix reduction no longer distorts: the signal
   is limited to full scale once, after every gain has been applied.
 - Wave Link: wait up to 0.6 seconds for Wave Link to confirm a level change
-  instead of reading it back once. Large changes used to snap back.
+  instead of reading it back once, the likely reason large changes snapped
+  back. This has not yet been run against Wave Link itself.
 - Wave Link: when a change is not confirmed, show the level and mute Wave Link
   actually has, never louder or unmuted beyond what you chose.
-- Wave Link: set the destination channel's level and mute before moving an app
-  onto it, and move the app back if the change fails afterwards.
+- Wave Link: set and confirm the destination channel's level and mute before
+  moving an app onto it, refuse the move if that cannot be confirmed, and move
+  the app back if the change fails afterwards.
 - Wave Link: an equalizer-only change for an app Wave Link controls says EQ
   stays in Wave Link instead of reporting success.
 - A profile change that a router refuses for a running app is reported as not
   supported instead of "saved for later".
 - A level change made while a profile is still applying no longer sends an
   earlier app's old EQ or output back.
-- One out-of-range number in saved settings no longer resets all preferences.
+- One out-of-range number in the preferences file no longer resets all
+  preferences.
+- An automatic call mute is no longer saved as yours when you change an app's
+  boost or volume during a call, and a call mute that a router applied without
+  confirming is still released when the call ends.
+- A media app that starts during a microphone-detected call is muted too.
+- The control socket's `apply-profile` reply is no longer `ok` when a saved EQ
+  or output was skipped or a newer change replaced an app's levels; it reports
+  those apps as `partial` or `failed`.
+- Save Current Mix waits for a profile that is still being applied.
 - Changing the system clock no longer resets or refills the limits on
   automation commands.
 - Lists no longer refresh on every level update while audio plays.

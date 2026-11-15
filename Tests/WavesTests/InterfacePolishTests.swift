@@ -99,8 +99,14 @@ import WavesAudioCore
 
   // Another app's gain does not show on this row.
   fixture.store.adaptiveGainsDBByAppID = ["com.example.other": -6]
-  surface.pump(0.3)
-  #expect(surface.hostingView.fittingSize.width == 0)
+  // The tag fades out. Wait for the result instead of a fixed time, which a
+  // loaded machine can overrun.
+  var isHidden = false
+  for _ in 0..<60 where !isHidden {
+    surface.pump(0.05)
+    isHidden = surface.hostingView.fittingSize.width == 0
+  }
+  #expect(isHidden)
 }
 
 /// Rows and lists must not read the fast-changing store state themselves; only

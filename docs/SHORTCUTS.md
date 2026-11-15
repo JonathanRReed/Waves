@@ -81,8 +81,8 @@ use `wavesctl profile` in a Run Shell Script action (below).
 waves://set-boost?app=com.spotify.client&boost=2
 ```
 
-`boost` runs from `1` (off) to `4`, the same as the Boost menu in the mixer.
-Anything outside that range is refused. Waves also refuses boost for an app it
+`boost` is `1` (off), `2`, `3` or `4`, the same as the Boost menu in the mixer.
+Anything else is refused. Waves also refuses boost for an app it
 is excluded from and for an app whose audio Wave Link or route recovery
 controls, exactly as the mixer does.
 

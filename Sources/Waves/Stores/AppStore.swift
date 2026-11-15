@@ -18,6 +18,8 @@ final class AppStore {
   /// Whether saving settings failed for `lastProfileApplyResult`. A failed save
   /// rolls back the levels kept for apps that were not running.
   var lastProfileSettingsSaveFailed = false
+  /// Apps in `lastProfileApplyResult` whose saved EQ or output did not apply.
+  var lastProfileSoundSkippedAppIDs: Set<String> = []
   /// The profile the user last selected, used to highlight it in the UI and —
   /// for membership-only grouping profiles — to scope the main window. Not
   /// persisted; a fresh launch starts with no active profile.

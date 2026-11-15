@@ -144,9 +144,9 @@ public enum WavesCTLCommand: Equatable, Sendable {
       return .toggle(app: arguments[1])
 
     case "boost":
-      let boostUsage = "usage: wavesctl boost <app-id> <1..4>"
+      let boostUsage = "usage: wavesctl boost <app-id> <1|2|3|4>"
       guard arguments.count == 3 else { throw WavesCTLValidationError.usage(boostUsage) }
-      guard let value = Double(arguments[2]), value.isFinite, (1...4).contains(value) else {
+      guard let value = Double(arguments[2]), [1, 2, 3, 4].contains(value) else {
         throw WavesCTLValidationError.usage(boostUsage)
       }
       return .boost(app: arguments[1], value: value)
@@ -294,14 +294,14 @@ public enum WavesCTLUsage {
       mute   <app-id>            Mute an app
       unmute <app-id>            Unmute an app
       toggle <app-id>            Toggle an app's mute
-      boost  <app-id> <1..4>     Set an app's boost (Waves 1.8 or later)
+      boost  <app-id> <1|2|3|4>  Set an app's boost (Waves 1.8 or later)
       profile <name>             Apply a profile by name (Waves 1.8 or later)
       refresh                    Rescan running apps (Waves 1.8 or later)
       watch                      Subscribe and print state changes until interrupted
       raw '<json>'               Send one raw request line
       help                       Show this help
 
-    App IDs come from `wavesctl apps`. Volume is 0 to 1; boost is 1 to 4.
+    App IDs come from `wavesctl apps`. Volume is 0 to 1; boost is 1, 2, 3 or 4.
 
     The socket path can be overridden with WAVES_CONTROL_SOCKET.
 

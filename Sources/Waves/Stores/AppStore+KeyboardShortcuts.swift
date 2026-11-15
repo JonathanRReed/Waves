@@ -54,10 +54,10 @@ extension AppStore {
       setMuted(!app.isMuted, for: app)
     case .volumeUpApp(let appID):
       guard let app = resolveHotkeyApp(appID, verb: "adjust") else { return }
-      adjustVolume(for: app, by: Self.hotkeyVolumeStep)
+      adjustVolume(for: app, increasing: true)
     case .volumeDownApp(let appID):
       guard let app = resolveHotkeyApp(appID, verb: "adjust") else { return }
-      adjustVolume(for: app, by: -Self.hotkeyVolumeStep)
+      adjustVolume(for: app, increasing: false)
     }
   }
 
@@ -86,15 +86,13 @@ extension AppStore {
     return app
   }
 
-  /// Matches the frontmost volume shortcuts' step, so a per-app key and a
-  /// frontmost key move the slider by the same amount.
-  private static let hotkeyVolumeStep: Float = 0.1
-
-  private func adjustVolume(for app: AudioApp, by delta: Float) {
-    guard delta.isFinite else { return }
+  /// One step along the slider's loudness curve, the same step the mixer's
+  /// own volume keys and VoiceOver take, so every keyboard path moves the
+  /// thumb by the same amount and each step is audible.
+  private func adjustVolume(for app: AudioApp, increasing: Bool) {
     let currentVolume = app.desiredVolume.isFinite ? app.desiredVolume : 1.0
-    let target = min(max(currentVolume + delta, 0), 1)
-    guard target.isFinite, target != app.desiredVolume else { return }
+    let target = VolumeTaper.steppedVolume(from: currentVolume, increasing: increasing)
+    guard target != app.desiredVolume else { return }
     setDesiredVolume(target, for: app)
     // The complete-intent transaction owns the confirmation and error toasts,
     // so this path stays silent and a keypress produces exactly one.

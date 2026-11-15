@@ -53,8 +53,10 @@ Locally, in `~/Library/Application Support/Waves/` (or `~/.Waves` as a fallback)
   losing it with the process. Waves reads it back into the diagnostics report.
 
 These can include app names, bundle identifiers, route state, selected output
-device identifiers, diagnostic notes, and your volume/mute/boost choices. They
-never leave your Mac.
+device identifiers, diagnostic notes, and your volume/mute/boost choices. A
+profile that saves outputs keeps each output device's identifier and name, and
+the apps you choose for call detection are kept by bundle identifier. They never
+leave your Mac.
 
 `Copy Diagnostics` places a bounded current report on the general pasteboard.
 It contains no audio samples, but can include the Waves version/build, macOS

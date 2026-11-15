@@ -68,6 +68,8 @@ struct ProfileSoundNotes: Equatable, Sendable {
   /// True when another router kept an app's EQ or output, which deserves a
   /// warning; a device that simply isn't connected does not.
   var routerHeldSound = false
+  /// Apps whose saved EQ or output did not apply.
+  var affectedAppIDs: Set<String> = []
 
   var isEmpty: Bool { sentences.isEmpty }
 }
@@ -170,6 +172,7 @@ enum ProfileSaveResult: Equatable, Sendable {
   case duplicateName(String)
   case noEligibleApps
   case noMixToSave
+  case profileStillApplying
 
   var savedProfileID: UUID? {
     guard case .saved(let id) = self else { return nil }
@@ -192,6 +195,8 @@ enum ProfileSaveResult: Equatable, Sendable {
       "Select at least one app that is not excluded from Waves."
     case .noMixToSave:
       "Waves isn't managing any app's sound yet. Change an app's volume, then save."
+    case .profileStillApplying:
+      "A profile is still being applied. Try again in a moment."
     }
   }
 }
