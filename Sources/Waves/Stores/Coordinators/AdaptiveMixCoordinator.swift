@@ -88,6 +88,7 @@ final class AdaptiveMixCoordinator {
     }
 
     policyEngine.usesLoudnessCorrection = input.mode.usesLoudnessBalance
+    policyEngine.usesPriorityDucking = input.mode.usesSpeechFocus
     policyEngine.focusMode = input.focusMode
     let gains = policyEngine.update(
       inputs: input.apps.map { item in

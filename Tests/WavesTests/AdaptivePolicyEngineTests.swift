@@ -225,3 +225,31 @@ private func policyInput(
     ) == -8
   )
 }
+
+// MARK: - Mode gating
+
+private func frontmostGame() -> AdaptiveMixInput {
+  var game = policyInput("game", contentType: .game, priority: .normal, rmsDBFS: -18)
+  game.isFrontmost = true
+  return game
+}
+
+
+@Test func loudnessOnlyEngineNeverPriorityDucks() {
+  var engine = AdaptivePolicyEngine(
+    usesLoudnessCorrection: true,
+    usesPriorityDucking: false,
+    focusMode: .followFrontApp
+  )
+  let front = frontmostGame()
+  // At the loudness target, so the trim stays at 0 and only ducking could move it.
+  let music = policyInput("music", contentType: .music, priority: .background, rmsDBFS: -24)
+
+  var gains: [String: Float] = [:]
+  for _ in 0..<5 {
+    gains = engine.update(inputs: [front, music], elapsed: 0.1)
+  }
+
+  // A duck would be -10 dB; float rounding of -24 dBFS leaves a ~1e-7 dB trim.
+  #expect(abs(gains["music"] ?? -99) < 0.01)
+}

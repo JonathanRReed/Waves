@@ -183,7 +183,6 @@ public enum AdaptiveMixing {
   public static let speechActivationFrameCount = 2
   public static let speechHangDuration: TimeInterval = 0.6
 
-  public static let speechDuckDB = -10.0
   public static let speechDuckAttackDuration: TimeInterval = 0.12
   public static let speechDuckReleaseDuration: TimeInterval = 0.9
 
@@ -342,68 +341,6 @@ public enum AdaptiveMixing {
     return voiceBandEnergy / fullBandEnergy
   }
 
-  /// Resolves automatic roles without guessing for neutral app categories.
-  public static func resolvedRole(
-    _ configuredRole: AdaptiveAppRole,
-    category: AppCategory
-  ) -> AdaptiveAppRole {
-    guard configuredRole == .auto else { return configuredRole }
-
-    switch category {
-    case .conferencing:
-      return .voice
-    case .media:
-      return .media
-    case .browser, .communication, .system, .unknown:
-      return .auto
-    }
-  }
-
-  public static func isSpeechDuckEligible(
-    role: AdaptiveAppRole,
-    category: AppCategory
-  ) -> Bool {
-    resolvedRole(role, category: category) == .media
-  }
-
-  public static func isLoudnessBalanceEligible(
-    role: AdaptiveAppRole,
-    category: AppCategory
-  ) -> Bool {
-    resolvedRole(role, category: category) != .ignore
-  }
-
-  /// Combines the enabled temporary gain layers without changing manual gain.
-  public static func combinedGainDB(
-    mode: AdaptiveMixMode,
-    role: AdaptiveAppRole,
-    category: AppCategory,
-    speechDuckDB: Double,
-    loudnessTrimDB: Double
-  ) -> Double {
-    guard mode != .off else { return 0 }
-
-    let resolved = resolvedRole(role, category: category)
-    guard resolved != .ignore else { return 0 }
-
-    let safeDuck = speechDuckDB.isFinite ? speechDuckDB : 0
-    let safeTrim = loudnessTrimDB.isFinite ? loudnessTrimDB : 0
-    let gain: Double
-
-    switch mode {
-    case .off:
-      return 0
-    case .speechFocus:
-      gain = resolved == .media ? safeDuck : 0
-    case .loudnessBalance:
-      gain = safeTrim
-    case .both:
-      gain = safeTrim + (resolved == .media ? safeDuck : 0)
-    }
-
-    return min(maximumCombinedGainDB, max(minimumCombinedGainDB, gain))
-  }
-
   static func elapsedDuration(_ elapsed: TimeInterval) -> TimeInterval {
     guard elapsed.isFinite, elapsed > 0 else { return 0 }
     return elapsed
@@ -484,48 +421,6 @@ public struct SpeechDetectionState: Hashable, Sendable {
       isSpeechActive = false
     }
     return isSpeechActive
-  }
-}
-
-/// Smooth attack and release state for the fixed speech duck.
-public struct SpeechDuckingState: Hashable, Sendable {
-  public private(set) var currentGainDB: Double
-
-  public init(currentGainDB: Double = 0) {
-    let safeGain = currentGainDB.isFinite ? currentGainDB : 0
-    self.currentGainDB = min(0, max(AdaptiveMixing.speechDuckDB, safeGain))
-  }
-
-  @discardableResult
-  public mutating func update(
-    isSpeechActive: Bool,
-    isEligible: Bool,
-    elapsed: TimeInterval
-  ) -> Double {
-    let target = isSpeechActive && isEligible ? AdaptiveMixing.speechDuckDB : 0
-    let duration = AdaptiveMixing.elapsedDuration(elapsed)
-
-    if target < currentGainDB {
-      let rate =
-        abs(AdaptiveMixing.speechDuckDB)
-        / AdaptiveMixing.speechDuckAttackDuration
-      currentGainDB = AdaptiveMixing.move(
-        currentGainDB,
-        toward: target,
-        maximumChange: rate * duration
-      )
-    } else {
-      let rate =
-        abs(AdaptiveMixing.speechDuckDB)
-        / AdaptiveMixing.speechDuckReleaseDuration
-      currentGainDB = AdaptiveMixing.move(
-        currentGainDB,
-        toward: target,
-        maximumChange: rate * duration
-      )
-    }
-
-    return currentGainDB
   }
 }
 
@@ -647,8 +542,12 @@ public struct AdaptivePolicyGainState: Hashable, Sendable {
 /// Stateful, deterministic coordinator for the 1.2 content and priority model.
 /// Audio samples never enter this value. It consumes only transient RMS and
 /// voice-band energy measurements and emits temporary per-app gain values.
+///
+/// `usesPriorityDucking` is Speech Focus and `usesLoudnessCorrection` is
+/// Loudness Balance; each layer runs only when its mode is on.
 public struct AdaptivePolicyEngine: Sendable {
   public var usesLoudnessCorrection: Bool
+  public var usesPriorityDucking: Bool
   public var focusMode: AdaptiveFocusMode
   private var speechDetectionStates: [String: SpeechDetectionState] = [:]
   private var loudnessTrimStates: [String: LoudnessTrimState] = [:]
@@ -656,9 +555,11 @@ public struct AdaptivePolicyEngine: Sendable {
 
   public init(
     usesLoudnessCorrection: Bool = true,
+    usesPriorityDucking: Bool = true,
     focusMode: AdaptiveFocusMode = .smartHybrid
   ) {
     self.usesLoudnessCorrection = usesLoudnessCorrection
+    self.usesPriorityDucking = usesPriorityDucking
     self.focusMode = focusMode
   }
 
@@ -728,7 +629,7 @@ public struct AdaptivePolicyEngine: Sendable {
 
       let routeIsEligible = input.isManaged && !input.isMuted
       let priorityGain =
-        routeIsEligible
+        usesPriorityDucking && routeIsEligible
         ? AdaptiveMixing.priorityAttenuationDB(
           focus: focusPriority,
           app: effectivePriorities[input.appID] ?? input.policy.priority
