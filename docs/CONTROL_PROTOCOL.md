@@ -163,7 +163,8 @@ cover the profile's apps that carry levels:
 - `savedForLater`: the app is not running; its levels are saved and apply when it
   next opens.
 - `skipped`: the app is excluded from Waves.
-- `failed`: could not be set, or a newer change replaced it first.
+- `failed`: could not be set, a newer change replaced it first, or the app is not
+  running and its levels could not be saved.
 
 `ok` is `true` only when `failed` is `0`. Otherwise the reply is `ok:false` with
 `error:"not-applied"` and the same `profile` counts. If another profile was

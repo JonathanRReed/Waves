@@ -721,17 +721,24 @@ extension AppStore {
   /// Applies a profile for an external client and waits for its result.
   /// Nil when nothing was started or a newer profile replaced this one before
   /// it finished, so the caller can never report a superseded apply as done.
-  func applyProfileForExternalControl(_ profile: Profile) async -> ProfileApplyResult? {
+  /// `settingsSaved` is false when the save failed, which rolls back the levels
+  /// kept for apps that were not running.
+  func applyProfileForExternalControl(
+    _ profile: Profile
+  ) async -> (result: ProfileApplyResult, settingsSaved: Bool)? {
     let previousGeneration = appIntentCoordinator.currentProfileTask?.generation
     applyProfile(profile, purpose: .automation)
     guard let started = appIntentCoordinator.currentProfileTask,
       started.generation != previousGeneration
     else { return nil }
     await started.task.value
-    guard let result = lastProfileApplyResult,
+    // A profile replaced while it was finishing leaves its own rows published
+    // until the newer one reports, so the generation is checked here as well.
+    guard appIntentCoordinator.isCurrentProfile(started.generation),
+      let result = lastProfileApplyResult,
       result.rows.count == profile.entries.count,
       result.rows.allSatisfy({ $0.generation == started.generation })
     else { return nil }
-    return result
+    return (result, !lastProfileSettingsSaveFailed)
   }
 }

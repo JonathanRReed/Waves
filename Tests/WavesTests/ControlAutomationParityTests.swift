@@ -156,6 +156,17 @@ private let unsupportedID = "com.example.unsupported"
 }
 
 @MainActor
+@Test func applyProfileDoesNotClaimLevelsWereSavedWhenTheSaveFailed() async {
+  let store = await makeParityStore(failingSettingsSaves: true)
+  let response = await handle(store, ControlRequest(id: 9, cmd: .applyProfile, profile: "Focus"))
+  #expect(!response.ok)
+  #expect(response.error == .notApplied)
+  // The running app's levels landed; the app that is not running has nothing saved for it.
+  #expect(
+    response.profile == ControlProfileResult(name: "Focus", applied: 1, savedForLater: 0, skipped: 0, failed: 1))
+}
+
+@MainActor
 @Test func newCommandsRespectTheRunningAndPermissionGates() async {
   let idle = await makeParityStore(startupState: .idle)
   for request in [
@@ -298,7 +309,8 @@ extension AppStore {
 private func makeParityStore(
   startupState: AppStartupState = .running,
   enableExternalControl: Bool = true,
-  backend: PreviewAudioControlBackend? = nil
+  backend: PreviewAudioControlBackend? = nil,
+  failingSettingsSaves: Bool = false
 ) async -> AppStore {
   let snapshot = paritySnapshot()
   let preferences = ParityPreferencesStore()
@@ -333,6 +345,7 @@ private func makeParityStore(
     initialStartupState: startupState
   )
   await store.drainPersistenceTasks()
+  if failingSettingsSaves { preferences.saveError = CocoaError(.fileWriteUnknown) }
   return store
 }
 
@@ -367,8 +380,12 @@ private func paritySnapshot() -> AudioSessionSnapshot {
 
 private final class ParityPreferencesStore: PreferencesPersisting, @unchecked Sendable {
   var value = UserPreferences()
+  var saveError: Error?
   func load() -> UserPreferences { value }
-  func save(_ preferences: UserPreferences) async throws { value = preferences }
+  func save(_ preferences: UserPreferences) async throws {
+    if let saveError { throw saveError }
+    value = preferences
+  }
   func flush() async throws {}
   func consumeDidRecoverFromCorruptFile() -> Bool { false }
 }

@@ -133,6 +133,7 @@ extension AppStore {
     guard appIntentCoordinator.isCurrentProfile(generation) else { return }
 
     lastProfileApplyResult = result
+    lastProfileSettingsSaveFailed = persistenceResult.settingsError != nil
     for row in result.rows {
       let detail = row.detail ?? "No additional detail."
       logger.info(

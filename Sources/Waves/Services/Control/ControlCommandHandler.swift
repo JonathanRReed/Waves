@@ -232,7 +232,7 @@ struct ControlCommandHandler {
     guard let profile = store.automationProfile(named: name) else {
       return .failure(id: request.id, .unknownProfile)
     }
-    guard let result = await store.applyProfileForExternalControl(profile) else {
+    guard let (result, settingsSaved) = await store.applyProfileForExternalControl(profile) else {
       return .failure(id: request.id, .notApplied)
     }
 
@@ -240,7 +240,9 @@ struct ControlCommandHandler {
     for (entry, row) in zip(profile.entries, result.rows) where entry.hasLevels {
       switch row.outcome {
       case .applied, .noChange: counts.applied += 1
-      case .unavailable: counts.savedForLater += 1
+      // Levels for an app that is not running exist only in saved settings.
+      case .unavailable where settingsSaved: counts.savedForLater += 1
+      case .unavailable: counts.failed += 1
       case .excluded: counts.skipped += 1
       case .membershipOnly: break
       case .failed, .unsupported, .superseded: counts.failed += 1
