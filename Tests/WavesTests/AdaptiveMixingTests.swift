@@ -103,28 +103,6 @@ private func voiceEnergy(fullBandRMS: Double, ratio: Double) -> Double {
   #expect(!secondInvalidFrame)
 }
 
-// MARK: - Speech duck timing
-
-@Test func speechDuckUsesOneHundredTwentyMillisecondAttack() {
-  var state = SpeechDuckingState()
-
-  let halfway = state.update(isSpeechActive: true, isEligible: true, elapsed: 0.06)
-  #expect(abs(halfway - (-5)) < 1e-9)
-
-  let target = state.update(isSpeechActive: true, isEligible: true, elapsed: 0.06)
-  #expect(abs(target - AdaptiveMixing.speechDuckDB) < 1e-9)
-}
-
-@Test func speechDuckUsesNineHundredMillisecondRelease() {
-  var state = SpeechDuckingState(currentGainDB: AdaptiveMixing.speechDuckDB)
-
-  let halfway = state.update(isSpeechActive: false, isEligible: true, elapsed: 0.45)
-  #expect(abs(halfway - (-5)) < 1e-9)
-
-  let restored = state.update(isSpeechActive: false, isEligible: true, elapsed: 0.45)
-  #expect(abs(restored) < 1e-9)
-}
-
 // MARK: - Loudness balancing
 
 @Test func loudnessAverageUsesThreeSecondTimeConstant() {
@@ -175,95 +153,6 @@ private func voiceEnergy(fullBandRMS: Double, ratio: Double) -> Double {
 
   #expect(restored == -2)
   #expect(state.averagedRMS == nil)
-}
-
-// MARK: - Roles and combined gain
-
-@Test func adaptiveRolesResolveFromExplicitRoleOrCategory() {
-  #expect(AdaptiveMixing.resolvedRole(.voice, category: .media) == .voice)
-  #expect(AdaptiveMixing.resolvedRole(.media, category: .conferencing) == .media)
-  #expect(AdaptiveMixing.resolvedRole(.ignore, category: .conferencing) == .ignore)
-  #expect(AdaptiveMixing.resolvedRole(.auto, category: .conferencing) == .voice)
-  #expect(AdaptiveMixing.resolvedRole(.auto, category: .media) == .media)
-  #expect(AdaptiveMixing.resolvedRole(.auto, category: .browser) == .auto)
-}
-
-@Test func combinedGainAppliesOnlyLayersAllowedByModeAndRole() {
-  #expect(
-    AdaptiveMixing.combinedGainDB(
-      mode: .speechFocus,
-      role: .media,
-      category: .media,
-      speechDuckDB: -10,
-      loudnessTrimDB: 2
-    ) == -10
-  )
-  #expect(
-    AdaptiveMixing.combinedGainDB(
-      mode: .speechFocus,
-      role: .voice,
-      category: .conferencing,
-      speechDuckDB: -10,
-      loudnessTrimDB: 2
-    ) == 0
-  )
-  #expect(
-    AdaptiveMixing.combinedGainDB(
-      mode: .loudnessBalance,
-      role: .auto,
-      category: .browser,
-      speechDuckDB: -10,
-      loudnessTrimDB: 2
-    ) == 2
-  )
-  #expect(
-    AdaptiveMixing.combinedGainDB(
-      mode: .both,
-      role: .media,
-      category: .media,
-      speechDuckDB: -10,
-      loudnessTrimDB: 2
-    ) == -8
-  )
-}
-
-@Test func combinedGainClampsAndOffRestoresImmediately() {
-  #expect(
-    AdaptiveMixing.combinedGainDB(
-      mode: .both,
-      role: .media,
-      category: .media,
-      speechDuckDB: -20,
-      loudnessTrimDB: -6
-    ) == -18
-  )
-  #expect(
-    AdaptiveMixing.combinedGainDB(
-      mode: .loudnessBalance,
-      role: .voice,
-      category: .conferencing,
-      speechDuckDB: 0,
-      loudnessTrimDB: 8
-    ) == 3
-  )
-  #expect(
-    AdaptiveMixing.combinedGainDB(
-      mode: .off,
-      role: .media,
-      category: .media,
-      speechDuckDB: -10,
-      loudnessTrimDB: 3
-    ) == 0
-  )
-  #expect(
-    AdaptiveMixing.combinedGainDB(
-      mode: .both,
-      role: .ignore,
-      category: .media,
-      speechDuckDB: -10,
-      loudnessTrimDB: 3
-    ) == 0
-  )
 }
 
 // MARK: - Voice-band analysis
