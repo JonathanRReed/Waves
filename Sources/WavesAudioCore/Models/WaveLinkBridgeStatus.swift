@@ -24,6 +24,10 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
     /// Whether the channel reported complete mix metadata for safe relocation.
     /// Optional so diagnostics exported by older Waves builds still decode.
     public var isRelocationReady: Bool?
+    /// False when Wave Link left out the channel's level or mute, or sent a
+    /// level outside 0 to 1. `level` and `isMuted` then hold placeholders.
+    /// Optional so diagnostics exported by older Waves builds still decode.
+    public var reportsValidState: Bool?
 
     public init(
       id: String,
@@ -33,7 +37,8 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
       level: Float,
       isMuted: Bool,
       mixCount: Int? = nil,
-      isRelocationReady: Bool? = nil
+      isRelocationReady: Bool? = nil,
+      reportsValidState: Bool? = nil
     ) {
       self.id = id
       self.name = name
@@ -45,6 +50,7 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
       self.isMuted = isMuted
       self.mixCount = mixCount
       self.isRelocationReady = isRelocationReady
+      self.reportsValidState = reportsValidState
     }
 
     /// A software channel holding no app with complete mix metadata is one
@@ -97,6 +103,12 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
 
   public var softwareChannelCount: Int { channels.filter(\.isSoftware).count }
   public var freeSoftwareChannelCount: Int { channels.filter(\.isFreeSoftwareChannel).count }
+  /// Software channels whose level or mute Wave Link did not report validly.
+  /// Hardware channels are left out: their listings may omit a level, and
+  /// Waves never controls them.
+  public var softwareChannelsWithoutValidStateCount: Int {
+    channels.filter { $0.isSoftware && $0.reportsValidState == false }.count
+  }
 
   /// One line for a status row: what Waves is talking to and whether the
   /// channel layout leaves room for independent per-app control.
@@ -123,6 +135,10 @@ public struct WaveLinkBridgeStatus: Hashable, Codable, Sendable {
         parts.append(
           "· \(software) software channel\(software == 1 ? "" : "s"), \(free) free"
         )
+      }
+      let invalid = softwareChannelsWithoutValidStateCount
+      if invalid > 0 {
+        parts.append("· \(invalid) did not report a valid level and mute")
       }
       return parts.joined(separator: " ")
     }

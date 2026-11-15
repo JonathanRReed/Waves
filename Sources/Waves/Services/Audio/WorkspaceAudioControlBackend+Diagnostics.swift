@@ -88,10 +88,11 @@ extension WorkspaceAudioControlBackend {
     switch bridge.phase {
     case .idle: .informational
     case .connected:
-      bridge.channels.contains {
-        $0.isSoftware
-          && ((!$0.appIdentifiers.isEmpty && $0.mixCount == 0) || $0.appIdentifiers.count > 1)
-      }
+      bridge.softwareChannelsWithoutValidStateCount > 0
+        || bridge.channels.contains {
+          $0.isSoftware
+            && ((!$0.appIdentifiers.isEmpty && $0.mixCount == 0) || $0.appIdentifiers.count > 1)
+        }
         ? .warning : .passed
     case .failed: .warning
     }
@@ -104,6 +105,10 @@ extension WorkspaceAudioControlBackend {
     case .failed:
       return bridge.summaryLine
     case .connected:
+      if bridge.softwareChannelsWithoutValidStateCount > 0 {
+        return bridge.summaryLine
+          + ". Wave Link did not report a valid level and mute for a software channel, so Waves cannot confirm changes to it. Restart Wave Link, then test again."
+      }
       if bridge.channels.contains(where: {
         $0.isSoftware && !$0.appIdentifiers.isEmpty && $0.mixCount == 0
       }) {

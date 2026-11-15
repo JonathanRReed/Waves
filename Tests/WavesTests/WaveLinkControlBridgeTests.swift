@@ -782,3 +782,59 @@ func waveLinkBridgeRejectsRelocationThatCannotPreserveMixSettings(_ scenario: St
   #expect(result.appliedVolume == 0.18)
   #expect(await rpc.setRequests.last?.level == 0.18)
 }
+
+// MARK: - Reporting channels without a valid state
+
+@Test func waveLinkConnectionTestFlagsASoftwareChannelWithoutAValidState() async throws {
+  // A missing level decodes as placeholder 1.00, unmuted. The connection test
+  // must not show that as a healthy channel.
+  let listing = Data(
+    #"{"channels":[{"id":"browser","name":"Browser","type":"Software","isMuted":false,"apps":[{"id":"com.example.browser"}],"mixes":[{"id":"personal","level":1,"isMuted":false}]},{"id":"mic","name":"Wave:3","type":"Hardware"}]}"#.utf8
+  )
+  let rpc = WaveLinkRPCStub(channels: [])
+  // Served as Wave Link sent it: the stub re-encodes channels with their
+  // placeholder values, which would hide the missing level.
+  let bridge = WaveLinkControlBridge(request: { method, params in
+    method == "getChannels" ? listing : try await rpc.request(method: method, params: params)
+  })
+
+  let status = await bridge.inspect()
+
+  #expect(status.phase == .connected)
+  #expect(status.channels.map(\.reportsValidState) == [false, false])
+  // The hardware channel's omitted level is normal and is not counted.
+  #expect(status.softwareChannelsWithoutValidStateCount == 1)
+  #expect(status.summaryLine.contains("1 did not report a valid level and mute"))
+  #expect(WorkspaceAudioControlBackend.diagnosticsStatus(for: status) == .warning)
+  #expect(
+    WorkspaceAudioControlBackend.diagnosticsDetail(for: status)
+      .contains("did not report a valid level and mute for a software channel"))
+
+  let export = DiagnosticsExportFormatter.format(
+    metadata: DiagnosticsMetadata(bundleInfo: [:], operatingSystemVersion: "Version 27.0"),
+    captureAuthorization: nil,
+    session: .empty,
+    apps: [],
+    availableOutputDeviceCount: 0,
+    diagnostics: nil,
+    waveLinkBridge: status,
+    persistenceFailureCount: 0,
+    lastPersistenceError: nil,
+    shutdownResult: nil
+  )
+  #expect(export.contains("Browser · software · level and mute not validly reported"))
+  #expect(!export.contains("Browser · software · level 1.00"))
+}
+
+@Test func waveLinkStatusDecodesAChannelSummaryWithoutAValidStateFlag() throws {
+  let status = try JSONDecoder().decode(
+    WaveLinkBridgeStatus.self,
+    from: Data(
+      #"{"phase":"connected","channels":[{"id":"zoom","name":"Zoom","isSoftware":true,"appIdentifiers":["us.zoom.xos"],"level":0.5,"isMuted":false,"mixCount":1}],"updatedAt":0}"#.utf8
+    )
+  )
+
+  #expect(status.channels.first?.reportsValidState == nil)
+  #expect(status.softwareChannelsWithoutValidStateCount == 0)
+  #expect(WorkspaceAudioControlBackend.diagnosticsStatus(for: status) == .passed)
+}

@@ -255,8 +255,15 @@ private struct WaveLinkBridgeStatusRow: View {
     }
   }
 
+  /// Connected, but a software channel did not report a valid level and
+  /// mute, so changes to it cannot be confirmed.
+  private var isConnectedWithInvalidChannels: Bool {
+    status?.phase == .connected && (status?.softwareChannelsWithoutValidStateCount ?? 0) > 0
+  }
+
   private var symbolName: String {
-    switch status?.phase {
+    if isConnectedWithInvalidChannels { return "exclamationmark.triangle.fill" }
+    return switch status?.phase {
     case .connected: "checkmark.circle.fill"
     case .failed: "exclamationmark.triangle.fill"
     case .idle, nil: "link.circle"
@@ -264,7 +271,8 @@ private struct WaveLinkBridgeStatusRow: View {
   }
 
   private var symbolColor: Color {
-    switch status?.phase {
+    if isConnectedWithInvalidChannels { return .orange }
+    return switch status?.phase {
     case .connected: .green
     case .failed: .orange
     case .idle, nil: .secondary
@@ -277,7 +285,8 @@ private struct WaveLinkBridgeStatusRow: View {
     let described = software.map { channel -> String in
       let apps = channel.appIdentifiers.isEmpty ? "free" : "\(channel.appIdentifiers.count) app\(channel.appIdentifiers.count == 1 ? "" : "s")"
       let mix = channel.mixCount == 0 ? ", not added to a mix" : ""
-      return "\(channel.name) (\(apps)\(mix))"
+      let state = channel.reportsValidState == false ? ", no valid level reported" : ""
+      return "\(channel.name) (\(apps)\(mix)\(state))"
     }
     return "Channels: " + described.joined(separator: ", ")
   }

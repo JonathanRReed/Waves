@@ -224,7 +224,8 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
       level: level,
       isMuted: isMuted,
       mixCount: mixes?.count,
-      isRelocationReady: relocationMixes != nil
+      isRelocationReady: relocationMixes != nil,
+      reportsValidState: reportsValidState
     )
   }
 }
