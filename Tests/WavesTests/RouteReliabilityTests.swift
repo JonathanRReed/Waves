@@ -1,3 +1,4 @@
+import AppKit
 import AudioToolbox
 import Foundation
 import Testing
@@ -706,53 +707,141 @@ private let rate96 = DeviceFormatSignature(sampleRate: 96_000, outputChannelCoun
   #expect(budget.detail.contains("ceiling: active"))
 }
 
-@Test func deviceFormatListenersFollowTheDeviceListAndRetryRefusedDevices() {
-  let calls = ListenerCalls()
-  let lifecycle = DeviceFormatListenerLifecycle(
+private func listenerLifecycle(_ calls: ListenerCalls) -> DeviceFormatListenerLifecycle {
+  DeviceFormatListenerLifecycle(
     nativeCalls: DeviceFormatListenerNativeCalls(
       add: { device, address, _ in calls.add(device, address.mSelector) },
       remove: { device, address, _ in calls.remove(device, address.mSelector) }
     )
   )
-  let perDevice = DeviceFormatListenerLifecycle.addresses.count
+}
+
+private let perDevice = DeviceFormatListenerLifecycle.addresses.count
+
+@Test func deviceFormatListenersFollowTheDeviceListAndRetryRefusedListeners() {
+  let calls = ListenerCalls()
+  let lifecycle = listenerLifecycle(calls)
 
   #expect(lifecycle.sync(deviceIDs: [1, 2]) {}.isEmpty)
   #expect(calls.live == [1: perDevice, 2: perDevice])
 
-  // Device 1 unplugged, device 3 plugged in; device 3 refuses the rate listener.
-  calls.refuse(device: 3, selector: kAudioDevicePropertyNominalSampleRate)
+  // Device 1 unplugged, device 3 plugged in; device 3 refuses the rate
+  // listener. It keeps the two it accepted, and the next sync adds only the
+  // missing one.
+  calls.refuseAdd(device: 3, selector: kAudioDevicePropertyNominalSampleRate)
   #expect(lifecycle.sync(deviceIDs: [2, 3]) {}.count == 1)
-  #expect(calls.live == [2: perDevice])
+  #expect(calls.live == [2: perDevice, 3: perDevice - 1])
 
-  calls.refuse(device: 3, selector: nil)
+  calls.refuseAdd(device: 3, selector: nil)
   #expect(lifecycle.sync(deviceIDs: [2, 3]) {}.isEmpty)
   #expect(calls.live == [2: perDevice, 3: perDevice])
+  #expect(calls.adds(on: 3) == perDevice)
 
   #expect(lifecycle.remove().isEmpty)
   #expect(calls.live.isEmpty)
 }
 
+@Test func aListenerWhoseRemovalFailsStaysOwnedReportedAndRetried() {
+  let calls = ListenerCalls()
+  let lifecycle = listenerLifecycle(calls)
+  #expect(lifecycle.sync(deviceIDs: [1, 2]) {}.isEmpty)
+
+  // Device 1 leaves the list; its rate listener will not come off.
+  calls.failRemove(device: 1, selector: kAudioDevicePropertyNominalSampleRate, status: -1)
+  #expect(lifecycle.sync(deviceIDs: [2]) {}.count == 1)
+  #expect(calls.live == [1: 1, 2: perDevice])
+  #expect(lifecycle.registrationCount == perDevice + 1)
+
+  // Shutdown reports it and keeps it; a later attempt retries only it.
+  #expect(lifecycle.remove().count == 1)
+  #expect(calls.live == [1: 1])
+  calls.failRemove(device: 1, selector: kAudioDevicePropertyNominalSampleRate, status: noErr)
+  #expect(lifecycle.remove().isEmpty)
+  #expect(calls.live.isEmpty)
+  #expect(lifecycle.registrationCount == 0)
+}
+
+@Test func aListenerOnADeviceThatIsAlreadyGoneIsNotReportedOrKept() {
+  let calls = ListenerCalls()
+  let lifecycle = listenerLifecycle(calls)
+  #expect(lifecycle.sync(deviceIDs: [1]) {}.isEmpty)
+  calls.failRemove(device: 1, selector: kAudioDevicePropertyDeviceIsAlive, status: kAudioHardwareBadObjectError)
+  #expect(lifecycle.sync(deviceIDs: []) {}.isEmpty)
+  #expect(lifecycle.registrationCount == 0)
+}
+
+@Test func releasingTheListenerOwnerRemovesWhatItStillHolds() {
+  let calls = ListenerCalls()
+  do {
+    let lifecycle = listenerLifecycle(calls)
+    #expect(lifecycle.sync(deviceIDs: [1, 2]) {}.isEmpty)
+    #expect(calls.live == [1: perDevice, 2: perDevice])
+  }
+  #expect(calls.live.isEmpty)
+}
+
+@Test func releasingTheBackendWithoutShutdownRemovesItsFormatListeners() async {
+  let calls = ListenerCalls()
+  var backend: WorkspaceAudioControlBackend? = WorkspaceAudioControlBackend(
+    testingSnapshot: .empty,
+    deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls(
+      add: { device, address, _ in calls.add(device, address.mSelector) },
+      remove: { device, address, _ in calls.remove(device, address.mSelector) }
+    )
+  )
+  await backend?.syncDeviceFormatListenersForTesting(deviceIDs: [1, 2])
+  #expect(calls.live == [1: perDevice, 2: perDevice])
+  backend = nil
+  #expect(calls.live.isEmpty)
+}
+
+@Test func releasingTheWakeObserverUnregistersIt() {
+  let center = NotificationCenter()
+  let wakes = ListenerCalls()
+  var token: WakeObserverToken? = WakeObserverToken(center: center) { _ = wakes.add(1, 0) }
+  center.post(name: NSWorkspace.didWakeNotification, object: nil)
+  #expect(wakes.live == [1: 1])
+  _ = token
+  token = nil
+  center.post(name: NSWorkspace.didWakeNotification, object: nil)
+  #expect(wakes.live == [1: 1])
+}
+
 private final class ListenerCalls: @unchecked Sendable {
   private let lock = NSLock()
   private var counts: [AudioObjectID: Int] = [:]
-  private var refused: (AudioObjectID, AudioObjectPropertySelector)?
+  private var addCounts: [AudioObjectID: Int] = [:]
+  private var refusedAdd: (AudioObjectID, AudioObjectPropertySelector)?
+  private var failedRemoves: [String: OSStatus] = [:]
 
   var live: [AudioObjectID: Int] { lock.withLock { counts.filter { $0.value > 0 } } }
 
-  func refuse(device: AudioObjectID, selector: AudioObjectPropertySelector?) {
-    lock.withLock { refused = selector.map { (device, $0) } }
+  func adds(on device: AudioObjectID) -> Int { lock.withLock { addCounts[device] ?? 0 } }
+
+  func refuseAdd(device: AudioObjectID, selector: AudioObjectPropertySelector?) {
+    lock.withLock { refusedAdd = selector.map { (device, $0) } }
+  }
+
+  func failRemove(device: AudioObjectID, selector: AudioObjectPropertySelector, status: OSStatus) {
+    lock.withLock { failedRemoves["\(device)/\(selector)"] = status == noErr ? nil : status }
   }
 
   func add(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector) -> OSStatus {
     lock.withLock {
-      if let refused, refused.0 == device, refused.1 == selector { return -1 }
+      if let refusedAdd, refusedAdd.0 == device, refusedAdd.1 == selector { return -1 }
       counts[device, default: 0] += 1
+      addCounts[device, default: 0] += 1
       return noErr
     }
   }
 
   func remove(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector) -> OSStatus {
     lock.withLock {
+      if let status = failedRemoves["\(device)/\(selector)"] {
+        // A device that is already gone took the registration with it.
+        if status == kAudioHardwareBadObjectError { counts[device, default: 0] -= 1 }
+        return status
+      }
       counts[device, default: 0] -= 1
       return noErr
     }

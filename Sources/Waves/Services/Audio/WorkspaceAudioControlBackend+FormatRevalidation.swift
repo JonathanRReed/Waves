@@ -72,19 +72,21 @@ extension WorkspaceAudioControlBackend {
   func addWakeObserver() {
     guard !isShuttingDown, wakeObserver == nil else { return }
     let mailbox = deviceChangeMailbox
-    wakeObserver = WakeObserverToken(
-      NSWorkspace.shared.notificationCenter.addObserver(
-        forName: NSWorkspace.didWakeNotification,
-        object: nil,
-        queue: nil
-      ) { _ in mailbox.enqueue(.wake) }
-    )
+    wakeObserver = WakeObserverToken(center: NSWorkspace.shared.notificationCenter) {
+      mailbox.enqueue(.wake)
+    }
   }
 
   func removeWakeObserver() {
-    guard let wakeObserver else { return }
-    NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver.token)
-    self.wakeObserver = nil
+    wakeObserver?.invalidate()
+    wakeObserver = nil
+  }
+
+  func syncDeviceFormatListenersForTesting(deviceIDs: Set<AudioObjectID>) {
+    let mailbox = deviceChangeMailbox
+    retainCleanupDegradations(
+      deviceFormatListeners.sync(deviceIDs: deviceIDs) { mailbox.enqueue(.deviceFormat) }
+    )
   }
 
   func revalidateRouteFormatsForTesting(at now: Duration) async {
@@ -92,7 +94,33 @@ extension WorkspaceAudioControlBackend {
   }
 }
 
+/// Owns the wake registration and removes it exactly once: on an explicit
+/// shutdown, or when the backend is released without one. A separate
+/// non-isolated owner, like the device-format listeners, because an actor's
+/// deinit cannot reach back into isolated state to clean up.
 final class WakeObserverToken: @unchecked Sendable {
-  let token: NSObjectProtocol
-  init(_ token: NSObjectProtocol) { self.token = token }
+  private let center: NotificationCenter
+  private let lock = NSLock()
+  private var token: NSObjectProtocol?
+
+  init(center: NotificationCenter, onWake: @escaping @Sendable () -> Void) {
+    self.center = center
+    self.token = center.addObserver(
+      forName: NSWorkspace.didWakeNotification,
+      object: nil,
+      queue: nil
+    ) { _ in onWake() }
+  }
+
+  func invalidate() {
+    let token = lock.withLock {
+      defer { self.token = nil }
+      return self.token
+    }
+    if let token { center.removeObserver(token) }
+  }
+
+  deinit {
+    invalidate()
+  }
 }

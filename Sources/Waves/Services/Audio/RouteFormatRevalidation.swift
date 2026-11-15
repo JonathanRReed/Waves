@@ -157,6 +157,10 @@ struct DeviceFormatListenerNativeCalls: Sendable {
   }
 }
 
+/// Owns the per-device format listeners. Every registration stays owned
+/// until its own removal succeeds (or reports the device already gone), so a
+/// failed removal is reported and retried rather than forgotten, and the
+/// owner cleans up whatever it still holds when it is released.
 final class DeviceFormatListenerLifecycle: @unchecked Sendable {
   static let addresses: [AudioObjectPropertyAddress] = [
     AudioObjectPropertyAddress(
@@ -178,15 +182,23 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
 
   private let nativeCalls: DeviceFormatListenerNativeCalls
   private var listener: RouterObservationListenerBlockReference?
-  /// Device object → the addresses registered on it.
-  private(set) var installed: [AudioObjectID: [AudioObjectPropertyAddress]] = [:]
+  /// Device object → the addresses currently registered on it.
+  private var installed: [AudioObjectID: [AudioObjectPropertyAddress]] = [:]
 
   init(nativeCalls: DeviceFormatListenerNativeCalls) {
     self.nativeCalls = nativeCalls
   }
 
+  deinit {
+    _ = remove()
+  }
+
+  /// Registrations still owned, for diagnostics and tests.
+  var registrationCount: Int { installed.values.reduce(0) { $0 + $1.count } }
+
   /// Listens on exactly `deviceIDs`: new devices gain listeners, departed
-  /// ones lose them. A device that refused a listener is retried next sync.
+  /// ones lose them. A device keeps whatever listeners it accepted; the next
+  /// sync adds only the ones it refused, and retries any removal that failed.
   func sync(
     deviceIDs: Set<AudioObjectID>,
     onChange: @escaping @Sendable () -> Void
@@ -196,12 +208,14 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
     }
     guard let listener else { return [] }
     var degradations: [CleanupDegradation] = []
-    for deviceID in installed.keys where !deviceIDs.contains(deviceID) {
+    for deviceID in installed.keys.sorted() where !deviceIDs.contains(deviceID) {
       degradations += removeListeners(from: deviceID, listener: listener)
     }
-    for deviceID in deviceIDs.sorted() where installed[deviceID] == nil {
+    for deviceID in deviceIDs.sorted() {
+      let owned = installed[deviceID] ?? []
       var added: [AudioObjectPropertyAddress] = []
-      for address in Self.addresses {
+      // Each address in `addresses` has its own selector.
+      for address in Self.addresses where !owned.contains(where: { $0.mSelector == address.mSelector }) {
         let status = nativeCalls.add(deviceID, address, listener)
         if status == noErr {
           added.append(address)
@@ -214,24 +228,24 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
             ))
         }
       }
-      if added.count == Self.addresses.count {
-        installed[deviceID] = added
-      } else {
-        // Partial registration is rolled back so the next sync retries the
-        // whole device instead of leaving it half-observed.
-        for address in added { _ = nativeCalls.remove(deviceID, address, listener) }
+      if !added.isEmpty {
+        installed[deviceID] = owned + added
       }
     }
     return degradations
   }
 
+  /// Removes every owned registration. One whose removal fails stays owned
+  /// and is reported; calling again retries only those.
   func remove() -> [CleanupDegradation] {
     guard let listener else { return [] }
     var degradations: [CleanupDegradation] = []
-    for deviceID in installed.keys {
+    for deviceID in installed.keys.sorted() {
       degradations += removeListeners(from: deviceID, listener: listener)
     }
-    self.listener = nil
+    if installed.isEmpty {
+      self.listener = nil
+    }
     return degradations
   }
 
@@ -239,16 +253,21 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
     from deviceID: AudioObjectID,
     listener: RouterObservationListenerBlockReference
   ) -> [CleanupDegradation] {
-    let addresses = installed.removeValue(forKey: deviceID) ?? []
-    return addresses.compactMap { address in
+    var degradations: [CleanupDegradation] = []
+    var stillOwned: [AudioObjectPropertyAddress] = []
+    for address in installed[deviceID] ?? [] {
       let status = nativeCalls.remove(deviceID, address, listener)
       // A device that has already gone away takes its listeners with it.
-      guard status != noErr, status != kAudioHardwareBadObjectError else { return nil }
-      return CleanupDegradation(
-        stage: .listenerRemoval,
-        nativeStatus: status,
-        detail: "Remove device format listener selector \(address.mSelector)"
-      )
+      guard status != noErr, status != kAudioHardwareBadObjectError else { continue }
+      stillOwned.append(address)
+      degradations.append(
+        CleanupDegradation(
+          stage: .listenerRemoval,
+          nativeStatus: status,
+          detail: "Remove device format listener selector \(address.mSelector)"
+        ))
     }
+    installed[deviceID] = stillOwned.isEmpty ? nil : stillOwned
+    return degradations
   }
 }
