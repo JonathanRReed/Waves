@@ -1272,6 +1272,51 @@ private let perDevice = DeviceFormatListenerLifecycle.addresses.count
   #expect(fixture.events.values == ["create app.a #2", "stop #1"])
 }
 
+@Test func aDeviceMoveIsRecordedOnceWhileItsOldRegistrationWillNotComeOff() {
+  let calls = ListenerCalls()
+  let lifecycle = listenerLifecycle(calls)
+  #expect(lifecycle.sync(devices: [10: "builtin"]) {}.isEmpty)
+
+  // The device comes back as object 11. Its old registrations on 10 will not
+  // come off, and 11 refuses new ones for now.
+  for address in DeviceFormatListenerLifecycle.addresses {
+    calls.failRemove(device: 10, selector: address.mSelector, status: -1)
+  }
+  calls.refuseAllAdds(on: 11)
+  _ = lifecycle.sync(devices: [11: "builtin"]) {}
+  #expect(lifecycle.takeDevicesSeenNotAlive() == ["builtin"])
+
+  // The same inventory again is not another move.
+  _ = lifecycle.sync(devices: [11: "builtin"]) {}
+  _ = lifecycle.sync(devices: [11: "builtin"]) {}
+  #expect(lifecycle.takeDevicesSeenNotAlive().isEmpty)
+}
+
+@Test func unchangedInventoryWithAStuckListenerDoesNotRebuildRoutesAgain() async throws {
+  let calls = ListenerCalls()
+  let fixture = RouteFixture(apps: [routeTestApp()], deviceFormatListenerNativeCalls: calls.nativeCalls)
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await backend.performDeviceChangePassForTesting(changes: [.deviceInventory])
+
+  // The built-in output returns as object 11; object 10's listeners will not
+  // come off and 11 will not take new ones yet. The move rebuilds once.
+  for address in DeviceFormatListenerLifecycle.addresses {
+    calls.failRemove(device: 10, selector: address.mSelector, status: -1)
+  }
+  calls.refuseAllAdds(on: 11)
+  fixture.inventory.set([11: "builtin", 20: "usb-dac", 30: "headphones"])
+  await backend.performDeviceChangePassForTesting(changes: [.deviceInventory])
+  #expect(fixture.events.creations == 1)
+
+  // Each rebuild raises another device-list notification. With nothing
+  // changed outside Waves, those passes rebuild nothing.
+  for _ in 0..<3 {
+    await backend.performDeviceChangePassForTesting(changes: [.deviceInventory])
+  }
+  #expect(fixture.events.creations == 1)
+}
+
 @Test func releasingTheWakeObserverUnregistersIt() {
   let center = NotificationCenter()
   let wakes = ListenerCalls()
@@ -1289,6 +1334,7 @@ private final class ListenerCalls: @unchecked Sendable {
   private var counts: [AudioObjectID: Int] = [:]
   private var addCounts: [AudioObjectID: Int] = [:]
   private var refusedAdd: (AudioObjectID, AudioObjectPropertySelector)?
+  private var refusedAllAdds: Set<AudioObjectID> = []
   private var failedRemoves: [String: OSStatus] = [:]
   private var listeners: [AudioObjectID: RouterObservationListenerBlockReference] = [:]
   private var alive = true
@@ -1325,6 +1371,8 @@ private final class ListenerCalls: @unchecked Sendable {
     lock.withLock { refusedAdd = selector.map { (device, $0) } }
   }
 
+  func refuseAllAdds(on device: AudioObjectID) { lock.withLock { _ = refusedAllAdds.insert(device) } }
+
   func failRemove(device: AudioObjectID, selector: AudioObjectPropertySelector, status: OSStatus) {
     lock.withLock { failedRemoves["\(device)/\(selector)"] = status == noErr ? nil : status }
   }
@@ -1332,6 +1380,7 @@ private final class ListenerCalls: @unchecked Sendable {
   func add(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector) -> OSStatus {
     lock.withLock {
       if let refusedAdd, refusedAdd.0 == device, refusedAdd.1 == selector { return -1 }
+      if refusedAllAdds.contains(device) { return -1 }
       counts[device, default: 0] += 1
       addCounts[device, default: 0] += 1
       return noErr

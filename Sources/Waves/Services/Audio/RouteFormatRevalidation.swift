@@ -204,6 +204,11 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
   /// so a registration is reused only while both its object ID and its UID
   /// still match.
   private var installed: [AudioObjectID: (uid: String, listener: RouterObservationListenerBlockReference, addresses: [AudioObjectPropertyAddress])] = [:]
+  /// The device list the last sync was given. Kept apart from `installed`,
+  /// which also holds registrations kept only because their removal failed:
+  /// those describe where a device used to be, not where it was last seen,
+  /// so they must never make an unchanged device look as if it moved.
+  private var lastObservedDevices: [AudioObjectID: String] = [:]
   private let notAliveLock = NSLock()
   private var notAliveDeviceUIDs: Set<String> = []
 
@@ -237,16 +242,19 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
   ///
   /// An object ID that now names another device loses its old registrations
   /// before the new device gets its own block. A UID that now lives on a
-  /// different object is a device that went away and came back: whatever a
-  /// route's aggregate was built on may not have survived, so it is recorded
-  /// as seen not alive, exactly as if its alive listener had caught it.
+  /// different object than in the previous sync's list is a device that went
+  /// away and came back: whatever a route's aggregate was built on may not
+  /// have survived, so it is recorded as seen not alive, exactly as if its
+  /// alive listener had caught it. Recorded once, on the sync that sees the
+  /// move.
   func sync(
     devices: [AudioObjectID: String],
     onChange: @escaping @Sendable () -> Void
   ) -> [CleanupDegradation] {
     var degradations: [CleanupDegradation] = []
     var previousObjectByUID: [String: AudioObjectID] = [:]
-    for (deviceID, entry) in installed { previousObjectByUID[entry.uid] = deviceID }
+    for (deviceID, uid) in lastObservedDevices { previousObjectByUID[uid] = deviceID }
+    lastObservedDevices = devices
     for deviceID in installed.keys.sorted() where devices[deviceID] != installed[deviceID]?.uid {
       degradations += removeListeners(from: deviceID)
     }
