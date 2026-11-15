@@ -65,7 +65,8 @@ enum CallDetectionPolicy {
     seenApps: [AudioApp],
     isInstalled: (String) -> Bool
   ) -> [String] {
-    let seen = seenApps
+    let seen =
+      seenApps
       .filter { $0.category == .conferencing || $0.category == .communication }
       .map(\.logicalID)
     var result: [String] = []
@@ -89,7 +90,8 @@ enum CallDetectionPolicy {
     guard !captures.isEmpty, !chosenAppIDs.isEmpty else { return [] }
     var capturing = Set<String>()
     for capture in captures {
-      for app in apps where app.pid == capture.pid
+      for app in apps
+      where app.pid == capture.pid
         || (capture.owningAppBundlePath != nil
           && app.runtimeIdentity?.outerBundlePath == capture.owningAppBundlePath)
       {
