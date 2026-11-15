@@ -142,6 +142,18 @@ extension OutputDeviceInventory {
 struct DeviceFormatListenerNativeCalls: Sendable {
   let add: @Sendable (AudioObjectID, AudioObjectPropertyAddress, RouterObservationListenerBlockReference) -> OSStatus
   let remove: @Sendable (AudioObjectID, AudioObjectPropertyAddress, RouterObservationListenerBlockReference) -> OSStatus
+  /// Read on the listener queue when a device's alive state changes.
+  let isAlive: @Sendable (AudioObjectID) -> Bool
+
+  init(
+    add: @escaping @Sendable (AudioObjectID, AudioObjectPropertyAddress, RouterObservationListenerBlockReference) -> OSStatus,
+    remove: @escaping @Sendable (AudioObjectID, AudioObjectPropertyAddress, RouterObservationListenerBlockReference) -> OSStatus,
+    isAlive: @escaping @Sendable (AudioObjectID) -> Bool = { _ in true }
+  ) {
+    self.add = add
+    self.remove = remove
+    self.isAlive = isAlive
+  }
 
   static func live(on queue: DispatchQueue) -> Self {
     Self(
@@ -152,7 +164,8 @@ struct DeviceFormatListenerNativeCalls: Sendable {
       remove: { deviceID, address, listener in
         var address = address
         return AudioObjectRemovePropertyListenerBlock(deviceID, &address, queue, listener.block)
-      }
+      },
+      isAlive: OutputDeviceInventory.isAlive
     )
   }
 }
@@ -181,9 +194,11 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
   ]
 
   private let nativeCalls: DeviceFormatListenerNativeCalls
-  private var listener: RouterObservationListenerBlockReference?
-  /// Device object → the addresses currently registered on it.
-  private var installed: [AudioObjectID: [AudioObjectPropertyAddress]] = [:]
+  /// Device object → its listener block and the addresses registered with
+  /// it. One block per device, so a callback knows which device it is for.
+  private var installed: [AudioObjectID: (listener: RouterObservationListenerBlockReference, addresses: [AudioObjectPropertyAddress])] = [:]
+  private let notAliveLock = NSLock()
+  private var notAliveDeviceUIDs: Set<String> = []
 
   init(nativeCalls: DeviceFormatListenerNativeCalls) {
     self.nativeCalls = nativeCalls
@@ -194,25 +209,35 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
   }
 
   /// Registrations still owned, for diagnostics and tests.
-  var registrationCount: Int { installed.values.reduce(0) { $0 + $1.count } }
+  var registrationCount: Int { installed.values.reduce(0) { $0 + $1.addresses.count } }
 
-  /// Listens on exactly `deviceIDs`: new devices gain listeners, departed
-  /// ones lose them. A device keeps whatever listeners it accepted; the next
-  /// sync adds only the ones it refused, and retries any removal that failed.
+  /// Devices seen not alive by a listener callback since the last call. The
+  /// revalidation pass runs after a 500 ms debounce and reads only the final
+  /// state, so a device that drops and comes back inside that window would
+  /// otherwise look as if nothing had happened, and its routes, whose
+  /// aggregates may not have survived, would not be rebuilt.
+  func takeDevicesSeenNotAlive() -> Set<String> {
+    notAliveLock.withLock {
+      defer { notAliveDeviceUIDs.removeAll() }
+      return notAliveDeviceUIDs
+    }
+  }
+
+  /// Listens on exactly `devices` (object ID → UID): new devices gain
+  /// listeners, departed ones lose them. A device keeps whatever listeners it
+  /// accepted; the next sync adds only the ones it refused, and retries any
+  /// removal that failed.
   func sync(
-    deviceIDs: Set<AudioObjectID>,
+    devices: [AudioObjectID: String],
     onChange: @escaping @Sendable () -> Void
   ) -> [CleanupDegradation] {
-    if listener == nil {
-      listener = RouterObservationListenerBlockReference { _, _ in onChange() }
-    }
-    guard let listener else { return [] }
     var degradations: [CleanupDegradation] = []
-    for deviceID in installed.keys.sorted() where !deviceIDs.contains(deviceID) {
-      degradations += removeListeners(from: deviceID, listener: listener)
+    for deviceID in installed.keys.sorted() where devices[deviceID] == nil {
+      degradations += removeListeners(from: deviceID)
     }
-    for deviceID in deviceIDs.sorted() {
-      let owned = installed[deviceID] ?? []
+    for (deviceID, uid) in devices.sorted(by: { $0.key < $1.key }) {
+      let listener = installed[deviceID]?.listener ?? makeListener(deviceID: deviceID, uid: uid, onChange: onChange)
+      let owned = installed[deviceID]?.addresses ?? []
       var added: [AudioObjectPropertyAddress] = []
       // Each address in `addresses` has its own selector.
       for address in Self.addresses where !owned.contains(where: { $0.mSelector == address.mSelector }) {
@@ -229,7 +254,7 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
         }
       }
       if !added.isEmpty {
-        installed[deviceID] = owned + added
+        installed[deviceID] = (listener, owned + added)
       }
     }
     return degradations
@@ -238,25 +263,34 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
   /// Removes every owned registration. One whose removal fails stays owned
   /// and is reported; calling again retries only those.
   func remove() -> [CleanupDegradation] {
-    guard let listener else { return [] }
-    var degradations: [CleanupDegradation] = []
-    for deviceID in installed.keys.sorted() {
-      degradations += removeListeners(from: deviceID, listener: listener)
-    }
-    if installed.isEmpty {
-      self.listener = nil
-    }
-    return degradations
+    installed.keys.sorted().flatMap { removeListeners(from: $0) }
   }
 
-  private func removeListeners(
-    from deviceID: AudioObjectID,
-    listener: RouterObservationListenerBlockReference
-  ) -> [CleanupDegradation] {
+  /// The block does not capture the lifecycle strongly: Core Audio retains
+  /// it, and that must not keep the owner (and so its deinit cleanup) alive.
+  private func makeListener(
+    deviceID: AudioObjectID,
+    uid: String,
+    onChange: @escaping @Sendable () -> Void
+  ) -> RouterObservationListenerBlockReference {
+    let isAlive = nativeCalls.isAlive
+    return RouterObservationListenerBlockReference { [weak self] count, addresses in
+      let aliveChanged = (0..<Int(count)).contains {
+        addresses[$0].mSelector == kAudioDevicePropertyDeviceIsAlive
+      }
+      if aliveChanged, !isAlive(deviceID), let self {
+        self.notAliveLock.withLock { _ = self.notAliveDeviceUIDs.insert(uid) }
+      }
+      onChange()
+    }
+  }
+
+  private func removeListeners(from deviceID: AudioObjectID) -> [CleanupDegradation] {
+    guard let entry = installed[deviceID] else { return [] }
     var degradations: [CleanupDegradation] = []
     var stillOwned: [AudioObjectPropertyAddress] = []
-    for address in installed[deviceID] ?? [] {
-      let status = nativeCalls.remove(deviceID, address, listener)
+    for address in entry.addresses {
+      let status = nativeCalls.remove(deviceID, address, entry.listener)
       // A device that has already gone away takes its listeners with it.
       guard status != noErr, status != kAudioHardwareBadObjectError else { continue }
       stillOwned.append(address)
@@ -267,7 +301,7 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
           detail: "Remove device format listener selector \(address.mSelector)"
         ))
     }
-    installed[deviceID] = stillOwned.isEmpty ? nil : stillOwned
+    installed[deviceID] = stillOwned.isEmpty ? nil : (entry.listener, stillOwned)
     return degradations
   }
 }

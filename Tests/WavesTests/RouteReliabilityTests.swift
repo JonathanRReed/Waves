@@ -708,12 +708,16 @@ private let rate96 = DeviceFormatSignature(sampleRate: 96_000, outputChannelCoun
 }
 
 private func listenerLifecycle(_ calls: ListenerCalls) -> DeviceFormatListenerLifecycle {
-  DeviceFormatListenerLifecycle(
-    nativeCalls: DeviceFormatListenerNativeCalls(
-      add: { device, address, _ in calls.add(device, address.mSelector) },
-      remove: { device, address, _ in calls.remove(device, address.mSelector) }
-    )
-  )
+  DeviceFormatListenerLifecycle(nativeCalls: calls.nativeCalls)
+}
+
+extension DeviceFormatListenerLifecycle {
+  fileprivate func sync(
+    deviceIDs: Set<AudioObjectID>,
+    onChange: @escaping @Sendable () -> Void
+  ) -> [CleanupDegradation] {
+    sync(devices: Dictionary(uniqueKeysWithValues: deviceIDs.map { ($0, "device-\($0)") }), onChange: onChange)
+  }
 }
 
 private let perDevice = DeviceFormatListenerLifecycle.addresses.count
@@ -789,10 +793,43 @@ private let perDevice = DeviceFormatListenerLifecycle.addresses.count
       remove: { device, address, _ in calls.remove(device, address.mSelector) }
     )
   )
-  await backend?.syncDeviceFormatListenersForTesting(deviceIDs: [1, 2])
+  await backend?.syncDeviceFormatListenersForTesting(devices: [1: "builtin", 2: "usb-dac"])
   #expect(calls.live == [1: perDevice, 2: perDevice])
   backend = nil
   #expect(calls.live.isEmpty)
+}
+
+@Test func aDeviceThatDropsAndReturnsInsideTheDebounceIsStillRebuiltOn() async throws {
+  let calls = ListenerCalls()
+  let fixture = RouteFixture(apps: [routeTestApp()], deviceFormatListenerNativeCalls: calls.nativeCalls)
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await backend.syncDeviceFormatListenersForTesting(devices: [10: "builtin"])
+
+  // The built-in output drops (its listener fires while it is not alive) and
+  // comes back with the same format before the debounced pass runs.
+  calls.setAlive(false)
+  calls.fireAliveChange(on: 10)
+  calls.setAlive(true)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+
+  #expect(fixture.events.values == ["create app.a #2", "stop #1"])
+
+  // The transition is consumed: the next pass finds nothing to do.
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(11))
+  #expect(fixture.events.creations == 1)
+}
+
+@Test func anAliveEventWhileTheDeviceIsAliveIsNotATransition() async throws {
+  let calls = ListenerCalls()
+  let fixture = RouteFixture(apps: [routeTestApp()], deviceFormatListenerNativeCalls: calls.nativeCalls)
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await backend.syncDeviceFormatListenersForTesting(devices: [10: "builtin"])
+
+  calls.fireAliveChange(on: 10)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+  #expect(fixture.events.creations == 0)
 }
 
 @Test func releasingTheWakeObserverUnregistersIt() {
@@ -813,6 +850,32 @@ private final class ListenerCalls: @unchecked Sendable {
   private var addCounts: [AudioObjectID: Int] = [:]
   private var refusedAdd: (AudioObjectID, AudioObjectPropertySelector)?
   private var failedRemoves: [String: OSStatus] = [:]
+  private var listeners: [AudioObjectID: RouterObservationListenerBlockReference] = [:]
+  private var alive = true
+
+  var nativeCalls: DeviceFormatListenerNativeCalls {
+    DeviceFormatListenerNativeCalls(
+      add: { device, address, listener in
+        self.lock.withLock { self.listeners[device] = listener }
+        return self.add(device, address.mSelector)
+      },
+      remove: { device, address, _ in self.remove(device, address.mSelector) },
+      isAlive: { _ in self.lock.withLock { self.alive } }
+    )
+  }
+
+  func setAlive(_ value: Bool) { lock.withLock { alive = value } }
+
+  /// Delivers a device-is-alive change the way Core Audio's listener would.
+  func fireAliveChange(on device: AudioObjectID) {
+    guard let listener = lock.withLock({ listeners[device] }) else { return }
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyDeviceIsAlive,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    listener.block(1, &address)
+  }
 
   var live: [AudioObjectID: Int] { lock.withLock { counts.filter { $0.value > 0 } } }
 
@@ -1157,7 +1220,8 @@ final class RouteFixture: @unchecked Sendable {
   init(
     apps: [AudioApp],
     retryPause: WorkspaceAudioControlBackend.ControllerRetryPause? = nil,
-    rendersDuringHandoff: Bool = true
+    rendersDuringHandoff: Bool = true,
+    deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil
   ) {
     let events = self.events
     let devices = self.devices
@@ -1225,10 +1289,8 @@ final class RouteFixture: @unchecked Sendable {
       handoffSilencePause: { if rendersDuringHandoff { events.pumpRenders() } },
       routeOutputBindingProvider: { devices.binding(for: $0) },
       deviceFormatObservationProvider: { devices.observation($0) },
-      deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls(
-        add: { _, _, _ in noErr },
-        remove: { _, _, _ in noErr }
-      )
+      deviceFormatListenerNativeCalls: deviceFormatListenerNativeCalls
+        ?? DeviceFormatListenerNativeCalls(add: { _, _, _ in noErr }, remove: { _, _, _ in noErr })
     )
   }
 

@@ -40,10 +40,12 @@ extension WorkspaceAudioControlBackend {
     let observations = Dictionary(
       uniqueKeysWithValues: deviceUIDs.map { ($0, deviceFormatObservation(uid: $0)) }
     )
+    // A device that dropped and returned inside the debounce window was
+    // caught by its listener; treat it as seen not alive.
     let decision = RouteFormatRevalidation.decide(
       bindings: routeOutputBindingByRuntimeID,
       observations: observations,
-      devicesPreviouslySeenNotAlive: devicesSeenNotAlive
+      devicesPreviouslySeenNotAlive: devicesSeenNotAlive.union(deviceFormatListeners.takeDevicesSeenNotAlive())
     )
     devicesSeenNotAlive = decision.devicesSeenNotAlive
     guard !decision.runtimeIDsToRebuild.isEmpty else { return }
@@ -57,15 +59,20 @@ extension WorkspaceAudioControlBackend {
   /// an event for a device no route uses is a no-op in `revalidateRouteFormats`.
   func syncDeviceFormatListeners() {
     guard !isShuttingDown else { return }
-    let mailbox = deviceChangeMailbox
-    let deviceIDs = Set(
-      allDeviceIDs().filter {
-        OutputDeviceInventory.hasOutputStreams($0)
-          && OutputDeviceInventory.deviceUID($0)?.hasPrefix("com.waves.aggregate.") == false
+    var devices: [AudioObjectID: String] = [:]
+    for deviceID in allDeviceIDs() where OutputDeviceInventory.hasOutputStreams(deviceID) {
+      guard let uid = OutputDeviceInventory.deviceUID(deviceID), !uid.hasPrefix("com.waves.aggregate.") else {
+        continue
       }
-    )
+      devices[deviceID] = uid
+    }
+    syncDeviceFormatListeners(devices: devices)
+  }
+
+  private func syncDeviceFormatListeners(devices: [AudioObjectID: String]) {
+    let mailbox = deviceChangeMailbox
     retainCleanupDegradations(
-      deviceFormatListeners.sync(deviceIDs: deviceIDs) { mailbox.enqueue(.deviceFormat) }
+      deviceFormatListeners.sync(devices: devices) { mailbox.enqueue(.deviceFormat) }
     )
   }
 
@@ -82,11 +89,8 @@ extension WorkspaceAudioControlBackend {
     wakeObserver = nil
   }
 
-  func syncDeviceFormatListenersForTesting(deviceIDs: Set<AudioObjectID>) {
-    let mailbox = deviceChangeMailbox
-    retainCleanupDegradations(
-      deviceFormatListeners.sync(deviceIDs: deviceIDs) { mailbox.enqueue(.deviceFormat) }
-    )
+  func syncDeviceFormatListenersForTesting(devices: [AudioObjectID: String]) {
+    syncDeviceFormatListeners(devices: devices)
   }
 
   func revalidateRouteFormatsForTesting(at now: Duration) async {
