@@ -473,3 +473,73 @@ func polishApp(
   #expect(fixture.store.toasts.last?.title == "Could not open GitHub")
   #expect(pasteboard.string(forType: .string) == fixture.store.diagnosticsExportText)
 }
+
+// MARK: - Automation in diagnostics
+
+@MainActor
+@Test func diagnosticsReportAutomationStateWithoutNamingApps() async throws {
+  let fixture = try await makePolishFixture(apps: [polishApp()]) { preferences in
+    preferences.enableURLScheme = true
+    preferences.enableExternalControl = true
+    preferences.enableKeyboardShortcuts = true
+    preferences.adaptiveMixMode = .speechFocus
+    preferences.adaptiveFocusMode = .followFrontApp
+  }
+  defer { fixture.cleanup() }
+  let store = fixture.store
+  let secretAppID = "com.example.private-app"
+  let chord = HotkeyChord(keyCode: 46, carbonModifiers: UInt32(2304))
+  store.preferences.hotkeys.bindings = [
+    HotkeyBinding(action: .muteApp(secretAppID), keyCode: chord.keyCode, carbonModifiers: chord.carbonModifiers),
+    HotkeyBinding(action: .showMixer, keyCode: 1, carbonModifiers: UInt32(2304)),
+  ]
+  store.reportRejectedHotkeys([store.preferences.hotkeys.bindings[0]])
+  store.loginItemStatus = LoginItemStatus(
+    isEnabled: false, isUserIntentEnabled: true, statusDescription: "Requires approval",
+    requiresApproval: true)
+  store.controlSocketDiagnostics = { ControlSocketDiagnostics(isListening: true, clientCount: 2) }
+
+  let report = store.diagnosticsExportText
+  let section =
+    try #require(report.components(separatedBy: "\nAutomation\n").last)
+    .components(separatedBy: "\n\n").first ?? ""
+  #expect(section.contains("URL commands: enabled"))
+  #expect(section.contains("Control socket: enabled, listening, 2 clients connected"))
+  #expect(section.contains("Global shortcuts: enabled, 2 assigned, 1 refused by macOS"))
+  #expect(section.contains("Refused shortcut: \(store.preferences.hotkeys.bindings[0].displayString) (mute-app)"))
+  #expect(section.contains("Open at login: Requires approval (waiting for approval in System Settings)"))
+  #expect(section.contains("Adaptive Mix: speechFocus, focus followFrontApp"))
+  #expect(!section.contains(secretAppID))
+  #expect(!report.contains(secretAppID))
+}
+
+@Test func diagnosticsAutomationSectionDescribesAnIdleSocket() {
+  var lines: [String] = []
+  let state = DiagnosticsAutomationState(
+    urlCommandsEnabled: false,
+    controlSocketEnabled: true,
+    controlSocket: ControlSocketDiagnostics(isListening: false, clientCount: 0),
+    keyboardShortcutsEnabled: false,
+    assignedShortcutCount: 0,
+    refusedShortcuts: [],
+    loginItem: LoginItemStatus(isEnabled: true, isUserIntentEnabled: true, statusDescription: "Enabled"),
+    adaptiveMixMode: .off,
+    adaptiveFocusMode: .smartHybrid
+  )
+  DiagnosticsExportFormatter.appendAutomation(state, to: &lines)
+  #expect(
+    lines == [
+      "",
+      "Automation",
+      "URL commands: disabled",
+      "Control socket: enabled, not listening",
+      "Global shortcuts: disabled, 0 assigned, 0 refused by macOS",
+      "Open at login: Enabled",
+      "Adaptive Mix: off, focus smartHybrid",
+    ])
+  var disabled = state
+  disabled.controlSocketEnabled = false
+  lines = []
+  DiagnosticsExportFormatter.appendAutomation(disabled, to: &lines)
+  #expect(lines.contains("Control socket: disabled"))
+}

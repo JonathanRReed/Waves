@@ -363,6 +363,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     store?.onExternalControlPreferenceChange = { [weak self] in
       self?.reconcileControlServer()
     }
+    store?.controlSocketDiagnostics = { [weak self] in
+      ControlSocketDiagnostics(
+        isListening: self?.controlServer?.isRunning ?? false,
+        clientCount: self?.controlServer?.connectionCount ?? 0
+      )
+    }
     store?.start()
     reconcileControlServer()
     NSApp.setActivationPolicy(.regular)

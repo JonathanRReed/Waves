@@ -182,6 +182,9 @@ final class AppStore {
   /// finishes, where every chord is treated as available and the registration
   /// itself remains the backstop.
   @ObservationIgnored var isChordAvailable: ((HotkeyChord) -> Bool)?
+  /// Reports the control socket's listener and client count for diagnostics.
+  /// Set by the app delegate, which owns the server.
+  @ObservationIgnored var controlSocketDiagnostics: (() -> ControlSocketDiagnostics)?
 
   /// Releases and restores Waves's own registrations. Set by the app delegate.
   ///
@@ -988,7 +991,24 @@ final class AppStore {
       lastPersistenceError: lastPersistenceError,
       shutdownResult: shutdownResult,
       previousShutdown: previousShutdownReport,
-      callDetection: callDetectionDiagnostics
+      callDetection: callDetectionDiagnostics,
+      automation: diagnosticsAutomationState
+    )
+  }
+
+  var diagnosticsAutomationState: DiagnosticsAutomationState {
+    let bindings = preferences.hotkeys.bindings
+    return DiagnosticsAutomationState(
+      urlCommandsEnabled: preferences.enableURLScheme,
+      controlSocketEnabled: preferences.enableExternalControl,
+      controlSocket: controlSocketDiagnostics?(),
+      keyboardShortcutsEnabled: preferences.enableKeyboardShortcuts,
+      assignedShortcutCount: bindings.count,
+      refusedShortcuts: bindings.filter { rejectedHotkeyIDs.contains($0.id) }
+        .map { "\($0.displayString) (\($0.action.kind))" },
+      loginItem: loginItemStatus,
+      adaptiveMixMode: preferences.adaptiveMixMode,
+      adaptiveFocusMode: preferences.adaptiveFocusMode
     )
   }
 
