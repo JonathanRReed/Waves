@@ -255,6 +255,13 @@ final class AppStore {
   // clears it and runs exactly one more pass, which re-reads the *current*
   // frontmost app — so the latest app switch always wins and none are dropped.
   var pendingAutoPausePassRerun = false
+  /// Reads which apps are running microphone input, for microphone call
+  /// detection. Started only while that mode is on.
+  let microphoneActivityMonitor: any MicrophoneActivityMonitoring
+  /// Waits out `CallDetectionPolicy.callEndHold`; injected so tests decide when
+  /// the hold expires.
+  let callEndHoldSleep: @Sendable (Duration) async throws -> Void
+  var microphoneCall = MicrophoneCallState()
   var waveLinkSettingsGeneration: UInt64 = 0
   var pendingWaveLinkRouteRecovery = false
   private let accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster
@@ -276,9 +283,15 @@ final class AppStore {
       duration in try await Task.sleep(for: duration)
     },
     accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster = .live,
-    installLocation: InstallLocationClassification = .applications
+    installLocation: InstallLocationClassification = .applications,
+    microphoneActivityMonitor: (any MicrophoneActivityMonitoring)? = nil,
+    callEndHoldSleep: @escaping @Sendable (Duration) async throws -> Void = {
+      duration in try await Task.sleep(for: duration)
+    }
   ) {
     self.backend = backend
+    self.microphoneActivityMonitor = microphoneActivityMonitor ?? CoreAudioMicrophoneActivityMonitor()
+    self.callEndHoldSleep = callEndHoldSleep
     self.loginItemService = loginItemService
     self.runtimeProcessProbe = runtimeProcessProbe
     self.adaptiveMixCoordinator = AdaptiveMixCoordinator(sleep: adaptiveMixSleep)
@@ -955,7 +968,8 @@ final class AppStore {
       persistenceFailureCount: persistenceFailureCount,
       lastPersistenceError: lastPersistenceError,
       shutdownResult: shutdownResult,
-      previousShutdown: previousShutdownReport
+      previousShutdown: previousShutdownReport,
+      callDetection: callDetectionDiagnostics
     )
   }
 
@@ -972,7 +986,8 @@ final class AppStore {
       toastDismissalCount: toastDismissals.count,
       lingerTaskCount: lingerRemovalTasks.count,
       observerCount: [frontmostAppObserver, appTerminationObserver].compactMap { $0 }.count
-        + (deviceChangeObserver == nil ? 0 : 1),
+        + (deviceChangeObserver == nil ? 0 : 1)
+        + (microphoneActivityMonitor.isRunning ? 1 : 0),
       backendStarted: hasStartedAudioBackend
     )
   }

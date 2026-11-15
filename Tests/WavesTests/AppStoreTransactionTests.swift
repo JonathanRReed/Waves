@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 import WavesAudioCore
@@ -1423,7 +1424,7 @@ func acceptedURLMuteReplacesAutomaticMuteOwnership(isMuted: Bool) async {
   )
   #expect(fixture.preferencesStore.saveCount == 0)
   #expect(fixture.presetsStore.saveCount == 0)
-  #expect(!fixture.store.toasts.contains { $0.title == "Auto-paused media" })
+  #expect(!fixture.store.toasts.contains { $0.title == "Muted for your call" })
 }
 
 @MainActor
@@ -1493,6 +1494,451 @@ func acceptedURLMuteReplacesAutomaticMuteOwnership(isMuted: Bool) async {
 
   _ = await fixture.store.shutdown()
   #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+// MARK: - Microphone call detection
+
+/// Stands in for Core Audio: the test decides which processes run input.
+@MainActor
+private final class FakeMicrophoneActivityMonitor: MicrophoneActivityMonitoring {
+  private var onChange: (@MainActor () -> Void)?
+  private(set) var startCount = 0
+  var captures: [MicrophoneCaptureProcess] = []
+
+  var isRunning: Bool { onChange != nil }
+
+  func start(onChange: @escaping @MainActor () -> Void) {
+    guard self.onChange == nil else { return }
+    startCount += 1
+    self.onChange = onChange
+  }
+
+  func stop() { onChange = nil }
+
+  func capturingProcesses() -> [MicrophoneCaptureProcess] {
+    isRunning ? captures : []
+  }
+
+  func emit(_ captures: [MicrophoneCaptureProcess]) {
+    self.captures = captures
+    onChange?()
+  }
+}
+
+/// The call-end hold, released only when the test says so.
+@MainActor
+private final class ManualHoldClock {
+  private(set) var requested: [Duration] = []
+  private var liveWaiters = 0
+  private var generation = 0
+
+  nonisolated var sleep: @Sendable (Duration) async throws -> Void {
+    { [self] duration in try await self.wait(duration) }
+  }
+
+  private func wait(_ duration: Duration) async throws {
+    requested.append(duration)
+    let started = generation
+    liveWaiters += 1
+    defer { liveWaiters -= 1 }
+    while generation == started {
+      try await Task.sleep(for: .milliseconds(2))
+    }
+  }
+
+  /// Waits (up to about two seconds) for a hold to be waiting, then lets it
+  /// expire. Records an issue instead of hanging when no hold ever starts.
+  func expire() async {
+    for _ in 0..<1_000 where liveWaiters == 0 {
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+    guard liveWaiters > 0 else {
+      Issue.record("No call-end hold was waiting")
+      return
+    }
+    generation += 1
+  }
+}
+
+private func callTestApp(
+  id: String,
+  pid: Int32,
+  category: AppCategory,
+  displayName: String,
+  isMuted: Bool = false,
+  runtimeIdentity: AppRuntimeIdentity? = nil
+) -> AudioApp {
+  AudioApp(
+    id: "\(id).runtime",
+    logicalID: id,
+    pid: pid,
+    bundleID: id,
+    displayName: displayName,
+    category: category,
+    isActive: true,
+    desiredVolume: 0.5,
+    appliedVolume: isMuted ? 0 : 0.5,
+    isMuted: isMuted,
+    routingState: .managed,
+    compatibility: .supported,
+    targetDeviceUID: "device.original",
+    runtimeIdentity: runtimeIdentity
+  )
+}
+
+/// A helper process inside the call app's bundle, as a browser or Electron app
+/// captures the microphone from.
+private let callHelperCapture = MicrophoneCaptureProcess(
+  pid: 9_001,
+  reportedBundleID: "com.example.call.helper",
+  owningAppBundlePath: "/Applications/Call.app",
+  owningAppBundleID: "com.example.call"
+)
+
+@MainActor
+private func makeMicrophoneCallFixture(
+  apps: [AudioApp]? = nil,
+  chosenAppIDs: [String] = ["com.example.call"]
+) -> (fixture: TransactionFixture, monitor: FakeMicrophoneActivityMonitor, clock: ManualHoldClock) {
+  let monitor = FakeMicrophoneActivityMonitor()
+  let clock = ManualHoldClock()
+  let fixture = makeTransactionFixture(
+    apps: apps ?? [
+      callTestApp(id: "com.example.music", pid: 10, category: .media, displayName: "Music Player"),
+      // A call app Waves happens to class as media must still never be muted.
+      callTestApp(id: "com.example.call", pid: 20, category: .media, displayName: "Call"),
+    ],
+    device: transactionTestDevice(),
+    microphoneActivityMonitor: monitor,
+    callEndHoldSleep: clock.sleep
+  )
+  fixture.store.preferences.autoPauseMusicForConferencing = true
+  fixture.store.preferences.callDetectionMode = .microphoneInUse
+  fixture.store.preferences.callDetectionAppIDs = chosenAppIDs
+  return (fixture, monitor, clock)
+}
+
+@MainActor
+private func settleCallDetection(_ store: AppStore) async {
+  await store.drainOwnedOperations()
+  await store.drainAppIntentTransactions()
+}
+
+@MainActor
+private func muteState(_ store: AppStore, _ appID: String) -> (isMuted: Bool, source: MuteSource)? {
+  store.session.apps.first { $0.logicalID == appID }.map { ($0.isMuted, $0.muteSource) }
+}
+
+@MainActor
+@Test func microphoneModeDoesNothingUntilChosenAndNeverRunsWhileOff() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  store.preferences.callDetectionMode = .frontmostCallApp
+  store.checkAutoPauseMusic()
+  #expect(monitor.startCount == 0)
+  store.preferences.callDetectionMode = .microphoneInUse
+  store.preferences.autoPauseMusicForConferencing = false
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(monitor.startCount == 0)
+  #expect(!monitor.isRunning)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func microphoneCallMutesMediaButNeverTheCallApp() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+
+  #expect(monitor.isRunning)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  #expect(muteState(store, "com.example.music")?.source == .autoConferencing)
+  #expect(muteState(store, "com.example.call")?.isMuted == false)
+  // Not muted and then unmuted again: the call app is never touched.
+  #expect(await fixture.backend.recordedIntents().count == 1)
+  #expect(store.toasts.contains { $0.title == "Muted for your call" })
+  #expect(!store.toasts.contains { $0.title.contains("paused") })
+  // Automation is never saved as the user's own mute.
+  #expect(store.preferences.appAudioIntents["com.example.music"]?.isMuted != true)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func aCallAppMutedEarlierByAutomationIsUnmutedWhenItsCallStarts() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  // An automatic mute from the other mode caught the media-category call app.
+  await store.applyAutomaticConferencingTransition(isConferencingActive: true)
+  #expect(muteState(store, "com.example.call")?.isMuted == true)
+
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.call")?.isMuted == false)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  #expect(muteState(store, "com.example.music")?.source == .autoConferencing)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func microphoneCallIgnoresAppsThatWereNotChosen() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture(chosenAppIDs: ["com.example.other"])
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func microphoneHelperResolvesToItsAppThroughTheOuterBundle() {
+  var identity = AppRuntimeIdentity(
+    lifetime: AppProcessLifetimeIdentity(pid: 30, startTimeSeconds: 1, startTimeMicroseconds: 0),
+    executablePath: "/Applications/Browser.app/Contents/MacOS/Browser",
+    outerBundlePath: "/Applications/Browser.app",
+    signingIdentity: AppCodeSigningIdentity(
+      identifier: "com.example.browser",
+      teamIdentifier: "TEAM",
+      designatedRequirement: "identifier \"com.example.browser\"",
+      codeDirectoryHash: Data([1])
+    )
+  )
+  let browser = callTestApp(
+    id: "name-browser", pid: 30, category: .browser, displayName: "Browser", runtimeIdentity: identity)
+  // A helper with no bundle ID of its own, matched only by its outer `.app`.
+  let helper = MicrophoneCaptureProcess(
+    pid: 31, reportedBundleID: nil, owningAppBundlePath: "/Applications/Browser.app", owningAppBundleID: nil)
+  #expect(
+    CallDetectionPolicy.callingAppIDs(captures: [helper], chosenAppIDs: ["name-browser"], apps: [browser])
+      == ["name-browser"])
+  identity = AppRuntimeIdentity(
+    lifetime: identity.lifetime,
+    executablePath: "/Applications/Other.app/Contents/MacOS/Other",
+    outerBundlePath: "/Applications/Other.app",
+    signingIdentity: identity.signingIdentity
+  )
+  let other = callTestApp(
+    id: "name-browser", pid: 30, category: .browser, displayName: "Browser", runtimeIdentity: identity)
+  #expect(
+    CallDetectionPolicy.callingAppIDs(captures: [helper], chosenAppIDs: ["name-browser"], apps: [other])
+      .isEmpty)
+  // The app's own process, by PID.
+  let own = MicrophoneCaptureProcess(pid: 30, reportedBundleID: nil, owningAppBundlePath: nil, owningAppBundleID: nil)
+  #expect(
+    CallDetectionPolicy.callingAppIDs(captures: [own], chosenAppIDs: ["name-browser"], apps: [browser])
+      == ["name-browser"])
+}
+
+@MainActor
+@Test func microphoneCallRidesOverABriefReleaseThenUnmutesAfterTheHold() async {
+  let (fixture, monitor, clock) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The mic closes for a moment and comes back: no unmute.
+  monitor.emit([])
+  await settleCallDetection(store)
+  #expect(store.microphoneCall.endHoldTask != nil)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  monitor.emit([callHelperCapture])
+  await settleCallDetection(store)
+  #expect(store.microphoneCall.endHoldTask == nil)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The call ends: still muted until the hold expires.
+  monitor.emit([])
+  let hold = store.microphoneCall.endHoldTask
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  await clock.expire()
+  await hold?.value
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(muteState(store, "com.example.music")?.source == .user)
+  #expect(store.toasts.contains { $0.title == "Unmuted after your call" })
+  #expect(clock.requested == [CallDetectionPolicy.callEndHold, CallDetectionPolicy.callEndHold])
+  #expect(CallDetectionPolicy.callEndHold == .seconds(2))
+  #expect(await fixture.backend.recordedIntents().map(\.reason) == [.automation, .automation])
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func userChoicesDuringAMicrophoneCallWin() async {
+  let apps = [
+    callTestApp(id: "com.example.music", pid: 10, category: .media, displayName: "Music Player"),
+    callTestApp(id: "com.example.video", pid: 11, category: .media, displayName: "Video", isMuted: true),
+    callTestApp(id: "com.example.call", pid: 20, category: .conferencing, displayName: "Call"),
+  ]
+  let (fixture, monitor, clock) = makeMicrophoneCallFixture(apps: apps)
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The user unmutes the music mid-call; more capture changes in the same call
+  // must not mute it again.
+  if let music = store.session.apps.first(where: { $0.logicalID == "com.example.music" }) {
+    store.setMuted(false, for: music)
+  }
+  await settleCallDetection(store)
+  monitor.emit([callHelperCapture, MicrophoneCaptureProcess(pid: 20)])
+  // Refreshes and app switches re-run the automatic pass during a call.
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+
+  monitor.emit([])
+  let hold = store.microphoneCall.endHoldTask
+  await clock.expire()
+  await hold?.value
+  await settleCallDetection(store)
+  // The user's own mute from before the call is kept after it.
+  #expect(muteState(store, "com.example.video")?.isMuted == true)
+  #expect(muteState(store, "com.example.video")?.source == .user)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(await fixture.backend.recordedIntents().map(\.reason) == [.automation, .userEdit])
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func turningCallMutingOffReleasesMicrophoneMutesAndStopsTheMonitor() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  store.setAutoPauseMusicEnabled(false)
+  await settleCallDetection(store)
+  #expect(!monitor.isRunning)
+  #expect(!store.microphoneCall.isActive)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(store.callDetectionDiagnostics == nil)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func changingDetectionModeStopsTheMonitorAndReleasesMutesTheNewModeDoesNotSee() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  store.setCallDetectionMode(.frontmostCallApp)
+  await settleCallDetection(store)
+  #expect(!monitor.isRunning)
+  #expect(store.preferences.callDetectionMode == .frontmostCallApp)
+  // The new mode reads the real frontmost app. Unless a call app happens to be
+  // in front on the test machine, it sees no call and releases the mute.
+  let front = NSWorkspace.shared.frontmostApplication
+  let callAppInFront =
+    front.map {
+      AppDiscoveryPolicy.inferCategory(bundleID: $0.bundleIdentifier, displayName: $0.localizedName ?? "")
+    } == .conferencing
+  if !callAppInFront {
+    #expect(muteState(store, "com.example.music")?.isMuted == false)
+  }
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func addingACapturingAppStartsTheCallAtOnce() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture(chosenAppIDs: [])
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+
+  store.setCallDetectionApp("com.example.call", isChosen: true)
+  await settleCallDetection(store)
+  #expect(store.preferences.callDetectionAppIDs == ["com.example.call"])
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  #expect(store.callDetectionDiagnostics == CallDetectionDiagnostics(isDetected: true, appNames: ["Call"]))
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func shutdownStopsTheMicrophoneMonitorAndTheHold() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  monitor.emit([])
+  #expect(store.microphoneCall.endHoldTask != nil)
+
+  _ = await store.shutdown()
+  #expect(!monitor.isRunning)
+  #expect(store.microphoneCall.endHoldTask == nil)
+  #expect(store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func choosingMicrophoneModeFillsInKnownCallAppsOnce() async {
+  let apps = [
+    callTestApp(id: "com.example.music", pid: 10, category: .media, displayName: "Music Player"),
+    callTestApp(id: "com.example.zoomish", pid: 12, category: .conferencing, displayName: "Zoom"),
+    callTestApp(id: "com.example.chat", pid: 13, category: .communication, displayName: "Discord"),
+  ]
+  let (fixture, _, _) = makeMicrophoneCallFixture(apps: apps)
+  let store = fixture.store
+  store.preferences.callDetectionMode = .frontmostCallApp
+  store.preferences.callDetectionAppIDs = nil
+  store.setCallDetectionMode(.microphoneInUse)
+  let filled = store.preferences.callDetectionAppIDs ?? []
+  #expect(Array(filled.prefix(2)) == ["com.example.zoomish", "com.example.chat"])
+  #expect(!filled.contains("com.example.music"))
+
+  // A list the user emptied stays empty when they come back to the mode.
+  store.preferences.callDetectionAppIDs = []
+  store.setCallDetectionMode(.frontmostCallApp)
+  store.setCallDetectionMode(.microphoneInUse)
+  #expect(store.preferences.callDetectionAppIDs == [])
+  _ = await store.shutdown()
+}
+
+@Test func suggestedCallAppsAreSeenCallAppsThenInstalledKnownOnes() {
+  let seen = [
+    AudioApp(id: "a", logicalID: "us.zoom.xos", displayName: "zoom.us", category: .conferencing),
+    AudioApp(id: "b", logicalID: "com.example.music", displayName: "Music", category: .media),
+    AudioApp(id: "c", logicalID: "com.example.chat", displayName: "Chat", category: .communication),
+  ]
+  let suggested = CallDetectionPolicy.suggestedCallAppIDs(
+    seenApps: seen,
+    isInstalled: { ["us.zoom.xos", "com.hnc.Discord"].contains($0) }
+  )
+  #expect(suggested == ["us.zoom.xos", "com.example.chat", "com.hnc.Discord"])
+  for bundleID in CallDetectionPolicy.knownCallAppBundleIDs {
+    let category = AppDiscoveryPolicy.inferCategory(bundleID: bundleID, displayName: "")
+    #expect(category == .conferencing || category == .communication, "\(bundleID) is \(category)")
+  }
+}
+
+@Test func callDetectionPreferencesDefaultToTheFrontmostModeAndRoundTrip() throws {
+  let legacy = try JSONDecoder().decode(UserPreferences.self, from: Data("{}".utf8))
+  #expect(legacy.callDetectionMode == .frontmostCallApp)
+  #expect(legacy.callDetectionAppIDs == nil)
+  #expect(legacy.autoPauseMusicForConferencing)
+
+  var preferences = UserPreferences()
+  preferences.callDetectionMode = .microphoneInUse
+  preferences.callDetectionAppIDs = ["com.google.Chrome"]
+  let decoded = try JSONDecoder().decode(UserPreferences.self, from: JSONEncoder().encode(preferences))
+  #expect(decoded.callDetectionMode == .microphoneInUse)
+  #expect(decoded.callDetectionAppIDs == ["com.google.Chrome"])
 }
 
 @MainActor
@@ -2333,7 +2779,11 @@ private func makeTransactionFixture(
   deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
     duration in try await Task.sleep(for: duration)
   },
-  profileStore: TransactionProfilesStore = TransactionProfilesStore()
+  profileStore: TransactionProfilesStore = TransactionProfilesStore(),
+  microphoneActivityMonitor: (any MicrophoneActivityMonitoring)? = nil,
+  callEndHoldSleep: @escaping @Sendable (Duration) async throws -> Void = {
+    duration in try await Task.sleep(for: duration)
+  }
 ) -> TransactionFixture {
   let snapshot = transactionSnapshot(apps: apps, device: device)
   let refreshSnapshot = refreshApps.map { transactionSnapshot(apps: $0, device: device) }
@@ -2385,7 +2835,9 @@ private func makeTransactionFixture(
     deviceVolumePresetsStore: presetsStore,
     initialStartupState: initialStartupState,
     runtimeProcessProbe: runtimeProcessProbe,
-    deviceChangeSuppressionSleep: deviceChangeSuppressionSleep
+    deviceChangeSuppressionSleep: deviceChangeSuppressionSleep,
+    microphoneActivityMonitor: microphoneActivityMonitor,
+    callEndHoldSleep: callEndHoldSleep
   )
   return TransactionFixture(
     store: store,
@@ -3197,4 +3649,31 @@ func nonFiniteBoostsEmitUnityBoost(nonFiniteValue: Float) async throws {
 
   #expect(await fixture.backend.recordedIntents().isEmpty)
   #expect(fixture.store.trackedAppIntentTaskCount == 0)
+}
+
+@Test(arguments: [nil, false, true] as [Bool?])
+func diagnosticsMentionTheMicrophoneOnlyWhileThatModeIsOn(detected: Bool?) {
+  let text = DiagnosticsExportFormatter.format(
+    metadata: DiagnosticsMetadata(bundleInfo: [:], operatingSystemVersion: "Version 27.0"),
+    captureAuthorization: nil,
+    session: .empty,
+    apps: [],
+    availableOutputDeviceCount: 0,
+    diagnostics: nil,
+    persistenceFailureCount: 0,
+    lastPersistenceError: nil,
+    shutdownResult: nil,
+    callDetection: detected.map { CallDetectionDiagnostics(isDetected: $0, appNames: $0 ? ["Zoom"] : []) }
+  )
+  switch detected {
+  case nil:
+    #expect(!text.lowercased().contains("microphone"))
+    #expect(!text.contains("Call detection"))
+  case false?:
+    #expect(text.contains("Detected: no"))
+    #expect(!text.contains("By [app name]"))
+  case true?:
+    #expect(text.contains("Detected: yes"))
+    #expect(text.contains("By [app name]: Zoom"))
+  }
 }
