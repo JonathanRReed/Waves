@@ -82,7 +82,8 @@ final class PerAppTapController: @unchecked Sendable {
   private var renderedEqualizerHeadroomGain: Float
   /// Volume x boost x adaptive gain.
   private var renderedLevelGain: Float
-  /// 1 while audible, 0 once a mute has faded out.
+  /// 1 while audible, 0 once a mute has faded out. Also read, and cut to 0, on
+  /// `callbackQueue` by `silenceForHandoff`.
   private var renderedMuteGain: Float
   /// Frames a mute or unmute fades over (about 5 ms).
   private let muteRampFrameCount: Float
@@ -170,6 +171,8 @@ final class PerAppTapController: @unchecked Sendable {
     appID: String,
     logicalID: String? = nil,
     targetProcessObjectIDs: [AudioObjectID] = [],
+    volume: Float = 1,
+    muted: Bool = false,
     teardownNativeCalls: PerAppTapControllerTeardownNativeCalls? = nil
   ) throws -> PerAppTapController {
     let description = CATapDescription(stereoMixdownOfProcesses: [])
@@ -197,9 +200,9 @@ final class PerAppTapController: @unchecked Sendable {
       tapDescription: description,
       tapID: 10_001,
       aggregateDeviceID: 10_002,
-      volume: 1,
+      volume: volume,
       volumeBoost: 1,
-      muted: false,
+      muted: muted,
       equalizerSettings: EqualizerSettings(),
       managedAudioEqualizerSettings: GlobalEqualizerSettings(),
       adaptiveGainDB: 0,
@@ -220,11 +223,6 @@ final class PerAppTapController: @unchecked Sendable {
     callbackQueue.sync {}
     let state = stateBox.read()
     return (state.volume, state.volumeBoost)
-  }
-
-  func settledIsMutedForTesting() -> Bool {
-    callbackQueue.sync {}
-    return stateBox.read().isMuted != 0
   }
 
   /// Runs one render callback the way Core Audio would, after every queued
@@ -278,6 +276,39 @@ final class PerAppTapController: @unchecked Sendable {
     callbackQueue.async { [weak self] in
       self?.stateBox.writeVolumeAndMute(volume: clampedVolume, volumeBoost: clampedBoost, muted: muted)
     }
+  }
+
+  enum HandoffSilence: Equatable, Sendable {
+    /// The mute fade finished in the render path.
+    case faded
+    /// The fade did not finish in time, so the renderer was cut to silence.
+    case cut
+  }
+
+  /// Mutes this renderer and blocks until the render path has faded it out,
+  /// so a replacement can start playing without the two overlapping.
+  ///
+  /// Each `pause` gives the IO thread time to render; a fade normally ends
+  /// within one or two callbacks. A renderer that has not finished after
+  /// `maxPolls` pauses is either not rendering at all (its device is gone or
+  /// stopped) or running an unusually long buffer. Either way it is cut to
+  /// silence without a fade: every later callback outputs zeros, so it can
+  /// never play over its replacement. The cut may click; it is never louder.
+  func silenceForHandoff(maxPolls: Int, pause: () -> Void) -> HandoffSilence {
+    let isSilent: () -> Bool = { [self] in
+      callbackQueue.sync { renderedMuteGain == 0 }
+    }
+    callbackQueue.sync {
+      let state = stateBox.read()
+      stateBox.writeVolumeAndMute(volume: state.volume, volumeBoost: state.volumeBoost, muted: true)
+    }
+    if isSilent() { return .faded }
+    for _ in 0..<max(0, maxPolls) {
+      pause()
+      if isSilent() { return .faded }
+    }
+    callbackQueue.sync { renderedMuteGain = 0 }
+    return .cut
   }
 
   func setVolumeBoost(_ boost: Float) {
@@ -566,9 +597,9 @@ final class PerAppTapController: @unchecked Sendable {
   /// Retries a teardown that previously failed. Distinct from `dispose()`,
   /// which stays idempotent so a second shutdown request never repeats
   /// destructive native cleanup.
-  func retryDispose() -> [CleanupDegradation] {
+  func retryDispose(releasingTapMute: Bool = true) -> [CleanupDegradation] {
     disposeOnce.reset()
-    return dispose()
+    return dispose(releasingTapMute: releasingTapMute)
   }
 
   @available(macOS 14.2, *)
@@ -617,7 +648,14 @@ final class PerAppTapController: @unchecked Sendable {
     }
   }
 
-  func dispose() -> [CleanupDegradation] {
+  /// Tears the controller down. By default the tap's mute is released first
+  /// so the app falls back to its own output (fail open). A controller retired
+  /// in favour of a successor passes `releasingTapMute: false`: the successor's
+  /// tap already keeps the app's own output muted, so asking Core Audio to
+  /// unmute this one could only risk the app playing at full level alongside
+  /// the successor. The renderer is stopped and destroyed instead; it was
+  /// silenced before the successor was un-muted.
+  func dispose(releasingTapMute: Bool = true) -> [CleanupDegradation] {
     disposeOnce.run { [self] in
       var observations: [CleanupStatusObservation] = []
 
@@ -637,6 +675,7 @@ final class PerAppTapController: @unchecked Sendable {
         teardownNativeCalls != nil || (didStartIOProc && ioProcID != nil && aggregateDeviceID != .unknown)
       let preparation = MutingTapTeardownPreparation.perform(
         makeOriginalAudioAudible: {
+          guard releasingTapMute else { return noErr }
           if let teardownNativeCalls {
             return teardownNativeCalls.makeOriginalAudioAudible()
           }
@@ -651,6 +690,7 @@ final class PerAppTapController: @unchecked Sendable {
           return AudioDeviceStop(aggregateDeviceID, procID)
         },
         restoreTapMuting: {
+          guard releasingTapMute else { return noErr }
           if let teardownNativeCalls {
             return teardownNativeCalls.restoreTapMuting()
           }
@@ -662,7 +702,7 @@ final class PerAppTapController: @unchecked Sendable {
         }
       )
 
-      if #available(macOS 14.2, *), tapID != .unknown {
+      if #available(macOS 14.2, *), tapID != .unknown, releasingTapMute {
         observations.append(
           CleanupStatusObservation(
             appID: appID,

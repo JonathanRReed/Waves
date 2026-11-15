@@ -114,6 +114,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// Waits between controller-creation retries. Tests replace it with a gate so
   /// newer work can be interleaved deterministically while a repair is paused.
   typealias ControllerRetryPause = @Sendable (_ nanoseconds: UInt64) async throws -> Void
+  /// One poll interval while a handoff waits for the outgoing renderer's mute
+  /// fade. Tests replace it with one simulated render callback.
+  typealias HandoffSilencePause = @Sendable () -> Void
+  /// About 40 ms at the default 1 ms pause: one or two IO cycles at any
+  /// common buffer size. See `PerAppTapController.silenceForHandoff`.
+  static let handoffSilenceMaxPolls = 40
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
   let routeMaintenanceOverride: RouteMaintenanceOverride?
@@ -143,6 +149,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let applicationCaptureProvider: (@Sendable () async -> AppRuntimeDiscovery.Capture)?
   let processLifetimeLiveness: @Sendable (AppProcessLifetimeIdentity) -> Bool
   let controllerRetryPause: ControllerRetryPause
+  let handoffSilencePause: HandoffSilencePause
   let routeOutputBindingProvider: (@Sendable (AudioApp) -> RouteOutputBinding?)?
   let deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)?
 
@@ -178,6 +185,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.processLifetimeLiveness = RuntimeProcessIdentity.mayStillBeRunning
     self.routeBudgetClock = Self.monotonicRouteTime
     self.controllerRetryPause = { try await Task.sleep(nanoseconds: $0) }
+    self.handoffSilencePause = { usleep(1_000) }
     self.routeOutputBindingProvider = nil
     self.deviceFormatObservationProvider = nil
     self.deviceFormatListeners = DeviceFormatListenerLifecycle(
@@ -213,6 +221,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     processLifetimeLiveness: @escaping @Sendable (AppProcessLifetimeIdentity) -> Bool = RuntimeProcessIdentity.mayStillBeRunning,
     routeBudgetClock: (@Sendable () -> Duration)? = nil,
     controllerRetryPause: ControllerRetryPause? = nil,
+    handoffSilencePause: HandoffSilencePause? = nil,
     routeOutputBindingProvider: (@Sendable (AudioApp) -> RouteOutputBinding?)? = nil,
     deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)? = nil,
     deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil
@@ -242,6 +251,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.processLifetimeLiveness = processLifetimeLiveness
     self.routeBudgetClock = routeBudgetClock ?? Self.monotonicRouteTime
     self.controllerRetryPause = controllerRetryPause ?? { try await Task.sleep(nanoseconds: $0) }
+    self.handoffSilencePause = handoffSilencePause ?? { usleep(1_000) }
     self.routeOutputBindingProvider = routeOutputBindingProvider
     self.deviceFormatObservationProvider = deviceFormatObservationProvider
     self.deviceFormatListeners = DeviceFormatListenerLifecycle(
@@ -1330,84 +1340,85 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     try ensureRouteWorkCurrent(generationContext, repairContext)
     let outputBinding = currentOutputBinding(for: app)
-    // Make before break. The outgoing renderer goes silent before its
-    // replacement is built: its tap keeps the app's own output muted, so
-    // for the creation window the app is quieter than set, never louder,
-    // and two renderers never play the same app at once.
-    let silencedIncumbent = controllers[app.id].flatMap { $0.isActive ? $0 : nil }
-    silencedIncumbent?.apply(volume: volume, volumeBoost: app.volumeBoost, muted: true)
-    let controller: PerAppTapController
-    do {
-      controller = try await createControllerWithRetry(
-        for: app,
-        processTarget: processTarget,
-        equalizerSettings: stagedEqualizer,
-        generationContext: generationContext,
-        repairContext: repairContext,
-        origin: origin
-      )
-    } catch {
-      restoreSilencedIncumbent(silencedIncumbent, runtimeID: app.id)
-      throw error
-    }
+    // Make before break. The replacement is built and started silent while
+    // the incumbent keeps playing; both taps keep the app's own output muted,
+    // so the user hears the incumbent alone. Nothing touches the incumbent
+    // until the replacement is authorized to take over, so work that fails,
+    // or is overtaken while suspended in creation, leaves it exactly as it was.
+    let controller = try await createControllerWithRetry(
+      for: app,
+      processTarget: processTarget,
+      equalizerSettings: stagedEqualizer,
+      generationContext: generationContext,
+      repairContext: repairContext,
+      origin: origin
+    )
 
     do {
       try ensureAcceptingOperations()
       // Background work was suspended in creation retries; newer intent or
       // newer route work for this app wins and this controller is discarded.
-      try ensureRouteWorkCurrent(nil, repairContext)
-      if let generationContext {
-        try ensureGenerationCurrent(generationContext)
-        if let installedGeneration = controllerGenerationByRuntimeID[app.id],
-          installedGeneration > generationContext.generation
-        {
-          throw IntentSupersededError()
-        }
-        // Keep this check immediately adjacent to installation. If newer work ran
-        // while controller creation was suspended, the new controller is disposed
-        // below and the currently-installed controller remains untouched.
-        try ensureGenerationCurrent(generationContext)
+      try ensureRouteWorkCurrent(generationContext, repairContext)
+      if let generationContext,
+        let installedGeneration = controllerGenerationByRuntimeID[app.id],
+        installedGeneration > generationContext.generation
+      {
+        throw IntentSupersededError()
       }
-
-      let replacedController = controllers.updateValue(controller, forKey: app.id)
-      // A fresh controller starts with a fresh geometry-recovery budget. Only
-      // the rebuild the coordinator itself asked for carries it over, so that
-      // rebuild's verification window and attempt count still apply.
-      if !preservesGeometryRecovery {
-        geometryRecoveryByRuntimeID.removeValue(forKey: app.id)
-      }
-      routeOutputBindingByRuntimeID[app.id] = outputBinding
-      if let generationContext {
-        controllerGenerationByRuntimeID[app.id] = generationContext.generation
-      } else {
-        controllerGenerationByRuntimeID.removeValue(forKey: app.id)
-      }
-      controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
-      controller.setEqualizer(stagedEqualizer)
-      controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
-      controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
-      if let replacedController {
-        retainCleanupDegradations(disposeController(replacedController))
-      }
-
-      // A freshly-created process tap proves capture is currently authorized.
-      captureAuthorization = .authorized
     } catch {
-      retainCleanupDegradations(disposeController(controller))
-      restoreSilencedIncumbent(silencedIncumbent, runtimeID: app.id)
+      discardUnusedReplacement(controller, runtimeID: app.id)
       throw error
     }
+
+    // The handoff. Nothing below suspends, so no other route work can run
+    // between silencing the incumbent and un-muting its replacement.
+    let incumbent = controllers[app.id]
+    if let incumbent, incumbent.isActive {
+      let silence = incumbent.silenceForHandoff(
+        maxPolls: Self.handoffSilenceMaxPolls,
+        pause: handoffSilencePause
+      )
+      if silence == .cut {
+        logger.info("Outgoing route for \(app.displayName, privacy: .public) did not finish its fade; cut to silence")
+      }
+    }
+    controllers[app.id] = controller
+    // A fresh controller starts with a fresh geometry-recovery budget. Only
+    // the rebuild the coordinator itself asked for carries it over, so that
+    // rebuild's verification window and attempt count still apply.
+    if !preservesGeometryRecovery {
+      geometryRecoveryByRuntimeID.removeValue(forKey: app.id)
+    }
+    routeOutputBindingByRuntimeID[app.id] = outputBinding
+    if let generationContext {
+      controllerGenerationByRuntimeID[app.id] = generationContext.generation
+    } else {
+      controllerGenerationByRuntimeID.removeValue(forKey: app.id)
+    }
+    if let incumbent {
+      retireController(incumbent)
+    }
+    // Only now, with the incumbent silent and stopped, does the replacement
+    // fade in to the app's level.
+    controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
+    controller.setEqualizer(stagedEqualizer)
+    controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
+    controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
+
+    // A freshly-created process tap proves capture is currently authorized.
+    captureAuthorization = .authorized
   }
 
-  /// Gives a still-installed incumbent back the app's committed levels. A
-  /// failed intent never committed, and newer intent that reused this
-  /// controller while the replacement was being built already committed its
-  /// own, so the snapshot row is the right source either way.
-  private func restoreSilencedIncumbent(_ incumbent: PerAppTapController?, runtimeID: String) {
-    guard let incumbent, controllers[runtimeID] === incumbent,
-      let app = snapshot.apps.first(where: { $0.id == runtimeID })
-    else { return }
-    incumbent.apply(volume: app.desiredVolume, volumeBoost: app.volumeBoost, muted: app.isMuted)
+  /// Disposes a replacement that was built but not installed. It never left
+  /// silence. While an incumbent's tap still keeps the app's own output muted
+  /// it is retired without releasing its own tap mute; with no incumbent it
+  /// is disposed fail-open like any lone route, so the app is audible.
+  private func discardUnusedReplacement(_ replacement: PerAppTapController, runtimeID: String) {
+    if controllers[runtimeID]?.isActive == true {
+      retireController(replacement)
+    } else {
+      retainCleanupDegradations(disposeController(replacement))
+    }
   }
 
   private func createControllerWithRetry(
@@ -1478,10 +1489,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   ) throws -> PerAppTapController {
     try ensureAcceptingOperations()
 
+    // Every new renderer starts silent. `applyRoute` un-mutes it only once it
+    // is installed and the incumbent it replaces is silent.
+    var silentApp = app
+    silentApp.isMuted = true
     if let controllerFactory {
       try revalidateProcessTarget(processTarget, for: app)
       return try controllerFactory(
-        app,
+        silentApp,
         processTarget.processObjectIDs,
         equalizerSettings,
         managedAudioEqualizerSettings,
@@ -1592,9 +1607,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         tapDescription: tapDescription,
         tapID: tapID,
         aggregateDeviceID: aggregateID,
-        volume: app.desiredVolume,
-        volumeBoost: app.volumeBoost,
-        muted: app.isMuted,
+        volume: silentApp.desiredVolume,
+        volumeBoost: silentApp.volumeBoost,
+        muted: silentApp.isMuted,
         equalizerSettings: equalizerSettings,
         managedAudioEqualizerSettings: managedAudioEqualizerSettings,
         adaptiveGainDB: adaptiveGainDBByAppID[app.logicalID] ?? 0,

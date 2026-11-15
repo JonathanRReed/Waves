@@ -149,15 +149,17 @@ final class BudgetBox {
 
   _ = try await backend.restoreDefaultFollowingRoutesForTesting()
 
-  // The old tap (#1) releases its app only after the replacement (#3) runs,
-  // and the old renderer was silent while #3 was built. The pinned route (#2)
-  // is untouched.
-  #expect(fixture.events.values == ["prior #1 muted=true", "create app.a #3", "audible #1"])
+  // The replacement (#3) is built while the old renderer (#1) keeps playing,
+  // and the two are never heard together. The old renderer is stopped, not
+  // told to un-mute its tap: #3's tap keeps the app's own output muted. The
+  // pinned route (#2) is untouched.
+  #expect(fixture.events.values == ["create app.a #3", "stop #1"])
+  #expect(fixture.events.overlaps.isEmpty)
+  #expect(fixture.events.pumpRenders() == [2, 3])
   #expect(await backend.lifecycleDebugSnapshot().liveControllers == 2)
   let apps = await backend.currentSnapshot().apps
   #expect(apps.first { $0.id == "app.a" }?.routingState == .managed)
   #expect(apps.first { $0.id == "app.a" }?.appliedVolume == 0.5)
-  #expect(fixture.events.controller(serial: 3)?.settledIsMutedForTesting() == false)
 }
 
 @Test func defaultOutputChangeReleasesARouteItCannotRebuildAndSaysWhy() async throws {
@@ -168,7 +170,8 @@ final class BudgetBox {
 
   _ = try await backend.restoreDefaultFollowingRoutesForTesting()
 
-  #expect(fixture.events.values.last == "audible #1")
+  // Released fail-open: the tap's mute goes first, then the renderer stops.
+  #expect(fixture.events.values.suffix(2) == ["audible #1", "stop #1"])
   #expect(fixture.events.creations == 0)
   #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
   let app = try #require(await backend.currentSnapshot().apps.first)
@@ -177,7 +180,7 @@ final class BudgetBox {
   #expect(app.notes?.contains("plays at its own volume") == true)
 }
 
-@Test func failedInPlaceRebuildGivesTheSilencedIncumbentItsLevelsBack() async throws {
+@Test func failedInPlaceRebuildLeavesTheIncumbentPlayingAtItsLevel() async throws {
   let fixture = RouteFixture(apps: [routeTestApp(id: "app.a", volume: 0.5)])
   try await fixture.installInitialRoutes()
   let backend = fixture.backend
@@ -186,10 +189,91 @@ final class BudgetBox {
   await backend.flagGeometryMismatchForTesting(runtimeID: "app.a")
   await backend.updateAudioLevels(at: .seconds(10))
 
+  // The incumbent is only touched once a replacement exists to take over.
   let incumbent = try #require(fixture.events.controller(serial: 1))
-  #expect(fixture.events.values.contains("audible #1") == false)
-  #expect(incumbent.settledIsMutedForTesting() == false)
+  #expect(fixture.events.values == ["fail app.a", "fail app.a", "fail app.a"])
+  #expect(fixture.events.pumpRenders() == [1])
   #expect(incumbent.settledGainsForTesting().volume == 0.5)
+}
+
+// MARK: - The handoff: silence first, one renderer at a time
+
+@Test func anAbandonedRepairCannotUnmuteAnIncumbentThatANewerRebuildReplaces() async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(apps: [routeTestApp()], retryPause: { _ in await gate.pause() })
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // A geometry repair's first creation fails and it pauses before retrying.
+  fixture.events.failNextCreations(1)
+  await backend.flagGeometryMismatchForTesting(runtimeID: "app.a")
+  let repair = Task { await backend.updateAudioLevels(at: .seconds(10)) }
+  await gate.waitUntilPaused(count: 1)
+  // A newer output choice fails its first creation too and pauses as well.
+  fixture.events.failNextCreations(1)
+  let choice = Task {
+    await backend.applyAppIntent(
+      routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+    )
+  }
+  await gate.waitUntilPaused(count: 2)
+
+  // The repair resumes first, finds itself overtaken, and leaves the
+  // incumbent alone: it is still the one renderer playing the app.
+  await gate.releaseFirst()
+  await repair.value
+  #expect(fixture.events.pumpRenders() == [1])
+
+  await gate.releaseFirst()
+  #expect(await choice.value.outcome == .applied)
+  #expect(fixture.events.values == ["fail app.a", "fail app.a", "create app.a #2", "stop #1"])
+  #expect(fixture.events.overlaps.isEmpty)
+  #expect(fixture.events.pumpRenders() == [2])
+}
+
+@Test func anIncumbentThatWillNotStopIsSilencedBeforeItsReplacementPlays() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.failNextStops(1)
+
+  let move = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  #expect(move.outcome == .applied)
+
+  // #1 could not be stopped, so it is parked still running. It had faded out
+  // before #2 was un-muted, so only #2 is heard.
+  #expect(await backend.lifecycleDebugSnapshot().orphanedControllers == 1)
+  #expect(fixture.events.pumpRenders() == [2])
+  #expect(fixture.events.overlaps.isEmpty)
+
+  // The parked teardown is retried on the maintenance tick. While #2 plays,
+  // #1's tap is never told to un-mute: that could only add a second copy.
+  for tick in 0..<20 {
+    await backend.updateAudioLevels(at: .seconds(10 + tick))
+  }
+  #expect(await backend.lifecycleDebugSnapshot().orphanedControllers == 0)
+  #expect(fixture.events.values.contains("stop #1"))
+  #expect(!fixture.events.values.contains("audible #1"))
+}
+
+@Test func anIncumbentThatIsNotRenderingIsCutToSilenceBeforeItsReplacementPlays() async throws {
+  // The outgoing renderer's device has stopped, so its fade never runs.
+  let fixture = RouteFixture(apps: [routeTestApp()], rendersDuringHandoff: false)
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.failNextStops(1)
+
+  let move = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  #expect(move.outcome == .applied)
+
+  // If its device comes back before the parked teardown succeeds, #1 still
+  // renders nothing: it was cut to silence rather than left mid-fade.
+  #expect(fixture.events.pumpRenders() == [2])
+  #expect(fixture.events.overlaps.isEmpty)
 }
 
 // MARK: - Item 3: a device that was both the default and a pinned target
@@ -373,7 +457,7 @@ private let rate96 = DeviceFormatSignature(sampleRate: 96_000, outputChannelCoun
   // Audio MIDI Setup: built-in output 48 kHz to 96 kHz.
   fixture.devices.set("builtin", .alive(rate96))
   await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
-  #expect(fixture.events.values == ["prior #1 muted=true", "create app.a #3", "audible #1"])
+  #expect(fixture.events.values == ["create app.a #3", "stop #1"])
 
   // The rebuilt route recorded 96 kHz, so the events its own rebuild raises
   // (and any repeat of the original one) find nothing to do.
@@ -543,30 +627,40 @@ private final class ListenerCalls: @unchecked Sendable {
 
 // MARK: - Fixture
 
-/// Holds a controller-creation retry until the test releases it.
+/// Holds controller-creation retries until the test releases them, in the
+/// order they paused.
 actor RetryGate {
-  private var paused: CheckedContinuation<Void, Never>?
-  private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
+  private var paused: [CheckedContinuation<Void, Never>] = []
+  private var pauseWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
   private var isReleased = false
 
   func pause() async {
     guard !isReleased else { return }
     await withCheckedContinuation { continuation in
-      paused = continuation
-      pauseWaiters.forEach { $0.resume() }
-      pauseWaiters.removeAll()
+      paused.append(continuation)
+      let ready = pauseWaiters.filter { $0.count <= paused.count }
+      pauseWaiters.removeAll { $0.count <= paused.count }
+      ready.forEach { $0.continuation.resume() }
     }
   }
 
-  func waitUntilPaused() async {
-    guard paused == nil else { return }
-    await withCheckedContinuation { pauseWaiters.append($0) }
+  /// Returns once `count` retries are paused.
+  func waitUntilPaused(count: Int = 1) async {
+    guard paused.count < count else { return }
+    await withCheckedContinuation { pauseWaiters.append((count, $0)) }
   }
 
+  /// Resumes the retry that paused first.
+  func releaseFirst() {
+    guard !paused.isEmpty else { return }
+    paused.removeFirst().resume()
+  }
+
+  /// Resumes every paused retry and lets later ones through.
   func release() {
     isReleased = true
-    paused?.resume()
-    paused = nil
+    paused.forEach { $0.resume() }
+    paused.removeAll()
   }
 }
 
@@ -613,17 +707,22 @@ func routeIntent(
   )
 }
 
-/// Records, in order, every controller creation and every moment a
-/// controller's tap stops muting its app (the instant the app would be heard
-/// at its own, unattenuated level).
+/// Records, in order, every controller creation, every renderer stop, and
+/// every moment a controller's tap stops muting its app (the instant the app
+/// would be heard at its own, unattenuated level). `pumpRenders` plays one
+/// buffer through every running controller, the way their IO procs would,
+/// and records any moment two renderers of one app are heard together.
 final class RouteEvents: @unchecked Sendable {
   private let lock = NSLock()
   private var recorded: [String] = []
   private var serial = 0
   private var failuresRemaining = 0
+  private var stopFailuresRemaining = 0
+  private var created: [Int: (appID: String, controller: PerAppTapController)] = [:]
 
   var values: [String] { lock.withLock { recorded } }
   var creations: Int { lock.withLock { recorded.count { $0.hasPrefix("create ") } } }
+  var overlaps: [String] { lock.withLock { recorded.filter { $0.hasPrefix("overlap ") } } }
 
   func record(_ value: String) { lock.withLock { recorded.append(value) } }
 
@@ -644,9 +743,17 @@ final class RouteEvents: @unchecked Sendable {
     }
   }
 
-  func reset() { lock.withLock { recorded.removeAll() } }
+  func failNextStops(_ count: Int) { lock.withLock { stopFailuresRemaining = count } }
 
-  private var created: [Int: (appID: String, controller: PerAppTapController)] = [:]
+  func consumeStopFailure() -> Bool {
+    lock.withLock {
+      guard stopFailuresRemaining > 0 else { return false }
+      stopFailuresRemaining -= 1
+      return true
+    }
+  }
+
+  func reset() { lock.withLock { recorded.removeAll() } }
 
   func remember(_ controller: PerAppTapController, serial: Int, appID: String) {
     lock.withLock { created[serial] = (appID, controller) }
@@ -656,25 +763,64 @@ final class RouteEvents: @unchecked Sendable {
     lock.withLock { created[serial]?.controller }
   }
 
-  /// The newest still-running controller built for `appID`, if any.
-  func liveController(for appID: String) -> (serial: Int, controller: PerAppTapController)? {
-    lock.withLock {
-      created
-        .filter { $0.value.appID == appID && $0.value.controller.isActive }
-        .max { $0.key < $1.key }
-        .map { ($0.key, $0.value.controller) }
+  /// Plays one buffer through every controller that is still rendering and
+  /// returns the serials that produced sound.
+  @discardableResult
+  func pumpRenders() -> [Int] {
+    let running = lock.withLock { created.filter { $0.value.controller.isActive } }
+    var heardByApp: [String: [Int]] = [:]
+    for (serial, entry) in running.sorted(by: { $0.key < $1.key }) where peak(of: entry.controller) > 0 {
+      heardByApp[entry.appID, default: []].append(serial)
     }
+    for (appID, serials) in heardByApp.sorted(by: { $0.key < $1.key }) where serials.count > 1 {
+      record("overlap \(appID) " + serials.map { "#\($0)" }.joined(separator: "+"))
+    }
+    return heardByApp.values.flatMap { $0 }.sorted()
+  }
+
+  private func peak(of controller: PerAppTapController) -> Float {
+    var input = [Float](repeating: 0.5, count: 512 * 2)
+    var output = [Float](repeating: 0, count: input.count)
+    input.withUnsafeMutableBytes { inputBytes in
+      output.withUnsafeMutableBytes { outputBytes in
+        var inputList = AudioBufferList(
+          mNumberBuffers: 1,
+          mBuffers: AudioBuffer(
+            mNumberChannels: 2,
+            mDataByteSize: UInt32(inputBytes.count),
+            mData: inputBytes.baseAddress
+          )
+        )
+        var outputList = AudioBufferList(
+          mNumberBuffers: 1,
+          mBuffers: AudioBuffer(
+            mNumberChannels: 2,
+            mDataByteSize: UInt32(outputBytes.count),
+            mData: outputBytes.baseAddress
+          )
+        )
+        controller.renderForTesting(input: &inputList, output: &outputList)
+      }
+    }
+    return output.map(abs).max() ?? 0
   }
 }
 
 /// The fake output devices' current formats. Default-following routes play
-/// on "builtin"; pinned routes on their target.
+/// on `defaultUID`; pinned routes on their target.
 final class DeviceFormatState: @unchecked Sendable {
   private let lock = NSLock()
   private var observations: [String: DeviceFormatObservation] = [
     "builtin": .alive(DeviceFormatSignature(sampleRate: 48_000, outputChannelCount: 2)),
     "usb-dac": .alive(DeviceFormatSignature(sampleRate: 48_000, outputChannelCount: 2)),
+    "headphones": .alive(DeviceFormatSignature(sampleRate: 48_000, outputChannelCount: 2)),
   ]
+  private var currentDefaultUID = "builtin"
+
+  var defaultUID: String {
+    get { lock.withLock { currentDefaultUID } }
+    set { lock.withLock { currentDefaultUID = newValue } }
+  }
 
   func set(_ uid: String, _ observation: DeviceFormatObservation) {
     lock.withLock { observations[uid] = observation }
@@ -685,7 +831,7 @@ final class DeviceFormatState: @unchecked Sendable {
   }
 
   func binding(for app: AudioApp) -> RouteOutputBinding? {
-    let uid = app.targetDeviceUID ?? "builtin"
+    let uid = app.targetDeviceUID ?? defaultUID
     guard case .alive(let signature) = observation(uid) else { return nil }
     return RouteOutputBinding(deviceUID: uid, signature: signature)
   }
@@ -696,9 +842,13 @@ final class RouteFixture: @unchecked Sendable {
   let events = RouteEvents()
   let devices = DeviceFormatState()
 
+  /// - Parameter rendersDuringHandoff: whether outgoing renderers keep
+  ///   rendering while a handoff waits for them to fade out. False models a
+  ///   renderer whose device has stopped.
   init(
     apps: [AudioApp],
-    retryPause: WorkspaceAudioControlBackend.ControllerRetryPause? = nil
+    retryPause: WorkspaceAudioControlBackend.ControllerRetryPause? = nil,
+    rendersDuringHandoff: Bool = true
   ) {
     let events = self.events
     let devices = self.devices
@@ -724,27 +874,34 @@ final class RouteFixture: @unchecked Sendable {
           events.record("fail \(app.id)")
           throw BackendError.managedRouteUnavailable("Injected creation failure")
         }
-        // Whether the outgoing renderer was already silent when its
-        // replacement was built (make before break without double audio).
-        if let prior = events.liveController(for: app.id) {
-          events.record("prior #\(prior.serial) muted=\(prior.controller.settledIsMutedForTesting())")
-        }
         let serial = events.nextSerial()
         events.record("create \(app.id) #\(serial)")
         let controller = try PerAppTapController.testingController(
           appID: app.id,
           logicalID: app.logicalID,
           targetProcessObjectIDs: processObjectIDs,
+          volume: app.desiredVolume,
+          muted: app.isMuted,
           teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
             makeOriginalAudioAudible: {
               events.record("audible #\(serial)")
               return noErr
             },
-            stopIOProc: { noErr },
+            stopIOProc: {
+              guard !events.consumeStopFailure() else {
+                events.record("stop failed #\(serial)")
+                return -1
+              }
+              events.record("stop #\(serial)")
+              return noErr
+            },
             restoreTapMuting: { noErr }
           )
         )
         events.remember(controller, serial: serial, appID: app.id)
+        // The new IO proc starts rendering as soon as it is created, while
+        // every other renderer keeps going.
+        events.pumpRenders()
         return controller
       },
       processObjectIDResolver: { _ in [1] },
@@ -752,6 +909,7 @@ final class RouteFixture: @unchecked Sendable {
       captureAuthorizationProbe: { .authorized },
       routeBudgetClock: { .seconds(1) },
       controllerRetryPause: retryPause ?? { _ in },
+      handoffSilencePause: { if rendersDuringHandoff { events.pumpRenders() } },
       routeOutputBindingProvider: { devices.binding(for: $0) },
       deviceFormatObservationProvider: { devices.observation($0) },
       deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls(

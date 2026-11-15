@@ -127,6 +127,16 @@ extension WorkspaceAudioControlBackend {
     return degradations
   }
 
+  /// Retires a controller that a successor has replaced, without releasing its
+  /// tap mute (see `PerAppTapController.dispose(releasingTapMute:)`). A failed
+  /// teardown parks it like any other; it stays silent meanwhile.
+  func retireController(_ controller: PerAppTapController) {
+    let degradations = controller.dispose(releasingTapMute: false)
+    guard !degradations.isEmpty else { return }
+    orphanedControllers.append(controller)
+    retainCleanupDegradations(degradations)
+  }
+
   /// Retries parked teardowns, dropping each one once it succeeds or has had
   /// enough attempts. Driven from the existing route-maintenance tick, so it
   /// costs nothing when there is nothing parked.
@@ -142,7 +152,13 @@ extension WorkspaceAudioControlBackend {
         stillOrphaned.append(controller)
         continue
       }
-      let degradations = controller.retryDispose()
+      // While the app has a live route, that route's tap keeps the app's own
+      // output muted; releasing this one's mute could only add a second,
+      // full-level copy. With no live route left, release it so the app is
+      // audible (fail open).
+      let degradations = controller.retryDispose(
+        releasingTapMute: controllers[controller.appID]?.isActive != true
+      )
       if degradations.isEmpty {
         // Released at last — drop its attempt count too, so a later controller
         // that happens to reuse this appID starts from a full retry budget.
