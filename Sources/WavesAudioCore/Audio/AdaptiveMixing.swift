@@ -156,6 +156,9 @@ public struct AdaptiveMixInput: Hashable, Sendable {
   public var rms: Float
   public var voiceBandEnergy: Float
   public var isFrontmost: Bool
+  /// The user's volume times boost. `rms` and `voiceBandEnergy` are measured
+  /// before it, so only the non-speech audibility check multiplies it back in.
+  public var manualGain: Float
 
   public init(
     appID: String,
@@ -164,7 +167,8 @@ public struct AdaptiveMixInput: Hashable, Sendable {
     isMuted: Bool,
     rms: Float,
     voiceBandEnergy: Float,
-    isFrontmost: Bool = false
+    isFrontmost: Bool = false,
+    manualGain: Float = 1
   ) {
     self.appID = appID
     self.policy = policy
@@ -173,6 +177,7 @@ public struct AdaptiveMixInput: Hashable, Sendable {
     self.rms = rms.isFinite ? max(0, rms) : 0
     self.voiceBandEnergy = voiceBandEnergy.isFinite ? max(0, voiceBandEnergy) : 0
     self.isFrontmost = isFrontmost
+    self.manualGain = manualGain.isFinite ? max(0, manualGain) : 1
   }
 }
 
@@ -599,9 +604,11 @@ public struct AdaptivePolicyEngine: Sendable {
         isActive = routeIsEligible && detected
         if isActive { speakingAppIDs.insert(input.appID) }
       } else {
+        // Measurements are pre-fader; whether a non-speech app is audible
+        // enough to take focus still depends on the user's own level.
         isActive =
           routeIsEligible
-          && AdaptiveMixing.decibels(forAmplitude: Double(input.rms))
+          && AdaptiveMixing.decibels(forAmplitude: Double(input.rms * input.manualGain))
             >= AdaptiveMixing.activityThresholdDBFS
       }
 

@@ -296,6 +296,34 @@ private func speakingCall(priority: AdaptivePriority = .normal) -> AdaptiveMixIn
   )
 }
 
+// MARK: - Pre-fader measurements
+
+@Test func turnedDownNonSpeechAppDoesNotTakeFocus() {
+  // -20 dBFS before the fader, 1% after it: -60 dBFS is below the activity
+  // threshold, so the frontmost app must not duck anyone.
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: false, focusMode: .followFrontApp)
+  var game = frontmostGame()
+  game.manualGain = 0.01
+  let music = policyInput("music", contentType: .music, priority: .normal, rmsDBFS: -20)
+
+  let gains = engine.update(inputs: [game, music], elapsed: 0.12)
+
+  #expect(gains["music"] == 0)
+}
+
+@Test func turnedDownCallStillTriggersSpeechFocus() {
+  // Measurements are pre-fader, so a call at 15% still counts as speaking.
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: false, focusMode: .assignedPriorities)
+  var call = speakingCall(priority: .foreground)
+  call.manualGain = 0.15
+  let music = policyInput("music", contentType: .music, priority: .background, rmsDBFS: -20)
+
+  _ = engine.update(inputs: [call, music], elapsed: 0.12)
+  let gains = engine.update(inputs: [call, music], elapsed: 0.12)
+
+  #expect(gains["music"] == Float(AdaptiveMixing.strongPriorityReductionDB))
+}
+
 // MARK: - Mode gating
 
 @Test func loudnessOnlyEngineNeverPriorityDucks() {
