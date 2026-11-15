@@ -1448,3 +1448,44 @@ private final class ControlConnectionCountProbe: @unchecked Sendable {
     continuation?.resume(returning: false)
   }
 }
+
+@Test
+func socketPublicationFallsBackWhenTheKernelRejectsTheNoFollowAnyFlag() throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("waves-publish-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try Data("staged".utf8).write(to: directory.appendingPathComponent("staged"))
+  let parent = open(directory.path, O_RDONLY | O_DIRECTORY)
+  defer { close(parent) }
+
+  // macOS 15 and earlier answer EINVAL to AT_SYMLINK_NOFOLLOW_ANY.
+  var attemptedFlags: [Int32] = []
+  let olderKernel: (Int32, UnsafePointer<CChar>, Int32, UnsafePointer<CChar>, Int32) -> Int32 = {
+    fromDirectory, from, toDirectory, to, flags in
+    attemptedFlags.append(flags)
+    if flags == AT_SYMLINK_NOFOLLOW_ANY {
+      errno = EINVAL
+      return -1
+    }
+    return linkat(fromDirectory, from, toDirectory, to, flags)
+  }
+  #expect(
+    ControlSocketFilesystem.publishSocketLeaf(
+      parentDescriptor: parent, stagingLeaf: "staged", publicLeaf: "public", link: olderKernel
+    ) == nil)
+  #expect(attemptedFlags == [AT_SYMLINK_NOFOLLOW_ANY, 0])
+  #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("public").path))
+
+  // Publication stays no-overwrite, and any other failure is reported as is.
+  attemptedFlags = []
+  #expect(
+    ControlSocketFilesystem.publishSocketLeaf(
+      parentDescriptor: parent, stagingLeaf: "staged", publicLeaf: "public", link: olderKernel
+    ) == EEXIST)
+  #expect(attemptedFlags == [AT_SYMLINK_NOFOLLOW_ANY, 0])
+  #expect(
+    ControlSocketFilesystem.publishSocketLeaf(
+      parentDescriptor: parent, stagingLeaf: "missing", publicLeaf: "other"
+    ) == ENOENT)
+}
