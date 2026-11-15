@@ -129,7 +129,11 @@ extension WorkspaceAudioControlBackend {
     // Iterate by logicalID and re-resolve the row after every await — a stale
     // index would trap or write onto the wrong app. Rows that vanished are
     // skipped.
-    for repairContext in targets {
+    for (offset, repairContext) in targets.enumerated() {
+      // Between routes, never inside one handoff: a handoff may block the
+      // actor for up to `handoffSilenceMaxPolls` pauses, and a batch of them
+      // must not hold off a user's edit for the whole batch.
+      if offset > 0 { await Task.yield() }
       let logicalID = repairContext.logicalID
       guard !isShuttingDown else { return }
       guard isRepairCurrent(repairContext),
@@ -508,7 +512,9 @@ extension WorkspaceAudioControlBackend {
     var changed = false
     var lastError: String?
 
-    for (appID, repairContext) in selected {
+    for (offset, (appID, repairContext)) in selected.enumerated() {
+      // Between routes only; see `reattachRoutes(_:origin:mode:)`.
+      if offset > 0 { await Task.yield() }
       guard !isShuttingDown else { return }
       guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) else {
         continue
