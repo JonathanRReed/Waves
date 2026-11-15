@@ -186,9 +186,9 @@ module WavesPublication
     end
 
     attempt.call("Site download") do
-      links = fetch.call("#{SITE}/").scan(%r{releases/download/([^/"'\s]+)/Waves\.dmg}).flatten.uniq
-      require_that.call(links == [tag], "download links point at #{links.empty? ? 'nothing' : links.join(', ')}")
-      "every download link points at #{tag}"
+      links = fetch.call("#{SITE}/").scan(%r{[^"'\s<>]*/releases/download/[^"'\s<>]*}).uniq
+      require_that.call(links == [dmg_url], "download links point at #{links.empty? ? 'nothing' : links.join(', ')}")
+      "every download link is #{dmg_url}"
     end
 
     attempt.call("Site changelog") do

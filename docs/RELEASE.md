@@ -570,7 +570,7 @@ DMG downloaded without authentication matches `Waves.dmg.sha256`; the live
 appcast's newest item has that version and build, points at that DMG, has its
 exact length, and carries an EdDSA signature that verifies over that DMG with
 the Sparkle public key pinned in `release/metadata.json`; every download link
-on the site points at the release and the newest changelog entry is the
+on the site is exactly that DMG's URL and the newest changelog entry is the
 version; the tap cask has the version, a download URL that resolves to that
 DMG, and the downloaded DMG's SHA-256. It prints one line per
 check and exits non-zero on any mismatch. The release is not finished until it

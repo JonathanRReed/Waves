@@ -121,6 +121,10 @@ class VerifyPublicationTest < Minitest::Test
     assert_only_failure(canned, "Site download", /v1\.7\.3/)
 
     canned = responses
+    canned["#{SITE}/"] = %(<a href="https://github.com/SomeoneElse/Waves/releases/download/v1.7.4/Waves.dmg">Download</a>)
+    assert_only_failure(canned, "Site download", /SomeoneElse/)
+
+    canned = responses
     canned["#{SITE}/changelog/"] = %(<h2 id="v1-7-3">1.7.3</h2>)
     assert_only_failure(canned, "Site changelog", /1\.7\.3/)
   end
