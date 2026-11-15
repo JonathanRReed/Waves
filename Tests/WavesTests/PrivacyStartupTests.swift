@@ -277,7 +277,7 @@ import WavesAudioCore
   preferences.hasCompletedPrivacySetup = true
   preferences.hasCompletedGuidedSetup = true
   preferences.requiredSetupVersion = OnboardingExperience.currentVersion
-  preferences.whatsNewDismissedVersion = OnboardingExperience.currentVersion
+  preferences.whatsNewDismissedVersion = OnboardingExperience.whatsNewVersion
   let fixture = makePrivacyFixture(
     preferences: preferences,
     cachedSession: privacyTestSnapshot(apps: [privacyTestApp()])
@@ -312,7 +312,7 @@ import WavesAudioCore
   preferences.hasCompletedPrivacySetup = true
   preferences.hasCompletedGuidedSetup = true
   preferences.requiredSetupVersion = OnboardingExperience.currentVersion
-  preferences.whatsNewDismissedVersion = OnboardingExperience.currentVersion
+  preferences.whatsNewDismissedVersion = OnboardingExperience.whatsNewVersion
   let fixture = makePrivacyFixture(
     preferences: preferences,
     cachedSession: privacyTestSnapshot(apps: [privacyTestApp()])

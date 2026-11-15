@@ -751,7 +751,7 @@ final class AppStore {
     onShowMixerRequested?()
     preferences.whatsNewDismissedVersion = max(
       preferences.whatsNewDismissedVersion,
-      OnboardingExperience.currentVersion
+      OnboardingExperience.whatsNewVersion
     )
 
     guard let app = eligibleGuidedTourApp else {
@@ -823,7 +823,7 @@ final class AppStore {
     requestedWhatsNew = false
     preferences.whatsNewDismissedVersion = max(
       preferences.whatsNewDismissedVersion,
-      OnboardingExperience.currentVersion
+      OnboardingExperience.whatsNewVersion
     )
     persistPreferences()
   }

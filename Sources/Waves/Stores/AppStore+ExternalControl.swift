@@ -204,7 +204,7 @@ extension AppStore {
     if completesFirstRun {
       completedPreferences.whatsNewDismissedVersion = max(
         completedPreferences.whatsNewDismissedVersion,
-        version
+        OnboardingExperience.whatsNewVersion
       )
     }
 
@@ -217,7 +217,7 @@ extension AppStore {
           if completesFirstRun {
             pending.whatsNewDismissedVersion = max(
               pending.whatsNewDismissedVersion,
-              version
+              OnboardingExperience.whatsNewVersion
             )
           }
         },
@@ -231,7 +231,7 @@ extension AppStore {
           if completesFirstRun {
             preferences.whatsNewDismissedVersion = max(
               preferences.whatsNewDismissedVersion,
-              version
+              OnboardingExperience.whatsNewVersion
             )
           }
           requestedSetupReplay = false

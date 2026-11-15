@@ -686,7 +686,7 @@ private func makeRenderedUIFixture(
   preferences.hasCompletedPrivacySetup = true
   preferences.hasCompletedGuidedSetup = true
   preferences.requiredSetupVersion = OnboardingExperience.currentVersion
-  preferences.whatsNewDismissedVersion = OnboardingExperience.currentVersion
+  preferences.whatsNewDismissedVersion = OnboardingExperience.whatsNewVersion
   preferences.urlSchemeAutomationAcknowledged = true
   preferences.adaptiveMixMode = .both
   preferences.adaptiveStrategy = .lectureFocus

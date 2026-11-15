@@ -59,7 +59,7 @@ enum OnboardingLaunchPolicy {
       && !tourWasDismissed
 
     return .mixer(
-      showWhatsNew: preferences.whatsNewDismissedVersion < version,
+      showWhatsNew: preferences.whatsNewDismissedVersion < OnboardingExperience.whatsNewVersion,
       showTourTip: showTourTip
     )
   }
