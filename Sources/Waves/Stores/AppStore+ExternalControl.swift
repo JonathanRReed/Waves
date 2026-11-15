@@ -715,7 +715,12 @@ extension AppStore {
     guard let transaction = setVolumeBoost(boost, for: app, reason: .automation) else {
       return .failed
     }
-    return await transaction.value.outcome
+    let result = await transaction.value
+    // A newer change to the same app can land while this one is finishing; its
+    // own result would still say applied.
+    guard !appIntentCoordinator.hasNewerGeneration(than: result.generation, for: app.logicalID)
+    else { return .superseded }
+    return result.outcome
   }
 
   /// Applies a profile for an external client and waits for its result.
