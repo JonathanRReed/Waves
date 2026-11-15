@@ -50,7 +50,10 @@ extension AppStore {
         overrides: AppIntentOverrides(
           desiredVolume: entry.desiredVolume,
           isMuted: entry.isMuted,
-          volumeBoost: entry.volumeBoost
+          volumeBoost: entry.volumeBoost,
+          equalizerSettings: entry.equalizer,
+          targetDeviceUID: entry.output?.deviceUID,
+          replacesTargetDevice: entry.output != nil
         ),
         generation: generation,
         reason: reason
