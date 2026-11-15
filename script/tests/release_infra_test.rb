@@ -907,6 +907,10 @@ class ReleaseInfraTest < Minitest::Test
         "gatekeeper" => passed_gate.call("app and DMG accepted"),
       },
       "gates" => required_gates.to_h { |name| [name, passed_gate.call("#{name} receipt")] }.merge(
+        "boundedRuntimeCheck" => passed_gate.call("signed candidate live then idle").merge(
+          "activeSeconds" => 30,
+          "idleSeconds" => 30
+        ),
         "remoteElgato" => {
           "status" => remote,
           "detail" => remote == "passed" ? "remote hardware receipt" : "awaiting remote hardware receipt",
@@ -1041,7 +1045,7 @@ class ReleaseInfraTest < Minitest::Test
   def required_gates
     %w[
       localQA securityScan sanitizer routeLifecycleStress socketStress
-      activeSoak idleSoak updater renderedUI pluginTypecheck pluginUnitTests
+      updater renderedUI pluginTypecheck pluginUnitTests
       pluginValidation pluginPackage pluginLiveSocket packageVerification
     ]
   end
@@ -1340,9 +1344,22 @@ class ReleaseInfraTest < Minitest::Test
     end
 
     failed = evidence_input
-    failed.fetch("gates").fetch("idleSoak")["status"] = "failed"
-    assert_release_error(/idleSoak/) do
+    failed.fetch("gates").fetch("socketStress")["status"] = "failed"
+    assert_release_error(/socketStress/) do
       WavesRelease::Evidence.seal(input: failed, metadata: load_metadata, profile: "candidate")
+    end
+
+    {"status" => "failed", "idleSeconds" => 0, "activeSeconds" => 30.5}.each do |field, value|
+      runtime = evidence_input
+      runtime.fetch("gates").fetch("boundedRuntimeCheck")[field] = value
+      assert_release_error(/boundedRuntimeCheck/) do
+        WavesRelease::Evidence.seal(input: runtime, metadata: load_metadata, profile: "candidate")
+      end
+    end
+    unmeasured = evidence_input
+    unmeasured.fetch("gates")["boundedRuntimeCheck"] = {"status" => "passed", "detail" => "ran"}
+    assert_release_error(/boundedRuntimeCheck/) do
+      WavesRelease::Evidence.seal(input: unmeasured, metadata: load_metadata, profile: "candidate")
     end
 
     skipped = evidence_input

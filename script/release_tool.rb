@@ -473,8 +473,8 @@ module WavesRelease
       goldenGateNative rosetta tahoeAppleSilicon sequoiaAppleSilicon sonomaPhysical
     ].freeze
     REQUIRED_GATES = %w[
-      localQA securityScan sanitizer routeLifecycleStress socketStress activeSoak
-      idleSoak updater renderedUI pluginTypecheck pluginUnitTests pluginValidation
+      localQA securityScan sanitizer routeLifecycleStress socketStress boundedRuntimeCheck
+      updater renderedUI pluginTypecheck pluginUnitTests pluginValidation
       pluginPackage pluginLiveSocket packageVerification remoteElgato
     ].freeze
     INPUT_KEYS = %w[
@@ -692,8 +692,19 @@ module WavesRelease
 
     def validate_gates!(gates, profile, metadata)
       Validation.exact_keys!(gates, REQUIRED_GATES, "gate evidence")
-      (REQUIRED_GATES - ["remoteElgato"]).each do |name|
+      (REQUIRED_GATES - %w[remoteElgato boundedRuntimeCheck]).each do |name|
         Validation.passed_result!(gates[name], "gates.#{name}")
+      end
+      # A short run of the signed candidate with live audio, then idle. It is
+      # not a soak, so the evidence records how long each phase actually ran.
+      runtime = gates["boundedRuntimeCheck"]
+      Validation.exact_keys!(runtime, %w[status detail activeSeconds idleSeconds], "gates.boundedRuntimeCheck")
+      raise Error, "gates.boundedRuntimeCheck status must be passed" unless runtime["status"] == "passed"
+      Validation.nonempty_string!(runtime["detail"], "gates.boundedRuntimeCheck.detail")
+      %w[activeSeconds idleSeconds].each do |field|
+        unless runtime[field].is_a?(Integer) && runtime[field].positive?
+          raise Error, "gates.boundedRuntimeCheck.#{field} must be a positive integer"
+        end
       end
       allowed_remote = profile == "candidate" ? %w[pending passed deferred] : %w[passed deferred]
       validate_release_deferral_result!(

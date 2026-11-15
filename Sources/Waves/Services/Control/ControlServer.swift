@@ -895,21 +895,25 @@ enum ControlSocketFilesystem {
   /// Hard-link publication is atomic and no-overwrite. The unpredictable
   /// staging name remains available until a filesystem that accepts the link
   /// proves public-name reachability through the actual listener.
+  ///
+  /// macOS 15 and earlier reject `AT_SYMLINK_NOFOLLOW_ANY` for `linkat` with
+  /// `EINVAL`, which used to stop the control socket from ever starting there.
+  /// Both names are single components under the verified parent descriptor, so
+  /// the plain no-follow link is equivalent, and the caller re-checks the
+  /// published leaf's identity either way.
   static func publishSocketLeaf(
     parentDescriptor: Int32,
     stagingLeaf: String,
-    publicLeaf: String
+    publicLeaf: String,
+    link: (Int32, UnsafePointer<CChar>, Int32, UnsafePointer<CChar>, Int32) -> Int32 = linkat
   ) -> Int32? {
-    guard
-      linkat(
-        parentDescriptor,
-        stagingLeaf,
-        parentDescriptor,
-        publicLeaf,
-        AT_SYMLINK_NOFOLLOW_ANY
-      ) == 0
-    else { return errno }
-    return nil
+    for flags in [AT_SYMLINK_NOFOLLOW_ANY, 0] {
+      if link(parentDescriptor, stagingLeaf, parentDescriptor, publicLeaf, flags) == 0 {
+        return nil
+      }
+      guard errno == EINVAL else { return errno }
+    }
+    return EINVAL
   }
 
   /// Atomically removes the named entry from its public or staging name before
