@@ -842,14 +842,25 @@ final class PerAppTapController: @unchecked Sendable {
     // fading, the level may fall but not rise, so the fade only goes down.
     let safeLevel = requestedLevel.isFinite ? requestedLevel : levelStart
     let levelEnd = isMuted && muteStart > 0 ? min(safeLevel, levelStart) : safeLevel
-    let headroomStart = renderedEqualizerHeadroomGain
-    let headroomEnd = equalizerHeadroomGain.isFinite ? equalizerHeadroomGain : headroomStart
+    // More headroom attenuation lands at once, as it always has: the EQ's own
+    // coefficients reach a new boost within about 20 ms, so attenuation that
+    // ramped across a longer buffer would arrive after the boost it protects
+    // against. Only the release ramps.
+    let headroomEnd =
+      equalizerHeadroomGain.isFinite ? equalizerHeadroomGain : renderedEqualizerHeadroomGain
+    let headroomStart = min(renderedEqualizerHeadroomGain, headroomEnd)
     renderedMuteGain = muteEnd
     renderedLevelGain = levelEnd
     renderedEqualizerHeadroomGain = headroomEnd
 
     let outputGainStart = levelStart * muteStart
     let outputGainEnd = levelEnd * muteEnd
+    // A mute fade finishes on its own frame, not at the end of the buffer, so a
+    // large buffer cannot stretch it.
+    let outputRampFrameCount =
+      muteEnd != muteStart
+      ? Int((abs(muteEnd - muteStart) * muteRampFrameCount).rounded(.up))
+      : frameCount
     guard outputGainStart != 0 || outputGainEnd != 0 else {
       stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
       zeroOutput(outputData)
@@ -954,6 +965,7 @@ final class PerAppTapController: @unchecked Sendable {
         channelsPerFrame: bufferChannelCount,
         from: outputGainStart,
         to: outputGainEnd,
+        rampFrameCount: outputRampFrameCount,
         clampsFloat: clampsOutput
       )
 

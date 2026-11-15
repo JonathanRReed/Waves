@@ -651,12 +651,15 @@ public struct AdaptivePolicyEngine: Sendable {
       let loudnessGain: Double
       if usesLoudnessCorrection {
         var state = loudnessTrimStates[input.appID] ?? LoudnessTrimState()
-        loudnessGain = state.update(
+        let trim = state.update(
           rms: Double(input.rms),
           isEligible: routeIsEligible,
           elapsed: elapsed
         )
         loudnessTrimStates[input.appID] = state
+        // The measurement is pre-fader, so a quiet source reads as quiet even
+        // when the user has boosted it. Never add gain on top of their boost.
+        loudnessGain = input.manualGain > 1 ? min(0, trim) : trim
       } else {
         loudnessTrimStates.removeValue(forKey: input.appID)
         loudnessGain = 0

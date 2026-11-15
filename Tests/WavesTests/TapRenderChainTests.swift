@@ -190,3 +190,52 @@ private func makeController() throws -> PerAppTapController {
   #expect(render(controller, constant(0.5, frames: 64)).allSatisfy { $0 == 0 })
   #expect(controller.getAdaptiveAnalysis().rms == 0)
 }
+
+@Test func muteFadeEndsOnItsOwnFrameInsideALargeBuffer() throws {
+  let controller = try makeController()
+  _ = render(controller, constant(0.5, frames: 64))
+  controller.apply(volume: 1, volumeBoost: 1, muted: true)
+
+  // 5 ms at 48 kHz is 240 frames. A 1,024-frame buffer must not stretch the
+  // fade to its own length.
+  let output = render(controller, constant(0.5, frames: 1_024))
+  let left = output.enumerated().filter { $0.offset.isMultiple(of: 2) }.map(\.element)
+
+  #expect(left[0] > 0.49)
+  #expect(left[120] > 0.2 && left[120] < 0.3)
+  #expect(left[238] > 0)
+  #expect(left[239...].allSatisfy { $0 == 0 })
+}
+
+@Test func mutingAlreadyFadingAudioFinishesTheFadePartwayThroughABuffer() throws {
+  let controller = try makeController()
+  _ = render(controller, constant(0.5, frames: 64))
+  controller.apply(volume: 1, volumeBoost: 1, muted: true)
+  _ = render(controller, constant(0.5, frames: 200))
+
+  // 40 of the 240 fade frames remain.
+  let output = render(controller, constant(0.5, frames: 256))
+  let left = output.enumerated().filter { $0.offset.isMultiple(of: 2) }.map(\.element)
+
+  #expect(left[0] > 0 && left[0] < 0.5 * 40 / 240)
+  #expect(left[38] > 0)
+  // Float rounding may spend one extra frame.
+  #expect(left[41...].allSatisfy { $0 == 0 })
+}
+
+@Test func addedEqualizerHeadroomLandsBeforeTheBoostItProtectsAgainst() throws {
+  let controller = try makeController()
+  _ = render(controller, constant(0.5, frames: 64))
+
+  var settings = EqualizerSettings(isEnabled: true, mode: .simple, simpleGainsDB: [12, 0, 0])
+  settings.setGain(12, at: 0)
+  let headroom = Float(pow(10, Double(settings.headroomCompensationDB) / 20))
+  #expect(headroom < 0.5)
+  controller.setEqualizer(settings)
+
+  // The EQ's coefficients reach the new boost within about 20 ms, far sooner
+  // than this buffer ends, so the attenuation cannot ramp across it.
+  let output = render(controller, constant(0.5, frames: 2_048))
+
+  #expect(output[0] < 0.5 * headroom * 1.2)
+}

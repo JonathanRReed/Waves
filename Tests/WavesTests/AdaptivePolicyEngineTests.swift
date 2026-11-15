@@ -344,3 +344,19 @@ private func speakingCall(priority: AdaptivePriority = .normal) -> AdaptiveMixIn
   // A duck would be -10 dB; float rounding of -24 dBFS leaves a ~1e-7 dB trim.
   #expect(abs(gains["music"] ?? -99) < 0.01)
 }
+
+@Test func loudnessBalanceNeverAddsGainOnTopOfTheUsersBoost() {
+  var engine = AdaptivePolicyEngine(usesLoudnessCorrection: true, usesPriorityDucking: false)
+  // Quiet before the fader: on its own this earns the full upward trim.
+  var boosted = policyInput("boosted", contentType: .music, priority: .normal, rmsDBFS: -36)
+  boosted.manualGain = 4
+  let plain = policyInput("plain", contentType: .music, priority: .normal, rmsDBFS: -36)
+
+  var gains: [String: Float] = [:]
+  for _ in 0..<200 {
+    gains = engine.update(inputs: [boosted, plain], elapsed: 0.1)
+  }
+
+  #expect(gains["boosted"] == 0)
+  #expect((gains["plain"] ?? 0) > 2.9)
+}

@@ -39,7 +39,8 @@ public enum TapDSP {
   /// Multiplies interleaved samples in place by a gain that moves linearly
   /// from `startGain` to `endGain` across the buffer's frames, so a gain change
   /// never lands as a step. The per-frame gain never leaves the range between
-  /// the two endpoints.
+  /// the two endpoints. With `rampFrameCount`, the gain lands on `endGain`
+  /// after that many frames and holds it for the rest of the buffer.
   ///
   /// Float samples are clamped to ±1 only when `clampsFloat` is set, so earlier
   /// stages of the chain can pass headroom on to the final one. Integer
@@ -55,6 +56,7 @@ public enum TapDSP {
     channelsPerFrame: Int,
     from startGain: Float,
     to endGain: Float,
+    rampFrameCount: Int? = nil,
     clampsFloat: Bool
   ) {
     let channels = max(1, channelsPerFrame)
@@ -67,7 +69,7 @@ public enum TapDSP {
     case .float32:
       let pointer = data.assumingMemoryBound(to: Float.self)
       let count = byteCount / MemoryLayout<Float>.size
-      let frameCount = count / channels
+      let frameCount = max(1, min(count / channels, rampFrameCount ?? .max))
       for index in 0..<count {
         let sample = pointer[index]
         guard sample.isFinite else {
@@ -84,7 +86,7 @@ public enum TapDSP {
       guard !isUnity else { return }
       let pointer = data.assumingMemoryBound(to: Int16.self)
       let count = byteCount / MemoryLayout<Int16>.size
-      let frameCount = count / channels
+      let frameCount = max(1, min(count / channels, rampFrameCount ?? .max))
       for index in 0..<count {
         let gain = isRamp ? rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount) : endGain
         pointer[index] = scaleSigned16(pointer[index], gain: gain)
@@ -93,7 +95,7 @@ public enum TapDSP {
       guard !isUnity else { return }
       let pointer = data.assumingMemoryBound(to: Int32.self)
       let count = byteCount / MemoryLayout<Int32>.size
-      let frameCount = count / channels
+      let frameCount = max(1, min(count / channels, rampFrameCount ?? .max))
       for index in 0..<count {
         let gain = isRamp ? rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount) : endGain
         pointer[index] = scaleSigned32(pointer[index], gain: gain)
