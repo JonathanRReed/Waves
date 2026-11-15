@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SwiftUI
 import Testing
 import WavesAudioCore
@@ -134,6 +135,89 @@ import WavesAudioCore
       }
     }
   }
+}
+
+// MARK: - Live state and list invalidation
+
+private final class ObservationFlag: @unchecked Sendable {
+  var fired = false
+}
+
+@MainActor
+private func observeLiveLists(_ store: AppStore) -> ObservationFlag {
+  let flag = ObservationFlag()
+  withObservationTracking {
+    _ = store.liveApps
+    _ = store.recentApps
+    _ = store.sourceCounts
+    _ = store.menuBarStatus
+    _ = store.hasLiveAudio
+    _ = MenuBarLayout.makeAppList(
+      visibleApps: store.visibleApps,
+      isRecentlyLive: store.isRecentlyLive,
+      isExcluded: store.isExcluded
+    )
+  } onChange: {
+    flag.fired = true
+  }
+  return flag
+}
+
+/// The Live list, the sidebar counts, the menu-bar panel's list, and the
+/// menu-bar icon all ask whether an app is playing. They must re-evaluate when
+/// an app starts or stops playing, and not on every level tick while it plays.
+@MainActor
+@Test func liveListsIgnoreLevelTicksButFollowPlayingChanges() async throws {
+  let app = polishApp()
+  let fixture = try await makePolishFixture(apps: [app])
+  defer { fixture.cleanup() }
+  let store = fixture.store
+  store.liveLevels = [app.logicalID: AudioLevels(peak: 0.3, rms: 0.2)]
+  #expect(store.isLive(app))
+  #expect(store.liveApps.map(\.logicalID) == [app.logicalID])
+
+  let tick = observeLiveLists(store)
+  store.liveLevels = [app.logicalID: AudioLevels(peak: 0.42, rms: 0.31)]
+  #expect(tick.fired == false, "a level tick re-evaluated a list")
+
+  let stop = observeLiveLists(store)
+  store.liveLevels = [app.logicalID: AudioLevels(peak: 0, rms: 0)]
+  #expect(stop.fired)
+  #expect(store.isLive(app) == false)
+}
+
+@MainActor
+@Test func isLiveKeepsItsMeaningAcrossPollAndSnapshotStates() async throws {
+  let managed = polishApp(id: "com.example.managed")
+  let muted = polishApp(id: "com.example.muted", muted: true)
+  let live = polishApp(id: "com.example.live", state: .live)
+  var snapshotLevels = polishApp(id: "com.example.snapshot")
+  snapshotLevels.peakLevel = 0.2
+  let fixture = try await makePolishFixture(apps: [managed, muted, live, snapshotLevels])
+  defer { fixture.cleanup() }
+  let store = fixture.store
+
+  // No poll yet: the snapshot's own levels decide for managed apps.
+  #expect(store.isLive(managed) == false)
+  #expect(store.isLive(snapshotLevels))
+  #expect(store.isLive(live))
+  #expect(store.isLive(muted) == false)
+
+  // A poll entry is authoritative, quiet or loud, and the threshold is unchanged.
+  store.liveLevels = [
+    managed.logicalID: AudioLevels(peak: 0.0016, rms: 0),
+    snapshotLevels.logicalID: AudioLevels(peak: 0.0015, rms: 0.001),
+    muted.logicalID: AudioLevels(peak: 0.5, rms: 0.5),
+  ]
+  #expect(store.isLive(managed))
+  #expect(store.isLive(snapshotLevels) == false)
+  #expect(store.isLive(muted) == false)
+  #expect(store.isLive(live))
+
+  // Clearing the poll falls back to the snapshot again.
+  store.liveLevels = [:]
+  #expect(store.isLive(managed) == false)
+  #expect(store.isLive(snapshotLevels))
 }
 
 // MARK: - Fixtures

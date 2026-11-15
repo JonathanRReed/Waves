@@ -80,7 +80,16 @@ final class AppStore {
   var availableDevices: [AudioDevice] = []
   /// Live per-app output levels for meters, populated only while a UI surface
   /// is visible (kept out of `session` so updates don't trigger re-sorts).
-  var liveLevels: [String: AudioLevels] = [:]
+  var liveLevels: [String: AudioLevels] = [:] {
+    didSet { syncPolledLevelMembership() }
+  }
+  /// Which apps the last level poll reported, and which of those were above the
+  /// live threshold. `isLive` reads these instead of `liveLevels`, so the lists
+  /// and status surfaces that ask "is it playing?" are invalidated when an app
+  /// starts or stops playing, not on every level tick. Assigned only when the
+  /// membership actually changes.
+  private(set) var polledLevelAppIDs: Set<String> = []
+  private(set) var audiblePolledAppIDs: Set<String> = []
   /// The adaptive engine's current temporary gain per app (dB), published so
   /// the UI can show which apps Sidechain Focus is holding back or lifting
   /// right now. Empty whenever Adaptive Mix is off or nothing is being
@@ -433,7 +442,8 @@ final class AppStore {
   /// otherwise the moment you nudge a playing app's volume it flips to `.managed`
   /// and vanishes from the Live list even though sound is still coming out. The
   /// authoritative "is it making sound now" signal is the live-level poll
-  /// (`liveLevels`, refreshed a few times a second while a surface is visible);
+  /// (`liveLevels`, refreshed a few times a second while a surface is visible),
+  /// read through its membership sets so callers do not observe every tick;
   /// fall back to the last snapshot levels when the poll isn't running.
   func isLive(_ app: AudioApp) -> Bool {
     if app.routeHealthContext == .waveLinkBridge {
@@ -443,10 +453,20 @@ final class AppStore {
     }
     if app.routingState == .live { return true }
     guard app.routingState == .managed, !app.isMuted else { return false }
-    if let levels = liveLevels[app.logicalID] {
-      return max(levels.rms, levels.peak) > Self.liveLevelThreshold
+    if polledLevelAppIDs.contains(app.logicalID) {
+      return audiblePolledAppIDs.contains(app.logicalID)
     }
     return max(app.peakLevel, app.rmsLevel) > Self.liveLevelThreshold
+  }
+
+  private func syncPolledLevelMembership() {
+    let polled = Set(liveLevels.keys)
+    let audible = Set(
+      liveLevels.lazy
+        .filter { max($0.value.rms, $0.value.peak) > Self.liveLevelThreshold }
+        .map(\.key))
+    if polled != polledLevelAppIDs { polledLevelAppIDs = polled }
+    if audible != audiblePolledAppIDs { audiblePolledAppIDs = audible }
   }
 
   /// True when the app is producing audio right now, OR went quiet within the
