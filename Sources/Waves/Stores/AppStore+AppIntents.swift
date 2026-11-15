@@ -430,10 +430,17 @@ extension AppStore {
 
     let appID = intent.appID
     let acceptedApp = result.resultingApp
+    // An automatic call mute is session-only. A change that did not touch mute
+    // (a boost or volume change during a call) keeps the mute the user saved.
+    // An explicit mute change has already released the automatic one.
+    let durableMute =
+      appIntentCoordinator.ownsAutomaticMute(for: appID)
+      ? (preferences.appAudioIntents[appID]?.isMuted ?? false)
+      : (acceptedApp?.isMuted ?? intent.isMuted)
     let durableIntent = PersistedAppAudioIntent(
       appID: appID,
       desiredVolume: acceptedApp?.desiredVolume ?? intent.desiredVolume,
-      isMuted: acceptedApp?.isMuted ?? intent.isMuted,
+      isMuted: durableMute,
       volumeBoost: acceptedApp?.volumeBoost ?? intent.volumeBoost,
       equalizerSettings: intent.equalizerSettings,
       targetDeviceUID: acceptedApp?.targetDeviceUID ?? intent.targetDeviceUID

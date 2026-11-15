@@ -506,18 +506,40 @@ actor WaveLinkControlBridge: WaveLinkControlling {
       Self.logger.info(
         "Moving \(bundleIdentifier, privacy: .public) to empty Wave Link channel \(empty.name, privacy: .public)"
       )
-      // Give the empty channel the requested level and mute before the app
-      // joins it, so the app never plays there at the channel's old level or
-      // unmuted. If Wave Link refuses, the move goes ahead and the level is
-      // set right after it, as before.
+      // Give the empty channel the requested level and mute, and see Wave
+      // Link report them, before the app joins it. Moving first would let the
+      // app play there at the channel's old level or unmuted, possibly into a
+      // stream mix, and no later rollback can take that sound back. If the
+      // channel cannot be confirmed ready, the app stays where it is.
       let prepareRequest = SetChannelRequest(id: empty.id, level: channelVolume, isMuted: isMuted)
+      var destinationIsReady = false
       do {
         _ = try await request("setChannel", try encoder.encode(prepareRequest))
+        for (read, delay) in ([Duration.zero] + Self.confirmationDelays).enumerated() {
+          if read > 0 { try await sleep(delay) }
+          guard
+            let destination = try await readChannels().first(where: { $0.id == empty.id }),
+            destination.isSoftware, destination.apps.isEmpty,
+            destination.relocationMixes == sourceMixes
+          else { break }
+          if destination.reportsValidState,
+            Self.wholePercent(destination.level) == Self.wholePercent(channelVolume),
+            destination.isMuted == isMuted
+          {
+            destinationIsReady = true
+            break
+          }
+        }
       } catch is CancellationError {
         throw CancellationError()
       } catch {
         Self.logger.error(
           "Could not prepare channel \(empty.name, privacy: .public) before the move: \(error.localizedDescription, privacy: .public)"
+        )
+      }
+      guard destinationIsReady else {
+        throw WaveLinkControlBridgeError.readBackMismatch(
+          "Wave Link did not confirm the level and mute for \(empty.name) before the move, so the app was left on its current channel."
         )
       }
       relocationSource = source

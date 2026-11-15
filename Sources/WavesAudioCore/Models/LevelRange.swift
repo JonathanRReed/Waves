@@ -53,6 +53,14 @@ public struct LevelRange: Hashable, Sendable {
     validated(value.map(Double.init))
   }
 
+  /// A boost the mixer's menu offers: a whole multiplier inside the boost
+  /// range. Automation refuses anything else, because the mixer shows boost as
+  /// a whole number and would describe 1.9x as 1x.
+  public static func validatedBoostChoice(_ value: Float?) -> Float? {
+    guard let boost = boost.validated(value), boost == boost.rounded() else { return nil }
+    return boost
+  }
+
   /// Parses short decimal text (a URL query value) and validates it.
   public func validated(text: String?) -> Float? {
     guard let text, !text.isEmpty, text.utf8.count <= Self.maximumTextLength else { return nil }

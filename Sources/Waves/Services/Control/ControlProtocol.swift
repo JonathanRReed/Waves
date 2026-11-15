@@ -205,6 +205,9 @@ struct ControlProfileResult: Codable, Equatable, Sendable {
   var skipped: Int
   /// Could not be set, or a newer change replaced it first.
   var failed: Int
+  /// Levels set, but the profile's EQ or output for the app was not: the
+  /// output device is not connected, or another router controls the app.
+  var partial = 0
 }
 
 /// One app, as the control surface describes it.

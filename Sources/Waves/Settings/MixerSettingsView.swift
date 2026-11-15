@@ -166,7 +166,7 @@ struct MixerSettingsView: View {
         Text("Calls")
       } footer: {
         Text(
-          "In front: works with Zoom, Teams, Webex, and FaceTime, but media comes back when you switch to another app, and browser calls aren't detected. Microphone: works with any app you choose, including a browser, but any microphone use by that app counts as a call. Waves only asks macOS which apps are using the microphone and never listens to it."
+          "In front: works with Zoom, Teams, Webex, and FaceTime, but media comes back when you switch to another app, and browser calls aren't detected. Microphone: works with the apps you choose, such as Discord, Slack, or Chrome, but any microphone use by them counts as a call. Waves only asks macOS which apps are using the microphone and never listens to it."
         )
       }
     }

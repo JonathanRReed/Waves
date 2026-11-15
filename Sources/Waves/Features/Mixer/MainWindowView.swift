@@ -547,8 +547,8 @@ private struct SidebarView: View {
           }
           .buttonStyle(.plain)
           .foregroundStyle(theme.accent)
-          .help("Save every app's current levels as a new profile (⇧⌘S)")
-          .accessibilityHint("Saves every app's current levels as a new profile.")
+          .help("Save the apps you've adjusted as a new profile (⇧⌘S)")
+          .accessibilityHint("Saves the apps you've adjusted as a new profile.")
         }
         ForEach(store.profiles) { profile in
           ProfileSidebarRow(profile: profile)
@@ -592,7 +592,7 @@ private struct SidebarView: View {
           .foregroundStyle(.secondary)
           .help("Save Current Mix (⇧⌘S)")
           .accessibilityLabel("Save current mix")
-          .accessibilityHint("Saves every app's current levels as a new profile.")
+          .accessibilityHint("Saves the apps you've adjusted as a new profile.")
           .keyboardShortcut("s", modifiers: [.command, .shift])
         }
       }

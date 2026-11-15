@@ -111,7 +111,8 @@ final class AutomationCommandParser {
       // Refused outside 1...4, never clamped: a URL must not be able to ask
       // for more boost than the mixer offers.
       guard let appID = validAppID(in: components),
-        let boost = LevelRange.boost.validated(text: queryValue(named: "boost", in: components))
+        let boost = LevelRange.validatedBoostChoice(
+          LevelRange.boost.validated(text: queryValue(named: "boost", in: components)))
       else {
         return presentedRejection("Set-boost command was invalid.")
       }

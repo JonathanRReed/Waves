@@ -1349,7 +1349,7 @@ class ReleaseInfraTest < Minitest::Test
       WavesRelease::Evidence.seal(input: failed, metadata: load_metadata, profile: "candidate")
     end
 
-    {"status" => "failed", "idleSeconds" => 0, "activeSeconds" => 30.5}.each do |field, value|
+    {"status" => "failed", "idleSeconds" => 29, "activeSeconds" => 30.5}.each do |field, value|
       runtime = evidence_input
       runtime.fetch("gates").fetch("boundedRuntimeCheck")[field] = value
       assert_release_error(/boundedRuntimeCheck/) do

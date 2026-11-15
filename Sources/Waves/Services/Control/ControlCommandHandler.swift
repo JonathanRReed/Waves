@@ -197,7 +197,7 @@ struct ControlCommandHandler {
     guard request.boost != nil else {
       return .failure(id: request.id, .missingParameter)
     }
-    guard let boost = LevelRange.boost.validated(request.boost) else {
+    guard let boost = LevelRange.validatedBoostChoice(request.boost) else {
       return .failure(id: request.id, .invalidParameter)
     }
     guard MixerRouteControlPolicy(app: app).allowsDSPControl else {
@@ -232,24 +232,34 @@ struct ControlCommandHandler {
     guard let profile = store.automationProfile(named: name) else {
       return .failure(id: request.id, .unknownProfile)
     }
-    guard let (result, settingsSaved) = await store.applyProfileForExternalControl(profile) else {
+    guard
+      let (result, settingsSaved, soundSkippedAppIDs) =
+        await store.applyProfileForExternalControl(profile)
+    else {
       return .failure(id: request.id, .notApplied)
     }
 
     var counts = ControlProfileResult(name: profile.name, applied: 0, savedForLater: 0, skipped: 0, failed: 0)
     for (entry, row) in zip(profile.entries, result.rows) where entry.hasLevels {
       switch row.outcome {
-      case .applied, .noChange: counts.applied += 1
+      case .applied, .noChange:
+        if soundSkippedAppIDs.contains(entry.appID) {
+          counts.partial += 1
+        } else {
+          counts.applied += 1
+        }
       // Levels for an app that is not running exist only in saved settings.
       case .unavailable where settingsSaved: counts.savedForLater += 1
       case .unavailable: counts.failed += 1
       case .excluded: counts.skipped += 1
-      case .membershipOnly: break
+      // Stripping an unconnected output can leave a row with nothing to apply.
+      case .membershipOnly:
+        if soundSkippedAppIDs.contains(entry.appID) { counts.partial += 1 }
       case .failed, .unsupported, .superseded: counts.failed += 1
       }
     }
     var response =
-      counts.failed == 0
+      counts.failed == 0 && counts.partial == 0
       ? ControlResponse.success(id: request.id)
       : ControlResponse.failure(id: request.id, .notApplied)
     response.profile = counts
