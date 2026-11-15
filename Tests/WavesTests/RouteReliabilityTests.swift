@@ -584,6 +584,35 @@ private func maintenancePass(_ fixture: RouteFixture, from start: Int, ticks: In
   #expect(fixture.events.creations == 2)
 }
 
+@Test func aRouteBuiltWhileItsDeviceFormatWasUnreadableStillRecordsItsDevice() async throws {
+  // The built-in output's format cannot be read while the route is built
+  // (mid-reset, say); the route itself is created fine.
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  fixture.devices.set("builtin", .notAlive)
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  #expect(await backend.routeOutputBindingForTesting(runtimeID: "app.a") == RouteOutputBinding(deviceUID: "builtin", signature: nil))
+
+  // The default moves on; a volume edit must not take the old route as
+  // correctly placed just because its format was never recorded.
+  fixture.devices.set("builtin", .alive(rate48))
+  fixture.devices.defaultUID = "headphones"
+  let edit = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.2, generation: 10))
+  #expect(edit.outcome == .applied)
+  #expect(await backend.routeOutputBindingForTesting(runtimeID: "app.a")?.deviceUID == "headphones")
+  #expect(fixture.events.values == ["create app.a #2", "stop #1"])
+}
+
+@Test func aRouteWithNoRecordedFormatIsRebuiltOnceItsDeviceReportsOne() {
+  let bindings = ["a": RouteOutputBinding(deviceUID: "builtin", signature: nil)]
+  let decision = RouteFormatRevalidation.decide(
+    bindings: bindings,
+    observations: ["builtin": .alive(rate48)],
+    devicesPreviouslySeenNotAlive: []
+  )
+  #expect(decision.runtimeIDsToRebuild == ["a"])
+}
+
 // MARK: - Queued repairs carry the authorization they were selected with
 
 @Test func aMoveCannotRecreateAnAppExcludedWhileAnEarlierRouteWasRetrying() async throws {
@@ -1569,10 +1598,9 @@ final class DeviceFormatState: @unchecked Sendable {
     lock.withLock { observations[uid] ?? .missing }
   }
 
-  func binding(for app: AudioApp) -> RouteOutputBinding? {
-    let uid = app.targetDeviceUID ?? defaultUID
-    guard case .alive(let signature) = observation(uid) else { return nil }
-    return RouteOutputBinding(deviceUID: uid, signature: signature)
+  /// Where `app`'s route should play: its pinned target, or the default.
+  func outputUID(for app: AudioApp) -> String {
+    app.targetDeviceUID ?? defaultUID
   }
 }
 
@@ -1685,7 +1713,7 @@ final class RouteFixture: @unchecked Sendable {
       routeBudgetClock: { .seconds(1) },
       controllerRetryPause: retryPause ?? { _ in },
       handoffSilencePause: { if rendersDuringHandoff { events.pumpRenders() } },
-      routeOutputBindingProvider: { devices.binding(for: $0) },
+      outputDeviceUIDProvider: { devices.outputUID(for: $0) },
       deviceFormatObservationProvider: { devices.observation($0) },
       deviceFormatListenerNativeCalls: deviceFormatListenerNativeCalls
         ?? DeviceFormatListenerNativeCalls(add: { _, _, _ in noErr }, remove: { _, _, _ in noErr })

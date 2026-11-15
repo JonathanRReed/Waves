@@ -24,10 +24,13 @@ enum DeviceFormatObservation: Equatable, Sendable {
 }
 
 /// The device a live route renders to, and that device's format when the
-/// route was built.
+/// route was built. The device is always known to whatever built the route;
+/// its format is optional metadata that a failed read leaves nil, without
+/// losing the device. A route with no recorded format is rebuilt once its
+/// device next reports one, which records it.
 struct RouteOutputBinding: Equatable, Sendable {
   let deviceUID: String
-  let signature: DeviceFormatSignature
+  let signature: DeviceFormatSignature?
 }
 
 enum RouteFormatRevalidation {

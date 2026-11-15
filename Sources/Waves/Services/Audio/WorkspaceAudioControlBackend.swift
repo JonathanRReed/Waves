@@ -154,7 +154,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let processLifetimeLiveness: @Sendable (AppProcessLifetimeIdentity) -> Bool
   let controllerRetryPause: ControllerRetryPause
   let handoffSilencePause: HandoffSilencePause
-  let routeOutputBindingProvider: (@Sendable (AudioApp) -> RouteOutputBinding?)?
+  let outputDeviceUIDProvider: (@Sendable (AudioApp) -> String?)?
   let deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
@@ -190,7 +190,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.routeBudgetClock = Self.monotonicRouteTime
     self.controllerRetryPause = { try await Task.sleep(nanoseconds: $0) }
     self.handoffSilencePause = { usleep(1_000) }
-    self.routeOutputBindingProvider = nil
+    self.outputDeviceUIDProvider = nil
     self.deviceFormatObservationProvider = nil
     self.deviceFormatListeners = DeviceFormatListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.device-format"))
@@ -226,7 +226,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     routeBudgetClock: (@Sendable () -> Duration)? = nil,
     controllerRetryPause: ControllerRetryPause? = nil,
     handoffSilencePause: HandoffSilencePause? = nil,
-    routeOutputBindingProvider: (@Sendable (AudioApp) -> RouteOutputBinding?)? = nil,
+    outputDeviceUIDProvider: (@Sendable (AudioApp) -> String?)? = nil,
     deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)? = nil,
     deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil
   ) {
@@ -256,7 +256,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.routeBudgetClock = routeBudgetClock ?? Self.monotonicRouteTime
     self.controllerRetryPause = controllerRetryPause ?? { try await Task.sleep(nanoseconds: $0) }
     self.handoffSilencePause = handoffSilencePause ?? { usleep(1_000) }
-    self.routeOutputBindingProvider = routeOutputBindingProvider
+    self.outputDeviceUIDProvider = outputDeviceUIDProvider
     self.deviceFormatObservationProvider = deviceFormatObservationProvider
     self.deviceFormatListeners = DeviceFormatListenerLifecycle(
       nativeCalls: deviceFormatListenerNativeCalls
@@ -1446,15 +1446,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// False only when the live route is known to render to a device other than
   /// the one it should play on now: its pinned target, or the current default.
   /// Unknown either way (no recorded binding, or no readable default) counts
-  /// as true, so nothing is rebuilt on a guess. Cheap enough for every volume
-  /// edit: a pinned route reads nothing, a default-following one reads the
-  /// default device's UID.
+  /// as true, so nothing is rebuilt on a guess. Every installed route records
+  /// its device, so "no binding" means a controller this backend did not
+  /// build. Cheap enough for every volume edit: a pinned route reads nothing,
+  /// a default-following one reads the default device's UID.
   func isRouteOnItsExpectedDevice(_ app: AudioApp) -> Bool {
-    guard let bound = routeOutputBindingByRuntimeID[app.id]?.deviceUID else { return true }
-    let expected =
-      routeOutputBindingProvider.map { $0(app)?.deviceUID }
-      ?? (app.targetDeviceUID ?? (try? currentDefaultOutputDeviceUID()))
-    guard let expected else { return true }
+    guard let bound = routeOutputBindingByRuntimeID[app.id]?.deviceUID,
+      let expected = expectedOutputDeviceUID(for: app)
+    else { return true }
     return bound == expected
   }
 

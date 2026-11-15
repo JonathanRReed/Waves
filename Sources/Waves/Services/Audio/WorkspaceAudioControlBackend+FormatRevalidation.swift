@@ -8,16 +8,24 @@ import WavesAudioCore
 extension WorkspaceAudioControlBackend {
   static let formatEventDebounce: Duration = .milliseconds(500)
 
+  /// The device `app`'s route should render to now: its pinned target, or
+  /// the current default. Nil only when the default cannot be read.
+  func expectedOutputDeviceUID(for app: AudioApp) -> String? {
+    if let outputDeviceUIDProvider { return outputDeviceUIDProvider(app) }
+    return app.targetDeviceUID ?? (try? currentDefaultOutputDeviceUID())
+  }
+
   /// The device `app`'s route would render to now and that device's current
   /// format. Creation records the binding of the attempt that succeeded.
   func currentOutputBinding(for app: AudioApp) -> RouteOutputBinding? {
-    if let routeOutputBindingProvider { return routeOutputBindingProvider(app) }
-    guard let deviceUID = app.targetDeviceUID ?? (try? currentDefaultOutputDeviceUID()) else { return nil }
-    return outputBinding(forDeviceUID: deviceUID)
+    expectedOutputDeviceUID(for: app).map(outputBinding(forDeviceUID:))
   }
 
-  func outputBinding(forDeviceUID deviceUID: String) -> RouteOutputBinding? {
-    guard case .alive(let signature) = deviceFormatObservation(uid: deviceUID) else { return nil }
+  /// Always names the device; the format is nil if it cannot be read now.
+  func outputBinding(forDeviceUID deviceUID: String) -> RouteOutputBinding {
+    guard case .alive(let signature) = deviceFormatObservation(uid: deviceUID) else {
+      return RouteOutputBinding(deviceUID: deviceUID, signature: nil)
+    }
     return RouteOutputBinding(deviceUID: deviceUID, signature: signature)
   }
 
