@@ -28,7 +28,14 @@ extension AppStore {
     applyProfile(profile, purpose: .userProfile)
   }
 
-  func applyProfile(_ profile: Profile, purpose: ProfileApplyPurpose) {
+  /// `allowsOutputChanges` is false for a `waves://` link. Anything that can
+  /// open a URL can send one, so a link sets levels and EQ but never moves an
+  /// app's audio to another device.
+  func applyProfile(
+    _ profile: Profile,
+    purpose: ProfileApplyPurpose,
+    allowsOutputChanges: Bool = true
+  ) {
     guard requireAudioRunning() else { return }
     // Remember the mix as it stands so the user can come back to it when the
     // session ends. Only a deliberate, level-changing apply creates one, and an
@@ -70,6 +77,19 @@ extension AppStore {
       // Never route an app to a device that isn't connected: leave that app's
       // output alone, apply the rest of its row, and say so afterwards.
       var skippedOutputs: [SkippedProfileOutput] = []
+      if !allowsOutputChanges {
+        plannedProfile.entries = plannedProfile.entries.map { entry in
+          guard let output = entry.output else { return entry }
+          let current = self.session.apps.first(matchingAppKey: entry.appID)?.targetDeviceUID
+          if current != output.deviceUID, !excludedAppIDsAtSubmission.contains(entry.appID) {
+            skippedOutputs.append(
+              SkippedProfileOutput(appID: entry.appID, deviceName: nil, withheldFromLink: true))
+          }
+          var entry = entry
+          entry.output = nil
+          return entry
+        }
+      }
       if plannedProfile.entries.contains(where: { $0.output?.deviceUID != nil }) {
         let connectedUIDs = Set(await backend.availableOutputDevices().map(\.id))
         plannedProfile.entries = plannedProfile.entries.map { entry in
@@ -712,6 +732,15 @@ extension AppStore {
     skippedOutputs: [SkippedProfileOutput]
   ) -> ProfileSoundNotes {
     var notes = ProfileSoundNotes()
+    let withheldFromLink = skippedOutputs.filter(\.withheldFromLink)
+    if !withheldFromLink.isEmpty {
+      let appNames = withheldFromLink.map { profileAppName(for: $0.appID) }
+      notes.sentences.append(
+        "Links can't move apps to another output, so \(Self.listPhrase(appNames))"
+          + (appNames.count == 1 ? " kept its output." : " kept their outputs.")
+      )
+    }
+    let skippedOutputs = skippedOutputs.filter { !$0.withheldFromLink }
     if !skippedOutputs.isEmpty {
       var deviceNames: [String] = []
       for name in skippedOutputs.map({ $0.deviceName ?? "a saved output device" })

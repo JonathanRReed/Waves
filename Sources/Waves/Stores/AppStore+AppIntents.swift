@@ -69,14 +69,17 @@ extension AppStore {
         detail: result.detail
       )
       // Later rows suspend. An edit to this app in the meantime builds its
-      // intent from the confirmed EQ, so the restored one is recorded now
-      // rather than when the whole profile is reconciled.
-      if let equalizer = entry.equalizer,
-        Self.profileRowRestoredSound(entry, row: row),
-        appIntentCoordinator.isCurrentProfile(generation),
+      // intent from the confirmed app and EQ, so what this row restored is
+      // recorded now rather than when the whole profile is reconciled.
+      if appIntentCoordinator.isCurrentProfile(generation),
         !appIntentCoordinator.hasNewerGeneration(than: generation, for: entry.appID)
       {
-        appIntentCoordinator.recordConfirmedEqualizer(equalizer, for: entry.appID)
+        if row.outcome == .applied || row.outcome == .noChange, let app = row.resultingApp {
+          appIntentCoordinator.recordConfirmedApp(app)
+        }
+        if let equalizer = entry.equalizer, Self.profileRowRestoredSound(entry, row: row) {
+          appIntentCoordinator.recordConfirmedEqualizer(equalizer, for: entry.appID)
+        }
       }
       rows.append(row)
     }

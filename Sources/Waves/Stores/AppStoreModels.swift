@@ -53,11 +53,13 @@ struct EqualizerFocusRequest: Equatable {
 /// app's volume/mute/boost, captured so the user can put everything back with
 /// one click when they're done (meeting over, game closed). Kept in memory
 /// only — a restore point describes a moment, not a preference.
-/// A profile row whose output was left alone because its saved device was
-/// not connected when the profile was applied.
+/// A profile row whose output was left alone: its saved device was not
+/// connected when the profile was applied, or the profile came from a
+/// `waves://` link, which may not move an app to another output.
 struct SkippedProfileOutput: Equatable, Sendable {
   let appID: String
   let deviceName: String?
+  var withheldFromLink = false
 }
 
 /// What a profile apply could not do with EQ and output, in plain sentences.

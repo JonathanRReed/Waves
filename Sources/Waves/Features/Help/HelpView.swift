@@ -353,7 +353,7 @@ struct HelpView: View {
       }
 
       Text(
-        "Membership-only profiles just group apps. Capture levels to also save each app's volume, mute, and boost, and choose whether to include its EQ and output device. An output that isn't connected when you apply the profile is skipped. Reset Mix restores levels only, not EQ or outputs."
+        "Membership-only profiles just group apps. Capture levels to also save each app's volume, mute, and boost, and choose whether to include its EQ and output device. An output that isn't connected when you apply the profile is skipped. Reset Mix restores levels only, not EQ or outputs. A profile applied by a waves:// link sets levels and EQ but never moves an app to another output."
       )
       .font(.caption)
       .foregroundStyle(.secondary)

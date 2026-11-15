@@ -2416,13 +2416,18 @@ private let profileTestHeadphones = AudioDevice(
 @Test func editDuringASoundProfileKeepsTheEqualizerAlreadyRestoredForThatApp() async {
   let first = transactionTestApp(id: "apply.sound.first", desiredVolume: 0.8, targetDeviceUID: nil)
   let second = transactionTestApp(id: "apply.sound.second", desiredVolume: 0.8, targetDeviceUID: nil)
-  let fixture = makeTransactionFixture(apps: [first, second], device: transactionTestDevice())
+  let fixture = makeTransactionFixture(
+    apps: [first, second],
+    device: transactionTestDevice(),
+    extraOutputDevices: [profileTestHeadphones]
+  )
   await fixture.backend.suspendIntent(callNumber: 2)
   let savedEqualizer = profileTestEqualizer(gain: -6)
+  let headphones = ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
   let profile = Profile(
     name: "Movie",
     entries: [
-      ProfileEntry(appID: first.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer),
+      ProfileEntry(appID: first.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer, output: headphones),
       ProfileEntry(appID: second.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer),
     ]
   )
@@ -2445,10 +2450,12 @@ private let profileTestHeadphones = AudioDevice(
   _ = await edit.value
   await fixture.store.drainAppIntentTransactions()
 
-  // The volume change carries the EQ the profile just restored, not the old one.
+  // The volume change carries the EQ and output the profile just restored,
+  // not the old ones.
   let edited = await fixture.backend.recordedIntents().last { $0.appID == first.logicalID }
   #expect(edited?.desiredVolume == 0.5)
   #expect(edited?.equalizerSettings == restored)
+  #expect(edited?.targetDeviceUID == profileTestHeadphones.id)
 }
 
 @MainActor
@@ -2517,6 +2524,53 @@ private let profileTestHeadphones = AudioDevice(
       $0.title == "Profile partly applied" && $0.kind == .info
         && $0.detail == "AirPods Pro isn't connected, so Test App kept its output."
     })
+}
+
+@MainActor
+@Test func linkAppliedProfileSetsLevelsAndEqualizerButNeverMovesTheOutput() async {
+  let app = transactionTestApp(id: "apply.link", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  let equalizer = profileTestEqualizer(gain: -6)
+  let profile = Profile(
+    name: "Speakers",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.4,
+        equalizer: equalizer,
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+  fixture.store.preferences.enableURLScheme = true
+  fixture.store.profiles = [profile]
+
+  // Anything that can open a URL can send this, so it must not be able to
+  // move a call or music onto another device.
+  fixture.store.handleURLScheme(URL(string: "waves://apply-profile?name=Speakers")!)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  #expect(intents.first?.desiredVolume == 0.4)
+  #expect(intents.first?.equalizerSettings.activeGainsDB == equalizer.activeGainsDB)
+  #expect(intents.first?.targetDeviceUID == nil)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == nil)
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied"
+        && $0.detail == "Links can't move apps to another output, so Test App kept its output."
+    })
+
+  // The same profile applied by the user does move it.
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  #expect(await fixture.backend.recordedIntents().last?.targetDeviceUID == profileTestHeadphones.id)
 }
 
 @MainActor
