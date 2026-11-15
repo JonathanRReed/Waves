@@ -26,25 +26,33 @@ enum AutomationCommandParseResult: Equatable, Sendable {
 /// application or audio state.
 @MainActor
 final class AutomationCommandParser {
-  typealias Clock = @MainActor @Sendable () -> Date
+  /// Seconds on a monotonic clock. Tests inject their own.
+  typealias Clock = @MainActor @Sendable () -> TimeInterval
+
+  static let maximumRequests = 10
+  static let requestWindow: TimeInterval = 60
+  static let throttleNotificationInterval: TimeInterval = 5
+  static let defaultClock: Clock = { MonotonicClock.seconds() }
 
   private let now: Clock
-  private let maximumRequests: Int
-  private let requestWindow: TimeInterval
   private let throttleNotificationInterval: TimeInterval
-  private var acceptedRequestTimes: [Date] = []
-  private var lastThrottleNotification: Date?
+  private var acceptedRequests: SlidingWindowQuota
+  private var lastThrottleNotification: TimeInterval?
   private(set) var invocationCount = 0
 
   init(
-    maximumRequests: Int = 10,
-    requestWindow: TimeInterval = 60,
-    throttleNotificationInterval: TimeInterval = 5,
-    now: @escaping Clock = Date.init
+    maximumRequests: Int = AutomationCommandParser.maximumRequests,
+    requestWindow: TimeInterval = AutomationCommandParser.requestWindow,
+    throttleNotificationInterval: TimeInterval = AutomationCommandParser.throttleNotificationInterval,
+    now: @escaping Clock = AutomationCommandParser.defaultClock
   ) {
-    self.maximumRequests = max(0, maximumRequests)
-    self.requestWindow = requestWindow.isFinite ? max(0, requestWindow) : 60
-    self.throttleNotificationInterval = throttleNotificationInterval.isFinite ? max(0, throttleNotificationInterval) : 5
+    acceptedRequests = SlidingWindowQuota(
+      limit: maximumRequests,
+      window: requestWindow.isFinite ? max(0, requestWindow) : Self.requestWindow
+    )
+    self.throttleNotificationInterval =
+      throttleNotificationInterval.isFinite
+      ? max(0, throttleNotificationInterval) : Self.throttleNotificationInterval
     self.now = now
   }
 
@@ -114,41 +122,28 @@ final class AutomationCommandParser {
       return presentedRejection("Unknown command: \(String(host.prefix(64)))")
     }
 
-    guard acceptRequest() else {
-      let currentTime = now()
-      let shouldNotify: Bool
-      if currentTime.timeIntervalSinceReferenceDate.isFinite {
-        shouldNotify =
-          lastThrottleNotification.map {
-            currentTime.timeIntervalSince($0) >= throttleNotificationInterval || currentTime < $0
-          } ?? true
-        if shouldNotify { lastThrottleNotification = currentTime }
-      } else {
-        shouldNotify = false
+    let reading = now()
+    guard acceptedRequests.admit(at: reading) else {
+      // A non-finite reading is refused and never starts a notification
+      // cooldown; time otherwise only moves forward (see SlidingWindowQuota).
+      guard let currentTime = acceptedRequests.observe(reading) else {
+        return .throttled(shouldNotify: false)
       }
+      let shouldNotify =
+        lastThrottleNotification.map { currentTime - $0 >= throttleNotificationInterval } ?? true
+      if shouldNotify { lastThrottleNotification = currentTime }
       return .throttled(shouldNotify: shouldNotify)
     }
     return .accepted(validated)
   }
 
   func reset() {
-    acceptedRequestTimes.removeAll()
+    acceptedRequests.reset()
     lastThrottleNotification = nil
   }
 
   func shutdown() {
     reset()
-  }
-
-  private func acceptRequest() -> Bool {
-    let currentTime = now()
-    guard currentTime.timeIntervalSinceReferenceDate.isFinite else { return false }
-    let cutoff = currentTime.addingTimeInterval(-requestWindow)
-    // Do not retain future entries after a backwards wall-clock shift.
-    acceptedRequestTimes.removeAll { $0 < cutoff || $0 > currentTime }
-    guard acceptedRequestTimes.count < maximumRequests else { return false }
-    acceptedRequestTimes.append(currentTime)
-    return true
   }
 
   private func queryValue(named name: String, in components: URLComponents) -> String? {

@@ -53,7 +53,7 @@ private final class LimiterRecoveryClock {
     let limiter = URLInvocationLimiter(
       maximumInvocations: 2,
       window: window,
-      now: { clock.date }
+      now: { clock.date.timeIntervalSinceReferenceDate }
     )
     #expect(limiter.allow())
     #expect(limiter.allow())
@@ -76,7 +76,7 @@ private final class LimiterRecoveryClock {
     let parser = AutomationCommandParser(
       maximumRequests: 2,
       requestWindow: window,
-      now: { clock.date }
+      now: { clock.date.timeIntervalSinceReferenceDate }
     )
     #expect(parser.parse(refreshURL) == .accepted(.refresh))
     #expect(parser.parse(refreshURL) == .accepted(.refresh))
@@ -99,7 +99,7 @@ private final class LimiterRecoveryClock {
     let parser = AutomationCommandParser(
       maximumRequests: 0,
       throttleNotificationInterval: interval,
-      now: { clock.date }
+      now: { clock.date.timeIntervalSinceReferenceDate }
     )
     #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
     #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
@@ -120,7 +120,7 @@ func invocationLimiterFailsClosedOnNonFiniteCurrentTime(nonFiniteTime: TimeInter
   let clock = LimiterRecoveryClock()
   let limiter = URLInvocationLimiter(
     maximumInvocations: 2,
-    now: { clock.date }
+    now: { clock.date.timeIntervalSinceReferenceDate }
   )
   #expect(limiter.allow())
 
@@ -143,7 +143,7 @@ func automationParserFailsClosedOnNonFiniteCurrentTime(nonFiniteTime: TimeInterv
   let clock = LimiterRecoveryClock()
   let parser = AutomationCommandParser(
     maximumRequests: 2,
-    now: { clock.date }
+    now: { clock.date.timeIntervalSinceReferenceDate }
   )
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
 
@@ -164,7 +164,7 @@ func automationParserFailsClosedOnNonFiniteCurrentTime(nonFiniteTime: TimeInterv
 func automationParserPreservesNotificationCooldownAcrossInvalidClock(nonFiniteTime: TimeInterval) {
   let refreshURL = URL(string: "waves://refresh")!
   let clock = LimiterRecoveryClock()
-  let parser = AutomationCommandParser(maximumRequests: 0, now: { clock.date })
+  let parser = AutomationCommandParser(maximumRequests: 0, now: { clock.date.timeIntervalSinceReferenceDate })
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
   clock.date = Date(timeIntervalSinceReferenceDate: nonFiniteTime)
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
@@ -174,116 +174,160 @@ func automationParserPreservesNotificationCooldownAcrossInvalidClock(nonFiniteTi
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
 }
 
+// MARK: - Clock steps
+//
+// Production limiters read CLOCK_MONOTONIC, which cannot step. These tests feed
+// an injected clock that does, and prove the limiter logic still never reopens
+// a spent quota, never forgets an admission, and never restarts a notification
+// cooldown early when time appears to go backwards.
+
 @MainActor
-@Test func invocationLimiterRecoversFromClockRollbackWithBoundedQuotaAndExpiry() {
+@Test func invocationLimiterKeepsItsQuotaClosedWhenTheClockStepsBackwards() {
   let clock = LimiterRecoveryClock()
   clock.date = Date(timeIntervalSince1970: 1000)
-  let limiter = URLInvocationLimiter(maximumInvocations: 2, window: 60, now: { clock.date })
+  let limiter = URLInvocationLimiter(maximumInvocations: 2, window: 60, now: { clock.date.timeIntervalSinceReferenceDate })
   #expect(limiter.allow())
   #expect(limiter.allow())
   #expect(!limiter.allow())
 
+  // A wall-clock limiter used to start over here.
   clock.date = Date(timeIntervalSince1970: 500)
-  #expect(limiter.allow())
-  #expect(limiter.allow())
   #expect(!limiter.allow())
 
-  // The refilled quota keeps the existing inclusive window boundary.
-  clock.date = Date(timeIntervalSince1970: 560)
+  // The window still runs from the latest time seen, with its inclusive edge.
+  clock.date = Date(timeIntervalSince1970: 1060)
   #expect(!limiter.allow())
-  clock.date = Date(timeIntervalSince1970: 560.001)
+  clock.date = Date(timeIntervalSince1970: 1060.001)
   #expect(limiter.allow())
   #expect(limiter.allow())
   #expect(!limiter.allow())
 }
 
 @MainActor
-@Test func parserRequestsRecoverFromClockRollbackWithBoundedQuotaAndExpiry() {
+@Test func parserKeepsItsQuotaClosedWhenTheClockStepsBackwards() {
   let refreshURL = URL(string: "waves://refresh")!
   let clock = LimiterRecoveryClock()
   clock.date = Date(timeIntervalSince1970: 1000)
-  let parser = AutomationCommandParser(maximumRequests: 2, requestWindow: 60, now: { clock.date })
+  let parser = AutomationCommandParser(maximumRequests: 2, requestWindow: 60, now: { clock.date.timeIntervalSinceReferenceDate })
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
 
   clock.date = Date(timeIntervalSince1970: 500)
-  #expect(parser.parse(refreshURL) == .accepted(.refresh))
-  #expect(parser.parse(refreshURL) == .accepted(.refresh))
-  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
 
-  clock.date = Date(timeIntervalSince1970: 560)
+  clock.date = Date(timeIntervalSince1970: 1060)
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
-  clock.date = Date(timeIntervalSince1970: 560.001)
+  clock.date = Date(timeIntervalSince1970: 1060.001)
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
 }
 
 @MainActor
-@Test func invocationLimiterPreservesNonFutureRequestsDuringClockRollback() {
+@Test func invocationLimiterKeepsEveryAdmissionWhenTheClockStepsBackwardsBetweenThem() {
   let clock = LimiterRecoveryClock()
   clock.date = Date(timeIntervalSince1970: 490)
-  let limiter = URLInvocationLimiter(maximumInvocations: 2, window: 60, now: { clock.date })
+  let limiter = URLInvocationLimiter(maximumInvocations: 2, window: 60, now: { clock.date.timeIntervalSinceReferenceDate })
   #expect(limiter.allow())
   clock.date = Date(timeIntervalSince1970: 510)
   #expect(limiter.allow())
   #expect(!limiter.allow())
 
-  // Only the future entry at 510 is discarded; the entry at 490 still counts.
+  // The admission at 510 must not be discarded as "in the future".
   clock.date = Date(timeIntervalSince1970: 500)
-  #expect(limiter.allow())
-  #expect(!limiter.allow())
-  clock.date = Date(timeIntervalSince1970: 550)
   #expect(!limiter.allow())
   clock.date = Date(timeIntervalSince1970: 550.001)
+  #expect(limiter.allow())
+  #expect(!limiter.allow())
+  clock.date = Date(timeIntervalSince1970: 570.001)
   #expect(limiter.allow())
   #expect(!limiter.allow())
 }
 
 @MainActor
-@Test func parserPreservesNonFutureRequestsDuringClockRollback() {
+@Test func parserKeepsEveryAdmissionWhenTheClockStepsBackwardsBetweenThem() {
   let refreshURL = URL(string: "waves://refresh")!
   let clock = LimiterRecoveryClock()
   clock.date = Date(timeIntervalSince1970: 490)
-  let parser = AutomationCommandParser(maximumRequests: 2, requestWindow: 60, now: { clock.date })
+  let parser = AutomationCommandParser(maximumRequests: 2, requestWindow: 60, now: { clock.date.timeIntervalSinceReferenceDate })
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
   clock.date = Date(timeIntervalSince1970: 510)
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
 
   clock.date = Date(timeIntervalSince1970: 500)
-  #expect(parser.parse(refreshURL) == .accepted(.refresh))
-  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
-  clock.date = Date(timeIntervalSince1970: 550)
-  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
   clock.date = Date(timeIntervalSince1970: 550.001)
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
 }
 
 @MainActor
-@Test func parserNotificationsResumeCooldownFromRolledBackTime() {
+@Test func parserNotificationCooldownIsNotRestartedByABackwardsStep() {
   let refreshURL = URL(string: "waves://refresh")!
   let clock = LimiterRecoveryClock()
   clock.date = Date(timeIntervalSince1970: 1000)
   let parser = AutomationCommandParser(
     maximumRequests: 0,
     throttleNotificationInterval: 5,
-    now: { clock.date }
+    now: { clock.date.timeIntervalSinceReferenceDate }
   )
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
 
   clock.date = Date(timeIntervalSince1970: 500)
-  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
-  clock.date = Date(timeIntervalSince1970: 504.999)
+  clock.date = Date(timeIntervalSince1970: 1004.999)
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
-  clock.date = Date(timeIntervalSince1970: 505)
+  clock.date = Date(timeIntervalSince1970: 1005)
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
-  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
-  clock.date = Date(timeIntervalSince1970: 510)
-  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
+}
+
+@MainActor
+@Test func aForwardStepCountsAsElapsedTimeButNeverMoreThanOneFullWindow() {
+  // On a monotonic clock a forward step is time that really passed, so the
+  // window expires; the quota it reopens is still the configured size.
+  let clock = LimiterRecoveryClock()
+  clock.date = Date(timeIntervalSince1970: 1000)
+  let limiter = URLInvocationLimiter(maximumInvocations: 2, window: 60, now: { clock.date.timeIntervalSinceReferenceDate })
+  #expect(limiter.allow())
+  #expect(limiter.allow())
+  #expect(!limiter.allow())
+  clock.date = Date(timeIntervalSince1970: 1000 + 86_400)
+  #expect(limiter.allow())
+  #expect(limiter.allow())
+  #expect(!limiter.allow())
+}
+
+@MainActor
+@Test func productionLimitersReadTheMonotonicClockNotTheWallClock() {
+  // CLOCK_MONOTONIC counts from boot; the wall clock counts from 2001. If any
+  // default ever goes back to Date(), its reading lands ~800 million seconds away.
+  let monotonic = MonotonicClock.seconds()
+  let wall = Date().timeIntervalSinceReferenceDate
+  let systemMonotonic = TimeInterval(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1_000_000_000
+  #expect(abs(monotonic - systemMonotonic) < 5)
+  for (name, reading) in [
+    ("URLInvocationLimiter", URLInvocationLimiter.defaultClock()),
+    ("AutomationCommandParser", AutomationCommandParser.defaultClock()),
+    ("ControlConnection", ControlConnection.defaultClock()),
+  ] {
+    #expect(abs(reading - monotonic) < 5, "\(name) default clock is not monotonic")
+    #expect(abs(reading - wall) > 1_000, "\(name) default clock reads the wall clock")
+  }
+}
+
+@MainActor
+@Test func anAdmissionMadeAfterABackwardsStepDoesNotExpireEarly() {
+  let clock = LimiterRecoveryClock()
+  clock.date = Date(timeIntervalSince1970: 1000)
+  let limiter = URLInvocationLimiter(maximumInvocations: 2, window: 60, now: { clock.date.timeIntervalSinceReferenceDate })
+  #expect(limiter.allow())
+  // Stepped back with room left: this admission counts as made at 1000, not
+  // at 500, so it is still inside the window when the clock comes back.
+  clock.date = Date(timeIntervalSince1970: 500)
+  #expect(limiter.allow())
+  clock.date = Date(timeIntervalSince1970: 1000)
+  #expect(!limiter.allow())
 }

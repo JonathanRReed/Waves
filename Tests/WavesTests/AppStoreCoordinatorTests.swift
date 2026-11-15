@@ -7,7 +7,7 @@ import WavesAudioCore
 @MainActor
 @Test func automationParserProducesTypedCommandsAndBoundsRate() {
   var now = Date(timeIntervalSince1970: 1_000)
-  let parser = AutomationCommandParser(now: { now })
+  let parser = AutomationCommandParser(now: { now.timeIntervalSinceReferenceDate })
 
   #expect(
     parser.parse(URL(string: "waves://set-volume?app=com.example.music&volume=0.42")!)

@@ -20,8 +20,10 @@ private struct ControlAdmissionTokenBucket {
 
   mutating func allow(cost: Int, now: TimeInterval) -> Bool {
     guard now.isFinite else { return false }
+    // Never step the refill point backwards: a clock that went back and then
+    // returned would otherwise refill the same interval twice.
     let elapsed = max(0, now - lastRefill)
-    lastRefill = now
+    lastRefill = max(lastRefill, now)
     if elapsed.isFinite {
       tokens = min(capacity, tokens + elapsed * refillPerSecond)
     }
