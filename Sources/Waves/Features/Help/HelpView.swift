@@ -241,6 +241,10 @@ struct HelpView: View {
           keys: "⌘N"
         )
         shortcutRow(
+          action: "Save current mix",
+          keys: "⇧⌘S"
+        )
+        shortcutRow(
           action: "Open Settings",
           keys: "⌘,"
         )
@@ -349,6 +353,9 @@ struct HelpView: View {
       VStack(alignment: .leading, spacing: 8) {
         bullet("A profile is a group of apps you use together, like Work or Gaming")
         bullet("Use the + in the sidebar's Profiles section to create one")
+        bullet(
+          "Save Current Mix, in the menu bar's profile menu or the sidebar, saves what you hear now as a profile in one step"
+        )
         bullet("Pick which apps belong, and optionally capture their current levels")
         bullet("Select a profile in the sidebar to focus just those apps")
         bullet("Profiles that carry levels show an Apply Levels button")
@@ -362,7 +369,7 @@ struct HelpView: View {
       }
 
       Text(
-        "Membership-only profiles just group apps. Capture levels to also save each app's volume, mute, and boost."
+        "Membership-only profiles just group apps. Capture levels to also save each app's volume, mute, and boost, and choose whether to include its EQ and output device. An output that isn't connected when you apply the profile is skipped. Reset Mix restores levels only, not EQ or outputs. A profile applied by a waves:// link sets levels and EQ but never moves an app to another output."
       )
       .font(.caption)
       .foregroundStyle(.secondary)

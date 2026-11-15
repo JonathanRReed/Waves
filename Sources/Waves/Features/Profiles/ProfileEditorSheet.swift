@@ -35,15 +35,12 @@ struct ProfileValidationFeedback: View {
 }
 
 /// Create or edit a profile: name it, choose which apps belong, and decide
-/// whether to capture the current volume/mute/boost levels or keep it a pure
-/// grouping.
+/// whether to capture the current volume/mute/boost levels (and, optionally,
+/// each app's EQ and output) or keep it a pure grouping.
 struct ProfileEditorSheet: View {
   @Environment(AppStore.self) private var store
   @Environment(\.wavesTheme) private var theme
   @Environment(\.dismiss) private var dismiss
-  @Environment(\.colorSchemeContrast) private var contrast
-  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-  @Environment(\.wavesAccessibilityOverrides) private var accessibilityOverrides
 
   let context: ProfileEditorContext
 
@@ -61,6 +58,8 @@ struct ProfileEditorSheet: View {
   @State private var offlineMemberIDs: [String]
   @State private var didResolveOfflineMembers = false
   @State private var captureLevels: Bool
+  @State private var includeEqualizer: Bool
+  @State private var includeOutput: Bool
   @State private var validationResult: ProfileSaveResult?
 
   init(context: ProfileEditorContext) {
@@ -72,6 +71,11 @@ struct ProfileEditorSheet: View {
     // profile keeps its stored levels unless the user explicitly re-captures.
     // Capturing is the deliberate opt-in to bake in the *current* mix.
     _captureLevels = State(initialValue: false)
+    // A re-capture keeps the shape the profile already has. A new profile
+    // includes EQ (part of what you hear) but not outputs, which depend on
+    // what is plugged in and can send a call to the wrong device.
+    _includeEqualizer = State(initialValue: context.profile.map(\.carriesEqualizer) ?? true)
+    _includeOutput = State(initialValue: context.profile.map(\.carriesOutput) ?? false)
     _validationResult = State(initialValue: nil)
   }
 
@@ -124,56 +128,40 @@ struct ProfileEditorSheet: View {
   }
 
   private var nameField: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Text("Name")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-      // A tonal field that matches the app-picker card below, instead of the
-      // light AppKit rounded-border bezel that fights the near-black palette.
-      TextField("e.g. Work, Gaming, Focus", text: $name)
-        .textFieldStyle(.plain)
-        .padding(8)
-        .background(
-          theme.fieldFill(
-            reduceTransparency: accessibilityOverrides?.reduceTransparency ?? reduceTransparency,
-            increasedContrast: accessibilityOverrides?.increasedContrast ?? (contrast == .increased)
-          ),
-          in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-        )
-        .overlay(
-          RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .strokeBorder(nameFieldStroke)
-        )
-        .accessibilityLabel("Profile name")
-        .accessibilityValue(name)
-        .accessibilityHint(nameValidationMessage ?? "Enter a unique profile name.")
-        .onChange(of: name) { _, _ in clearNameValidation() }
-      if let nameValidationResult {
-        ProfileValidationFeedback(scope: .name, result: nameValidationResult)
-      }
-    }
+    ProfileNameField(name: $name, validationResult: nameValidationResult)
+      .onChange(of: name) { _, _ in clearNameValidation() }
   }
 
   private var captureToggle: some View {
-    Toggle(isOn: $captureLevels) {
-      VStack(alignment: .leading, spacing: 2) {
-        Text("Capture current levels")
-          .font(.callout.weight(.medium))
-        Text(captureDescription)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
+    VStack(alignment: .leading, spacing: 10) {
+      Toggle(isOn: $captureLevels) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Capture current levels")
+            .font(.callout.weight(.medium))
+          Text(captureDescription)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
+      .toggleStyle(.switch)
+
+      if captureLevels {
+        ProfileSoundCaptureOptions(
+          includeEqualizer: $includeEqualizer,
+          includeOutput: $includeOutput
+        )
+        .padding(.leading, 12)
       }
     }
-    .toggleStyle(.switch)
   }
 
   private var captureDescription: String {
     if captureLevels {
       return "Saves each app's current volume, mute, and boost so applying this profile restores the mix."
     }
-    if context.profile?.carriesLevels == true {
-      return "Keeps this profile's saved levels. New apps are added as members only."
+    if let saved = context.profile?.savedContentsPhrase {
+      return "Keeps this profile's saved \(saved). New apps are added as members only."
     }
     return "Membership only. This profile just groups the apps and won't change their audio."
   }
@@ -353,7 +341,9 @@ struct ProfileEditorSheet: View {
       id: context.profile?.id,
       named: trimmedName,
       appIDs: orderedIDs,
-      captureLevels: captureLevels
+      captureLevels: captureLevels,
+      includeEqualizer: includeEqualizer,
+      includeOutput: includeOutput
     )
     validationResult = result
     switch result {
@@ -366,10 +356,6 @@ struct ProfileEditorSheet: View {
     }
   }
 
-  private var nameValidationMessage: String? {
-    nameValidationResult?.message
-  }
-
   private var nameValidationResult: ProfileSaveResult? {
     if isTooLong {
       return .nameTooLong(maximum: Self.maxNameLength)
@@ -380,14 +366,6 @@ struct ProfileEditorSheet: View {
     default:
       return nil
     }
-  }
-
-  private var nameFieldStroke: Color {
-    nameValidationMessage == nil
-      ? theme.hairline(
-        increasedContrast: accessibilityOverrides?.increasedContrast ?? (contrast == .increased)
-      )
-      : WavesDesign.error
   }
 
   private func clearNameValidation() {

@@ -675,7 +675,7 @@ extension AppStore {
         )
         return
       }
-      applyProfile(profile, purpose: .automation)
+      applyProfile(profile, purpose: .automation, allowsOutputChanges: false)
 
     case .refresh:
       refresh()

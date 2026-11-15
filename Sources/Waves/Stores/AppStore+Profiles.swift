@@ -28,7 +28,14 @@ extension AppStore {
     applyProfile(profile, purpose: .userProfile)
   }
 
-  func applyProfile(_ profile: Profile, purpose: ProfileApplyPurpose) {
+  /// `allowsOutputChanges` is false for a `waves://` link. Anything that can
+  /// open a URL can send one, so a link sets levels and EQ but never moves an
+  /// app's audio to another device.
+  func applyProfile(
+    _ profile: Profile,
+    purpose: ProfileApplyPurpose,
+    allowsOutputChanges: Bool = true
+  ) {
     guard requireAudioRunning() else { return }
     // Remember the mix as it stands so the user can come back to it when the
     // session ends. Only a deliberate, level-changing apply creates one, and an
@@ -38,20 +45,19 @@ extension AppStore {
       captureMixRestorePoint(before: profile)
     }
     let excludedAppIDsAtSubmission = Set(preferences.excludedAppIDs)
-    var backendProfile = profile
-    // Keep every source row in its original slot, but neutralize an excluded
-    // row's audio fields before the batch reaches a backend that may not retain
-    // AppStore-owned exclusion preferences. The coordinator maps that same row
-    // back to `.excluded` below, so identity/order are preserved without even a
-    // transient re-tap of an app the user told Waves to leave alone.
-    backendProfile.entries = profile.entries.map { entry in
-      excludedAppIDsAtSubmission.contains(entry.appID) && entry.hasLevels
-        ? ProfileEntry(appID: entry.appID)
-        : entry
+    // A saved EQ restores the sound, not the app's Adaptive Mix role, which
+    // lives in the same settings value.
+    var submittedProfile = profile
+    submittedProfile.entries = profile.entries.map { entry in
+      guard var equalizer = entry.equalizer else { return entry }
+      equalizer.adaptiveRole = currentEqualizer(forAppID: entry.appID).adaptiveRole
+      var entry = entry
+      entry.equalizer = equalizer
+      return entry
     }
     let liveAppIDs = Set(session.apps.map(\.logicalID))
     let affectedLiveAppIDs = Set(
-      profile.entries.compactMap { entry in
+      submittedProfile.entries.compactMap { entry in
         entry.hasLevels && liveAppIDs.contains(entry.appID) ? entry.appID : nil
       })
     let generation = appIntentCoordinator.beginProfile(affectedAppIDs: affectedLiveAppIDs)
@@ -65,10 +71,55 @@ extension AppStore {
     }
 
     let backend = backend
-    let task = Task { @MainActor [weak self] in
+    let task = Task { @MainActor [weak self, submittedProfile] in
       guard let self else { return }
+      var plannedProfile = submittedProfile
+      // Never route an app to a device that isn't connected: leave that app's
+      // output alone, apply the rest of its row, and say so afterwards.
+      var skippedOutputs: [SkippedProfileOutput] = []
+      if !allowsOutputChanges {
+        plannedProfile.entries = plannedProfile.entries.map { entry in
+          guard let output = entry.output else { return entry }
+          let current = self.session.apps.first(matchingAppKey: entry.appID)?.targetDeviceUID
+          if current != output.deviceUID, !excludedAppIDsAtSubmission.contains(entry.appID) {
+            skippedOutputs.append(
+              SkippedProfileOutput(appID: entry.appID, deviceName: nil, withheldFromLink: true))
+          }
+          var entry = entry
+          entry.output = nil
+          return entry
+        }
+      }
+      if plannedProfile.entries.contains(where: { $0.output?.deviceUID != nil }) {
+        let connectedUIDs = Set(await backend.availableOutputDevices().map(\.id))
+        plannedProfile.entries = plannedProfile.entries.map { entry in
+          guard let uid = entry.output?.deviceUID, !connectedUIDs.contains(uid) else { return entry }
+          if !excludedAppIDsAtSubmission.contains(entry.appID) {
+            skippedOutputs.append(
+              SkippedProfileOutput(appID: entry.appID, deviceName: entry.output?.deviceName))
+          }
+          var entry = entry
+          entry.output = nil
+          return entry
+        }
+      }
+      var backendProfile = plannedProfile
+      // Keep every source row in its original slot, but neutralize an excluded
+      // row's audio fields before the batch reaches a backend that may not retain
+      // AppStore-owned exclusion preferences. The coordinator maps that same row
+      // back to `.excluded` below, so identity/order are preserved without even a
+      // transient re-tap of an app the user told Waves to leave alone.
+      backendProfile.entries = plannedProfile.entries.map { entry in
+        excludedAppIDsAtSubmission.contains(entry.appID) && entry.hasLevels
+          ? ProfileEntry(appID: entry.appID)
+          : entry
+      }
       let backendResult: ProfileApplyResult
-      if purpose == .automation {
+      // A row that also restores EQ or output goes out as one complete intent
+      // per app, so its level, EQ, and route change together and never pass
+      // through a louder in-between state. Older level-only profiles keep the
+      // backend's batch path.
+      if purpose == .automation || backendProfile.entries.contains(where: \.restoresSound) {
         backendResult = await applyProfileEntries(
           backendProfile,
           generation: generation,
@@ -79,15 +130,24 @@ extension AppStore {
       }
       defer { self.appIntentCoordinator.settleProfileTask(generation: generation) }
       await self.finishProfileApplication(
-        profile,
+        plannedProfile,
         purpose: purpose,
         generation: generation,
         affectedLiveAppIDs: affectedLiveAppIDs,
         excludedAppIDsAtSubmission: excludedAppIDsAtSubmission,
+        skippedOutputs: skippedOutputs,
         backendResult: backendResult
       )
     }
     appIntentCoordinator.registerProfileTask(task, generation: generation)
+  }
+
+  /// The EQ Waves would send for `appID` right now.
+  private func currentEqualizer(forAppID appID: String) -> EqualizerSettings {
+    appIntentCoordinator.confirmedEqualizer(for: appID)
+      ?? preferences.appAudioIntents[appID]?.equalizerSettings
+      ?? preferences.appEqualizerSettings[appID]
+      ?? EqualizerSettings()
   }
 
   private func finishProfileApplication(
@@ -96,6 +156,7 @@ extension AppStore {
     generation: UInt64,
     affectedLiveAppIDs: Set<String>,
     excludedAppIDsAtSubmission: Set<String>,
+    skippedOutputs: [SkippedProfileOutput],
     backendResult: ProfileApplyResult
   ) async {
     var result = await normalizedProfileResult(
@@ -152,12 +213,18 @@ extension AppStore {
     // older aggregate status here.
     syncOnboarding(using: session)
     persistSessionSnapshot()
+    let soundNotes = profileSoundNotes(
+      profile,
+      result: result,
+      skippedOutputs: skippedOutputs
+    )
     switch purpose {
     case .userProfile, .automation:
       presentProfileFeedback(
         profile,
         result: result,
-        persistenceResult: persistenceResult
+        persistenceResult: persistenceResult,
+        soundNotes: soundNotes
       )
     case .mixReset:
       if profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult) {
@@ -174,11 +241,14 @@ extension AppStore {
           profile,
           result: result,
           persistenceResult: persistenceResult,
+          soundNotes: soundNotes,
           failureTitle: "Some levels didn't reset"
         )
       }
     case .defaultAtStartup:
-      if profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult) {
+      if profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult),
+        soundNotes.isEmpty
+      {
         showToast(
           title: "Default profile applied",
           detail: profile.name,
@@ -190,6 +260,7 @@ extension AppStore {
           profile,
           result: result,
           persistenceResult: persistenceResult,
+          soundNotes: soundNotes,
           failureTitle: "Default profile partly applied"
         )
       }
@@ -218,9 +289,13 @@ extension AppStore {
     _ profile: Profile,
     result: ProfileApplyResult,
     persistenceResult: ProfilePersistenceResult,
+    soundNotes: ProfileSoundNotes = ProfileSoundNotes(),
     failureTitle: String
   ) {
-    guard !profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult) else {
+    guard
+      !profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult)
+        || !soundNotes.isEmpty
+    else {
       return
     }
     let actionable = result.rows.filter { $0.outcome != .membershipOnly }
@@ -236,8 +311,16 @@ extension AppStore {
     if let settingsError = persistenceResult.settingsError {
       parts.append("Settings not saved: \(settingsError)")
     }
+    parts += soundNotes.sentences
     guard !parts.isEmpty else { return }
-    showToast(title: failureTitle, detail: parts.joined(separator: " "), kind: .warning)
+    let onlySkippedOutputs =
+      profileFeedbackIndicatesSuccess(result, persistenceResult: persistenceResult)
+      && !soundNotes.routerHeldSound
+    showToast(
+      title: failureTitle,
+      detail: parts.joined(separator: " "),
+      kind: onlySkippedOutputs ? .info : .warning
+    )
   }
 
   private func normalizedProfileResult(
@@ -311,6 +394,13 @@ extension AppStore {
       if (row.outcome == .applied || row.outcome == .noChange), row.resultingApp == nil {
         row.outcome = .failed
         row.detail = "The backend reported success without a confirmed resulting app state."
+      }
+      // `.unavailable` means the app isn't running, so its row is saved for its
+      // next launch. A running app reported unavailable was refused instead —
+      // a router such as Wave Link owns the boost, EQ, or output this row
+      // asked for — and must be reported as not applied, not saved for later.
+      if row.outcome == .unavailable, row.resultingApp != nil {
+        row.outcome = .unsupported
       }
 
       // Excluded rows stayed in the ordered batch but reached the backend as
@@ -392,6 +482,13 @@ extension AppStore {
         let cachedMuteSource = session.apps
           .first(matchingAppKey: entry.appID)?.muteSource
         appIntentCoordinator.recordConfirmedApp(resultingApp)
+        // The next volume nudge builds its intent from the confirmed EQ, so a
+        // restored EQ must be recorded or that nudge would send the old one.
+        if let equalizer = entry.equalizer,
+          Self.profileRowRestoredSound(entry, row: row)
+        {
+          appIntentCoordinator.recordConfirmedEqualizer(equalizer, for: entry.appID)
+        }
         resultingApp.isPinned = preferences.pinnedAppIDs.contains(resultingApp.logicalID)
         if row.outcome == .excluded || preferences.excludedAppIDs.contains(resultingApp.logicalID) {
           makeExcludedPresentation(&resultingApp)
@@ -551,7 +648,7 @@ extension AppStore {
     row: ProfileRowApplyResult
   ) -> PersistedAppAudioIntent? {
     let existing = preferences.appAudioIntents[entry.appID]
-    let equalizer =
+    let existingEqualizer =
       existing?.equalizerSettings
       ?? appIntentCoordinator.confirmedEqualizer(for: entry.appID)
       ?? preferences.appEqualizerSettings[entry.appID]
@@ -567,12 +664,13 @@ extension AppStore {
       let isAutomaticMute =
         entry.isMuted == nil
         && session.apps.first(matchingAppKey: entry.appID)?.muteSource == .autoConferencing
+      let restoredEqualizer = Self.profileRowRestoredSound(entry, row: row) ? entry.equalizer : nil
       return PersistedAppAudioIntent(
         appID: entry.appID,
         desiredVolume: app.desiredVolume,
         isMuted: isAutomaticMute ? (existing?.isMuted ?? false) : app.isMuted,
         volumeBoost: app.volumeBoost,
-        equalizerSettings: equalizer,
+        equalizerSettings: restoredEqualizer ?? existingEqualizer,
         targetDeviceUID: app.targetDeviceUID
       )
     case .unavailable:
@@ -581,8 +679,8 @@ extension AppStore {
         desiredVolume: entry.desiredVolume ?? existing?.desiredVolume ?? 1,
         isMuted: entry.isMuted ?? existing?.isMuted ?? false,
         volumeBoost: entry.volumeBoost ?? existing?.volumeBoost ?? 1,
-        equalizerSettings: equalizer,
-        targetDeviceUID: existing?.targetDeviceUID
+        equalizerSettings: entry.equalizer ?? existingEqualizer,
+        targetDeviceUID: entry.output.map(\.deviceUID) ?? existing?.targetDeviceUID
       )
     case .membershipOnly, .superseded, .excluded, .unsupported, .failed:
       return nil
@@ -612,13 +710,117 @@ extension AppStore {
     return ProfileApplyResult(rows: rows, backendStatus: result.backendStatus)
   }
 
+  /// Whether a landed row really restored its EQ and output. Both live in
+  /// Waves' own route, so a row that landed while another router (Wave Link)
+  /// controls the app changed its level there but not its EQ or output.
+  static func profileRowRestoredSound(
+    _ entry: ProfileEntry,
+    row: ProfileRowApplyResult
+  ) -> Bool {
+    guard row.outcome == .applied || row.outcome == .noChange,
+      let app = row.resultingApp, app.routingState == .managed
+    else { return false }
+    if let output = entry.output, app.targetDeviceUID != output.deviceUID { return false }
+    return true
+  }
+
+  /// Plain sentences for the EQ and output parts of a profile that did not
+  /// apply: outputs left alone because their device is not connected, and apps
+  /// whose EQ or output another router controls.
+  private func profileSoundNotes(
+    _ profile: Profile,
+    result: ProfileApplyResult,
+    skippedOutputs: [SkippedProfileOutput]
+  ) -> ProfileSoundNotes {
+    var notes = ProfileSoundNotes()
+    let withheldFromLink = skippedOutputs.filter(\.withheldFromLink)
+    if !withheldFromLink.isEmpty {
+      let appNames = withheldFromLink.map { profileAppName(for: $0.appID) }
+      notes.sentences.append(
+        "Links can't move apps to another output, so \(Self.listPhrase(appNames))"
+          + (appNames.count == 1 ? " kept its output." : " kept their outputs.")
+      )
+    }
+    let skippedOutputs = skippedOutputs.filter { !$0.withheldFromLink }
+    if !skippedOutputs.isEmpty {
+      var deviceNames: [String] = []
+      for name in skippedOutputs.map({ $0.deviceName ?? "a saved output device" })
+      where !deviceNames.contains(name) {
+        deviceNames.append(name)
+      }
+      let appNames = skippedOutputs.map { profileAppName(for: $0.appID) }
+      let devices = Self.listPhrase(deviceNames)
+      notes.sentences.append(
+        devices.prefix(1).uppercased() + devices.dropFirst()
+          + (deviceNames.count == 1 ? " isn't" : " aren't")
+          + " connected, so \(Self.listPhrase(appNames))"
+          + (appNames.count == 1 ? " kept its output." : " kept their outputs.")
+      )
+    }
+
+    var heldElsewhere: [(appID: String, viaWaveLink: Bool)] = []
+    var heldParts: Set<String> = []
+    for (entry, row) in zip(profile.entries, result.rows) where entry.restoresSound {
+      guard row.outcome == .applied || row.outcome == .noChange || row.outcome == .unsupported,
+        let app = row.resultingApp,
+        !Self.profileRowRestoredSound(entry, row: row),
+        !preferences.excludedAppIDs.contains(entry.appID)
+      else { continue }
+      heldElsewhere.append((entry.appID, app.routeHealthContext == .waveLinkBridge))
+      if entry.equalizer != nil { heldParts.insert("EQ") }
+      if entry.output != nil { heldParts.insert("output") }
+    }
+    if !heldElsewhere.isEmpty {
+      let names = Self.listPhrase(heldElsewhere.map { profileAppName(for: $0.appID) })
+      let parts = heldParts.count == 2 ? "EQ and output" : heldParts.first ?? "EQ"
+      let possessive = heldElsewhere.count == 1 ? "its" : "their"
+      let verb = heldParts.count == 2 ? "weren't" : "wasn't"
+      let controller =
+        heldElsewhere.allSatisfy(\.viaWaveLink)
+        ? "Wave Link controls \(names)"
+        : "Waves isn't routing \(names) right now"
+      notes.sentences.append("\(controller), so \(possessive) \(parts) \(verb) changed.")
+      notes.routerHeldSound = true
+    }
+    return notes
+  }
+
+  private func profileAppName(for appID: String) -> String {
+    session.apps.first(matchingAppKey: appID)?.displayName
+      ?? FriendlyAppName.resolve(appID, in: session.apps)
+  }
+
+  /// "A", "A and B", "A, B, and C", or "A, B, and 2 more". Waves' copy is
+  /// English-only, so this does not follow the system's list style.
+  nonisolated static func listPhrase(_ items: [String]) -> String {
+    let shown = items.count > 3 ? Array(items.prefix(2)) + ["\(items.count - 2) more"] : items
+    switch shown.count {
+    case 0: return ""
+    case 1: return shown[0]
+    case 2: return "\(shown[0]) and \(shown[1])"
+    default: return shown.dropLast().joined(separator: ", ") + ", and " + shown[shown.count - 1]
+    }
+  }
+
   private func presentProfileFeedback(
     _ profile: Profile,
     result: ProfileApplyResult,
-    persistenceResult: ProfilePersistenceResult
+    persistenceResult: ProfilePersistenceResult,
+    soundNotes: ProfileSoundNotes
   ) {
     let actionableRows = zip(profile.entries, result.rows).filter { entry, _ in entry.hasLevels }
     guard !actionableRows.isEmpty else {
+      // Dropping every unconnected output can leave nothing to apply; the
+      // skipped devices still have to be named.
+      guard soundNotes.isEmpty else {
+        showToast(
+          title: "Profile partly applied",
+          detail: soundNotes.sentences.joined(separator: " "),
+          kind: soundNotes.routerHeldSound ? .warning : .info,
+          duration: .seconds(4)
+        )
+        return
+      }
       showToast(
         title: "Profile selected",
         detail: "\(profile.name) — \(profile.entries.count) \(profile.entries.count == 1 ? "app" : "apps")",
@@ -638,18 +840,29 @@ extension AppStore {
     let unsupportedCount = count(.unsupported)
     let supersededCount = count(.superseded)
     let hasOutcomeWarning = excludedCount + failedCount + unsupportedCount + supersededCount > 0
-    let isFullSuccess =
+    let levelsFullyApplied =
       appliedCount == actionableRows.count
       && unavailableCount == 0
       && !hasOutcomeWarning
       && persistenceResult.isFullySaved
 
-    if isFullSuccess {
+    if levelsFullyApplied, soundNotes.isEmpty {
       showToast(
         title: "Profile applied",
         detail: profile.name,
         kind: .success,
         duration: .seconds(1.4)
+      )
+      return
+    }
+    if levelsFullyApplied {
+      // A device that isn't plugged in is ordinary; a router holding the
+      // app's EQ or output is worth a warning.
+      showToast(
+        title: "Profile partly applied",
+        detail: soundNotes.sentences.joined(separator: " "),
+        kind: soundNotes.routerHeldSound ? .warning : .info,
+        duration: .seconds(4)
       )
       return
     }
@@ -695,9 +908,11 @@ extension AppStore {
     }
     showToast(
       title: title,
-      detail: summary.joined(separator: ", "),
+      detail: soundNotes.isEmpty
+        ? summary.joined(separator: ", ")
+        : ([summary.joined(separator: ", ") + "."] + soundNotes.sentences).joined(separator: " "),
       kind: kind,
-      duration: .seconds(2.8)
+      duration: soundNotes.isEmpty ? .seconds(2.8) : .seconds(4)
     )
   }
 
@@ -851,7 +1066,9 @@ extension AppStore {
     id: UUID? = nil,
     named name: String,
     appIDs: [String],
-    captureLevels: Bool
+    captureLevels: Bool,
+    includeEqualizer: Bool = false,
+    includeOutput: Bool = false
   ) -> ProfileSaveResult {
     guard startupState != .shuttingDown else { return .unavailableDuringShutdown }
     let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -891,7 +1108,11 @@ extension AppStore {
             appID: appID,
             desiredVolume: app.desiredVolume,
             isMuted: userMute(for: app),
-            volumeBoost: app.volumeBoost
+            volumeBoost: app.volumeBoost,
+            equalizer: includeEqualizer ? equalizerSettings(for: app) : nil,
+            output: includeOutput
+              ? ProfileOutput(deviceUID: app.targetDeviceUID, deviceName: targetDevice(for: app)?.name)
+              : nil
           )
         }
         // Preserve a previously-saved level for an existing member; otherwise the
@@ -923,6 +1144,52 @@ extension AppStore {
       failureTitle: "Profile not saved"
     )
     return .saved(savedProfileID)
+  }
+
+  /// The apps "Save Current Mix" captures: visible apps whose sound Waves is
+  /// managing or has saved settings for. Untouched apps are left out — a level
+  /// for each of them would make applying the profile take over every running
+  /// app, the same mass-enrollment trap the Reset Mix restore point avoids.
+  var currentMixAppIDs: [String] {
+    let excluded = Set(preferences.excludedAppIDs)
+    return visibleApps.compactMap { app in
+      guard !excluded.contains(app.logicalID),
+        app.routingState == .managed || preferences.appAudioIntents[app.logicalID] != nil
+      else { return nil }
+      return app.logicalID
+    }
+  }
+
+  /// Saves what the user hears now as a new profile in one step: the current
+  /// levels of every app in `currentMixAppIDs`, plus each app's EQ and output
+  /// when asked.
+  @discardableResult
+  func saveCurrentMix(
+    named name: String,
+    includeEqualizer: Bool,
+    includeOutput: Bool
+  ) -> ProfileSaveResult {
+    let result = saveProfile(
+      named: name,
+      appIDs: currentMixAppIDs,
+      captureLevels: true,
+      includeEqualizer: includeEqualizer,
+      includeOutput: includeOutput
+    )
+    return result == .noEligibleApps ? .noMixToSave : result
+  }
+
+  /// Asks the main window to show the Save Current Mix sheet. Same
+  /// request/token shape as the mute-shortcut request: the menu bar can raise
+  /// this while the main window does not exist yet.
+  func requestSaveCurrentMix() {
+    saveCurrentMixRequested = true
+    saveCurrentMixToken &+= 1
+  }
+
+  func consumeSaveCurrentMixRequest() -> Bool {
+    defer { saveCurrentMixRequested = false }
+    return saveCurrentMixRequested
   }
 
   func deleteProfiles(at offsets: IndexSet) {

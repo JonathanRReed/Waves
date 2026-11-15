@@ -1,9 +1,10 @@
 import Foundation
 
 /// A named **group of apps** the user cares about together (e.g. "Work",
-/// "Gaming"). Each member may optionally carry a volume/mute/boost level; an
-/// entry with no levels is membership-only, so a profile can be a pure grouping
-/// or a saved mix — or anything in between.
+/// "Gaming"). Each member may optionally carry a volume/mute/boost level, and a
+/// saved mix may also carry each app's EQ and output device; an entry with none
+/// of these is membership-only, so a profile can be a pure grouping or a saved
+/// mix — or anything in between.
 public struct Profile: Identifiable, Codable, Hashable, Sendable {
   public static let maxNameLength = 100
   public static let maxEntries = 1_000
@@ -34,6 +35,12 @@ public struct Profile: Identifiable, Codable, Hashable, Sendable {
   /// True when at least one member carries explicit level settings, so applying
   /// the profile will change something. A pure grouping has none.
   public var carriesLevels: Bool { entries.contains(where: \.hasLevels) }
+
+  /// True when at least one member restores an EQ.
+  public var carriesEqualizer: Bool { entries.contains { $0.equalizer != nil } }
+
+  /// True when at least one member restores an output device.
+  public var carriesOutput: Bool { entries.contains { $0.output != nil } }
 
   private enum CodingKeys: String, CodingKey {
     case id
@@ -94,18 +101,68 @@ public struct Profile: Identifiable, Codable, Hashable, Sendable {
   }
 }
 
-/// One app's membership in a profile. The level fields are optional: when all
+/// The output an app should use when a profile is applied. A nil `deviceUID`
+/// means "follow the system default"; an entry that leaves the output alone has
+/// no `ProfileOutput` at all.
+public struct ProfileOutput: Codable, Hashable, Sendable {
+  public var deviceUID: String?
+  /// The device's name when the profile was saved, so a profile can still name
+  /// a device that is not connected right now.
+  public var deviceName: String?
+
+  public init(deviceUID: String?, deviceName: String? = nil) {
+    self.deviceUID = deviceUID.map { String($0.prefix(256)) }
+    self.deviceName = deviceUID == nil ? nil : deviceName.map { String($0.prefix(256)) }
+  }
+
+  public static let systemDefault = ProfileOutput(deviceUID: nil)
+
+  private enum CodingKeys: String, CodingKey {
+    case deviceUID
+    case deviceName
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      deviceUID: try container.decodeIfPresent(String.self, forKey: .deviceUID),
+      deviceName: try container.decodeIfPresent(String.self, forKey: .deviceName)
+    )
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encodeIfPresent(deviceUID, forKey: .deviceUID)
+    try container.encodeIfPresent(deviceName, forKey: .deviceName)
+  }
+}
+
+/// One app's membership in a profile. Every audio field is optional: when all
 /// are nil the entry is *membership-only* (the app belongs to the profile but
 /// the profile leaves its audio untouched when applied). Legacy presets, which
-/// always stored concrete levels, decode unchanged into level-bearing entries.
+/// always stored concrete levels, decode unchanged into level-bearing entries,
+/// and entries written before EQ and output existed leave both untouched.
 public struct ProfileEntry: Codable, Hashable, Sendable {
   public var appID: String
   public var desiredVolume: Float?
   public var isMuted: Bool?
   public var volumeBoost: Float?
+  /// The EQ to restore, or nil to leave the app's EQ as it is.
+  public var equalizer: EqualizerSettings?
+  /// The output to restore, or nil to leave the app's output as it is.
+  public var output: ProfileOutput?
 
-  /// Whether this entry sets any level. Membership-only entries return false.
+  /// Whether applying this entry changes the app's audio: a level, its EQ, or
+  /// its output. Membership-only entries return false.
   public var hasLevels: Bool {
+    setsVolumeLevels || restoresSound
+  }
+
+  /// Whether this entry restores an EQ or an output, not only levels.
+  public var restoresSound: Bool { equalizer != nil || output != nil }
+
+  /// Whether this entry sets a volume, mute, or boost.
+  public var setsVolumeLevels: Bool {
     desiredVolume != nil || isMuted != nil || volumeBoost != nil
   }
 
@@ -113,7 +170,9 @@ public struct ProfileEntry: Codable, Hashable, Sendable {
     appID: String,
     desiredVolume: Float? = nil,
     isMuted: Bool? = nil,
-    volumeBoost: Float? = nil
+    volumeBoost: Float? = nil,
+    equalizer: EqualizerSettings? = nil,
+    output: ProfileOutput? = nil
   ) {
     // Validate appID length to prevent excessive memory usage
     self.appID = String(appID.prefix(256))
@@ -125,6 +184,9 @@ public struct ProfileEntry: Codable, Hashable, Sendable {
 
     // Clamp volumeBoost to the user-facing range [1.0, 4.0] when present and finite
     self.volumeBoost = volumeBoost.flatMap { $0.isFinite ? max(1.0, min(4.0, $0)) : nil }
+
+    self.equalizer = equalizer
+    self.output = output
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -132,6 +194,8 @@ public struct ProfileEntry: Codable, Hashable, Sendable {
     case desiredVolume
     case isMuted
     case volumeBoost
+    case equalizer
+    case output
   }
 
   public init(from decoder: Decoder) throws {
@@ -143,7 +207,18 @@ public struct ProfileEntry: Codable, Hashable, Sendable {
     let desiredVolume = try container.decodeIfPresent(Float.self, forKey: .desiredVolume)
     let isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted)
     let volumeBoost = try container.decodeIfPresent(Float.self, forKey: .volumeBoost)
-    self.init(appID: appID, desiredVolume: desiredVolume, isMuted: isMuted, volumeBoost: volumeBoost)
+    // Added in 1.8. Both keys are absent from older files, which therefore keep
+    // leaving EQ and output alone; older builds ignore the keys they don't know.
+    let equalizer = try container.decodeIfPresent(EqualizerSettings.self, forKey: .equalizer)
+    let output = try container.decodeIfPresent(ProfileOutput.self, forKey: .output)
+    self.init(
+      appID: appID,
+      desiredVolume: desiredVolume,
+      isMuted: isMuted,
+      volumeBoost: volumeBoost,
+      equalizer: equalizer,
+      output: output
+    )
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -154,5 +229,7 @@ public struct ProfileEntry: Codable, Hashable, Sendable {
     try container.encodeIfPresent(desiredVolume, forKey: .desiredVolume)
     try container.encodeIfPresent(isMuted, forKey: .isMuted)
     try container.encodeIfPresent(volumeBoost, forKey: .volumeBoost)
+    try container.encodeIfPresent(equalizer, forKey: .equalizer)
+    try container.encodeIfPresent(output, forKey: .output)
   }
 }

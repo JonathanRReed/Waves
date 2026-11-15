@@ -70,6 +70,11 @@ waves://apply-profile?name=Focus
 waves://apply-profile?name=Deep%20Work
 ```
 
+A link applies a profile's levels and EQ. It never moves an app to another
+output device, even if the profile saved one, because anything that can open a
+link could send it. To apply a profile including its outputs from a shortcut,
+use `wavesctl profile` in a Run Shell Script action (below).
+
 ### Set boost
 
 ```text

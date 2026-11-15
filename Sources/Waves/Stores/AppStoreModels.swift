@@ -53,6 +53,25 @@ struct EqualizerFocusRequest: Equatable {
 /// app's volume/mute/boost, captured so the user can put everything back with
 /// one click when they're done (meeting over, game closed). Kept in memory
 /// only — a restore point describes a moment, not a preference.
+/// A profile row whose output was left alone: its saved device was not
+/// connected when the profile was applied, or the profile came from a
+/// `waves://` link, which may not move an app to another output.
+struct SkippedProfileOutput: Equatable, Sendable {
+  let appID: String
+  let deviceName: String?
+  var withheldFromLink = false
+}
+
+/// What a profile apply could not do with EQ and output, in plain sentences.
+struct ProfileSoundNotes: Equatable, Sendable {
+  var sentences: [String] = []
+  /// True when another router kept an app's EQ or output, which deserves a
+  /// warning; a device that simply isn't connected does not.
+  var routerHeldSound = false
+
+  var isEmpty: Bool { sentences.isEmpty }
+}
+
 struct MixRestorePoint: Equatable {
   /// Name of the profile whose application created this restore point.
   let profileName: String
@@ -150,6 +169,7 @@ enum ProfileSaveResult: Equatable, Sendable {
   case nameTooLong(maximum: Int)
   case duplicateName(String)
   case noEligibleApps
+  case noMixToSave
 
   var savedProfileID: UUID? {
     guard case .saved(let id) = self else { return nil }
@@ -170,6 +190,8 @@ enum ProfileSaveResult: Equatable, Sendable {
       "A profile named “\(name)” already exists."
     case .noEligibleApps:
       "Select at least one app that is not excluded from Waves."
+    case .noMixToSave:
+      "Waves isn't managing any app's sound yet. Change an app's volume, then save."
     }
   }
 }

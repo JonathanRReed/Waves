@@ -50,6 +50,9 @@ final class AppStore {
   /// the menu-bar panel can raise this while the main window does not yet exist.
   private(set) var muteShortcutRequest: String?
   private(set) var muteShortcutToken = 0
+  /// Set when the menu bar asks the main window to show Save Current Mix.
+  var saveCurrentMixRequested = false
+  var saveCurrentMixToken = 0
   var onboarding = OnboardingState()
   private(set) var installLocationClassification: InstallLocationClassification
   private(set) var installationAdvisoryAcknowledged = false
