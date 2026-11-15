@@ -179,8 +179,12 @@ enum DiagnosticsExportFormatter {
     lines.append("Software channels: \(bridge.softwareChannelCount) (\(bridge.freeSoftwareChannelCount) free)")
     for channel in bridge.channels.prefix(maximumWaveLinkChannelRows) {
       let apps = channel.appIdentifiers.isEmpty ? "empty" : channel.appIdentifiers.joined(separator: ", ")
+      let state =
+        channel.reportsValidState == false
+        ? "level and mute not validly reported"
+        : "level \(String(format: "%.2f", channel.level)) · \(channel.isMuted ? "muted" : "unmuted")"
       lines.append(
-        "  Channel [channel name]: \(bounded(channel.name, maximumLength: 128)) · \(channel.isSoftware ? "software" : "hardware") · level \(String(format: "%.2f", channel.level)) · \(channel.isMuted ? "muted" : "unmuted") · apps [identifier]: \(bounded(apps, maximumLength: 512))"
+        "  Channel [channel name]: \(bounded(channel.name, maximumLength: 128)) · \(channel.isSoftware ? "software" : "hardware") · \(state) · apps [identifier]: \(bounded(apps, maximumLength: 512))"
       )
     }
     if bridge.channels.count > maximumWaveLinkChannelRows {
