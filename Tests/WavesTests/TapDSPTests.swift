@@ -184,7 +184,9 @@ import Testing
       clampsFloat: false
     )
   }
-  #expect(samples == [1.5 * 0.9, -1.5 * 0.9])
+  // Typed explicitly: Swift 6.2 (the macOS 15 CI toolchain) infers Double here.
+  let expected: [Float] = [1.5 * 0.9, -1.5 * 0.9]
+  #expect(samples == expected)
 }
 
 @Test func int16GainRampSaturatesAndLandsOnTheTarget() {
