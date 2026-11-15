@@ -181,20 +181,78 @@ final class BudgetBox {
   #expect(app.notes?.contains("plays at its own volume") == true)
 }
 
-@Test func failedInPlaceRebuildLeavesTheIncumbentPlayingAtItsLevel() async throws {
+@Test func aFormatRebuildThatFailsReleasesTheBrokenRouteAndSaysWhy() async throws {
   let fixture = RouteFixture(apps: [routeTestApp(id: "app.a", volume: 0.5)])
   try await fixture.installInitialRoutes()
   let backend = fixture.backend
+
+  // The built-in output resets and comes back at 96 kHz under the same UID.
+  // #1's aggregate did not survive: it renders nothing, while its tap still
+  // mutes the app. Every rebuild attempt fails.
+  fixture.events.stopRendering(serial: 1)
+  fixture.devices.set("builtin", .alive(rate96))
   fixture.events.failNextCreations(3)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
 
-  await backend.flagGeometryMismatchForTesting(runtimeID: "app.a")
-  await backend.updateAudioLevels(at: .seconds(10))
+  // Released fail open, so the app plays at its own level, and the row says so.
+  #expect(fixture.events.values == ["fail app.a", "fail app.a", "fail app.a", "audible #1", "stop #1"])
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  let app = try #require(await backend.currentSnapshot().apps.first)
+  #expect(app.routingState == .error)
+  #expect(app.appliedVolume == nil)
+  #expect(app.notes?.contains("plays at its own volume") == true)
+}
 
-  // The incumbent is only touched once a replacement exists to take over.
-  let incumbent = try #require(fixture.events.controller(serial: 1))
-  #expect(fixture.events.values == ["fail app.a", "fail app.a", "fail app.a"])
-  #expect(fixture.events.pumpRenders() == [1])
-  #expect(incumbent.settledGainsForTesting().volume == 0.5)
+@Test func aFormatRebuildRefusedByTheRebuildCeilingReleasesTheRoute() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // Automatic rebuilds have spent the budget.
+  for cycle in 0..<RouteRebuildBudget.minimumCapacity {
+    await backend.flagGeometryMismatchForTesting(runtimeID: "app.a")
+    await backend.updateAudioLevels(at: .seconds(10 + cycle * 2))
+  }
+  let creations = fixture.events.creations
+  let incumbent = creations + 1
+  fixture.events.stopRendering(serial: incumbent)
+  fixture.devices.set("builtin", .alive(rate96))
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(40))
+
+  // Refused, so the route that no longer works is released, not kept.
+  #expect(fixture.events.creations == creations)
+  #expect(fixture.events.lastTapMuteEvent(serial: incumbent) == "audible #\(incumbent)")
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  let app = try #require(await backend.currentSnapshot().apps.first)
+  #expect(app.routingState == .error)
+  #expect(app.notes?.contains("paused automatic audio route rebuilds") == true)
+}
+
+@Test func aRouteWhoseAggregateSilentlyStoppedIsRebuilt() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // The device dropped and returned too fast for any listener to see, and
+  // #1's aggregate stopped rendering. The app keeps playing into its tap.
+  fixture.events.stopRendering(serial: 1)
+  await maintenancePass(fixture, from: 10, ticks: 30)
+
+  #expect(fixture.events.values == ["create app.a #2", "stop #1"])
+  #expect(fixture.events.pumpRenders() == [2])
+}
+
+@Test func aRouteWhoseAggregateSilentlyStoppedIsReleasedIfItCannotBeRebuilt() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.stopRendering(serial: 1)
+  fixture.events.failNextCreations(3)
+  await maintenancePass(fixture, from: 10, ticks: 30)
+
+  #expect(fixture.events.values.suffix(2) == ["audible #1", "stop #1"])
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  #expect(await backend.currentSnapshot().apps.first?.notes?.contains("plays at its own volume") == true)
 }
 
 // MARK: - The handoff: silence first, one renderer at a time
@@ -279,10 +337,12 @@ final class BudgetBox {
 
 // MARK: - A parked controller never outlives its app's audibility
 
-/// Ticks enough for one route-maintenance pass.
-private func maintenancePass(_ backend: WorkspaceAudioControlBackend, from start: Int) async {
-  for tick in 0..<20 {
-    await backend.updateAudioLevels(at: .seconds(start + tick))
+/// Level ticks, by default enough for one route-maintenance pass. Every
+/// running controller renders a buffer before each tick, as its IO proc would.
+private func maintenancePass(_ fixture: RouteFixture, from start: Int, ticks: Int = 20) async {
+  for tick in 0..<ticks {
+    fixture.events.pumpRenders()
+    await fixture.backend.updateAudioLevels(at: .seconds(start + tick))
   }
 }
 
@@ -299,7 +359,7 @@ private func maintenancePass(_ backend: WorkspaceAudioControlBackend, from start
   )
   #expect(move.outcome == .applied)
   for pass in 0..<WorkspaceAudioControlBackend.maxOrphanDisposeRetries {
-    await maintenancePass(backend, from: 10 + pass * 20)
+    await maintenancePass(fixture, from: 10 + pass * 20)
   }
   #expect(fixture.events.lastTapMuteEvent(serial: 1) == nil)
 
@@ -310,7 +370,7 @@ private func maintenancePass(_ backend: WorkspaceAudioControlBackend, from start
     routeIntent(appID: "app.a", volume: 0.5, generation: 11, isExcluded: true)
   )
   #expect(exclusion.outcome == .excluded)
-  await maintenancePass(backend, from: 200)
+  await maintenancePass(fixture, from: 200)
   #expect(fixture.events.lastTapMuteEvent(serial: 1) == "audible #1")
   #expect(fixture.events.pumpRenders().isEmpty)
 
@@ -398,7 +458,7 @@ private func maintenancePass(_ backend: WorkspaceAudioControlBackend, from start
   _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.4, generation: 11, isExcluded: true))
   fixture.events.failNextMuteReleases(1_000)
   fixture.events.failNextStops(1_000)
-  await maintenancePass(backend, from: 10)
+  await maintenancePass(fixture, from: 10)
 
   #expect(fixture.events.pumpRenders() == [1])
   let parked = try #require(fixture.events.controller(serial: 1))
@@ -417,7 +477,7 @@ private func maintenancePass(_ backend: WorkspaceAudioControlBackend, from start
   // carrying the app, so silent #1 must not join it.
   fixture.events.failNextMuteReleases(1_000)
   _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.4, generation: 11, isExcluded: true))
-  await maintenancePass(backend, from: 10)
+  await maintenancePass(fixture, from: 10)
 
   #expect(fixture.events.pumpRenders() == [2])
   #expect(fixture.events.overlaps.isEmpty)
@@ -1374,6 +1434,7 @@ final class RouteEvents: @unchecked Sendable {
   private var failuresRemaining = 0
   private var stopFailuresRemaining = 0
   private var muteReleaseFailuresRemaining = 0
+  private var dead: Set<Int> = []
   private var created: [Int: (appID: String, controller: PerAppTapController)] = [:]
 
   var values: [String] { lock.withLock { recorded } }
@@ -1427,6 +1488,10 @@ final class RouteEvents: @unchecked Sendable {
     }
   }
 
+  /// Models an aggregate that stopped rendering (its device reset under it):
+  /// its IO proc is never called again.
+  func stopRendering(serial: Int) { lock.withLock { _ = dead.insert(serial) } }
+
   func reset() { lock.withLock { recorded.removeAll() } }
 
   func remember(_ controller: PerAppTapController, serial: Int, appID: String) {
@@ -1441,7 +1506,7 @@ final class RouteEvents: @unchecked Sendable {
   /// returns the serials that produced sound.
   @discardableResult
   func pumpRenders() -> [Int] {
-    let running = lock.withLock { created.filter { $0.value.controller.isActive } }
+    let running = lock.withLock { created.filter { $0.value.controller.isActive && !dead.contains($0.key) } }
     var heardByApp: [String: [Int]] = [:]
     for (serial, entry) in running.sorted(by: { $0.key < $1.key }) where peak(of: entry.controller) > 0 {
       heardByApp[entry.appID, default: []].append(serial)

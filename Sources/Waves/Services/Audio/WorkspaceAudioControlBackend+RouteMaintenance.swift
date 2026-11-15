@@ -208,6 +208,19 @@ extension WorkspaceAudioControlBackend {
     }
   }
 
+  /// What a route that was known not to work, and could not be rebuilt,
+  /// reports once it has been released.
+  func failedRepairError(for app: AudioApp, _ error: Error) -> Error {
+    switch error {
+    case BackendError.noActiveAudioStream, BackendError.noAudioCapability:
+      return error
+    default:
+      return BackendError.managedRouteUnavailable(
+        "Waves couldn't rebuild the audio route for \(app.displayName), so it now plays at its own volume. \(error.localizedDescription)"
+      )
+    }
+  }
+
   /// Disposes an app's controller and forgets its per-route bookkeeping.
   func releaseRoute(runtimeID: String) {
     if let controller = controllers.removeValue(forKey: runtimeID) {
@@ -568,11 +581,19 @@ extension WorkspaceAudioControlBackend {
       } catch is IntentBackendStoppedError {
         return
       } catch {
-        if isMisbound {
-          // Same policy as a failed move on a default-output change: release
-          // the route so the app is audible, and say why.
+        let isGeometryAttempt = geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id)
+        // A route forced into a rebuild while it had a controller is one
+        // that is known not to work as built: its device's format changed or
+        // the device came back after not being alive (its aggregate may be
+        // dead), it stopped rendering while its app plays, its controller is
+        // inactive, or it renders to the wrong device. Keeping that
+        // controller after a failed or refused rebuild could leave its tap
+        // muting the app while nothing plays. Same policy as a failed move:
+        // release it so the app is audible, and say why. Geometry attempts
+        // keep their own bounded retries, which end in the same release.
+        if isMisbound || (shouldForceRebuild && repairContext.incumbent != nil && !isGeometryAttempt) {
           releaseRoute(runtimeID: app.id)
-          let reported = failedMoveError(for: app, error)
+          let reported = isMisbound ? failedMoveError(for: app, error) : failedRepairError(for: app, error)
           if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
             markRouteError(at: currentIndex, error: reported)
             snapshot.apps[currentIndex].appliedVolume = nil

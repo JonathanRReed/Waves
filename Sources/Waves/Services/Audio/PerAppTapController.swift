@@ -231,12 +231,14 @@ final class PerAppTapController: @unchecked Sendable {
   }
 
   /// Runs one render callback the way Core Audio would, after every queued
-  /// control write has landed.
+  /// control write has landed. Like the IO proc, it first marks the render
+  /// tick, which is what route maintenance reads as "still rendering".
   func renderForTesting(
     input: UnsafePointer<AudioBufferList>,
     output: UnsafeMutablePointer<AudioBufferList>
   ) {
     callbackQueue.sync {
+      stateBox.markRenderTick()
       guard validatesCallbackGeometry(input, outputData: output) else {
         zeroOutput(output)
         return
