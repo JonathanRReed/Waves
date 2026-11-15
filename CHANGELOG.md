@@ -6,6 +6,30 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Keep an app-specific mute shortcut after recording it in Settings. Recording
+  one removed it immediately, along with that app's volume shortcuts.
+- Keep an automatic call mute out of saved profiles and the Reset Mix restore
+  point, so capturing levels during a call no longer saves the mute as yours.
+- Report route recovery as not ready after a refresh while Waves cannot attach
+  its router listener, matching what Diagnostics shows.
+- Treat a non-finite boost as no boost. It was applied as a 4x boost.
+- Report silence for a level-meter buffer that contains a non-finite sample
+  instead of keeping a peak from the samples before it.
+- Reject URL automation profile names longer than a profile name can be.
+- Reject non-finite volume, boost, timestamp, and duration values in control,
+  automation, Wave Link, metering, diagnostics, and profile inputs.
+- Recover the URL and socket automation quotas after the system clock moves
+  backward.
+- Release tooling: recover from a busy disk-image detach and confirm the image
+  is detached before cleaning up.
+
+### Changed
+- Update Sparkle to 2.10.1.
+- Describe Adaptive Mix accurately in the Sound pane and Help: Loudness Balance
+  can raise a quiet app by a few decibels.
+- Title the What's New card and its Help button without a version number.
+
 ## [1.7.3] - 2026-10-03
 
 ### Fixed

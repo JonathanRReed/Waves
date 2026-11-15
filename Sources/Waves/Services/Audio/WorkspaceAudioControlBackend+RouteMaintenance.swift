@@ -6,6 +6,19 @@ import WavesAudioCore
 
 extension WorkspaceAudioControlBackend {
 
+  /// The one definition of "route recovery is healthy".
+  ///
+  /// `refreshGlobalRouteHealth` and `buildSnapshot` both publish this flag. When
+  /// each spelled the conditions out, the snapshot rebuild left out the router
+  /// listener, so a refresh could report Ready beside a listener failure.
+  func isRouteRecoveryHealthy(deviceIsReady: Bool, hasRouteErrors: Bool) -> Bool {
+    supportsPerAppRouting
+      && captureAuthorization == .authorized
+      && deviceIsReady
+      && !hasRouteErrors
+      && routerObservationListenerFailureDetail == nil
+  }
+
   /// Recompute global route readiness from authorization, the confirmed current
   /// output device, and every app route. A successful app apply cannot erase an
   /// authorization/device query failure or another app's route error.
@@ -13,12 +26,10 @@ extension WorkspaceAudioControlBackend {
     let hasRouteErrors = hasBlockingRouteErrors(in: snapshot.apps)
     let deviceIsReady = snapshot.currentDevice != nil
     snapshot.backendStatus.hasRequiredPermissions = captureAuthorization == .authorized
-    snapshot.backendStatus.isRouteRecoveryHealthy =
-      supportsPerAppRouting
-      && captureAuthorization == .authorized
-      && deviceIsReady
-      && !hasRouteErrors
-      && routerObservationListenerFailureDetail == nil
+    snapshot.backendStatus.isRouteRecoveryHealthy = isRouteRecoveryHealthy(
+      deviceIsReady: deviceIsReady,
+      hasRouteErrors: hasRouteErrors
+    )
 
     let routeError =
       hasRouteErrors

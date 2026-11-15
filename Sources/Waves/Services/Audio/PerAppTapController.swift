@@ -138,8 +138,8 @@ final class PerAppTapController: @unchecked Sendable {
     self.adaptiveGain = Float(pow(10, Double(safeAdaptiveGainDB) / 20))
     self.callbackQueue = DispatchQueue(label: "com.waves.backend.tap.\(appID)", qos: .userInitiated)
     let initialState = TapRenderState(
-      volume: volume,
-      volumeBoost: volumeBoost,
+      volume: Self.sanitizedVolume(volume),
+      volumeBoost: Self.sanitizedBoost(volumeBoost),
       isMuted: muted ? 1 : 0,
       isActive: 1,
       peakLevel: 0,
@@ -199,6 +199,15 @@ final class PerAppTapController: @unchecked Sendable {
     stateBox.flagGeometryMismatch()
   }
 
+  /// The volume and boost the render path will use once every queued control
+  /// write has landed. Control writes are asynchronous, so a test that read the
+  /// state straight after a write would see the value from before it.
+  func settledGainsForTesting() -> (volume: Float, volumeBoost: Float) {
+    callbackQueue.sync {}
+    let state = stateBox.read()
+    return (state.volume, state.volumeBoost)
+  }
+
   var isActive: Bool {
     stateBox.read().isActive != 0
       && (testingIsActive || (ioProcID != nil && aggregateDeviceID != .unknown))
@@ -217,9 +226,20 @@ final class PerAppTapController: @unchecked Sendable {
     targetProcessFamily.covers(target)
   }
 
+  /// Volume and boost in the range the render path accepts. A non-finite value
+  /// falls back to unity, because clamping alone does not reject it:
+  /// `min(4, .nan)` is 4, so a NaN boost would become a 4x boost.
+  private static func sanitizedVolume(_ volume: Float) -> Float {
+    volume.isFinite ? max(0, min(1, volume)) : 1
+  }
+
+  private static func sanitizedBoost(_ boost: Float) -> Float {
+    boost.isFinite ? max(1, min(4, boost)) : 1
+  }
+
   func apply(volume: Float, volumeBoost: Float, muted: Bool) {
-    let clampedVolume = max(0.0, min(1.0, volume))
-    let clampedBoost = max(1.0, min(4.0, volumeBoost))
+    let clampedVolume = Self.sanitizedVolume(volume)
+    let clampedBoost = Self.sanitizedBoost(volumeBoost)
     // Use async to avoid blocking the caller, especially important for real-time audio
     callbackQueue.async { [weak self] in
       self?.stateBox.writeVolumeAndMute(volume: clampedVolume, volumeBoost: clampedBoost, muted: muted)
@@ -227,7 +247,7 @@ final class PerAppTapController: @unchecked Sendable {
   }
 
   func setVolumeBoost(_ boost: Float) {
-    let clampedBoost = max(1.0, min(4.0, boost))
+    let clampedBoost = Self.sanitizedBoost(boost)
     let currentState = stateBox.read()
     callbackQueue.async { [weak self] in
       self?.stateBox.writeVolumeAndMute(

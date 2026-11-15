@@ -1674,10 +1674,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       backendStatus: BackendStatus(
         isAudioComponentInstalled: supportsPerAppRouting,
         hasRequiredPermissions: captureAuthorization == .authorized,
-        isRouteRecoveryHealthy: supportsPerAppRouting
-          && captureAuthorization == .authorized
-          && deviceReadiness.isReady
-          && !hasRouteErrors,
+        isRouteRecoveryHealthy: isRouteRecoveryHealthy(
+          deviceIsReady: deviceReadiness.isReady,
+          hasRouteErrors: hasRouteErrors
+        ),
         lastError: backendError
       ),
       updatedAt: now

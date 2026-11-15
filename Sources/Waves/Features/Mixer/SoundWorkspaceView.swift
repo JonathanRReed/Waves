@@ -365,7 +365,7 @@ struct SoundWorkspaceView: View {
       sectionHeader(
         "Adaptive Mix",
         detail:
-          "Turns apps down, never off, so the app you care about stays in front. Nothing is paused or muted."
+          "Adjusts app levels temporarily so the app you care about stays in front. Nothing is paused or muted."
       ) {
         Toggle(
           "Adaptive Mix",

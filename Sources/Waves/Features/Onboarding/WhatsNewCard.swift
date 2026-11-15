@@ -11,7 +11,7 @@ struct WhatsNewCard: View {
       HStack(alignment: .top, spacing: 12) {
         WavesMark(size: 38, live: true)
         VStack(alignment: .leading, spacing: 3) {
-          Text("What’s New in Waves 1.5")
+          Text("What’s New in Waves")
             .font(.title3.weight(.semibold))
           Text("A more capable mixer, with clearer route truth and faster recovery.")
             .font(.caption)

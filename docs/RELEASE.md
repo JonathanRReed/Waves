@@ -8,16 +8,15 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-The current source candidate is 1.7.3 build 21. It improves profile save and
-reset reliability, process discovery, waveform calculation, icon lifetime
-handling, and installer layout. It is not published until its candidate and
-publication gates pass.
+Version 1.7.3 build 21 is the latest published release. GitHub published it
+on 2026-10-04 with signed and notarized universal artifacts and sealed evidence,
+and the site appcast, site download, and Homebrew tap point at it. Its macOS 15,
+macOS 26, and physical Stream Deck deferrals apply only to 1.7.3 and do not
+qualify a later candidate.
 
-Version 1.7.2 build 20 was published before this candidate. GitHub published it on
-2026-09-08. The release includes signed and notarized universal artifacts and
-sealed evidence. The site appcast and Homebrew tap point at that release until 1.7.3 passes publication.
-Its performance, macOS 15, and physical Stream Deck deferrals apply only to
-1.7.2 and do not qualify this candidate.
+Source changes on `main` after the `v1.7.3` tag are unreleased. They are listed
+under `[Unreleased]` in `CHANGELOG.md` and are not published until a new
+candidate passes its candidate and publication gates.
 
 The separately versioned Stream Deck companion at
 `/Users/jonathanreed/Downloads/waves-streamdeck` must pass its Bun typecheck,
