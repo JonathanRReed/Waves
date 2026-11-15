@@ -33,6 +33,10 @@ struct MicrophoneCallState {
   /// An app was added to the chosen list since the last pass. During a call
   /// it must be unmuted if an automatic mute caught it.
   var chosenAppAdded = false
+  /// Media apps this call's passes have already decided about. An app that
+  /// appears later is muted once; one the user unmuted by hand is not
+  /// muted again.
+  var consideredMediaAppIDs: Set<String> = []
   var endHoldTask: Task<Void, Never>?
 }
 

@@ -76,7 +76,7 @@ private struct ProfileQuickPicker: View {
       } label: {
         Label(SaveCurrentMixSheet.title + "…", systemImage: "square.and.arrow.down.on.square")
       }
-      .help("Save every app's current levels as a new profile.")
+      .help("Save the apps you've adjusted as a new profile.")
       if let restorePoint = store.mixRestorePoint {
         Divider()
         Button {

@@ -40,8 +40,9 @@ hashes, toolchain, and these results, all against the exact candidate:
   UI cases, and the Thread Sanitizer harness.
 - `performance`: launch time, idle CPU, steady memory, and active mixing
   against the previous release, each within 10 percent or an approved
-  exception. Comparisons are optional: with `benchmarkDeferral` in metadata,
-  every metric is recorded as `deferred` with the approved reason.
+  exception. The tool accepts either measured numbers for all four or a
+  `benchmarkDeferral` in metadata approved for this exact version and build,
+  in which case every metric is recorded as `deferred` with that reason.
 - `platforms`: native, Rosetta, macOS 26, and macOS 15 runs, with macOS 15
   deferrable through `releaseDeferral`; a physical macOS 14 host is recorded
   honestly as unavailable.
@@ -60,7 +61,8 @@ hashes, toolchain, and these results, all against the exact candidate:
 home: an owned audio fixture plays, the candidate discovers and manages it and
 applies volume and mute changes over the control socket, then it stays up and
 answers requests with the audio stopped. It records the whole seconds of the
-active and idle phases in `activeSeconds` and `idleSeconds`. It is not a soak.
+active and idle phases in `activeSeconds` and `idleSeconds`, each at least 30.
+It is not a soak.
 The release owner retired the 4-, 12- and 72-hour soaks and the 30-run launch
 protocol on 2026-11-14; no release requires them. For 1.7.4 the harness was
 `dist/release-1.7.4-preparation/run-qa.py` on the release Mac, which is not

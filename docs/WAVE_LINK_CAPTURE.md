@@ -36,8 +36,8 @@ Wave Link 3 turns those guesses into facts. It takes about five minutes.
    `~/Desktop/wave-link-capture-<date>-<time>.jsonl`. Use `--seconds 180` for
    more time.
 
-3. While it records, in Waves, on the app's row. Wait about two seconds
-   between steps so they are easy to tell apart:
+3. While it records, do these in Waves, on the app's row. Wait about two
+   seconds between steps so they are easy to tell apart:
    1. Move the volume by a small step, for example 50% to 45%.
    2. Make one big jump: drag from 100% to 10% and let go.
    3. Make the opposite jump: 10% to 100%.

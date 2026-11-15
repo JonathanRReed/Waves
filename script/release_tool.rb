@@ -477,6 +477,9 @@ module WavesRelease
       updater renderedUI pluginTypecheck pluginUnitTests pluginValidation
       pluginPackage pluginLiveSocket packageVerification remoteElgato
     ].freeze
+    # Short, but long enough that a candidate which stops rendering or exits
+    # shortly after launch cannot pass.
+    MINIMUM_RUNTIME_CHECK_SECONDS = 30
     INPUT_KEYS = %w[
       source toolchain tests performance platforms package gates skippedGates
       skipCIEquivalentEvidence externalReceipts publicationEligible
@@ -702,8 +705,10 @@ module WavesRelease
       raise Error, "gates.boundedRuntimeCheck status must be passed" unless runtime["status"] == "passed"
       Validation.nonempty_string!(runtime["detail"], "gates.boundedRuntimeCheck.detail")
       %w[activeSeconds idleSeconds].each do |field|
-        unless runtime[field].is_a?(Integer) && runtime[field].positive?
-          raise Error, "gates.boundedRuntimeCheck.#{field} must be a positive integer"
+        unless runtime[field].is_a?(Integer) && runtime[field] >= MINIMUM_RUNTIME_CHECK_SECONDS
+          raise Error,
+                "gates.boundedRuntimeCheck.#{field} must be a whole number of at least " \
+                "#{MINIMUM_RUNTIME_CHECK_SECONDS} seconds"
         end
       end
       allowed_remote = profile == "candidate" ? %w[pending passed deferred] : %w[passed deferred]

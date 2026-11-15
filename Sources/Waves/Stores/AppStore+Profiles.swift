@@ -218,6 +218,7 @@ extension AppStore {
       result: result,
       skippedOutputs: skippedOutputs
     )
+    lastProfileSoundSkippedAppIDs = soundNotes.affectedAppIDs
     switch purpose {
     case .userProfile, .automation:
       presentProfileFeedback(
@@ -733,6 +734,7 @@ extension AppStore {
     skippedOutputs: [SkippedProfileOutput]
   ) -> ProfileSoundNotes {
     var notes = ProfileSoundNotes()
+    notes.affectedAppIDs.formUnion(skippedOutputs.map(\.appID))
     let withheldFromLink = skippedOutputs.filter(\.withheldFromLink)
     if !withheldFromLink.isEmpty {
       let appNames = withheldFromLink.map { profileAppName(for: $0.appID) }
@@ -767,6 +769,7 @@ extension AppStore {
         !preferences.excludedAppIDs.contains(entry.appID)
       else { continue }
       heldElsewhere.append((entry.appID, app.routeHealthContext == .waveLinkBridge))
+      notes.affectedAppIDs.insert(entry.appID)
       if entry.equalizer != nil { heldParts.insert("EQ") }
       if entry.output != nil { heldParts.insert("output") }
     }
@@ -1071,6 +1074,11 @@ extension AppStore {
     includeOutput: Bool = false
   ) -> ProfileSaveResult {
     guard startupState != .shuttingDown else { return .unavailableDuringShutdown }
+    // Mid-apply, an app's row still shows its old levels while its restored EQ
+    // is already confirmed; capturing then would save a mix that never existed.
+    if captureLevels, appIntentCoordinator.currentProfileTask != nil {
+      return .profileStillApplying
+    }
     let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmedName.isEmpty else { return .blankName }
     guard trimmedName.count <= 100 else { return .nameTooLong(maximum: 100) }

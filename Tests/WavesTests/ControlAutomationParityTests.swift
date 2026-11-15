@@ -86,7 +86,7 @@ private let unsupportedID = "com.example.unsupported"
   let store = await makeParityStore()
   let missing = await handle(store, ControlRequest(id: 1, cmd: .setBoost, app: managedID))
   #expect(missing == .failure(id: 1, .missingParameter))
-  for value: Float in [.nan, .infinity, -.infinity, 0, 0.5, 4.01, 5, 100, .greatestFiniteMagnitude] {
+  for value: Float in [.nan, .infinity, -.infinity, 0, 0.5, 1.5, 1.9, 2.5, 4.01, 5, 100, .greatestFiniteMagnitude] {
     let response = await handle(store, ControlRequest(id: 2, cmd: .setBoost, app: managedID, boost: value))
     #expect(response == .failure(id: 2, .invalidParameter), "boost \(value) must be refused, not clamped")
   }
@@ -167,6 +167,20 @@ private let unsupportedID = "com.example.unsupported"
 }
 
 @MainActor
+@Test func applyProfileIsNotOkWhenASavedOutputOrEqualizerWasSkipped() async throws {
+  let store = await makeParityStore()
+  let response = await handle(store, ControlRequest(id: 10, cmd: .applyProfile, profile: "Desk"))
+  // The level landed; the output device is not connected, so the profile did
+  // not fully apply and the caller must be able to tell.
+  #expect(!response.ok)
+  #expect(response.error == .notApplied)
+  #expect(
+    response.profile
+      == ControlProfileResult(name: "Desk", applied: 0, savedForLater: 0, skipped: 0, failed: 0, partial: 1))
+  #expect(store.session.apps.first { $0.logicalID == managedID }?.desiredVolume == 0.3)
+}
+
+@MainActor
 @Test func newCommandsRespectTheRunningAndPermissionGates() async {
   let idle = await makeParityStore(startupState: .idle)
   for request in [
@@ -211,11 +225,13 @@ private let unsupportedID = "com.example.unsupported"
     parser.parse(URL(string: "waves://toggle-mute?app=com.example.app")!)
       == .accepted(.toggleMute(appID: "com.example.app")))
   #expect(
-    parser.parse(URL(string: "waves://set-boost?app=com.example.app&boost=2.5")!)
-      == .accepted(.setBoost(appID: "com.example.app", boost: 2.5)))
+    parser.parse(URL(string: "waves://set-boost?app=com.example.app&boost=3")!)
+      == .accepted(.setBoost(appID: "com.example.app", boost: 3)))
   for bad in [
     "waves://toggle-mute", "waves://toggle-mute?app=", "waves://toggle-mute?app=a%0Ab",
     "waves://set-boost?app=a", "waves://set-boost?app=a&boost=0.5", "waves://set-boost?app=a&boost=5",
+    // The mixer offers whole multipliers only and would show 2.5x as 2x.
+    "waves://set-boost?app=a&boost=2.5", "waves://set-boost?app=a&boost=1.9",
     "waves://set-boost?app=a&boost=nan", "waves://set-boost?app=a&boost=inf", "waves://set-boost?boost=2",
   ] {
     guard case .rejected(let rejection) = parser.parse(URL(string: bad)!) else {
@@ -284,7 +300,7 @@ private let unsupportedID = "com.example.unsupported"
   #expect(WavesCTLCommand.boost(app: "a", value: 2).serverCommand == "set-boost")
 
   // What the help text promises is exactly what the parser accepts.
-  for line in ["boost  <app-id> <1..4>", "profile <name>", "refresh", "help"] {
+  for line in ["boost  <app-id> <1|2|3|4>", "profile <name>", "refresh", "help"] {
     #expect(WavesCTLUsage.text.contains(line))
   }
   #expect(WavesCTLUsage.text.contains("Contents/Helpers/wavesctl"))
@@ -326,6 +342,14 @@ private func makeParityStore(
         ProfileEntry(appID: managedID, desiredVolume: 0.3, volumeBoost: 2),
         ProfileEntry(appID: "com.example.not-running", desiredVolume: 0.2),
         ProfileEntry(appID: waveLinkID),
+      ]),
+    Profile(
+      name: "Desk",
+      entries: [
+        ProfileEntry(
+          appID: managedID,
+          desiredVolume: 0.3,
+          output: ProfileOutput(deviceUID: "device.not-connected", deviceName: "AirPods Pro"))
       ]),
     Profile(
       name: "Broken",

@@ -133,10 +133,10 @@ route's confirmed state.
 ← {"id":8,"ok":true,"app":"com.spotify.client","boost":2}
 ```
 
-`boost` is a multiplier from `1` (no boost) to `4`, the same range as the mixer's
-Boost menu. Unlike volume, a value outside `1…4` is **refused** with
-`invalid-parameter`, never clamped, so a client bug cannot make an app louder than
-the person asked for. The same rules as the mixer apply: an excluded app gets
+`boost` is `1` (no boost), `2`, `3` or `4`, the choices in the mixer's Boost
+menu. Unlike volume, any other value is **refused** with `invalid-parameter`,
+never clamped or rounded, so a client bug cannot make an app louder than the
+person asked for and the mixer always shows the boost that is applied. The same rules as the mixer apply: an excluded app gets
 `app-excluded`, and an app whose route Wave Link or route recovery controls gets
 `route-unavailable` (the mixer disables Boost for those apps too).
 
@@ -148,8 +148,11 @@ effect; if the route could not take it, the reply is `not-applied` or
 
 ```text
 → {"id":9,"cmd":"apply-profile","profile":"Focus"}
-← {"id":9,"ok":true,"profile":{"name":"Focus","applied":3,"savedForLater":1,"skipped":0,"failed":0}}
+← {"id":9,"ok":true,"profile":{"name":"Focus","applied":3,"savedForLater":1,"skipped":0,"failed":0,"partial":0}}
 ```
+
+Over the socket a profile applies everything it saved, including each app's EQ
+and output device. (A `waves://` link applies levels and EQ only.)
 
 `profile` is matched by name, ignoring case, exactly like `waves://apply-profile`.
 Names are at most 100 characters and may not contain control characters
@@ -157,16 +160,18 @@ Names are at most 100 characters and may not contain control characters
 
 Waves replies after the whole profile has finished applying, which can take a few
 seconds when several apps need new routes; allow at least 25 seconds. The counts
-cover the profile's apps that carry levels:
+cover the profile's apps that carry levels, an EQ or an output:
 
 - `applied`: set now (or already at those levels).
+- `partial`: levels set, but the profile's EQ or output for the app was not,
+  because the output device is not connected or another router controls the app.
 - `savedForLater`: the app is not running; its levels are saved and apply when it
   next opens.
 - `skipped`: the app is excluded from Waves.
 - `failed`: could not be set, a newer change replaced it first, or the app is not
   running and its levels could not be saved.
 
-`ok` is `true` only when `failed` is `0`. Otherwise the reply is `ok:false` with
+`ok` is `true` only when `failed` and `partial` are both `0`. Otherwise the reply is `ok:false` with
 `error:"not-applied"` and the same `profile` counts. If another profile was
 applied before this one finished, the reply is `not-applied` without counts.
 Waves also shows its usual "Profile applied" notice.
@@ -202,9 +207,9 @@ refused with `rate-limited`.
 | `error` | Meaning |
 | --- | --- |
 | `unsupported-protocol` | `hello` asked for a protocol other than 1. |
-| `malformed-request` | Not valid JSON, missing `cmd`, a wrong field type, or a command before `hello`. |
+| `malformed-request` | Not valid JSON, missing `cmd`, a wrong field type (including a volume or boost that is not a number, or is too large to be one), or a command before `hello`. |
 | `unknown-command` | Valid request with a command this Waves does not know (1.8.0 and later). |
-| `missing-parameter` | A required field is missing (or a volume is not a number). |
+| `missing-parameter` | A required field is missing. |
 | `invalid-parameter` | A field is present but outside what Waves accepts (1.8.0 and later). |
 | `unknown-app` | No app with that identifier in the mixer. |
 | `unknown-profile` | No profile with that name (1.8.0 and later). |

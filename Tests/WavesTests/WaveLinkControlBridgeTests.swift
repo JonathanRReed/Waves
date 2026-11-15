@@ -385,6 +385,8 @@ private actor WaveLinkRPCStub {
   private let readBackLevelRepresentation: String?
   private let readBackMuteRepresentation: String?
   private let levelResponse: WaveLinkLevelResponse
+  /// The level a channel shows once an app joins it, as if Wave Link reset it.
+  private let levelAfterAdd: Float?
   /// The channel a `setChannel` is still taking effect on, as Wave Link might
   /// fade or apply it after answering.
   private var settling: (channelID: String, from: Float, to: Float, reads: Int)?
@@ -405,7 +407,8 @@ private actor WaveLinkRPCStub {
     readBackLevel: Float? = nil,
     readBackLevelRepresentation: String? = nil,
     readBackMuteRepresentation: String? = nil,
-    levelResponse: WaveLinkLevelResponse = .immediate
+    levelResponse: WaveLinkLevelResponse = .immediate,
+    levelAfterAdd: Float? = nil
   ) {
     self.channels = channels
     self.applicationID = applicationID
@@ -417,6 +420,7 @@ private actor WaveLinkRPCStub {
     self.readBackLevelRepresentation = readBackLevelRepresentation
     self.readBackMuteRepresentation = readBackMuteRepresentation
     self.levelResponse = levelResponse
+    self.levelAfterAdd = levelAfterAdd
   }
 
   func request(method: String, params: Data?) throws -> Data {
@@ -479,6 +483,10 @@ private actor WaveLinkRPCStub {
       }
       channels[index].apps.append(.init(id: request.appID))
       if let mixesAfterAdd { channels[index].mixes = mixesAfterAdd }
+      if let levelAfterAdd {
+        channels[index].level = levelAfterAdd
+        settling = nil
+      }
       return Data("{}".utf8)
     case "setChannel":
       let request = try JSONDecoder().decode(SetRequest.self, from: try #require(params))
@@ -1081,48 +1089,49 @@ private func failing(
   #expect(await rpc.setRequests.first == .init(id: "empty", level: 0.2, isMuted: true))
 }
 
-@Test func waveLinkBridgeStillMovesAnAppWhenPreparingTheEmptyChannelFails() async throws {
+@Test func waveLinkBridgeRefusesToMoveAnAppWhenTheEmptyChannelCannotBePrepared() async throws {
   let rpc = WaveLinkRPCStub(channels: sharedAndEmptyChannels())
   let bridge = WaveLinkControlBridge(
     request: failing("setChannel", call: 1, with: .unavailable("setChannel: Invalid params"), rpc)
   )
 
-  let confirmation = try await bridge.apply(bundleIdentifier: "us.zoom.xos", volume: 0.2, isMuted: true)
-
-  #expect(confirmation.relocated)
-  #expect(confirmation.channelID == "empty")
-  #expect(await rpc.mutations == ["addToChannel:empty", "setChannel:empty"])
+  // Moving first would let the app play on the empty channel at its old level,
+  // unmuted. Nothing has changed, so this is not an unconfirmed change.
+  await #expect(
+    throws: WaveLinkControlBridgeError.readBackMismatch(
+      "Wave Link did not confirm the level and mute for Aux 1 before the move, so the app was left on its current channel."
+    )
+  ) {
+    try await bridge.apply(bundleIdentifier: "us.zoom.xos", volume: 0.2, isMuted: true)
+  }
+  #expect(await rpc.addRequests.isEmpty)
 }
 
-@Test func waveLinkBridgeMovesAnAppBackWhenItsNewChannelDoesNotConfirm() async throws {
+@Test func waveLinkBridgeRefusesToMoveAnAppOntoAChannelThatDoesNotShowTheRequestedLevel() async throws {
   let rpc = WaveLinkRPCStub(channels: sharedAndEmptyChannels(), readBackLevel: 0.5)
   let bridge = WaveLinkControlBridge(
     request: { method, params in try await rpc.request(method: method, params: params) },
     sleep: { _ in }
   )
 
-  // Moved back, the app is where it was and nothing about it changed, so the
-  // failure is not reported as an unconfirmed change.
+  // The empty channel never shows the requested level, so the app is not
+  // moved onto it at all.
   await #expect(
     throws: WaveLinkControlBridgeError.readBackMismatch(
-      "Requested 0.2, muted false; received 0.5, muted false.")
+      "Wave Link did not confirm the level and mute for Aux 1 before the move, so the app was left on its current channel."
+    )
   ) {
     try await bridge.apply(bundleIdentifier: "us.zoom.xos", volume: 0.2, isMuted: false)
   }
-  #expect(
-    await rpc.addRequests == [
-      .init(appID: "us.zoom.xos", channelID: "empty"),
-      .init(appID: "us.zoom.xos", channelID: "shared"),
-    ]
-  )
+  #expect(await rpc.addRequests.isEmpty)
 }
 
 @Test func waveLinkBridgeMovesAnAppBackWhenTheMoveCannotBeReadBack() async throws {
   let rpc = WaveLinkRPCStub(channels: sharedAndEmptyChannels())
-  // The first listing finds the channels; the second, right after the move,
-  // fails.
+  // The first listing finds the channels and the second confirms the empty
+  // channel is ready; the third, right after the move, fails.
   let bridge = WaveLinkControlBridge(
-    request: failing("getChannels", call: 2, with: .unavailable("getChannels: timed out"), rpc)
+    request: failing("getChannels", call: 3, with: .unavailable("getChannels: timed out"), rpc)
   )
 
   await #expect(throws: WaveLinkControlBridgeError.unavailable("getChannels: timed out")) {
@@ -1137,7 +1146,10 @@ private func failing(
 }
 
 @Test func waveLinkBridgeReportsAnUnconfirmedChangeWhenItCannotMoveAnAppBack() async throws {
-  let rpc = WaveLinkRPCStub(channels: sharedAndEmptyChannels(), readBackLevel: 0.5)
+  // The empty channel is ready before the move, then shows another level once
+  // the app has joined it and never reaches the requested one.
+  let rpc = WaveLinkRPCStub(
+    channels: sharedAndEmptyChannels(), levelResponse: .late(reads: 100), levelAfterAdd: 0.5)
   let bridge = WaveLinkControlBridge(
     request: failing("addToChannel", call: 2, with: .unavailable("addToChannel: timed out"), rpc),
     sleep: { _ in }
@@ -1147,15 +1159,16 @@ private func failing(
   // as uncertain and show what Wave Link last reported.
   await #expect(
     throws: WaveLinkControlBridgeError.unconfirmed(
-      .readBackMismatch("Requested 0.2, muted false; received 0.5, muted false."),
+      .readBackMismatch("Requested 1.0, muted false; received 0.5, muted false."),
       observed: WaveLinkChannelState(level: 0.5, isMuted: false))
   ) {
-    try await bridge.apply(bundleIdentifier: "us.zoom.xos", volume: 0.2, isMuted: false)
+    try await bridge.apply(bundleIdentifier: "us.zoom.xos", volume: 1, isMuted: false)
   }
 }
 
 @Test func waveLinkBridgeLeavesAMovedAppForTheNewerChangeThatReplacedIt() async throws {
-  let rpc = WaveLinkRPCStub(channels: sharedAndEmptyChannels(), levelResponse: .late(reads: 5))
+  let rpc = WaveLinkRPCStub(
+    channels: sharedAndEmptyChannels(), levelResponse: .late(reads: 5), levelAfterAdd: 0.5)
   let bridge = WaveLinkControlBridge(
     request: { method, params in try await rpc.request(method: method, params: params) },
     sleep: { _ in }
@@ -1163,7 +1176,7 @@ private func failing(
 
   await #expect(throws: WaveLinkControlBridgeError.self) {
     try await bridge.apply(
-      bundleIdentifier: "us.zoom.xos", volume: 0.2, isMuted: false,
+      bundleIdentifier: "us.zoom.xos", volume: 1, isMuted: false,
       allowsChannelRelocation: true, isCurrent: { false })
   }
   // The newer change sets the app's new channel next; moving the app back

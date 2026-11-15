@@ -390,9 +390,9 @@ struct HelpView: View {
           "When a call app is in front: Zoom, Teams, Webex, or FaceTime has to be the app you're using. Switching to another app unmutes media, and browser calls aren't detected"
         )
         bullet(
-          "When a chosen app is using the microphone: pick the apps you take calls in, including a browser. Media stays muted while any of them uses the microphone, whichever app is in front, and comes back about two seconds after it stops"
+          "When a chosen app is using the microphone: pick the apps you take calls in, such as Discord, Slack, or Chrome. Media stays muted while any of them uses the microphone, whichever app is in front, and comes back about two seconds after it stops"
         )
-        bullet("The call app itself is never muted, and anything you mute or unmute yourself stays that way")
+        bullet("The call app itself is never muted, and anything you mute or unmute yourself stays that way for the rest of that call")
       }
 
       Text(

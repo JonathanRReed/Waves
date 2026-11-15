@@ -727,10 +727,11 @@ extension AppStore {
   /// Nil when nothing was started or a newer profile replaced this one before
   /// it finished, so the caller can never report a superseded apply as done.
   /// `settingsSaved` is false when the save failed, which rolls back the levels
-  /// kept for apps that were not running.
+  /// kept for apps that were not running. `soundSkippedAppIDs` names apps whose
+  /// saved EQ or output did not apply.
   func applyProfileForExternalControl(
     _ profile: Profile
-  ) async -> (result: ProfileApplyResult, settingsSaved: Bool)? {
+  ) async -> (result: ProfileApplyResult, settingsSaved: Bool, soundSkippedAppIDs: Set<String>)? {
     let previousGeneration = appIntentCoordinator.currentProfileTask?.generation
     applyProfile(profile, purpose: .automation)
     guard let started = appIntentCoordinator.currentProfileTask,
@@ -740,10 +741,19 @@ extension AppStore {
     // A profile replaced while it was finishing leaves its own rows published
     // until the newer one reports, so the generation is checked here as well.
     guard appIntentCoordinator.isCurrentProfile(started.generation),
-      let result = lastProfileApplyResult,
+      var result = lastProfileApplyResult,
       result.rows.count == profile.entries.count,
       result.rows.allSatisfy({ $0.generation == started.generation })
     else { return nil }
-    return (result, !lastProfileSettingsSaveFailed)
+    // A direct edit to one of the profile's apps can land while the profile is
+    // finishing. That app's row was applied, but it is no longer what plays.
+    for index in result.rows.indices
+    where appIntentCoordinator.hasNewerGeneration(
+      than: started.generation, for: result.rows[index].appID)
+      && (result.rows[index].outcome == .applied || result.rows[index].outcome == .noChange)
+    {
+      result.rows[index].outcome = .superseded
+    }
+    return (result, !lastProfileSettingsSaveFailed, lastProfileSoundSkippedAppIDs)
   }
 }

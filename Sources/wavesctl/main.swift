@@ -110,11 +110,14 @@ do {
     let response = try client.request(command.request(id: 1))
     let counts = response["profile"]?.objectValue
     if let counts {
-      let parts = [("applied", "applied"), ("savedForLater", "saved for later"), ("skipped", "skipped"), ("failed", "failed")]
-        .compactMap { key, label -> String? in
-          guard let count = counts[key]?.numberValue, count > 0 else { return nil }
-          return "\(Int(count)) \(label)"
-        }
+      let parts = [
+        ("applied", "applied"), ("partial", "levels only"), ("savedForLater", "saved for later"),
+        ("skipped", "skipped"), ("failed", "failed"),
+      ]
+      .compactMap { key, label -> String? in
+        guard let count = counts[key]?.numberValue, count > 0 else { return nil }
+        return "\(Int(count)) \(label)"
+      }
       emit("profile: \(counts["name"]?.stringValue ?? "?")\(parts.isEmpty ? "" : " (" + parts.joined(separator: ", ") + ")")")
     }
     describe(response)
