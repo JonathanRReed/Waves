@@ -197,9 +197,13 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
   ]
 
   private let nativeCalls: DeviceFormatListenerNativeCalls
-  /// Device object → its listener block and the addresses registered with
-  /// it. One block per device, so a callback knows which device it is for.
-  private var installed: [AudioObjectID: (listener: RouterObservationListenerBlockReference, addresses: [AudioObjectPropertyAddress])] = [:]
+  /// Device object → the device UID it was registered for, its listener
+  /// block, and the addresses registered with it. One block per device, so a
+  /// callback knows which device it is for. Core Audio can give a returning
+  /// device a new object ID, and can reuse an object ID for another device,
+  /// so a registration is reused only while both its object ID and its UID
+  /// still match.
+  private var installed: [AudioObjectID: (uid: String, listener: RouterObservationListenerBlockReference, addresses: [AudioObjectPropertyAddress])] = [:]
   private let notAliveLock = NSLock()
   private var notAliveDeviceUIDs: Set<String> = []
 
@@ -230,15 +234,29 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
   /// listeners, departed ones lose them. A device keeps whatever listeners it
   /// accepted; the next sync adds only the ones it refused, and retries any
   /// removal that failed.
+  ///
+  /// An object ID that now names another device loses its old registrations
+  /// before the new device gets its own block. A UID that now lives on a
+  /// different object is a device that went away and came back: whatever a
+  /// route's aggregate was built on may not have survived, so it is recorded
+  /// as seen not alive, exactly as if its alive listener had caught it.
   func sync(
     devices: [AudioObjectID: String],
     onChange: @escaping @Sendable () -> Void
   ) -> [CleanupDegradation] {
     var degradations: [CleanupDegradation] = []
-    for deviceID in installed.keys.sorted() where devices[deviceID] == nil {
+    var previousObjectByUID: [String: AudioObjectID] = [:]
+    for (deviceID, entry) in installed { previousObjectByUID[entry.uid] = deviceID }
+    for deviceID in installed.keys.sorted() where devices[deviceID] != installed[deviceID]?.uid {
       degradations += removeListeners(from: deviceID)
     }
     for (deviceID, uid) in devices.sorted(by: { $0.key < $1.key }) {
+      if let previous = previousObjectByUID[uid], previous != deviceID {
+        notAliveLock.withLock { _ = notAliveDeviceUIDs.insert(uid) }
+      }
+      // An old registration on this object that would not come off yet; the
+      // next sync retries the removal before registering the new device.
+      if let entry = installed[deviceID], entry.uid != uid { continue }
       let listener = installed[deviceID]?.listener ?? makeListener(deviceID: deviceID, uid: uid, onChange: onChange)
       let owned = installed[deviceID]?.addresses ?? []
       var added: [AudioObjectPropertyAddress] = []
@@ -257,7 +275,7 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
         }
       }
       if !added.isEmpty {
-        installed[deviceID] = (listener, owned + added)
+        installed[deviceID] = (uid, listener, owned + added)
       }
     }
     return degradations
@@ -304,7 +322,7 @@ final class DeviceFormatListenerLifecycle: @unchecked Sendable {
           detail: "Remove device format listener selector \(address.mSelector)"
         ))
     }
-    installed[deviceID] = stillOwned.isEmpty ? nil : (entry.listener, stillOwned)
+    installed[deviceID] = stillOwned.isEmpty ? nil : (entry.uid, entry.listener, stillOwned)
     return degradations
   }
 }

@@ -67,6 +67,12 @@ extension WorkspaceAudioControlBackend {
   /// an event for a device no route uses is a no-op in `revalidateRouteFormats`.
   func syncDeviceFormatListeners() {
     guard !isShuttingDown else { return }
+    syncDeviceFormatListeners(devices: externalOutputDevices())
+  }
+
+  /// Every output-capable device outside Waves's own aggregates, by object.
+  func externalOutputDevices() -> [AudioObjectID: String] {
+    if let deviceInventoryProvider { return deviceInventoryProvider() }
     var devices: [AudioObjectID: String] = [:]
     for deviceID in allDeviceIDs() where OutputDeviceInventory.hasOutputStreams(deviceID) {
       guard let uid = OutputDeviceInventory.deviceUID(deviceID), !uid.hasPrefix("com.waves.aggregate.") else {
@@ -74,7 +80,7 @@ extension WorkspaceAudioControlBackend {
       }
       devices[deviceID] = uid
     }
-    syncDeviceFormatListeners(devices: devices)
+    return devices
   }
 
   private func syncDeviceFormatListeners(devices: [AudioObjectID: String]) {

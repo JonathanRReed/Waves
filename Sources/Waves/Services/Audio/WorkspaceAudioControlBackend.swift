@@ -155,6 +155,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let controllerRetryPause: ControllerRetryPause
   let handoffSilencePause: HandoffSilencePause
   let outputDeviceUIDProvider: (@Sendable (AudioApp) -> String?)?
+  /// Output devices by object ID, replacing the Core Audio device list in tests.
+  let deviceInventoryProvider: (@Sendable () -> [AudioObjectID: String])?
   let deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
@@ -191,6 +193,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.controllerRetryPause = { try await Task.sleep(nanoseconds: $0) }
     self.handoffSilencePause = { usleep(1_000) }
     self.outputDeviceUIDProvider = nil
+    self.deviceInventoryProvider = nil
     self.deviceFormatObservationProvider = nil
     self.deviceFormatListeners = DeviceFormatListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.device-format"))
@@ -227,6 +230,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     controllerRetryPause: ControllerRetryPause? = nil,
     handoffSilencePause: HandoffSilencePause? = nil,
     outputDeviceUIDProvider: (@Sendable (AudioApp) -> String?)? = nil,
+    deviceInventoryProvider: (@Sendable () -> [AudioObjectID: String])? = nil,
     deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)? = nil,
     deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil
   ) {
@@ -257,6 +261,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.controllerRetryPause = controllerRetryPause ?? { try await Task.sleep(nanoseconds: $0) }
     self.handoffSilencePause = handoffSilencePause ?? { usleep(1_000) }
     self.outputDeviceUIDProvider = outputDeviceUIDProvider
+    self.deviceInventoryProvider = deviceInventoryProvider
     self.deviceFormatObservationProvider = deviceFormatObservationProvider
     self.deviceFormatListeners = DeviceFormatListenerLifecycle(
       nativeCalls: deviceFormatListenerNativeCalls

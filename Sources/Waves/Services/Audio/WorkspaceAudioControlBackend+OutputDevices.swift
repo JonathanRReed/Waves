@@ -326,18 +326,33 @@ extension WorkspaceAudioControlBackend {
     let externalDeviceUIDs = currentExternalDeviceUIDs()
     let inventoryChanged = externalDeviceUIDs != lastKnownExternalDeviceUIDs
     lastKnownExternalDeviceUIDs = externalDeviceUIDs
-    if inventoryChanged {
+    // On every raw device-list notification, not only when the set of UIDs
+    // changed: a device that leaves and returns under the same UID before
+    // this pass runs comes back as a new object, which needs its own
+    // listeners, and its routes need checking (the sync records it as seen
+    // not alive). Waves's own aggregate churn lands here too; the sync then
+    // finds nothing to change and revalidation nothing to rebuild.
+    if inventoryChanged || changes.contains(.deviceInventory) {
       syncDeviceFormatListeners()
     }
 
     await applyDeviceChangePlan(
       DeviceChangePassPlan(defaultOutputChanged: defaultOutputChanged, inventoryChanged: inventoryChanged),
-      availableDeviceUIDs: { Set(self.allDeviceIDs().compactMap(OutputDeviceInventory.deviceUID)) }
+      availableDeviceUIDs: { self.availableDeviceUIDs() }
     )
     guard !isShuttingDown else { return }
-    if !changes.isDisjoint(with: [.deviceFormat, .wake]) {
+    if !changes.isDisjoint(with: [.deviceFormat, .wake, .deviceInventory]) {
       await revalidateRouteFormats(now: Self.monotonicRouteTime())
     }
+  }
+
+  func performDeviceChangePassForTesting(changes: AudioPropertyChanges) async {
+    await performDeviceChangePass(changes: changes)
+  }
+
+  private func availableDeviceUIDs() -> Set<String> {
+    if let deviceInventoryProvider { return Set(deviceInventoryProvider().values) }
+    return Set(allDeviceIDs().compactMap(OutputDeviceInventory.deviceUID))
   }
 
   func applyDeviceChangePlan(
@@ -379,7 +394,8 @@ extension WorkspaceAudioControlBackend {
 
   /// UIDs of every device that is not one of Waves's own private aggregates.
   private func currentExternalDeviceUIDs() -> Set<String> {
-    Set(
+    if let deviceInventoryProvider { return Set(deviceInventoryProvider().values) }
+    return Set(
       allDeviceIDs()
         .compactMap(OutputDeviceInventory.deviceUID)
         .filter { !$0.hasPrefix("com.waves.aggregate.") }

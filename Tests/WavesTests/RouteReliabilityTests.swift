@@ -1156,6 +1156,53 @@ private let perDevice = DeviceFormatListenerLifecycle.addresses.count
   #expect(fixture.events.creations == 0)
 }
 
+@Test func aDeviceThatReturnsAsANewObjectIsListenedToAndCountsAsSeenNotAlive() {
+  let calls = ListenerCalls()
+  let lifecycle = listenerLifecycle(calls)
+  #expect(lifecycle.sync(devices: [10: "builtin"]) {}.isEmpty)
+
+  // Same UID, new object: the old registrations go, the new object gets its
+  // own, and the device counts as having dropped.
+  #expect(lifecycle.sync(devices: [11: "builtin"]) {}.isEmpty)
+  #expect(calls.live == [11: perDevice])
+  #expect(lifecycle.takeDevicesSeenNotAlive() == ["builtin"])
+}
+
+@Test func anObjectIDReusedForAnotherDeviceGetsThatDevicesOwnListener() {
+  let calls = ListenerCalls()
+  let lifecycle = listenerLifecycle(calls)
+  #expect(lifecycle.sync(devices: [10: "builtin"]) {}.isEmpty)
+
+  // Core Audio reuses object 10 for the USB DAC.
+  #expect(lifecycle.sync(devices: [10: "usb-dac"]) {}.isEmpty)
+  #expect(calls.live == [10: perDevice])
+  #expect(calls.adds(on: 10) == 2 * perDevice)
+
+  // Its callback is the DAC's, not the built-in output's.
+  calls.setAlive(false)
+  calls.fireAliveChange(on: 10)
+  #expect(lifecycle.takeDevicesSeenNotAlive() == ["usb-dac"])
+}
+
+@Test func aDeviceListNotificationReconcilesListenersEvenWhenNoUIDChanged() async throws {
+  let calls = ListenerCalls()
+  let fixture = RouteFixture(apps: [routeTestApp()], deviceFormatListenerNativeCalls: calls.nativeCalls)
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await backend.performDeviceChangePassForTesting(changes: [.deviceInventory])
+  #expect(calls.live[10] == perDevice)
+
+  // The built-in output resets and is back, as a new object under the same
+  // UID, before the pass for its device-list notification runs.
+  fixture.inventory.set([11: "builtin", 20: "usb-dac", 30: "headphones"])
+  await backend.performDeviceChangePassForTesting(changes: [.deviceInventory])
+
+  #expect(calls.live[10] == nil)
+  #expect(calls.live[11] == perDevice)
+  // The route built on the old object is rebuilt on the device that came back.
+  #expect(fixture.events.values == ["create app.a #2", "stop #1"])
+}
+
 @Test func releasingTheWakeObserverUnregistersIt() {
   let center = NotificationCenter()
   let wakes = ListenerCalls()
@@ -1604,10 +1651,20 @@ final class DeviceFormatState: @unchecked Sendable {
   }
 }
 
+/// The fake Core Audio device list: output devices by object ID.
+final class DeviceInventory: @unchecked Sendable {
+  private let lock = NSLock()
+  private var devices: [AudioObjectID: String] = [10: "builtin", 20: "usb-dac", 30: "headphones"]
+
+  var current: [AudioObjectID: String] { lock.withLock { devices } }
+  func set(_ devices: [AudioObjectID: String]) { lock.withLock { self.devices = devices } }
+}
+
 final class RouteFixture: @unchecked Sendable {
   let backend: WorkspaceAudioControlBackend
   let events = RouteEvents()
   let devices = DeviceFormatState()
+  let inventory = DeviceInventory()
 
   /// - Parameter rendersDuringHandoff: whether outgoing renderers keep
   ///   rendering while a handoff waits for them to fade out. False models a
@@ -1624,6 +1681,7 @@ final class RouteFixture: @unchecked Sendable {
   ) {
     let events = self.events
     let devices = self.devices
+    let inventory = self.inventory
     // Every test app is still running. Captured as background-only processes
     // so discovery keeps the backend's own rows rather than inventing new ones.
     let capture = AppRuntimeDiscovery.Capture(
@@ -1714,6 +1772,7 @@ final class RouteFixture: @unchecked Sendable {
       controllerRetryPause: retryPause ?? { _ in },
       handoffSilencePause: { if rendersDuringHandoff { events.pumpRenders() } },
       outputDeviceUIDProvider: { devices.outputUID(for: $0) },
+      deviceInventoryProvider: { inventory.current },
       deviceFormatObservationProvider: { devices.observation($0) },
       deviceFormatListenerNativeCalls: deviceFormatListenerNativeCalls
         ?? DeviceFormatListenerNativeCalls(add: { _, _, _ in noErr }, remove: { _, _, _ in noErr })
