@@ -76,6 +76,16 @@ final class PerAppTapController: @unchecked Sendable {
   /// first. Accessed only on `callbackQueue`, like the gain itself.
   private var equalizerHeadroomReleaseGeneration: UInt64 = 0
   private var adaptiveGain: Float
+  /// The gains the previous render callback ended on. Each callback ramps from
+  /// these to the current targets so no change lands as a step. Touched only
+  /// by the render callback, which runs on `callbackQueue`.
+  private var renderedEqualizerHeadroomGain: Float
+  /// Volume x boost x adaptive gain.
+  private var renderedLevelGain: Float
+  /// 1 while audible, 0 once a mute has faded out.
+  private var renderedMuteGain: Float
+  /// Frames a mute or unmute fades over (about 5 ms).
+  private let muteRampFrameCount: Float
   /// Testing reaches the controller's real disposal sequence while replacing
   /// only the Core Audio calls that require a live tap and renderer.
   private let teardownNativeCalls: PerAppTapControllerTeardownNativeCalls?
@@ -136,6 +146,10 @@ final class PerAppTapController: @unchecked Sendable {
     )
     let safeAdaptiveGainDB = adaptiveGainDB.isFinite ? min(3, max(-18, adaptiveGainDB)) : 0
     self.adaptiveGain = Float(pow(10, Double(safeAdaptiveGainDB) / 20))
+    self.renderedEqualizerHeadroomGain = equalizerHeadroomGain
+    self.renderedLevelGain = Self.sanitizedVolume(volume) * Self.sanitizedBoost(volumeBoost) * adaptiveGain
+    self.renderedMuteGain = muted ? 0 : 1
+    self.muteRampFrameCount = Float(max(1, audioFormatPlan.sampleRate * 0.005))
     self.callbackQueue = DispatchQueue(label: "com.waves.backend.tap.\(appID)", qos: .userInitiated)
     let initialState = TapRenderState(
       volume: Self.sanitizedVolume(volume),
@@ -211,6 +225,21 @@ final class PerAppTapController: @unchecked Sendable {
   func settledIsMutedForTesting() -> Bool {
     callbackQueue.sync {}
     return stateBox.read().isMuted != 0
+  }
+
+  /// Runs one render callback the way Core Audio would, after every queued
+  /// control write has landed.
+  func renderForTesting(
+    input: UnsafePointer<AudioBufferList>,
+    output: UnsafeMutablePointer<AudioBufferList>
+  ) {
+    callbackQueue.sync {
+      guard validatesCallbackGeometry(input, outputData: output) else {
+        zeroOutput(output)
+        return
+      }
+      renderTappedAudio(input, to: output)
+    }
   }
 
   var isActive: Bool {
@@ -349,34 +378,7 @@ final class PerAppTapController: @unchecked Sendable {
         return
       }
 
-      let currentState = self.stateBox.read()
-
-      guard currentState.isActive != 0 else {
-        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
-        self.zeroOutput(outOutputData)
-        return
-      }
-
-      if currentState.isMuted != 0 {
-        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
-        self.zeroOutput(outOutputData)
-        return
-      }
-
-      let volume = currentState.volume
-      let volumeBoost = currentState.volumeBoost
-      if volume == 0.0 {
-        self.stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
-        self.zeroOutput(outOutputData)
-        return
-      }
-
-      self.renderTappedAudio(
-        inputData,
-        to: outOutputData,
-        volume: volume,
-        volumeBoost: volumeBoost
-      )
+      self.renderTappedAudio(inputData, to: outOutputData)
     }
     // REALTIME_CALLBACK_AUDIT_END callback
 
@@ -810,19 +812,73 @@ final class PerAppTapController: @unchecked Sendable {
   // REALTIME_CALLBACK_AUDIT_END validatesCallbackGeometry
 
   // REALTIME_CALLBACK_AUDIT_BEGIN renderTappedAudio
+  /// The chain, in order: EQ headroom, the per-app and managed-audio EQs, the
+  /// adaptive analysis, then volume x boost x adaptive gain as one ramped gain
+  /// with the only float clamp. Analysis reads the signal before the user's
+  /// fader; the level meter reads the final output, which is what they hear.
   private func renderTappedAudio(
     _ inputData: UnsafePointer<AudioBufferList>?,
-    to outputData: UnsafeMutablePointer<AudioBufferList>,
-    volume: Float,
-    volumeBoost: Float
+    to outputData: UnsafeMutablePointer<AudioBufferList>
   ) {
-    guard let inputData else {
+    let state = stateBox.read()
+    guard state.isActive != 0, let inputData else {
+      stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
       zeroOutput(outputData)
       return
     }
 
     let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
     let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
+    let frameCount =
+      outputBuffers.count > 0
+      ? Int(outputBuffers[0].mDataByteSize) / audioFormatPlan.bytesPerFrame
+      : 0
+
+    // Mute fades over `muteRampFrameCount` frames, across as many callbacks as
+    // that takes; every other gain change ramps within this one buffer.
+    let isMuted = state.isMuted != 0
+    let muteStep = Float(frameCount) / muteRampFrameCount
+    let muteStart = renderedMuteGain
+    let muteEnd = isMuted ? max(0, muteStart - muteStep) : min(1, muteStart + muteStep)
+    let levelStart = renderedLevelGain
+    let requestedLevel = state.volume * state.volumeBoost * adaptiveGain
+    // Volume and boost are sanitized on write; this keeps a bad value from
+    // ever reaching the samples as a NaN or a jump. While a mute is still
+    // fading, the level may fall but not rise, so the fade only goes down.
+    let safeLevel = requestedLevel.isFinite ? requestedLevel : levelStart
+    let levelEnd = isMuted && muteStart > 0 ? min(safeLevel, levelStart) : safeLevel
+    // More headroom attenuation lands at once, as it always has: the EQ's own
+    // coefficients reach a new boost within about 20 ms, so attenuation that
+    // ramped across a longer buffer would arrive after the boost it protects
+    // against. Only the release ramps.
+    let headroomEnd =
+      equalizerHeadroomGain.isFinite ? equalizerHeadroomGain : renderedEqualizerHeadroomGain
+    let headroomStart = min(renderedEqualizerHeadroomGain, headroomEnd)
+    renderedMuteGain = muteEnd
+    renderedLevelGain = levelEnd
+    renderedEqualizerHeadroomGain = headroomEnd
+
+    let outputGainStart = levelStart * muteStart
+    let outputGainEnd = levelEnd * muteEnd
+    // A mute fade finishes on its own frame, not at the end of the buffer, so a
+    // large buffer cannot stretch it.
+    let outputRampFrameCount =
+      muteEnd != muteStart
+      ? Int((abs(muteEnd - muteStart) * muteRampFrameCount).rounded(.up))
+      : frameCount
+    guard outputGainStart != 0 || outputGainEnd != 0 else {
+      stateBox.writeLevels(peakLevel: 0, rmsLevel: 0, analysisRMS: 0, voiceBandEnergy: 0)
+      zeroOutput(outputData)
+      return
+    }
+    // A muted or zero-volume app is silent to the user, so it must not count as
+    // active for Adaptive Mix while it fades.
+    let analyzes = !isMuted && state.volume != 0
+    // At exact unity with no EQ, finite samples pass through untouched.
+    let clampsOutput =
+      outputGainStart != 1 || outputGainEnd != 1
+      || headroomStart != 1 || headroomEnd != 1
+      || !equalizerDSP.isBypassed || !managedAudioEqualizerDSP.isBypassed
 
     var analysisSum: Float = 0
     var analysisSampleCount: UInt32 = 0
@@ -833,8 +889,7 @@ final class PerAppTapController: @unchecked Sendable {
     var finalSampleCount: UInt32 = 0
     var channelOffset = 0
     let inputOffset = tapInputStreamOffset
-
-    let manualGain = volume * volumeBoost
+    let sampleFormat = audioFormatPlan.sampleFormat
 
     for index in outputBuffers.indices {
       let outputBuffer = outputBuffers[index]
@@ -862,61 +917,67 @@ final class PerAppTapController: @unchecked Sendable {
         memset(outputPointer.advanced(by: copyByteCount), 0, outputByteCount - copyByteCount)
       }
 
-      // Apply the combined compensation before either filter. EqualizerDSP
-      // clamps typed samples to their valid range, so pre-attenuation is the
-      // realtime-safe way to prevent stacked boosts from clipping internally.
-      TapDSP.scale(
+      // Headroom comes before either filter so stacked boosts have room.
+      TapDSP.applyGain(
         outputPointer,
         byteCount: copyByteCount,
-        format: audioFormatPlan.sampleFormat,
-        gain: equalizerHeadroomGain
+        format: sampleFormat,
+        channelsPerFrame: bufferChannelCount,
+        from: headroomStart,
+        to: headroomEnd,
+        clampsFloat: false
       )
       equalizerDSP.process(
         outputPointer,
         byteCount: copyByteCount,
-        format: audioFormatPlan.sampleFormat,
+        format: sampleFormat,
         bufferChannelCount: bufferChannelCount,
         channelOffset: currentChannelOffset
       )
       managedAudioEqualizerDSP.process(
         outputPointer,
         byteCount: copyByteCount,
-        format: audioFormatPlan.sampleFormat,
+        format: sampleFormat,
         bufferChannelCount: bufferChannelCount,
         channelOffset: currentChannelOffset
       )
-      TapDSP.scale(
+
+      // Adaptive analysis observes the user's EQ but neither their fader nor
+      // its own correction, so it can neither undo the fader nor chase itself.
+      if analyzes {
+        let (_, preFaderSum, preFaderSamples) = TapDSP.levels(
+          from: outputPointer,
+          byteCount: copyByteCount,
+          format: sampleFormat
+        )
+        analysisSum += preFaderSum
+        analysisSampleCount += preFaderSamples
+        let voice = voiceBandAnalyzer.analyze(
+          UnsafeRawPointer(outputPointer),
+          byteCount: copyByteCount,
+          format: sampleFormat,
+          bufferChannelCount: bufferChannelCount,
+          channelOffset: currentChannelOffset
+        )
+        voiceEnergySum += voice.energySum
+        voiceSampleCount += voice.sampleCount
+      }
+
+      TapDSP.applyGain(
         outputPointer,
         byteCount: copyByteCount,
-        format: audioFormatPlan.sampleFormat,
-        gain: manualGain
+        format: sampleFormat,
+        channelsPerFrame: bufferChannelCount,
+        from: outputGainStart,
+        to: outputGainEnd,
+        rampFrameCount: outputRampFrameCount,
+        clampsFloat: clampsOutput
       )
-
-      // Adaptive analysis observes the user's EQ and manual controls, but not
-      // its own temporary correction, so it cannot chase itself.
-      let (_, preAdaptiveSum, preAdaptiveSamples) = TapDSP.levels(
-        from: outputPointer,
-        byteCount: copyByteCount,
-        format: audioFormatPlan.sampleFormat
-      )
-      analysisSum += preAdaptiveSum
-      analysisSampleCount += preAdaptiveSamples
-      let voice = voiceBandAnalyzer.analyze(
-        UnsafeRawPointer(outputPointer),
-        byteCount: copyByteCount,
-        format: audioFormatPlan.sampleFormat,
-        bufferChannelCount: bufferChannelCount,
-        channelOffset: currentChannelOffset
-      )
-      voiceEnergySum += voice.energySum
-      voiceSampleCount += voice.sampleCount
-
-      TapDSP.scale(outputPointer, byteCount: copyByteCount, format: audioFormatPlan.sampleFormat, gain: adaptiveGain)
 
       let (bufferPeak, bufferSum, bufferSamples) = TapDSP.levels(
         from: outputPointer,
         byteCount: copyByteCount,
-        format: audioFormatPlan.sampleFormat
+        format: sampleFormat
       )
       finalPeak = max(finalPeak, bufferPeak)
       finalSum += bufferSum

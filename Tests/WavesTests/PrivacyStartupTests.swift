@@ -430,7 +430,6 @@ import WavesAudioCore
   fixture.store.setMuted(true, for: cachedApp)
   fixture.store.setVolumeBoost(3, for: cachedApp)
   fixture.store.setEqualizerEnabled(true, for: cachedApp)
-  fixture.store.setAdaptiveRole(.voice, for: cachedApp)
   fixture.store.setAdaptiveMixMode(.both)
   fixture.store.setOutputDevice(alternateDevice, for: cachedApp)
   fixture.store.togglePinned(cachedApp)
