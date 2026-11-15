@@ -1050,8 +1050,10 @@ enum MixerKeyboardCommand: Equatable, Sendable {
 
   func updatedVolume(for app: AudioApp) -> Float? {
     switch self {
-    case .increaseVolume: min(1, app.desiredVolume + 0.05)
-    case .decreaseVolume: max(0, app.desiredVolume - 0.05)
+    // The same tapered step as the slider's VoiceOver adjustment, so = and -
+    // move the thumb an even distance and the sound by an audible amount.
+    case .increaseVolume: VolumeTaper.steppedVolume(from: app.desiredVolume, increasing: true)
+    case .decreaseVolume: VolumeTaper.steppedVolume(from: app.desiredVolume, increasing: false)
     case .toggleMute, .cycleBoost, .togglePin: nil
     }
   }

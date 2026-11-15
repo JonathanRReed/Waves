@@ -482,8 +482,8 @@ import WavesAudioCore
   #expect(MixerRowAccessibility.outputDeviceMenuLabel == "Output Device")
 
   #expect(MixerKeyboardCommand.toggleMute.updatedMute(for: app) == true)
-  #expect(MixerKeyboardCommand.increaseVolume.updatedVolume(for: app) == 0.67)
-  #expect(MixerKeyboardCommand.decreaseVolume.updatedVolume(for: app) == 0.57)
+  #expect(MixerKeyboardCommand.increaseVolume.updatedVolume(for: app) == 0.7)
+  #expect(MixerKeyboardCommand.decreaseVolume.updatedVolume(for: app) == 0.54)
   #expect(MixerKeyboardCommand.cycleBoost.updatedBoost(for: app) == 2)
   #expect(MixerKeyboardCommand.togglePin.updatedPin(for: app) == true)
 

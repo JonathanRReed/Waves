@@ -59,32 +59,8 @@ struct MenuBarAppRow: View {
         .help("More controls")
       }
 
-      Slider(
-        value: Binding(
-          get: { Double(app.desiredVolume) },
-          set: { newValue in
-            store.setDesiredVolume(Float(newValue), for: app)
-          }
-        ),
-        in: 0...1,
-        onEditingChanged: { isEditing in
-          if !isEditing {
-            store.commitDesiredVolume(for: app)
-          }
-        }
-      )
-      .controlSize(.small)
-      .tint(theme.accent)
-      .padding(.leading, 28)
-      .help(volumeSemantics.help)
-      .accessibilityLabel(volumeSemantics.label)
-      .accessibilityValue(volumeSemantics.value ?? "")
-      .accessibilityHint(volumeSemantics.hint)
-      .accessibilitySortPriority(volumeSemantics.sortPriority)
-      .accessibilityAdjustableAction { direction in
-        adjustVolume(direction)
-      }
-      .disabled(!volumeSemantics.isEnabled)
+      TaperedVolumeSlider(app: app, semantics: volumeSemantics)
+        .padding(.leading, 28)
     }
     .overlay(alignment: .bottomLeading) {
       if showsLevelMeter {
@@ -124,10 +100,6 @@ struct MenuBarAppRow: View {
     .disabled(!muteSemantics.isEnabled)
   }
 
-  private var routePolicy: MixerRouteControlPolicy {
-    MixerRouteControlPolicy(app: app)
-  }
-
   private var volumeSemantics: MixerControlAccessibilitySemantics {
     accessibilitySemantics(for: .volume)
   }
@@ -159,23 +131,5 @@ struct MenuBarAppRow: View {
 
   private var showsLevelMeter: Bool {
     !app.isMuted && (app.routingState == .managed || app.routingState == .live)
-  }
-
-  private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
-    guard routePolicy.allowsAudioControl else { return }
-    let step: Float = 0.05
-    let nextValue: Float
-
-    switch direction {
-    case .increment:
-      nextValue = min(app.desiredVolume + step, 1)
-    case .decrement:
-      nextValue = max(app.desiredVolume - step, 0)
-    @unknown default:
-      return
-    }
-
-    store.setDesiredVolume(nextValue, for: app)
-    store.commitDesiredVolume(for: app)
   }
 }
