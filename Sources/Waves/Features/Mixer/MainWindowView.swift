@@ -10,6 +10,7 @@ struct MainWindowView: View {
   // Restored across launches so the user returns to the scope they left.
   @SceneStorage("waves.selectedScope") private var selection: MixerScope = .source(.running)
   @State private var editorContext: ProfileEditorContext?
+  @State private var isSavingCurrentMix = false
   @State private var muteShortcutContext: MuteShortcutContext?
 
   var body: some View {
@@ -59,6 +60,10 @@ struct MainWindowView: View {
       ProfileEditorSheet(context: context)
         .environment(store)
     }
+    .sheet(isPresented: $isSavingCurrentMix) {
+      SaveCurrentMixSheet()
+        .environment(store)
+    }
     .sheet(item: $muteShortcutContext) { context in
       MuteShortcutSheet(appID: context.id)
         .environment(store)
@@ -89,6 +94,7 @@ struct MainWindowView: View {
       // bar raised this before `openWindow`, so this fresh view never sees the
       // token change.
       handleMuteShortcutRequest()
+      handleSaveCurrentMixRequest()
     }
     .onChange(of: store.preferences.showRecentApps) { _, _ in
       validateSelection()
@@ -121,6 +127,9 @@ struct MainWindowView: View {
     }
     .onChange(of: store.muteShortcutToken) { _, _ in
       handleMuteShortcutRequest()
+    }
+    .onChange(of: store.saveCurrentMixToken) { _, _ in
+      handleSaveCurrentMixRequest()
     }
     .onDisappear { store.endLiveLevels() }
   }
@@ -207,6 +216,7 @@ struct MainWindowView: View {
       SidebarView(
         selection: $selection,
         onNewProfile: presentNewProfile,
+        onSaveCurrentMix: { isSavingCurrentMix = true },
         onEditProfile: presentEditProfile
       )
       .navigationSplitViewColumnWidth(min: 220, ideal: 248, max: 300)
@@ -288,7 +298,7 @@ struct MainWindowView: View {
 
   private var resetMixHelp: String {
     guard let restorePoint = store.mixRestorePoint else { return "Reset mix" }
-    return "Put every app back to how it was before \(restorePoint.profileName)."
+    return "Put every app's levels back to how they were before \(restorePoint.profileName)."
   }
 
   /// Per-app EQ lives in the Sound workspace now (one EQ surface, no side
@@ -302,6 +312,11 @@ struct MainWindowView: View {
   private func handleMuteShortcutRequest() {
     guard let appID = store.consumeMuteShortcutRequest() else { return }
     muteShortcutContext = MuteShortcutContext(id: appID)
+  }
+
+  private func handleSaveCurrentMixRequest() {
+    guard store.consumeSaveCurrentMixRequest() else { return }
+    isSavingCurrentMix = true
   }
 
   /// A persisted scope can become invalid: a `.recent` source after the user
@@ -486,6 +501,7 @@ private struct SidebarView: View {
   @Environment(\.wavesTheme) private var theme
   @Binding var selection: MixerScope
   let onNewProfile: () -> Void
+  let onSaveCurrentMix: () -> Void
   let onEditProfile: (Profile) -> Void
   // Deleting a profile discards a hand-tuned captured mix with no undo, so the
   // context menu's Delete asks first instead of firing on a single misclick.
@@ -525,9 +541,14 @@ private struct SidebarView: View {
 
       Section {
         if store.profiles.isEmpty {
-          Text("No profiles yet. Group apps with +")
-            .font(.caption)
-            .foregroundStyle(.tertiary)
+          Button(action: onSaveCurrentMix) {
+            Label(SaveCurrentMixSheet.title + "…", systemImage: "square.and.arrow.down.on.square")
+              .font(.caption)
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(theme.accent)
+          .help("Save every app's current levels as a new profile (⇧⌘S)")
+          .accessibilityHint("Saves every app's current levels as a new profile.")
         }
         ForEach(store.profiles) { profile in
           ProfileSidebarRow(profile: profile)
@@ -562,6 +583,17 @@ private struct SidebarView: View {
           .help("New Profile (⌘N)")
           .accessibilityLabel("New profile")
           .keyboardShortcut("n", modifiers: [.command])
+
+          Button(action: onSaveCurrentMix) {
+            Image(systemName: "square.and.arrow.down.on.square")
+              .font(.caption.weight(.semibold))
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(.secondary)
+          .help("Save Current Mix (⇧⌘S)")
+          .accessibilityLabel("Save current mix")
+          .accessibilityHint("Saves every app's current levels as a new profile.")
+          .keyboardShortcut("s", modifiers: [.command, .shift])
         }
       }
     }
@@ -645,7 +677,10 @@ private struct ProfileSidebarRow: View {
   private var subtitle: String {
     let count = profile.entries.count
     let noun = count == 1 ? "app" : "apps"
-    var text = profile.carriesLevels ? "\(count) \(noun) · levels" : "\(count) \(noun)"
+    var text = "\(count) \(noun)"
+    if let saved = profile.savedContentsPhrase {
+      text += " · \(saved)"
+    }
     if store.preferences.defaultProfileID == profile.id {
       text += " · startup"
     }
@@ -1121,7 +1156,7 @@ private struct ProfileHeaderView: View {
         }
         .wavesGlassProminentButton()
         .controlSize(.small)
-        .help("Set every app in this profile to its saved volume, mute, and boost.")
+        .help("Set every app in this profile to its saved \(profile.savedContentsPhrase ?? "levels").")
       }
 
       Button {
@@ -1143,7 +1178,7 @@ private struct ProfileHeaderView: View {
       return "\(visibleCount) \(visibleCount == 1 ? "result" : "results")"
     }
     let running = "\(visibleCount) of \(profile.entries.count) running"
-    return profile.carriesLevels ? "\(running) · carries saved levels" : "\(running) · group"
+    return profile.savedContentsPhrase.map { "\(running) · saved \($0)" } ?? "\(running) · group"
   }
 }
 

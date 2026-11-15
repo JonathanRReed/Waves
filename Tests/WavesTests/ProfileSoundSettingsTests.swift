@@ -178,3 +178,29 @@ private struct Envelope174: Decodable {
     old.payload.first?.entries
       == [ProfileEntry174(appID: "com.apple.TV", desiredVolume: 0.7, isMuted: false, volumeBoost: 1)])
 }
+
+@Test func savedContentsPhraseNamesWhatAProfileRestores() {
+  let group = Profile(name: "Group", entries: [ProfileEntry(appID: "a")])
+  let levels = Profile(name: "Levels", entries: [ProfileEntry(appID: "a", desiredVolume: 0.5)])
+  let sound = Profile(
+    name: "Sound",
+    entries: [
+      ProfileEntry(appID: "a", desiredVolume: 0.5, equalizer: EqualizerSettings()),
+      ProfileEntry(appID: "b", desiredVolume: 0.5, output: .systemDefault),
+    ]
+  )
+  let equalizerOnly = Profile(
+    name: "EQ", entries: [ProfileEntry(appID: "a", desiredVolume: 0.5, equalizer: EqualizerSettings())])
+
+  #expect(group.savedContentsPhrase == nil)
+  #expect(levels.savedContentsPhrase == "levels")
+  #expect(equalizerOnly.savedContentsPhrase == "levels and EQ")
+  #expect(sound.savedContentsPhrase == "levels, EQ, and outputs")
+}
+
+@Test func listPhraseShortensLongAppLists() {
+  #expect(AppStore.listPhrase(["Music"]) == "Music")
+  #expect(AppStore.listPhrase(["Music", "Zoom"]) == "Music and Zoom")
+  #expect(AppStore.listPhrase(["Music", "Zoom", "Safari"]) == "Music, Zoom, and Safari")
+  #expect(AppStore.listPhrase(["A", "B", "C", "D", "E"]) == "A, B, and 3 more")
+}

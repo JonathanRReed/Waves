@@ -26,6 +26,22 @@ import WavesAudioCore
   )
 }
 
+@Test @MainActor func saveCurrentMixSheetRendersInLightAndDark() async throws {
+  let fixture = try await makeRenderedUIFixture()
+  for appearance in [WavesAppearance.light, .dark] {
+    let view = SaveCurrentMixSheet()
+      .environment(fixture.store)
+      .wavesTheme(palette: .waves, appearance: appearance)
+      .frame(width: 420, height: 440)
+    try renderEvidence(
+      view,
+      filename: "save-current-mix-\(appearance.rawValue).png",
+      size: NSSize(width: 420, height: 440),
+      appearance: appearance
+    )
+  }
+}
+
 @Test @MainActor func soundWorkspaceRendersAcrossPalettesAndAppearances() async throws {
   let fixture = try await makeRenderedUIFixture()
   let variants: [(WavesPalette, WavesAppearance)] = [

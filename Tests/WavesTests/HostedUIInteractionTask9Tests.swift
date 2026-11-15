@@ -230,6 +230,54 @@ struct HostedUIInteractionTask9Tests {
   }
 
   @MainActor
+  @Test func hostedSaveCurrentMixDefaultActionAnnouncesAMissingName() async throws {
+    let announcements = Task9AnnouncementRecorder()
+    let fixture = try await makeTask9InteractionFixture(
+      app: task9InteractionApp(),
+      announcementPoster: AccessibilityAnnouncementPoster { announcement in
+        announcements.record(announcement)
+      }
+    )
+    defer { fixture.cleanup() }
+
+    let surface = try Task9HostedSurface(
+      rootView: SaveCurrentMixSheet()
+        .environment(fixture.store)
+        .frame(width: 420, height: 440)
+    )
+    defer { surface.close() }
+    let profilesBefore = fixture.store.profiles
+
+    #expect(surface.performDefaultAction())
+    #expect(announcements.recordedValues == ["Enter a profile name."])
+    #expect(fixture.store.profiles == profilesBefore)
+    #expect(surface.performCancelAction())
+  }
+
+  @MainActor
+  @Test func mainWindowOpensSaveCurrentMixWhenTheMenuBarAsks() async throws {
+    let fixture = try await makeTask9InteractionFixture(
+      app: task9InteractionApp(),
+      announcementPoster: AccessibilityAnnouncementPoster { _ in }
+    )
+    defer { fixture.cleanup() }
+
+    // The menu bar's "Save Current Mix…" raises this request, then opens the
+    // main window.
+    let requested = try Task9HostedSurface(
+      rootView: MainWindowView()
+        .environment(fixture.store)
+        .frame(width: 1100, height: 700)
+    )
+    defer { requested.close() }
+    #expect(!requested.hasAttachedSheet)
+    fixture.store.requestSaveCurrentMix()
+    requested.waitUntil { requested.hasAttachedSheet }
+    #expect(requested.hasAttachedSheet)
+    #expect(!fixture.store.saveCurrentMixRequested)
+  }
+
+  @MainActor
   @Test func productionAccessibilityBoundaryCoversSemanticsActionsFocusAndRotors() {
     let managed = task9InteractionApp()
     let yielded = task9InteractionApp(
@@ -328,6 +376,19 @@ private final class Task9HostedSurface<Content: View> {
 
   func close() {
     window.orderOut(nil)
+  }
+
+  var hasAttachedSheet: Bool { window.attachedSheet != nil }
+
+  func waitUntil(timeout: TimeInterval = 3, _ condition: () -> Bool) {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+      guard Date() < deadline else {
+        Issue.record("Timed out waiting for the hosted window")
+        return
+      }
+      RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
   }
 
   func focusKeyboardTarget() throws {

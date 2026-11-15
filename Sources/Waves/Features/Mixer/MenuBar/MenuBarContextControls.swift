@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct MenuBarContextControls: View {
@@ -48,6 +49,7 @@ private struct OutputDevicePicker: View {
 
 private struct ProfileQuickPicker: View {
   @Environment(AppStore.self) private var store
+  @Environment(\.openWindow) private var openWindow
 
   var body: some View {
     Menu {
@@ -62,10 +64,19 @@ private struct ProfileQuickPicker: View {
           }
         }
       }
-      if store.profiles.isEmpty {
-        Text("No profiles yet")
-          .foregroundStyle(.secondary)
+      if !store.profiles.isEmpty {
+        Divider()
       }
+      // The sheet lives in the main window, which may be closed; the request
+      // survives until the window appears and consumes it.
+      Button {
+        store.requestSaveCurrentMix()
+        openWindow(id: AppSceneID.mainWindow)
+        NSApp.activate(ignoringOtherApps: true)
+      } label: {
+        Label(SaveCurrentMixSheet.title + "…", systemImage: "square.and.arrow.down.on.square")
+      }
+      .help("Save every app's current levels as a new profile.")
       if let restorePoint = store.mixRestorePoint {
         Divider()
         Button {
@@ -73,7 +84,7 @@ private struct ProfileQuickPicker: View {
         } label: {
           Label("Reset Mix", systemImage: "arrow.uturn.backward.circle")
         }
-        .help("Put every app back to how it was before \(restorePoint.profileName).")
+        .help("Put every app's levels back to how they were before \(restorePoint.profileName).")
       }
     } label: {
       compactPickerLabel(
