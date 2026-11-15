@@ -1462,8 +1462,35 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return bound == expected
   }
 
+  func startNewControllerForTesting(
+    _ controller: PerAppTapController,
+    runtimeID: String,
+    start: @Sendable () throws -> Void
+  ) throws {
+    try startNewController(controller, runtimeID: runtimeID, start: start)
+  }
+
   func routeOutputBindingForTesting(runtimeID: String) -> RouteOutputBinding? {
     routeOutputBindingByRuntimeID[runtimeID]
+  }
+
+  /// Starts a controller that was just built. One that will not start is a
+  /// replacement that was never installed, and is discarded like any other:
+  /// while the app's live route plays, its tap is not told to un-mute.
+  func startNewController(
+    _ controller: PerAppTapController,
+    runtimeID: String,
+    start: () throws -> Void
+  ) throws {
+    do {
+      try start()
+    } catch {
+      logger.error(
+        "Controller start failed for \(controller.appName, privacy: .public): \(error.localizedDescription, privacy: .public)"
+      )
+      discardUnusedReplacement(controller, runtimeID: runtimeID)
+      throw error
+    }
   }
 
   /// Disposes a replacement that was built but not installed. It never left
@@ -1691,18 +1718,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
 
       controllerOwnsResources = true
-      do {
-        try controller.start()
-      } catch {
-        let cleanupDegradations = disposeController(controller)
-        retainCleanupDegradations(cleanupDegradations)
-        if !cleanupDegradations.isEmpty {
-          logger.error(
-            "Controller creation failed for \(app.displayName, privacy: .public): \(error.localizedDescription, privacy: .public). Cleanup also reported \(cleanupDegradations.count, privacy: .public) degradation(s)."
-          )
-        }
-        throw error
-      }
+      try startNewController(controller, runtimeID: app.id) { try controller.start() }
 
       return (controller, binding)
     }

@@ -483,6 +483,75 @@ private func maintenancePass(_ fixture: RouteFixture, from start: Int, ticks: In
   #expect(fixture.events.overlaps.isEmpty)
 }
 
+// MARK: - A replacement that will not start
+
+@Test func aReplacementThatWillNotStartNeverUnmutesItsTapBesideTheLiveRoute() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  let events = fixture.events
+  let replacement = try PerAppTapController.testingController(
+    appID: "app.a",
+    muted: true,
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: {
+        events.record("audible #99")
+        return noErr
+      },
+      stopIOProc: {
+        events.record("stop #99")
+        return noErr
+      },
+      restoreTapMuting: { noErr }
+    )
+  )
+
+  // #1 plays the app. The new controller's IO proc fails to start.
+  var startFailed = false
+  do {
+    try await backend.startNewControllerForTesting(replacement, runtimeID: "app.a") {
+      throw BackendError.managedRouteUnavailable("Injected start failure")
+    }
+  } catch {
+    startFailed = true
+  }
+  #expect(startFailed)
+  // Retired, not released: #1's route is the one the user hears.
+  #expect(events.values == ["stop #99"])
+  #expect(events.pumpRenders() == [1])
+}
+
+@Test func aLoneControllerThatWillNotStartIsReleasedFailOpen() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(routingState: .monitorOnly)])
+  let backend = fixture.backend
+  let events = fixture.events
+  let controller = try PerAppTapController.testingController(
+    appID: "app.a",
+    muted: true,
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: {
+        events.record("audible #99")
+        return noErr
+      },
+      stopIOProc: {
+        events.record("stop #99")
+        return noErr
+      },
+      restoreTapMuting: { noErr }
+    )
+  )
+  var startFailed = false
+  do {
+    try await backend.startNewControllerForTesting(controller, runtimeID: "app.a") {
+      throw BackendError.managedRouteUnavailable("Injected start failure")
+    }
+  } catch {
+    startFailed = true
+  }
+  #expect(startFailed)
+  #expect(events.values == ["audible #99", "stop #99"])
+}
+
 // MARK: - A move to a new default is never lost to newer work
 
 @Test func aVolumeEditThatOvertakesAMoveToTheNewDefaultStillMovesTheRoute() async throws {
