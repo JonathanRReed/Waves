@@ -68,6 +68,11 @@ final class PerAppTapController: @unchecked Sendable {
   private var tapInputStreamOffset = 0
   private let testingIsActive: Bool
   private let disposeOnce = IdempotentCleanupResult()
+  /// Whether this controller's tap is known to keep the app's own output
+  /// muted: true from creation until a mute release succeeds (and is not
+  /// rolled back) or the tap is destroyed.
+  private(set) var tapMutesApp = true
+  private var didReportFailOpenMuteRelease = false
   private var retainedCleanupDegradations: [CleanupDegradation] = []
   private var equalizerSettings: EqualizerSettings
   private var managedAudioEqualizerSettings: GlobalEqualizerSettings
@@ -593,6 +598,50 @@ final class PerAppTapController: @unchecked Sendable {
     return count
   }
 
+  /// True when the render path outputs nothing: stopped, or muted (a
+  /// retired route is silenced before its successor plays, and a new route
+  /// starts muted). Read after every queued control write has landed, so an
+  /// un-mute that was just applied is seen.
+  var rendererIsSilent: Bool {
+    callbackQueue.sync {
+      let state = stateBox.read()
+      return state.isActive == 0 || state.isMuted != 0
+    }
+  }
+
+  /// Releases this tap's mute and nothing else, so the app plays at its own
+  /// level, for a parked controller whose teardown failed and whose app has
+  /// no live route. Separate from teardown retries, which are bounded: losing
+  /// the app's last route must release the app however many teardowns failed.
+  /// Only a silent renderer is released; one still playing the app carries it
+  /// already, and its own output beside it would be a second copy. Returns a
+  /// degradation the first time the release fails, nothing after that.
+  func releaseTapMuteForFailOpen() -> [CleanupDegradation] {
+    guard tapMutesApp, rendererIsSilent else { return [] }
+    let status: OSStatus
+    if let teardownNativeCalls {
+      status = teardownNativeCalls.makeOriginalAudioAudible()
+    } else if #available(macOS 14.2, *) {
+      status = makeOriginalAudioAudible()
+    } else {
+      status = noErr
+    }
+    guard status != noErr else {
+      tapMutesApp = false
+      return []
+    }
+    guard !didReportFailOpenMuteRelease else { return [] }
+    didReportFailOpenMuteRelease = true
+    return checkedCleanupDegradations(from: [
+      CleanupStatusObservation(
+        appID: appID,
+        stage: .processTapReleaseMute,
+        nativeStatus: status,
+        detail: "Release a parked controller's tap mute after its app lost its live route"
+      )
+    ])
+  }
+
   @discardableResult
   /// Retries a teardown that previously failed. Distinct from `dispose()`,
   /// which stays idempotent so a second shutdown request never repeats
@@ -676,11 +725,16 @@ final class PerAppTapController: @unchecked Sendable {
       let preparation = MutingTapTeardownPreparation.perform(
         makeOriginalAudioAudible: {
           guard releasingTapMute else { return noErr }
+          let status: OSStatus
           if let teardownNativeCalls {
-            return teardownNativeCalls.makeOriginalAudioAudible()
+            status = teardownNativeCalls.makeOriginalAudioAudible()
+          } else if #available(macOS 14.2, *) {
+            status = makeOriginalAudioAudible()
+          } else {
+            status = noErr
           }
-          guard #available(macOS 14.2, *) else { return noErr }
-          return makeOriginalAudioAudible()
+          if status == noErr { tapMutesApp = false }
+          return status
         },
         stopIOProc: {
           if let teardownNativeCalls {
@@ -690,13 +744,20 @@ final class PerAppTapController: @unchecked Sendable {
           return AudioDeviceStop(aggregateDeviceID, procID)
         },
         restoreTapMuting: {
-          guard releasingTapMute else { return noErr }
+          let status: OSStatus
           if let teardownNativeCalls {
-            return teardownNativeCalls.restoreTapMuting()
+            status = teardownNativeCalls.restoreTapMuting()
+          } else if #available(macOS 14.2, *) {
+            status = restoreTapMuting()
+          } else {
+            status = noErr
           }
-          guard #available(macOS 14.2, *) else { return noErr }
-          return restoreTapMuting()
+          if status == noErr { tapMutesApp = true }
+          return status
         },
+        // Re-muting the tap after a failed stop is only right while this
+        // renderer still plays the app; a silent one would leave it silent.
+        rollsBackTapMuteOnStopFailure: releasingTapMute && !rendererIsSilent,
         deactivateRenderer: {
           stateBox.setInactive()
         }
@@ -790,7 +851,10 @@ final class PerAppTapController: @unchecked Sendable {
             detail: "Destroy controller process tap"
           )
         )
-        if destroyStatus == noErr { tapID = .unknown }
+        if destroyStatus == noErr {
+          tapID = .unknown
+          tapMutesApp = false
+        }
       }
 
       return finish()

@@ -92,11 +92,18 @@ struct MutingTapTeardownPreparationResult: Equatable, Sendable {
 /// renderer stays live so the muting tap cannot strand the target app in
 /// silence. A successful mute-property write may still be applied by HAL
 /// asynchronously, so the renderer is deactivated only after stop succeeds.
+///
+/// A stop that fails after the mute was released re-mutes the tap only when
+/// `rollsBackTapMuteOnStopFailure`: that rollback exists so a renderer that
+/// keeps playing the app is not heard beside the app's own output. A silent
+/// renderer (a retired route, or one muted in Waves) would carry nothing, so
+/// re-muting its tap would only leave the app silent.
 enum MutingTapTeardownPreparation {
   static func perform(
     makeOriginalAudioAudible: () -> OSStatus,
     stopIOProc: () -> OSStatus,
     restoreTapMuting: () -> OSStatus,
+    rollsBackTapMuteOnStopFailure: Bool = true,
     deactivateRenderer: () -> Void
   ) -> MutingTapTeardownPreparationResult {
     let muteReleaseStatus = makeOriginalAudioAudible()
@@ -121,7 +128,7 @@ enum MutingTapTeardownPreparation {
     return MutingTapTeardownPreparationResult(
       tapMuteReleaseStatus: muteReleaseStatus,
       ioProcStopStatus: stopStatus,
-      tapMuteRestoreStatus: restoreTapMuting(),
+      tapMuteRestoreStatus: rollsBackTapMuteOnStopFailure ? restoreTapMuting() : nil,
       didAttemptIOProcStop: true
     )
   }

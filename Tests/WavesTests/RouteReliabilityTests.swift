@@ -277,6 +277,152 @@ final class BudgetBox {
   #expect(fixture.events.overlaps.isEmpty)
 }
 
+// MARK: - A parked controller never outlives its app's audibility
+
+/// Ticks enough for one route-maintenance pass.
+private func maintenancePass(_ backend: WorkspaceAudioControlBackend, from start: Int) async {
+  for tick in 0..<20 {
+    await backend.updateAudioLevels(at: .seconds(start + tick))
+  }
+}
+
+@Test func aRetireeWhoseTeardownIsExhaustedIsReleasedOnceItsSuccessorGoes() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // #1 is retired by a move and will not stop. Every teardown retry fails
+  // while #2 plays, until the retry allowance is spent.
+  fixture.events.failNextStops(1_000)
+  let move = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  #expect(move.outcome == .applied)
+  for pass in 0..<WorkspaceAudioControlBackend.maxOrphanDisposeRetries {
+    await maintenancePass(backend, from: 10 + pass * 20)
+  }
+  #expect(fixture.events.lastTapMuteEvent(serial: 1) == nil)
+
+  // The user excludes the app: #2 goes, fail open. #1 is silent and its tap
+  // still mutes the app, so the next pass must release it.
+  fixture.events.failNextStops(0)
+  let exclusion = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 11, isExcluded: true)
+  )
+  #expect(exclusion.outcome == .excluded)
+  await maintenancePass(backend, from: 200)
+  #expect(fixture.events.lastTapMuteEvent(serial: 1) == "audible #1")
+  #expect(fixture.events.pumpRenders().isEmpty)
+
+  // The exhaustion row described what was true at the time.
+  let result = await backend.shutdownWithResult()
+  let row = try #require(result.degradations.first { $0.detail?.contains("attempts") == true })
+  #expect(row.detail?.contains("stays muted while the app's current route plays") == true)
+  #expect(row.detail?.contains("fail-open") != true)
+}
+
+@Test func quittingReleasesASilentRetireeThatWillNotStop() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.failNextStops(1_000)
+  _ = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  #expect(await backend.lifecycleDebugSnapshot().orphanedControllers == 1)
+
+  _ = await backend.shutdownWithResult()
+
+  // Its stop fails again, but its renderer is silent: re-muting its tap
+  // would leave the app silent, so the release stands.
+  #expect(fixture.events.lastTapMuteEvent(serial: 1) == "audible #1")
+}
+
+@Test func failedTeardownsCannotAccumulateWithoutBound() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.failNextStops(1_000)
+
+  // Each output change parks the route it replaced.
+  let outputs = ["usb-dac", "headphones", "builtin"]
+  var outcomes: [AppIntentApplyOutcome] = []
+  for (offset, output) in outputs.enumerated() {
+    let result = await backend.applyAppIntent(
+      routeIntent(appID: "app.a", volume: 0.5, generation: UInt64(10 + offset), targetDeviceUID: output)
+    )
+    outcomes.append(result.outcome)
+  }
+
+  // Two parked; the third change is refused and the current route keeps
+  // playing the app.
+  #expect(outcomes == [.applied, .applied, .failed])
+  let lifecycle = await backend.lifecycleDebugSnapshot()
+  #expect(lifecycle.orphanedControllers == WorkspaceAudioControlBackend.maxParkedControllersPerApp)
+  #expect(lifecycle.liveControllers == 1)
+  #expect(fixture.events.creations == 2)
+  #expect(fixture.events.pumpRenders() == [3])
+}
+
+@Test func aParkedRendererThatStillPlaysIsSilencedBeforeANewRouteIsHeard() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // Excluding the app releases #1 fail open, but its tap will not release,
+  // so its renderer keeps carrying the app (that is the fail-open path).
+  fixture.events.failNextMuteReleases(1)
+  _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 10, isExcluded: true))
+  #expect(fixture.events.pumpRenders() == [1])
+
+  // The user manages the app again. Only the new route may be heard.
+  let managed = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 11))
+  #expect(managed.outcome == .applied)
+  #expect(fixture.events.pumpRenders() == [2])
+  #expect(fixture.events.overlaps.isEmpty)
+}
+
+@Test func aParkedRendererWhoseTapWillNotReleaseCarriesTheAppAgainWhenItsRouteGoes() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.4)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  // #1 is retired by a move and will not stop; it is silent.
+  fixture.events.failNextStops(1_000)
+  _ = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.4, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  // #2's route goes (the user excludes the app) and #1's tap will never
+  // release. The app must not be left silent: #1 carries it again, at the
+  // level the user set.
+  fixture.events.failNextStops(0)
+  _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.4, generation: 11, isExcluded: true))
+  fixture.events.failNextMuteReleases(1_000)
+  fixture.events.failNextStops(1_000)
+  await maintenancePass(backend, from: 10)
+
+  #expect(fixture.events.pumpRenders() == [1])
+  let parked = try #require(fixture.events.controller(serial: 1))
+  #expect(parked.settledGainsForTesting().volume == 0.4)
+}
+
+@Test func twoParkedRenderersNeverCarryTheSameAppTogether() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.4)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.failNextStops(1_000)
+  _ = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.4, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  // Excluding the app parks #2 too, and neither tap will release: #2 keeps
+  // carrying the app, so silent #1 must not join it.
+  fixture.events.failNextMuteReleases(1_000)
+  _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.4, generation: 11, isExcluded: true))
+  await maintenancePass(backend, from: 10)
+
+  #expect(fixture.events.pumpRenders() == [2])
+  #expect(fixture.events.overlaps.isEmpty)
+}
+
 // MARK: - A move to a new default is never lost to newer work
 
 @Test func aVolumeEditThatOvertakesAMoveToTheNewDefaultStillMovesTheRoute() async throws {
@@ -1227,6 +1373,7 @@ final class RouteEvents: @unchecked Sendable {
   private var serial = 0
   private var failuresRemaining = 0
   private var stopFailuresRemaining = 0
+  private var muteReleaseFailuresRemaining = 0
   private var created: [Int: (appID: String, controller: PerAppTapController)] = [:]
 
   var values: [String] { lock.withLock { recorded } }
@@ -1259,6 +1406,24 @@ final class RouteEvents: @unchecked Sendable {
       guard stopFailuresRemaining > 0 else { return false }
       stopFailuresRemaining -= 1
       return true
+    }
+  }
+
+  func failNextMuteReleases(_ count: Int) { lock.withLock { muteReleaseFailuresRemaining = count } }
+
+  func consumeMuteReleaseFailure() -> Bool {
+    lock.withLock {
+      guard muteReleaseFailuresRemaining > 0 else { return false }
+      muteReleaseFailuresRemaining -= 1
+      return true
+    }
+  }
+
+  /// The last thing that happened to a controller's tap mute: "audible"
+  /// (released, the app plays at its own level) or "muted" (re-muted).
+  func lastTapMuteEvent(serial: Int) -> String? {
+    lock.withLock {
+      recorded.last { $0 == "audible #\(serial)" || $0 == "muted #\(serial)" }
     }
   }
 
@@ -1418,6 +1583,10 @@ final class RouteFixture: @unchecked Sendable {
           muted: app.isMuted,
           teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
             makeOriginalAudioAudible: {
+              guard !events.consumeMuteReleaseFailure() else {
+                events.record("release failed #\(serial)")
+                return -1
+              }
               events.record("audible #\(serial)")
               return noErr
             },
@@ -1429,7 +1598,10 @@ final class RouteFixture: @unchecked Sendable {
               events.record("stop #\(serial)")
               return noErr
             },
-            restoreTapMuting: { noErr }
+            restoreTapMuting: {
+              events.record("muted #\(serial)")
+              return noErr
+            }
           )
         )
         events.remember(controller, serial: serial, appID: app.id)

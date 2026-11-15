@@ -75,6 +75,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   var orphanedControllers: [PerAppTapController] = []
   var orphanDisposeAttempts: [ObjectIdentifier: Int] = [:]
   static let maxOrphanDisposeRetries = 5
+  /// Parked controllers one app may accumulate before Waves stops building
+  /// new routes for it: each failed handoff parks one, and each holds a tap,
+  /// an aggregate device and an IO proc that cannot be freed.
+  static let maxParkedControllersPerApp = 2
   let routeMaintenanceTickInterval = 20
   let staleRouteThresholdTicks = 24
   var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
@@ -1427,6 +1431,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if let incumbent {
       retireController(incumbent)
     }
+    silenceParkedControllers(forRuntimeID: app.id)
     // Only now, with the incumbent silent and stopped, does the replacement
     // fade in to the app's level.
     controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
@@ -1480,6 +1485,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let maxRetries = 3
     var lastError: Error?
     var currentProcessTarget = processTarget
+    // Bounds what failed teardowns can accumulate: no new route for an app
+    // whose earlier routes have not closed.
+    guard parkedControllerCount(forRuntimeID: app.id) < Self.maxParkedControllersPerApp else {
+      throw BackendError.managedRouteUnavailable(
+        "Waves couldn't close earlier audio routes for \(app.displayName), so it won't start another for now. Restarting Waves clears them."
+      )
+    }
 
     for attempt in 1...maxRetries {
       try ensureAcceptingOperations()
