@@ -72,3 +72,46 @@ jobs:
             dist/package-*.log
           if-no-files-found: warn
           retention-days: 14
+
+  sequoia-tests:
+    # Advisory: the oldest hosted macOS image (macos-14 was retired on
+    # 2026-11-02). It cannot fail the workflow or the quality gate above.
+    name: Ordinary tests on macOS 15 (advisory)
+    runs-on: macos-15
+    timeout-minutes: 90
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      # The newest Xcode on macos-15; its macOS 26.2 SDK builds this package.
+      XCODE_APP: /Applications/Xcode_26.3.app
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Xcode 26.3 and its macOS 26 SDK
+        run: |
+          set -euo pipefail
+          if [ ! -d "$XCODE_APP" ]; then
+            echo "::error::$XCODE_APP is not on this image. Installed: $(echo /Applications/Xcode_*.app)"
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+          if [ "${SDK_VERSION%%.*}" -lt 26 ]; then
+            echo "::error::$XCODE_APP provides macOS SDK $SDK_VERSION; this package needs a macOS 26 SDK."
+            exit 1
+          fi
+          sw_vers
+          echo "macOS SDK $SDK_VERSION"
+          swift --version
+
+      - name: Run the ordinary Swift test suite
+        run: |
+          set -euo pipefail
+          TEST_HOME="$(mktemp -d)"
+          HOME="$TEST_HOME" CFFIXED_USER_HOME="$TEST_HOME" swift test --skip RenderedUISmokeTests
