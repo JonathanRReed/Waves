@@ -485,6 +485,26 @@ Each has been missed at least once:
 - [ ] `site.ts` and `src/data/CHANGELOG.md` on the site — the download button
 - [ ] `Casks/waves.rb` in the tap repo — Homebrew
 
+## Verify Every Channel
+
+The last step of every release. After the GitHub release, site deploy and tap
+push, run from any checkout:
+
+```bash
+./script/verify-publication.rb
+```
+
+It reads only public URLs, needs no credentials, and checks the version and
+build in `release/metadata.json` (or `./script/verify-publication.rb X.Y.Z BUILD`):
+the GitHub release exists, is not a draft or prerelease, and is the latest; the
+DMG downloaded without authentication matches `Waves.dmg.sha256`; the live
+appcast's newest item has that version and build, points at that DMG, has its
+exact length, and carries an EdDSA signature; every download link on the site
+points at the release and the newest changelog entry is the version; the tap
+cask has the version and the downloaded DMG's SHA-256. It prints one line per
+check and exits non-zero on any mismatch. The release is not finished until it
+passes.
+
 ## Rollback and Recovery
 
 Before installing a release candidate or production update, quit Waves and back
