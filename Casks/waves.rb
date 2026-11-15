@@ -9,8 +9,7 @@ cask "waves" do
   version "1.7.4"
   sha256 "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
 
-  url "https://github.com/JonathanRReed/Waves/releases/download/v#{version}/Waves.dmg",
-      verified: "github.com/JonathanRReed/Waves/"
+  url "https://github.com/JonathanRReed/Waves/releases/download/v#{version}/Waves.dmg"
   name "Waves"
   desc "Native per-app audio mixer"
   homepage "https://github.com/JonathanRReed/Waves"
@@ -19,6 +18,9 @@ cask "waves" do
     url :url
     strategy :github_latest
   end
+
+  # Waves updates itself with Sparkle.
+  auto_updates true
 
   # Per-app routing requires Core Audio process taps — macOS 14.2 is the floor
   # (matches LSMinimumSystemVersion). Homebrew's depends_on only understands
