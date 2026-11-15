@@ -242,11 +242,11 @@ public enum AdaptiveMixing {
     case .lectureFocus:
       let priority: AdaptivePriority
       switch contentType {
-      case .lectureOrVoice:
+      case .lectureOrVoice, .meeting:
         priority = .foreground
       case .music:
         priority = .background
-      case .meeting, .videoOrMedia, .game, .other:
+      case .videoOrMedia, .game, .other:
         priority = .normal
       }
       return AdaptiveAppPolicy(contentType: contentType, priority: priority)
@@ -580,8 +580,10 @@ public struct AdaptivePolicyEngine: Sendable {
 
     var activePriorityRanks: [Int] = []
     activePriorityRanks.reserveCapacity(inputs.count)
+    var speakingPriorityRanks: [Int] = []
     var effectivePriorities: [String: AdaptivePriority] = [:]
     effectivePriorities.reserveCapacity(inputs.count)
+    var speakingAppIDs: Set<String> = []
 
     for input in inputs {
       let routeIsEligible = input.isManaged && !input.isMuted
@@ -595,6 +597,7 @@ public struct AdaptivePolicyEngine: Sendable {
         )
         speechDetectionStates[input.appID] = state
         isActive = routeIsEligible && detected
+        if isActive { speakingAppIDs.insert(input.appID) }
       } else {
         isActive =
           routeIsEligible
@@ -606,16 +609,14 @@ public struct AdaptivePolicyEngine: Sendable {
       effectivePriorities[input.appID] = effectivePriority
       if isActive, let focusRank = effectivePriority.focusRank {
         activePriorityRanks.append(focusRank)
+        if speakingAppIDs.contains(input.appID) {
+          speakingPriorityRanks.append(focusRank)
+        }
       }
     }
 
-    let focusPriority: AdaptivePriority?
-    switch activePriorityRanks.max() {
-    case 2: focusPriority = .foreground
-    case 1: focusPriority = .normal
-    case 0: focusPriority = .background
-    default: focusPriority = nil
-    }
+    let focusPriority = Self.focusPriority(rank: activePriorityRanks.max())
+    let speechFocusPriority = Self.focusPriority(rank: speakingPriorityRanks.max())
 
     var result: [String: Float] = [:]
     result.reserveCapacity(inputs.count)
@@ -628,10 +629,14 @@ public struct AdaptivePolicyEngine: Sendable {
       }
 
       let routeIsEligible = input.isManaged && !input.isMuted
+      // An app carrying speech is only turned down for other speech, unless
+      // the user explicitly put it in the background.
+      let isProtectedSpeech =
+        speakingAppIDs.contains(input.appID) && input.policy.priority != .background
       let priorityGain =
         usesPriorityDucking && routeIsEligible
         ? AdaptiveMixing.priorityAttenuationDB(
-          focus: focusPriority,
+          focus: isProtectedSpeech ? speechFocusPriority : focusPriority,
           app: effectivePriorities[input.appID] ?? input.policy.priority
         )
         : 0
@@ -660,6 +665,15 @@ public struct AdaptivePolicyEngine: Sendable {
       result[input.appID] = Float(gain)
     }
     return result
+  }
+
+  private static func focusPriority(rank: Int?) -> AdaptivePriority? {
+    switch rank {
+    case 2: .foreground
+    case 1: .normal
+    case 0: .background
+    default: nil
+    }
   }
 
   private func effectivePriority(
