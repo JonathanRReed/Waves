@@ -466,6 +466,41 @@ import WavesAudioCore
   )
 }
 
+@Test @MainActor func renderedInterfacePolishRowsInLightAndDark() async throws {
+  let fixture = try await makeRenderedUIFixture()
+  // Adaptive Mix holding the music back and lifting the lecture.
+  fixture.store.adaptiveGainsDBByAppID = ["music.background": -6.3, "edu.lecture": 2.2]
+  fixture.store.preferences.appEqualizerSettings["music.background"] = EqualizerSettings(isEnabled: true)
+  let apps = Array(fixture.store.session.apps.prefix(3))
+
+  for appearance in [WavesAppearance.light, .dark] {
+    let rows = ZStack {
+      WavesBackground()
+      HStack(alignment: .top, spacing: 24) {
+        VStack(alignment: .leading, spacing: 4) {
+          ForEach(apps) { app in MixerRowView(app: app) }
+        }
+        .frame(width: 760)
+        VStack(alignment: .leading, spacing: 10) {
+          ForEach(apps) { app in MenuBarAppRow(app: app) }
+        }
+        .padding(8)
+        .frame(width: MenuBarLayout.panelWidth - 24)
+      }
+      .padding(24)
+    }
+    .environment(fixture.store)
+    .wavesTheme(palette: .waves, appearance: appearance)
+    .frame(width: 1180, height: 230)
+    try renderEvidence(
+      rows,
+      filename: "polish-rows-\(appearance.rawValue).png",
+      size: NSSize(width: 1180, height: 230),
+      appearance: appearance
+    )
+  }
+}
+
 @Test func primarySurfaceAccessibilityAndKeyboardContractsMatchRenderedControls() {
   for pane in SettingsPane.allCases {
     #expect(pane.accessibilityLabel == "\(pane.title) settings, \(pane.subtitle)")

@@ -292,6 +292,7 @@ struct MixerRowView: View {
               if routePolicy.offersRecovery {
                 RouteRecoveryButton(app: app, compact: false)
               }
+              AdaptiveGainTag(appID: app.logicalID, appName: app.displayName)
             }
           }
         }

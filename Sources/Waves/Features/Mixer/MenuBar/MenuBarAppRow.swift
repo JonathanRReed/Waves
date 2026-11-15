@@ -31,6 +31,8 @@ struct MenuBarAppRow: View {
 
         RoutingStateDot(app: app)
 
+        AdaptiveGainTag(appID: app.logicalID, appName: app.displayName)
+
         Spacer(minLength: 4)
 
         Text(MenuBarRowAccessibility.volumeValue(for: app))

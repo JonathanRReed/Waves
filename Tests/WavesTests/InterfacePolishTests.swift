@@ -25,6 +25,117 @@ import WavesAudioCore
   #expect(fixture.store.session.apps.first?.desiredVolume == 1)
 }
 
+// MARK: - Adaptive Mix tag
+
+@Test func adaptiveGainReadoutAppearsAtHalfADecibelAndRoundsToWholeDecibels() {
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: nil, previous: nil) == nil)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: -0.49, previous: nil) == nil)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: -0.5, previous: nil) == -1)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: 0.6, previous: nil) == 1)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: -4.2, previous: nil) == -4)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: -4.6, previous: nil) == -5)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: 3.4, previous: nil) == 3)
+}
+
+@Test func adaptiveGainReadoutHoldsAcrossTheThresholdAndRoundingBoundaries() {
+  // Hovering just under the appear threshold keeps a tag that is already up.
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: -0.4, previous: -1) == -1)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: -0.34, previous: -1) == nil)
+
+  // A gain wobbling around -4.5 dB does not flip between -4 and -5.
+  var shown: Int? = nil
+  var changes = 0
+  for gain: Float in [-4.4, -4.6, -4.45, -4.55, -4.5, -4.62, -4.38, -4.7] {
+    let next = AdaptiveGainReadout.displayedDecibels(gain: gain, previous: shown)
+    if next != shown { changes += 1 }
+    shown = next
+  }
+  #expect(changes == 1)
+  #expect(shown == -4)
+
+  // A real move still updates.
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: -5.8, previous: -4) == -6)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: 2, previous: -1) == 2)
+}
+
+@Test func adaptiveGainReadoutRejectsNonFiniteGains() {
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: .nan, previous: -3) == nil)
+  #expect(AdaptiveGainReadout.displayedDecibels(gain: -.infinity, previous: nil) == nil)
+}
+
+@Test func adaptiveGainReadoutWordsTheChange() {
+  #expect(AdaptiveGainReadout.text(decibels: -4) == "\u{2212}4 dB")
+  #expect(AdaptiveGainReadout.text(decibels: 3) == "+3 dB")
+  #expect(
+    AdaptiveGainReadout.accessibilityLabel(decibels: -4, appName: "Spotify")
+      == "Adaptive Mix is turning Spotify down by 4 dB right now.")
+  #expect(
+    AdaptiveGainReadout.accessibilityLabel(decibels: 2, appName: "Zoom")
+      == "Adaptive Mix is turning Zoom up by 2 dB right now.")
+}
+
+@MainActor
+@Test func adaptiveGainTagShowsWhileTheEngineIsApplyingAGain() async throws {
+  let app = polishApp()
+  let fixture = try await makePolishFixture(apps: [app])
+  defer { fixture.cleanup() }
+  let surface = PolishHostedSurface(
+    rootView: AdaptiveGainTag(appID: app.logicalID, appName: app.displayName)
+      .environment(fixture.store)
+  )
+  defer { surface.close() }
+  #expect(surface.hostingView.fittingSize.width == 0)
+
+  fixture.store.adaptiveGainsDBByAppID[app.logicalID] = -4.2
+  surface.pump()
+  let shownWidth = surface.hostingView.fittingSize.width
+  #expect(shownWidth > 20)
+
+  // A different value keeps the same width, so nothing beside it moves.
+  fixture.store.adaptiveGainsDBByAppID[app.logicalID] = -11.8
+  surface.pump()
+  #expect(surface.hostingView.fittingSize.width == shownWidth)
+
+  // Another app's gain does not show on this row.
+  fixture.store.adaptiveGainsDBByAppID = ["com.example.other": -6]
+  surface.pump(0.3)
+  #expect(surface.hostingView.fittingSize.width == 0)
+}
+
+/// Rows and lists must not read the fast-changing store state themselves; only
+/// the leaf views built for it may. A row that read `adaptiveGainsDBByAppID` or
+/// `liveLevels` would re-render, and the list would re-diff, ten times a second.
+@Test func onlyLeafViewsReadFastChangingStoreState() throws {
+  let viewsRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("Sources/Waves", isDirectory: true)
+  let allowed: [String: Set<String>] = [
+    "adaptiveGainsDBByAppID": ["AdaptiveGainTag.swift"],
+    "liveLevels": ["RowLevelMeter.swift"],
+  ]
+  let viewDirectories = ["Features", "Shared/UI", "Settings", "App"]
+  for directory in viewDirectories {
+    let enumerator = try #require(
+      FileManager.default.enumerator(
+        at: viewsRoot.appendingPathComponent(directory), includingPropertiesForKeys: nil))
+    for case let file as URL in enumerator where file.pathExtension == "swift" {
+      let source = try String(contentsOf: file, encoding: .utf8)
+      for (property, files) in allowed where source.contains(property) {
+        // Comments may name the property; code may not.
+        let codeLines = source.split(separator: "\n").filter {
+          !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//")
+            && $0.contains(property)
+        }
+        #expect(
+          codeLines.isEmpty || files.contains(file.lastPathComponent),
+          "\(file.lastPathComponent) reads \(property)")
+      }
+    }
+  }
+}
+
 // MARK: - Fixtures
 
 @MainActor
