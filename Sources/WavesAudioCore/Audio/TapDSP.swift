@@ -59,6 +59,9 @@ public enum TapDSP {
   ) {
     let channels = max(1, channelsPerFrame)
     let isUnity = startGain == 1.0 && endGain == 1.0
+    // A settled gain is the steady state for every managed app, so it skips
+    // the per-sample frame arithmetic a ramp needs.
+    let isRamp = startGain != endGain
 
     switch format {
     case .float32:
@@ -72,7 +75,7 @@ public enum TapDSP {
           continue
         }
         guard !isUnity || clampsFloat else { continue }
-        let gain = rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount)
+        let gain = isRamp ? rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount) : endGain
         let scaled = sample * gain
         pointer[index] = clampsFloat ? min(1.0, max(-1.0, scaled)) : scaled
       }
@@ -83,7 +86,7 @@ public enum TapDSP {
       let count = byteCount / MemoryLayout<Int16>.size
       let frameCount = count / channels
       for index in 0..<count {
-        let gain = rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount)
+        let gain = isRamp ? rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount) : endGain
         pointer[index] = scaleSigned16(pointer[index], gain: gain)
       }
     case .int32:
@@ -92,7 +95,7 @@ public enum TapDSP {
       let count = byteCount / MemoryLayout<Int32>.size
       let frameCount = count / channels
       for index in 0..<count {
-        let gain = rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount)
+        let gain = isRamp ? rampGain(from: startGain, to: endGain, frame: index / channels, of: frameCount) : endGain
         pointer[index] = scaleSigned32(pointer[index], gain: gain)
       }
     case .unknown:
