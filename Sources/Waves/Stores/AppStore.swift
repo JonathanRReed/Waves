@@ -112,6 +112,8 @@ final class AppStore {
   var shutdownTask: Task<AppShutdownResult, Never>?
   var shutdownResult: AppShutdownResult?
   var ownedOperationTasks: [UUID: Task<Void, Never>] = [:]
+  /// The refresh in flight, so an external caller can wait for its outcome.
+  @ObservationIgnored var refreshTask: Task<Bool, Never>?
   var hasStartedAudioBackend = false
   // Captured once at init from DeviceVolumePresetsStore.load(); consumed (and
   // toasted) the first time start() runs so a corrupt-file recovery is

@@ -434,36 +434,59 @@ extension AppStore {
     announce: Bool = true,
     reevaluateAutomation: Bool = true
   ) {
-    guard requireAudioRunning() else { return }
-    guard !isRefreshing else { return }
+    startRefresh(announce: announce, reevaluateAutomation: reevaluateAutomation)
+  }
+
+  /// Starts a refresh, or returns the one already running, as a task that
+  /// reports whether the rescan succeeded. Nil when audio is not running.
+  @discardableResult
+  func startRefresh(
+    announce: Bool,
+    reevaluateAutomation: Bool
+  ) -> Task<Bool, Never>? {
+    guard requireAudioRunning() else { return nil }
+    guard !isRefreshing else { return refreshTask }
 
     isRefreshing = true
     isLoading = session.apps.isEmpty
-    startOwnedOperation { store in
-      await store.performRefresh(
+    let task = Task { @MainActor [weak self] () -> Bool in
+      guard let self else { return false }
+      return await self.performRefresh(
         announce: announce,
         reevaluateAutomation: reevaluateAutomation
       )
     }
+    refreshTask = task
+    // Shutdown cancels and awaits owned operations; forward that to the scan.
+    let owned = startOwnedOperation { _ in
+      await withTaskCancellationHandler {
+        _ = await task.value
+      } onCancel: {
+        task.cancel()
+      }
+    }
+    if !owned { task.cancel() }
+    return task
   }
 
   private func performRefresh(
     announce: Bool,
     reevaluateAutomation: Bool
-  ) async {
+  ) async -> Bool {
     defer {
       isRefreshing = false
       isLoading = false
+      refreshTask = nil
     }
 
     do {
       let knownAppIDs = Set(session.apps.map(\.logicalID))
       let refreshed = try await backend.refresh()
-      guard !Task.isCancelled, startupState == .running else { return }
+      guard !Task.isCancelled, startupState == .running else { return false }
       session = mergedSession(with: refreshed, cached: session)
       cleanupStaleEntries()
       await restoreNewlyAppearedConfiguredApps(excluding: knownAppIDs)
-      guard !Task.isCancelled, startupState == .running else { return }
+      guard !Task.isCancelled, startupState == .running else { return false }
       persistSessionSnapshot()
       diagnostics = await backend.diagnosticsReport()
       onboarding.captureAuthorization = await backend.captureAuthorizationResult()
@@ -475,9 +498,11 @@ extension AppStore {
         let visibleCount = visibleApps.count
         showToast(title: "Library refreshed", detail: "\(visibleCount) app\(visibleCount == 1 ? "" : "s") detected.", kind: .info)
       }
+      return true
     } catch {
-      guard startupState == .running else { return }
+      guard startupState == .running else { return false }
       showToast(title: "Refresh failed", detail: error.localizedDescription, kind: .error)
+      return false
     }
   }
 
@@ -619,49 +644,30 @@ extension AppStore {
   private func handleAutomationCommand(_ command: AutomationCommand) {
     switch command {
     case let .setVolume(appID, volume):
-      guard let app = session.apps.first(matchingAppKey: appID) else {
-        showToast(
-          title: "URL command blocked",
-          detail: "App not found: \(String(appID.prefix(64)))",
-          kind: .warning
-        )
-        return
-      }
-      guard !isExcluded(app) else {
-        showToast(
-          title: "URL command blocked",
-          detail: "App is excluded from Waves.",
-          kind: .warning
-        )
-        return
-      }
+      guard let app = urlAutomationTarget(appID) else { return }
       commitDesiredVolume(volume, for: app, reason: .automation)
 
     case let .setMuted(appID, isMuted):
-      guard let app = session.apps.first(matchingAppKey: appID) else {
-        showToast(
-          title: "URL command blocked",
-          detail: "App not found: \(String(appID.prefix(64)))",
-          kind: .warning
-        )
-        return
-      }
-      guard !isExcluded(app) else {
-        showToast(
-          title: "URL command blocked",
-          detail: "App is excluded from Waves.",
-          kind: .warning
-        )
-        return
-      }
+      guard let app = urlAutomationTarget(appID) else { return }
       setMuted(isMuted, for: app, reason: .automation)
 
+    case let .toggleMute(appID):
+      guard let app = urlAutomationTarget(appID) else { return }
+      setMuted(!app.isMuted, for: app, reason: .automation)
+
+    case let .setBoost(appID, boost):
+      guard let app = urlAutomationTarget(appID) else { return }
+      // The mixer disables Boost for routes Wave Link or recovery owns; a URL
+      // must not be a way around that.
+      let policy = MixerRouteControlPolicy(app: app)
+      guard policy.allowsDSPControl else {
+        showToast(title: "URL command blocked", detail: policy.controlHint, kind: .warning)
+        return
+      }
+      setVolumeBoost(boost, for: app, reason: .automation)
+
     case let .applyProfile(profileName):
-      guard
-        let profile = profiles.first(where: {
-          $0.name.localizedCaseInsensitiveCompare(profileName) == .orderedSame
-        })
-      else {
+      guard let profile = automationProfile(named: profileName) else {
         showToast(
           title: "Profile not found",
           detail: "No profile named: \(String(profileName.prefix(64)))",
@@ -674,5 +680,58 @@ extension AppStore {
     case .refresh:
       refresh()
     }
+  }
+
+  /// The app a URL command names, or nil after telling the user why not.
+  private func urlAutomationTarget(_ appID: String) -> AudioApp? {
+    guard let app = session.apps.first(matchingAppKey: appID) else {
+      showToast(
+        title: "URL command blocked",
+        detail: "App not found: \(String(appID.prefix(64)))",
+        kind: .warning
+      )
+      return nil
+    }
+    guard !isExcluded(app) else {
+      showToast(
+        title: "URL command blocked",
+        detail: "App is excluded from Waves.",
+        kind: .warning
+      )
+      return nil
+    }
+    return app
+  }
+
+  /// The profile a URL or socket command names. One matching rule for both:
+  /// the whole name, ignoring case.
+  func automationProfile(named name: String) -> Profile? {
+    profiles.first { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }
+  }
+
+  /// Sets boost for an external client and reports what the route actually
+  /// did. Callers have already applied the mixer's eligibility rules.
+  func applyExternalBoost(_ boost: Float, to app: AudioApp) async -> AppIntentApplyOutcome {
+    guard let transaction = setVolumeBoost(boost, for: app, reason: .automation) else {
+      return .failed
+    }
+    return await transaction.value.outcome
+  }
+
+  /// Applies a profile for an external client and waits for its result.
+  /// Nil when nothing was started or a newer profile replaced this one before
+  /// it finished, so the caller can never report a superseded apply as done.
+  func applyProfileForExternalControl(_ profile: Profile) async -> ProfileApplyResult? {
+    let previousGeneration = appIntentCoordinator.currentProfileTask?.generation
+    applyProfile(profile, purpose: .automation)
+    guard let started = appIntentCoordinator.currentProfileTask,
+      started.generation != previousGeneration
+    else { return nil }
+    await started.task.value
+    guard let result = lastProfileApplyResult,
+      result.rows.count == profile.entries.count,
+      result.rows.allSatisfy({ $0.generation == started.generation })
+    else { return nil }
+    return result
   }
 }

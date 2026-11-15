@@ -4,6 +4,8 @@ import WavesAudioCore
 enum AutomationCommand: Equatable, Sendable {
   case setVolume(appID: String, volume: Float)
   case setMuted(appID: String, isMuted: Bool)
+  case toggleMute(appID: String)
+  case setBoost(appID: String, boost: Float)
   case applyProfile(name: String)
   case refresh
 }
@@ -72,7 +74,7 @@ final class AutomationCommandParser {
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
       let host = components.host?.lowercased(),
       !host.isEmpty,
-      !containsControlCharacters(host)
+      !Self.containsControlCharacters(host)
     else {
       return .rejected(
         AutomationCommandRejection(
@@ -82,10 +84,7 @@ final class AutomationCommandParser {
     }
     switch host {
     case "set-volume":
-      guard let appID = queryValue(named: "app", in: components),
-        !appID.isEmpty,
-        appID.count <= 256,
-        !containsControlCharacters(appID),
+      guard let appID = validAppID(in: components),
         let volume = LevelRange.volume.validated(text: queryValue(named: "volume", in: components))
       else {
         return presentedRejection("Set-volume command was invalid.")
@@ -93,11 +92,8 @@ final class AutomationCommandParser {
       validated = .setVolume(appID: appID, volume: volume)
 
     case "mute":
-      guard let appID = queryValue(named: "app", in: components),
-        !appID.isEmpty,
+      guard let appID = validAppID(in: components),
         let muteValue = queryValue(named: "muted", in: components),
-        appID.count <= 256,
-        !containsControlCharacters(appID),
         muteValue.count <= 16,
         let shouldMute = Bool(muteValue)
       else {
@@ -105,11 +101,25 @@ final class AutomationCommandParser {
       }
       validated = .setMuted(appID: appID, isMuted: shouldMute)
 
+    case "toggle-mute":
+      guard let appID = validAppID(in: components) else {
+        return presentedRejection("Toggle-mute command was invalid.")
+      }
+      validated = .toggleMute(appID: appID)
+
+    case "set-boost":
+      // Refused outside 1...4, never clamped: a URL must not be able to ask
+      // for more boost than the mixer offers.
+      guard let appID = validAppID(in: components),
+        let boost = LevelRange.boost.validated(text: queryValue(named: "boost", in: components))
+      else {
+        return presentedRejection("Set-boost command was invalid.")
+      }
+      validated = .setBoost(appID: appID, boost: boost)
+
     case "apply-profile", "apply-preset":
       guard let profileName = queryValue(named: "name", in: components),
-        !profileName.isEmpty,
-        profileName.count <= Profile.maxNameLength,
-        !containsControlCharacters(profileName)
+        Self.isAcceptableProfileName(profileName)
       else {
         return presentedRejection("Profile command was invalid.")
       }
@@ -146,6 +156,20 @@ final class AutomationCommandParser {
     reset()
   }
 
+  /// Shared with the control socket so both surfaces accept the same names.
+  static func isAcceptableProfileName(_ name: String) -> Bool {
+    !name.isEmpty && name.count <= Profile.maxNameLength && !Self.containsControlCharacters(name)
+  }
+
+  private func validAppID(in components: URLComponents) -> String? {
+    guard let appID = queryValue(named: "app", in: components),
+      !appID.isEmpty,
+      appID.count <= 256,
+      !Self.containsControlCharacters(appID)
+    else { return nil }
+    return appID
+  }
+
   private func queryValue(named name: String, in components: URLComponents) -> String? {
     components.queryItems?.first(where: { $0.name == name })?.value
   }
@@ -154,7 +178,7 @@ final class AutomationCommandParser {
     .rejected(AutomationCommandRejection(message: message, shouldPresent: true))
   }
 
-  private func containsControlCharacters(_ string: String) -> Bool {
+  private static func containsControlCharacters(_ string: String) -> Bool {
     string.unicodeScalars.contains { scalar in
       switch scalar.value {
       case 0x00...0x1F, 0x7F...0x9F, 0x2028, 0x2029, 0x202A...0x202E, 0x2066...0x2069:

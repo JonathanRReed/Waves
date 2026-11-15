@@ -274,6 +274,16 @@ struct HelpView: View {
           description: "Mute or unmute"
         )
         urlSchemeRow(
+          scheme: "waves://toggle-mute",
+          params: "app=APP_ID",
+          description: "Toggle mute"
+        )
+        urlSchemeRow(
+          scheme: "waves://set-boost",
+          params: "app=APP_ID&boost=2",
+          description: "Set boost (1-4)"
+        )
+        urlSchemeRow(
           scheme: "waves://apply-profile",
           params: "name=Focus",
           description: "Apply a named profile"

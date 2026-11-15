@@ -260,7 +260,8 @@ func automationParserPreservesNotificationCooldownAcrossInvalidClock(nonFiniteTi
   #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
   clock.date = Date(timeIntervalSince1970: 550.001)
   #expect(parser.parse(refreshURL) == .accepted(.refresh))
-  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: false))
+  // 40 seconds after the last notice, so the throttle may be announced again.
+  #expect(parser.parse(refreshURL) == .throttled(shouldNotify: true))
 }
 
 @MainActor

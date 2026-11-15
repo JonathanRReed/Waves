@@ -746,15 +746,19 @@ extension AppStore {
     )
   }
 
-  func setVolumeBoost(_ boost: Float, for app: AudioApp) {
-    guard requireAudioRunning() else { return }
-    guard !isExcluded(app) else { return }
-    let finiteBoost = boost.isFinite ? boost : 1.0
-    let clampedBoost = max(1, min(4, finiteBoost))
-    startAppIntentTransaction(
+  @discardableResult
+  func setVolumeBoost(
+    _ boost: Float,
+    for app: AudioApp,
+    reason: AppRouteIntentReason = .userEdit
+  ) -> Task<AppIntentApplyResult, Never>? {
+    guard requireAudioRunning() else { return nil }
+    guard !isExcluded(app) else { return nil }
+    let clampedBoost = LevelRange.boost.sanitized(boost)
+    return startAppIntentTransaction(
       forAppID: app.logicalID,
       overrides: AppIntentOverrides(volumeBoost: clampedBoost),
-      reason: .userEdit,
+      reason: reason,
       persistencePolicy: .acceptedUserIntent(updateDevicePreset: true),
       feedbackPolicy: .directControl(
         successTitle: "Boost updated",
