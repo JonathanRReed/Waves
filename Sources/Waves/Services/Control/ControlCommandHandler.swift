@@ -129,25 +129,24 @@ struct ControlCommandHandler {
 
     switch request.cmd {
     case .setVolume:
-      // Validate that volume parameter is present and finite (not NaN or Infinity)
-      // to prevent non-finite numbers from corrupting audio engine state or persistence.
-      guard let volume = request.volume, volume.isFinite else {
+      // Protocol 1 has always clamped a finite volume into 0...1, so an
+      // existing client that overshoots by a rounding error keeps working.
+      // A missing or non-finite volume is refused.
+      guard let clamped = LevelRange.volume.clamped(request.volume) else {
         return .failure(id: request.id, .missingParameter)
       }
-      let clamped = max(0, min(1, volume))
       store.setDesiredVolume(clamped, for: app)
       store.commitDesiredVolume(for: app)
       response.volume = clamped
 
     case .adjustVolume:
-      // Validate that delta parameter is present and finite (not NaN or Infinity)
-      // to prevent non-finite numbers from corrupting audio engine state or persistence.
-      guard let delta = request.delta, delta.isFinite else {
+      guard let delta = request.delta, delta.isFinite,
+        // Waves owns the clamp so a fast dial sweep cannot overshoot, and the
+        // resulting value comes back so the client never has to read first.
+        let clamped = LevelRange.volume.clamped(Double(app.desiredVolume) + Double(delta))
+      else {
         return .failure(id: request.id, .missingParameter)
       }
-      // Waves owns the clamp so a fast dial sweep cannot overshoot, and the
-      // resulting value comes back so the client never has to read first.
-      let clamped = max(0, min(1, app.desiredVolume + delta))
       store.setDesiredVolume(clamped, for: app)
       store.commitDesiredVolume(for: app)
       response.volume = clamped

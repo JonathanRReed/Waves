@@ -76,14 +76,9 @@ final class AutomationCommandParser {
     case "set-volume":
       guard let appID = queryValue(named: "app", in: components),
         !appID.isEmpty,
-        let volumeValue = queryValue(named: "volume", in: components),
         appID.count <= 256,
         !containsControlCharacters(appID),
-        volumeValue.count <= 32,
-        let volume = Float(volumeValue),
-        volume.isFinite,
-        volume >= 0,
-        volume <= 1
+        let volume = LevelRange.volume.validated(text: queryValue(named: "volume", in: components))
       else {
         return presentedRejection("Set-volume command was invalid.")
       }
