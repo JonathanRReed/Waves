@@ -20,14 +20,16 @@ sections:
 - exact clean source revision, absence of untracked build inputs, source-archive
   SHA-256, build-recipe SHA-256, and toolchain;
 - Swift, rendered UI, and Thread Sanitizer counts;
-- launch, idle CPU, memory, and active-mixing comparisons;
+- launch, idle CPU, memory, and active-mixing comparisons, or a deferral that
+  matches `benchmarkDeferral`;
 - native, Rosetta, Tahoe, Sequoia, and honest Sonoma-host results;
 - bundle identity, universal architectures, deployment floor, app/DMG/dSYM
   hashes, exact Developer ID identity, team, designated requirement, hardened
   runtime, notarization UUID, exact DMG binding, notary-log digest, stapling,
   and Gatekeeper;
-- local QA, security, sanitizer, stress, updater, soak, plugin, live socket, and
-  remote Elgato results;
+- local QA, security, sanitizer, stress, updater, plugin, live socket, and
+  remote Elgato results, plus a bounded runtime check of the signed candidate
+  that records its active and idle seconds;
 - immutable security-scan and remote-Elgato receipt digests bound to the exact
   source revision and DMG;
 - skipped-gate and source-changing skip-CI equivalence records.

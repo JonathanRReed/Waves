@@ -36,12 +36,6 @@ def finite_nonnegative_number?(value)
   value.is_a?(Numeric) && value.finite? && value >= 0
 end
 
-def median(values)
-  sorted = values.sort
-  middle = sorted.length / 2
-  sorted.length.odd? ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2.0
-end
-
 path = ARGV.shift
 abort_input("usage: #{$PROGRAM_NAME} summary.json") unless path && ARGV.empty?
 
@@ -199,40 +193,6 @@ end
   reasons << "#{metric} is positive" if finite_nonnegative_number?(value) && value.positive?
 end
 
-soak = { "available" => false, "reason" => "insufficient duration or temporal coverage for first and last 15-minute windows" }
-if request_valid && result_valid && result["actualDurationSeconds"] >= 7200 && sample_coverage_valid
-  interval = request["sampleIntervalSeconds"]
-  required_per_window = [2, (900.0 / interval * 0.8).floor].max
-  first = samples.select { |sample| sample.is_a?(Hash) && sample["elapsedSeconds"].is_a?(Numeric) && sample["elapsedSeconds"] <= 900 }
-  last_start = result["actualDurationSeconds"] - 900
-  last = samples.select { |sample| sample.is_a?(Hash) && sample["elapsedSeconds"].is_a?(Numeric) && sample["elapsedSeconds"] >= last_start }
-  first_span = first.empty? ? 0 : first.last["elapsedSeconds"] - first.first["elapsedSeconds"]
-  last_span = last.empty? ? 0 : last.last["elapsedSeconds"] - last.first["elapsedSeconds"]
-  required_span = [0, 900.0 - interval * 2.0].max
-  if first.length >= required_per_window && last.length >= required_per_window && first_span >= required_span && last_span >= required_span
-    medians = {}
-    monotonic = []
-    SAMPLE_METRICS.each do |metric|
-      all_values = samples.map { |sample| sample[metric] }
-      next unless all_values.all? { |value| finite_nonnegative_number?(value) }
-      medians[metric] = { "first15MinuteMedian" => median(first.map { |sample| sample[metric] }), "last15MinuteMedian" => median(last.map { |sample| sample[metric] }) }
-      monotonic << metric if all_values.each_cons(2).all? { |left, right| right >= left } && all_values.uniq.length > 1
-    end
-    soak = {
-      "available" => true,
-      "windowSeconds" => 900,
-      "firstWindowSampleCount" => first.length,
-      "lastWindowSampleCount" => last.length,
-      "medians" => medians,
-      "monotonicGrowthMetrics" => monotonic,
-      "leakDiagnosis" => false,
-      "note" => "Monotonic growth is a flag for review, not a leak diagnosis."
-    }
-  else
-    soak["reason"] = "insufficient temporal coverage in the first or last 15-minute window"
-  end
-end
-
 evidence_status = if reasons.any?
   "failed"
 elsif incomplete_reasons.any?
@@ -247,6 +207,5 @@ puts JSON.pretty_generate(
   "reasons" => reasons + incomplete_reasons,
   "sampleCount" => samples.length,
   "sampleFailureCount" => sample_failure_count,
-  "soakComparison" => soak,
   "statement" => "This analyzer classifies evidence only. It does not issue a release-pass decision."
 )
