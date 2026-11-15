@@ -30,8 +30,9 @@ with bounded retries and a visible global recovery path when automatic repair
 is exhausted.
 
 Automation is local and opt-in. URL commands and the same-user protocol-v1 Unix
-socket are separate settings and both default to off. The `wavesctl` client is
-part of this repository. The Stream Deck companion is separately versioned and
+socket are separate settings and both default to off. The `wavesctl` client ships
+inside the app at `Contents/Helpers/wavesctl`; users link it onto their `PATH`
+themselves. The Stream Deck companion is separately versioned and
 not bundled with Waves. It may control only routes Waves truthfully reports as
 managed. App Intents remain deferred until they can reuse the same AppStore
 intent boundary.

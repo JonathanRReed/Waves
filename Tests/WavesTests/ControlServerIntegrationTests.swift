@@ -652,7 +652,7 @@ func saturatedControlListenerSelfProofFinishesWithinItsStartupBudget() async thr
   let limiter = URLInvocationLimiter(
     maximumInvocations: 2,
     window: 60,
-    now: { now }
+    now: { now.timeIntervalSinceReferenceDate }
   )
   var isRunning = false
   var parseCount = 0

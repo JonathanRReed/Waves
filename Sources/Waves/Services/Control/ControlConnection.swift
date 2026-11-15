@@ -107,6 +107,10 @@ struct ControlWritePump {
 /// deadlines, and ordered nonblocking output queue for its entire lifetime.
 @MainActor
 final class ControlConnection {
+  /// Admission budgets refill on monotonic time, so changing the system clock
+  /// can neither refill nor freeze them.
+  static let defaultClock: () -> TimeInterval = { MonotonicClock.seconds() }
+
   private nonisolated let logger = Logger(subsystem: "com.jonathanreed.Waves", category: "Control")
   private nonisolated let fd: Int32
   private let requestHandler: ControlRequestHandler
@@ -120,7 +124,8 @@ final class ControlConnection {
   private var isWriteSourceActive = false
   private var codec = ControlCodec()
   private var session = ControlCommandHandler.Session()
-  private var admission = ControlInboundAdmission(now: Date().timeIntervalSinceReferenceDate)
+  private let now: () -> TimeInterval
+  private var admission: ControlInboundAdmission
   private var writePump = ControlWritePump()
   private var pendingRequests = ControlPendingRequestQueue()
   private var isHandlingRequest = false
@@ -134,8 +139,11 @@ final class ControlConnection {
     peerProcessID: pid_t,
     requestHandler: @escaping ControlRequestHandler,
     timeouts: ControlConnectionTimeouts = .production,
-    canSubscribe: @escaping () -> Bool
+    canSubscribe: @escaping () -> Bool,
+    now: @escaping () -> TimeInterval = ControlConnection.defaultClock
   ) {
+    self.now = now
+    admission = ControlInboundAdmission(now: now())
     self.fd = fd
     self.peerProcessID = peerProcessID
     self.requestHandler = requestHandler
@@ -222,7 +230,7 @@ final class ControlConnection {
     }
 
     for line in lines {
-      switch admission.classify(line, now: Date().timeIntervalSinceReferenceDate) {
+      switch admission.classify(line, now: now()) {
       case let .failure(id, error, shouldClose):
         if shouldClose {
           logger.error("Closing an abusive control connection")

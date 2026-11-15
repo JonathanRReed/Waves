@@ -20,8 +20,10 @@ private struct ControlAdmissionTokenBucket {
 
   mutating func allow(cost: Int, now: TimeInterval) -> Bool {
     guard now.isFinite else { return false }
+    // Never step the refill point backwards: a clock that went back and then
+    // returned would otherwise refill the same interval twice.
     let elapsed = max(0, now - lastRefill)
-    lastRefill = now
+    lastRefill = max(lastRefill, now)
     if elapsed.isFinite {
       tokens = min(capacity, tokens + elapsed * refillPerSecond)
     }
@@ -81,7 +83,7 @@ struct ControlInboundAdmission {
     _ frame: Data,
     now: TimeInterval
   ) -> ControlInboundFrameDecision {
-    classify(frame, now: now, decode: ControlCodec.decode)
+    classify(frame, now: now, decode: ControlCodec.decodeRequest)
   }
 
   mutating func classify(
@@ -89,16 +91,33 @@ struct ControlInboundAdmission {
     now: TimeInterval,
     decode: (Data) -> ControlRequest?
   ) -> ControlInboundFrameDecision {
+    classify(frame, now: now) { line -> ControlCodec.DecodeResult in
+      decode(line).map(ControlCodec.DecodeResult.request) ?? .malformed
+    }
+  }
+
+  mutating func classify(
+    _ frame: Data,
+    now: TimeInterval,
+    decode: (Data) -> ControlCodec.DecodeResult
+  ) -> ControlInboundFrameDecision {
     let requestID = ControlCodec.requestIDPrefix(frame)
     let frameAllowed = frameBucket.allow(cost: 1, now: now)
     let bytesAllowed = byteBucket.allow(cost: frame.count, now: now)
     guard frameAllowed, bytesAllowed else {
       return rejection(id: requestID, error: .rateLimited)
     }
-    guard let request = decode(frame) else {
+    switch decode(frame) {
+    case let .request(request):
+      return .request(request, retainedByteCount: frame.count)
+    case .unknownCommand:
+      // A newer client asking for something this build lacks is not abuse:
+      // it already paid the frame and byte budgets above, and it needs an
+      // answer it can show rather than a closed connection.
+      return .failure(id: requestID, error: .unknownCommand, shouldClose: false)
+    case .malformed:
       return rejection(id: requestID, error: .malformedRequest)
     }
-    return .request(request, retainedByteCount: frame.count)
   }
 
   private mutating func rejection(
