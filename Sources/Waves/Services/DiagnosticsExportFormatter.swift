@@ -83,7 +83,8 @@ enum DiagnosticsExportFormatter {
     lastPersistenceError: String?,
     shutdownResult: AppShutdownResult?,
     previousShutdown: ShutdownReport? = nil,
-    callDetection: CallDetectionDiagnostics? = nil
+    callDetection: CallDetectionDiagnostics? = nil,
+    automation: DiagnosticsAutomationState? = nil
   ) -> String {
     var lines: [String] = [
       "Waves diagnostics",
@@ -130,6 +131,7 @@ enum DiagnosticsExportFormatter {
     appendWaveLinkBridge(waveLinkBridge, to: &lines)
     appendShutdown(shutdownResult, to: &lines)
     appendPreviousShutdown(previousShutdown, to: &lines)
+    appendAutomation(automation, to: &lines)
     appendApps(apps, to: &lines)
     appendChecks(diagnostics, to: &lines)
 

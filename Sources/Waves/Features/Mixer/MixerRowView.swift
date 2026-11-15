@@ -20,6 +20,12 @@ enum MixerRowAccessibility {
     app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)"
   }
 
+  static let moreActionsHelp = "More controls"
+
+  static func moreActionsLabel(for app: AudioApp) -> String {
+    "More actions for \(app.displayName)"
+  }
+
   static func recoveryLabel(for _: AudioApp) -> String {
     "Recover all managed Waves routes"
   }
@@ -292,6 +298,7 @@ struct MixerRowView: View {
               if routePolicy.offersRecovery {
                 RouteRecoveryButton(app: app, compact: false)
               }
+              AdaptiveGainTag(appID: app.logicalID, appName: app.displayName)
             }
           }
         }
@@ -299,32 +306,8 @@ struct MixerRowView: View {
 
         Spacer(minLength: 10)
 
-        Slider(
-          value: Binding(
-            get: { Double(app.desiredVolume) },
-            set: { newValue in
-              store.setDesiredVolume(Float(newValue), for: app)
-            }
-          ),
-          in: 0...1,
-          onEditingChanged: { isEditing in
-            if !isEditing {
-              store.commitDesiredVolume(for: app)
-            }
-          }
-        )
-        .controlSize(.small)
-        .tint(theme.accent)
-        .frame(minWidth: 150, idealWidth: 210, maxWidth: 250)
-        .help(volumeSemantics.help)
-        .accessibilityLabel(volumeSemantics.label)
-        .accessibilityValue(volumeSemantics.value ?? "")
-        .accessibilityHint(volumeSemantics.hint)
-        .accessibilitySortPriority(volumeSemantics.sortPriority)
-        .accessibilityAdjustableAction { direction in
-          adjustVolume(direction)
-        }
-        .disabled(!volumeSemantics.isEnabled)
+        TaperedVolumeSlider(app: app, semantics: volumeSemantics)
+          .frame(minWidth: 150, idealWidth: 210, maxWidth: 250)
 
         Text("\(Int((app.desiredVolume * 100).rounded()))%")
           .font(.caption.monospacedDigit().weight(.medium))
@@ -347,7 +330,7 @@ struct MixerRowView: View {
             .frame(width: 28, height: 28)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.wavesIcon)
         .help(equalizerSemantics.help)
         .accessibilityLabel(equalizerSemantics.label)
         .accessibilityValue(equalizerSemantics.value ?? "")
@@ -369,7 +352,7 @@ struct MixerRowView: View {
             .frame(width: 28, height: 28)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.wavesIcon)
         .help(muteSemantics.help)
         .accessibilityLabel(muteSemantics.label)
         .accessibilityValue(muteSemantics.value ?? "")
@@ -377,6 +360,25 @@ struct MixerRowView: View {
         .accessibilitySortPriority(muteSemantics.sortPriority)
         .sensoryFeedback(.selection, trigger: app.isMuted)
         .disabled(!muteSemantics.isEnabled)
+
+        // The same items as the row's context menu, for anyone who does not
+        // think to right-click.
+        Menu {
+          MixerRowContextMenuItems(app: app, opensMainWindow: false)
+        } label: {
+          Image(systemName: "ellipsis")
+            .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        // Secondary, not cyan: a column of accent dots beside the mute
+        // buttons would spend the signal color on chrome.
+        .tint(Color.secondary)
+        .fixedSize()
+        .wavesHoverHighlight()
+        .help(MixerRowAccessibility.moreActionsHelp)
+        .accessibilityLabel(MixerRowAccessibility.moreActionsLabel(for: app))
       }
       // Dim excluded rows, but lift the floor under Increase Contrast so the
       // already-secondary text doesn't fall below a legible ratio.
@@ -501,22 +503,57 @@ struct MixerRowView: View {
 
     return parts.joined(separator: ", ")
   }
+}
 
-  private func adjustVolume(_ direction: AccessibilityAdjustmentDirection) {
-    guard routePolicy.allowsAudioControl else { return }
-    let step: Float = 0.05
-    let nextValue: Float
+/// The volume slider shared by the main-window and menu-bar rows. The thumb
+/// follows `VolumeTaper`; everything it reports and stores stays linear.
+struct TaperedVolumeSlider: View {
+  @Environment(AppStore.self) private var store
+  @Environment(\.wavesTheme) private var theme
+  let app: AudioApp
+  let semantics: MixerControlAccessibilitySemantics
 
-    switch direction {
-    case .increment:
-      nextValue = min(app.desiredVolume + step, 1)
-    case .decrement:
-      nextValue = max(app.desiredVolume - step, 0)
-    @unknown default:
-      return
+  var body: some View {
+    Slider(
+      value: Self.thumbPosition(for: app, in: store),
+      in: 0...1,
+      onEditingChanged: { isEditing in
+        if !isEditing {
+          store.commitDesiredVolume(for: app)
+        }
+      }
+    )
+    .controlSize(.small)
+    .tint(theme.accent)
+    .help(semantics.help)
+    .accessibilityLabel(semantics.label)
+    .accessibilityValue(semantics.value ?? "")
+    .accessibilityHint(semantics.hint)
+    .accessibilitySortPriority(semantics.sortPriority)
+    .accessibilityAdjustableAction { direction in
+      switch direction {
+      case .increment: adjust(increasing: true)
+      case .decrement: adjust(increasing: false)
+      @unknown default: break
+      }
     }
+    .disabled(!semantics.isEnabled)
+  }
 
-    store.setDesiredVolume(nextValue, for: app)
+  /// The slider's value is the thumb position; writes store the tapered volume.
+  static func thumbPosition(for app: AudioApp, in store: AppStore) -> Binding<Double> {
+    Binding(
+      get: { VolumeTaper.position(forVolume: app.desiredVolume) },
+      set: { position in
+        guard let volume = VolumeTaper.volume(forPosition: position) else { return }
+        store.setDesiredVolume(volume, for: app)
+      }
+    )
+  }
+
+  private func adjust(increasing: Bool) {
+    guard MixerRouteControlPolicy(app: app).allowsAudioControl else { return }
+    store.setDesiredVolume(VolumeTaper.steppedVolume(from: app.desiredVolume, increasing: increasing), for: app)
     store.commitDesiredVolume(for: app)
   }
 }
@@ -746,6 +783,7 @@ private struct BoostMenu: View {
         .contentShape(Rectangle())
     }
     .menuStyle(.borderlessButton)
+    .wavesHoverHighlight()
     .help(semantics.help)
     .accessibilityLabel(semantics.label)
     .accessibilityValue(semantics.value ?? "")

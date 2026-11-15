@@ -1,5 +1,9 @@
 enum OnboardingExperience {
   static let currentVersion = 1
+  /// The What's New card's content version. Raise it when the card changes so
+  /// people who dismissed an earlier card see the new one once after updating.
+  /// It is separate from `currentVersion`, which would also re-run setup.
+  static let whatsNewVersion = 2
 }
 
 enum GuidedSetupPhase: Equatable, Sendable {

@@ -80,7 +80,16 @@ final class AppStore {
   var availableDevices: [AudioDevice] = []
   /// Live per-app output levels for meters, populated only while a UI surface
   /// is visible (kept out of `session` so updates don't trigger re-sorts).
-  var liveLevels: [String: AudioLevels] = [:]
+  var liveLevels: [String: AudioLevels] = [:] {
+    didSet { syncPolledLevelMembership() }
+  }
+  /// Which apps the last level poll reported, and which of those were above the
+  /// live threshold. `isLive` reads these instead of `liveLevels`, so the lists
+  /// and status surfaces that ask "is it playing?" are invalidated when an app
+  /// starts or stops playing, not on every level tick. Assigned only when the
+  /// membership actually changes.
+  private(set) var polledLevelAppIDs: Set<String> = []
+  private(set) var audiblePolledAppIDs: Set<String> = []
   /// The adaptive engine's current temporary gain per app (dB), published so
   /// the UI can show which apps Sidechain Focus is holding back or lifting
   /// right now. Empty whenever Adaptive Mix is off or nothing is being
@@ -173,6 +182,9 @@ final class AppStore {
   /// finishes, where every chord is treated as available and the registration
   /// itself remains the backstop.
   @ObservationIgnored var isChordAvailable: ((HotkeyChord) -> Bool)?
+  /// Reports the control socket's listener and client count for diagnostics.
+  /// Set by the app delegate, which owns the server.
+  @ObservationIgnored var controlSocketDiagnostics: (() -> ControlSocketDiagnostics)?
 
   /// Releases and restores Waves's own registrations. Set by the app delegate.
   ///
@@ -433,7 +445,8 @@ final class AppStore {
   /// otherwise the moment you nudge a playing app's volume it flips to `.managed`
   /// and vanishes from the Live list even though sound is still coming out. The
   /// authoritative "is it making sound now" signal is the live-level poll
-  /// (`liveLevels`, refreshed a few times a second while a surface is visible);
+  /// (`liveLevels`, refreshed a few times a second while a surface is visible),
+  /// read through its membership sets so callers do not observe every tick;
   /// fall back to the last snapshot levels when the poll isn't running.
   func isLive(_ app: AudioApp) -> Bool {
     if app.routeHealthContext == .waveLinkBridge {
@@ -443,10 +456,20 @@ final class AppStore {
     }
     if app.routingState == .live { return true }
     guard app.routingState == .managed, !app.isMuted else { return false }
-    if let levels = liveLevels[app.logicalID] {
-      return max(levels.rms, levels.peak) > Self.liveLevelThreshold
+    if polledLevelAppIDs.contains(app.logicalID) {
+      return audiblePolledAppIDs.contains(app.logicalID)
     }
     return max(app.peakLevel, app.rmsLevel) > Self.liveLevelThreshold
+  }
+
+  private func syncPolledLevelMembership() {
+    let polled = Set(liveLevels.keys)
+    let audible = Set(
+      liveLevels.lazy
+        .filter { max($0.value.rms, $0.value.peak) > Self.liveLevelThreshold }
+        .map(\.key))
+    if polled != polledLevelAppIDs { polledLevelAppIDs = polled }
+    if audible != audiblePolledAppIDs { audiblePolledAppIDs = audible }
   }
 
   /// True when the app is producing audio right now, OR went quiet within the
@@ -623,15 +646,6 @@ final class AppStore {
     return .idle
   }
 
-  var menuBarIconName: String {
-    switch menuBarStatus {
-    case .setup: "lock.shield.fill"
-    case .playing: "speaker.wave.3.fill"
-    case .muted: "speaker.slash.fill"
-    case .idle: "speaker.wave.2.fill"
-    }
-  }
-
   var sourceInventorySummary: String {
     let count = visibleApps.count
     let label = count == 1 ? "running app" : "running apps"
@@ -737,7 +751,7 @@ final class AppStore {
     onShowMixerRequested?()
     preferences.whatsNewDismissedVersion = max(
       preferences.whatsNewDismissedVersion,
-      OnboardingExperience.currentVersion
+      OnboardingExperience.whatsNewVersion
     )
 
     guard let app = eligibleGuidedTourApp else {
@@ -809,7 +823,7 @@ final class AppStore {
     requestedWhatsNew = false
     preferences.whatsNewDismissedVersion = max(
       preferences.whatsNewDismissedVersion,
-      OnboardingExperience.currentVersion
+      OnboardingExperience.whatsNewVersion
     )
     persistPreferences()
   }
@@ -977,7 +991,24 @@ final class AppStore {
       lastPersistenceError: lastPersistenceError,
       shutdownResult: shutdownResult,
       previousShutdown: previousShutdownReport,
-      callDetection: callDetectionDiagnostics
+      callDetection: callDetectionDiagnostics,
+      automation: diagnosticsAutomationState
+    )
+  }
+
+  var diagnosticsAutomationState: DiagnosticsAutomationState {
+    let bindings = preferences.hotkeys.bindings
+    return DiagnosticsAutomationState(
+      urlCommandsEnabled: preferences.enableURLScheme,
+      controlSocketEnabled: preferences.enableExternalControl,
+      controlSocket: controlSocketDiagnostics?(),
+      keyboardShortcutsEnabled: preferences.enableKeyboardShortcuts,
+      assignedShortcutCount: bindings.count,
+      refusedShortcuts: bindings.filter { rejectedHotkeyIDs.contains($0.id) }
+        .map { "\($0.displayString) (\($0.action.kind))" },
+      loginItem: loginItemStatus,
+      adaptiveMixMode: preferences.adaptiveMixMode,
+      adaptiveFocusMode: preferences.adaptiveFocusMode
     )
   }
 

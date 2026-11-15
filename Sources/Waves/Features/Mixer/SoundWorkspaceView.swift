@@ -597,7 +597,7 @@ private struct EQScopeChip: View {
       )
       .contentShape(Capsule())
     }
-    .buttonStyle(.plain)
+    .buttonStyle(.wavesChip)
     .accessibilityLabel(SoundControlAccessibility.equalizerLabel(title: title))
     .accessibilityValue(isEnabled ? "On" : "Off")
     .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)

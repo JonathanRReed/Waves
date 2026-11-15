@@ -61,7 +61,9 @@ It contains no audio samples, but can include the Waves version/build, macOS
 version, structured capture-authorization state, app and device names or
 identifiers, route states, persistence/cleanup status, and bounded error text.
 Fields with potentially identifying values are labelled in the report. Review
-and redact it before sharing.
+and redact it before sharing. `Report a Problem…` copies the same report and
+opens a new GitHub issue in your browser, pre-filled with only the Waves and
+macOS versions; nothing is sent unless you submit the issue.
 
 ## Update checks
 

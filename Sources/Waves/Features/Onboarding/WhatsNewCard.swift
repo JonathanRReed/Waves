@@ -13,7 +13,7 @@ struct WhatsNewCard: View {
         VStack(alignment: .leading, spacing: 3) {
           Text("What’s New in Waves")
             .font(.title3.weight(.semibold))
-          Text("A more capable mixer, with clearer route truth and faster recovery.")
+          Text("Profiles that bring back your whole mix, and sound that behaves.")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -28,10 +28,10 @@ struct WhatsNewCard: View {
       }
 
       VStack(alignment: .leading, spacing: 8) {
-        whatsNewLine("Per-app output and EQ", symbol: "dial.medium.fill")
-        whatsNewLine("Truthful Wave Link ownership and recovery", symbol: "point.3.connected.trianglepath.dotted")
-        whatsNewLine("Focused keyboard and automation controls", symbol: "keyboard")
-        whatsNewLine("Labeled controls and reduced-motion support", symbol: "accessibility")
+        whatsNewLine("Save Current Mix, with EQ and outputs in profiles", symbol: "square.stack.3d.up.fill")
+        whatsNewLine("Call muting that works with Discord, Slack, and browsers", symbol: "phone.fill")
+        whatsNewLine("Sliders that follow loudness, and click-free changes", symbol: "speaker.wave.2.fill")
+        whatsNewLine("Shortcuts recipes and a bundled command-line tool", symbol: "keyboard")
       }
 
       HStack {
