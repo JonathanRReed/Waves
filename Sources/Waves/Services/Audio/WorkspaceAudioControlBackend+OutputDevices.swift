@@ -332,8 +332,7 @@ extension WorkspaceAudioControlBackend {
 
     await applyDeviceChangePlan(
       DeviceChangePassPlan(defaultOutputChanged: defaultOutputChanged, inventoryChanged: inventoryChanged),
-      availableDeviceUIDs: { Set(self.allDeviceIDs().compactMap(OutputDeviceInventory.deviceUID)) },
-      restoreDefaultFollowingRoutes: { try await self.autoRestoreDevice() }
+      availableDeviceUIDs: { Set(self.allDeviceIDs().compactMap(OutputDeviceInventory.deviceUID)) }
     )
     guard !isShuttingDown else { return }
     if !changes.isDisjoint(with: [.deviceFormat, .wake]) {
@@ -343,8 +342,7 @@ extension WorkspaceAudioControlBackend {
 
   func applyDeviceChangePlan(
     _ plan: DeviceChangePassPlan,
-    availableDeviceUIDs: () -> Set<String>,
-    restoreDefaultFollowingRoutes: () async throws -> AudioSessionSnapshot
+    availableDeviceUIDs: () -> Set<String>
   ) async {
     guard plan.reconcilesPinnedRoutes || plan.rehomesDefaultFollowingRoutes else { return }
     // Pinned routes first. Unplugging a device that was both the default and
@@ -357,7 +355,7 @@ extension WorkspaceAudioControlBackend {
     }
     if plan.rehomesDefaultFollowingRoutes {
       do {
-        _ = try await restoreDefaultFollowingRoutes()
+        _ = try await autoRestoreDevice()
         guard !isShuttingDown else { return }
         logger.info("Output device changed, managed routes restored")
       } catch {
@@ -376,11 +374,7 @@ extension WorkspaceAudioControlBackend {
     _ plan: DeviceChangePassPlan,
     availableDeviceUIDs: Set<String>
   ) async {
-    await applyDeviceChangePlan(
-      plan,
-      availableDeviceUIDs: { availableDeviceUIDs },
-      restoreDefaultFollowingRoutes: { try await self.restoreDefaultFollowingRoutesForTesting() }
-    )
+    await applyDeviceChangePlan(plan, availableDeviceUIDs: { availableDeviceUIDs })
   }
 
   /// UIDs of every device that is not one of Waves's own private aggregates.

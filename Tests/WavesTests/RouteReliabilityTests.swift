@@ -148,7 +148,7 @@ final class BudgetBox {
   try await fixture.installInitialRoutes()
   let backend = fixture.backend
 
-  _ = try await backend.restoreDefaultFollowingRoutesForTesting()
+  _ = try await backend.autoRestoreDevice()
 
   // The replacement (#3) is built while the old renderer (#1) keeps playing,
   // and the two are never heard together. The old renderer is stopped, not
@@ -169,7 +169,7 @@ final class BudgetBox {
   let backend = fixture.backend
   fixture.events.failNextCreations(3)
 
-  _ = try await backend.restoreDefaultFollowingRoutesForTesting()
+  _ = try await backend.autoRestoreDevice()
 
   // Released fail-open: the tap's mute goes first, then the renderer stops.
   #expect(fixture.events.values.suffix(2) == ["audible #1", "stop #1"])
@@ -289,7 +289,7 @@ final class BudgetBox {
   // first creation fails and it pauses before retrying.
   fixture.devices.defaultUID = "headphones"
   fixture.events.failNextCreations(1)
-  let move = Task { try await backend.restoreDefaultFollowingRoutesForTesting() }
+  let move = Task { try await backend.autoRestoreDevice() }
   await gate.waitUntilPaused()
 
   // A volume edit lands meanwhile and supersedes the move.
@@ -392,7 +392,7 @@ final class BudgetBox {
   // The default changes; app.a's move fails once and pauses.
   fixture.devices.defaultUID = "headphones"
   fixture.events.failNextCreations(1)
-  let move = Task { try await backend.restoreDefaultFollowingRoutesForTesting() }
+  let move = Task { try await backend.autoRestoreDevice() }
   await gate.waitUntilPaused()
   let exclusion = await backend.applyAppIntent(
     routeIntent(appID: "app.b", volume: 0.5, generation: 10, isExcluded: true)
@@ -495,6 +495,95 @@ final class BudgetBox {
   #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
   let excluded = try #require(await backend.currentSnapshot().apps.first { $0.id == "app.b" })
   #expect(excluded.routingState == .monitorOnly)
+}
+
+// MARK: - Authorization is captured before discovery suspends
+
+@Test func aDefaultMoveCannotRecreateAnAppExcludedWhileDiscoveryRan() async throws {
+  let discovery = DiscoveryGate()
+  let fixture = RouteFixture(
+    apps: [routeTestApp(id: "app.a"), routeTestApp(id: "app.b")],
+    discoveryPause: { await discovery.pause() }
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // The default changes. The pass's snapshot rebuild suspends in application
+  // capture, and the user excludes app.b meanwhile.
+  fixture.devices.defaultUID = "headphones"
+  await discovery.arm()
+  let move = Task { try await backend.autoRestoreDevice() }
+  await discovery.waitUntilPaused()
+  let exclusion = await backend.applyAppIntent(
+    routeIntent(appID: "app.b", volume: 0.5, generation: 10, isExcluded: true)
+  )
+  #expect(exclusion.outcome == .excluded)
+  await discovery.release()
+  _ = try await move.value
+
+  // app.a moved; app.b stays released and unmanaged.
+  #expect(fixture.events.values == ["audible #2", "stop #2", "create app.a #3", "stop #1"])
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  let excluded = try #require(await backend.currentSnapshot().apps.first { $0.id == "app.b" })
+  #expect(excluded.routingState == .monitorOnly)
+  #expect(excluded.appliedVolume == nil)
+}
+
+@Test func recoverRoutesCannotRecreateAnAppExcludedWhileDiscoveryRan() async throws {
+  let discovery = DiscoveryGate()
+  let fixture = RouteFixture(
+    apps: [routeTestApp(id: "app.a"), routeTestApp(id: "app.b")],
+    discoveryPause: { await discovery.pause() }
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  await discovery.arm()
+  let recovery = Task { try await backend.recoverRoutes() }
+  await discovery.waitUntilPaused()
+  let exclusion = await backend.applyAppIntent(
+    routeIntent(appID: "app.b", volume: 0.5, generation: 10, isExcluded: true)
+  )
+  #expect(exclusion.outcome == .excluded)
+  await discovery.release()
+  _ = try await recovery.value
+
+  #expect(!fixture.events.values.contains { $0.hasPrefix("create app.b") })
+  #expect(fixture.events.values.contains("create app.a #3"))
+  let excluded = try #require(await backend.currentSnapshot().apps.first { $0.id == "app.b" })
+  #expect(excluded.routingState == .monitorOnly)
+}
+
+@Test func discoveryKeepsControlStateThatLandedWhileItRan() async throws {
+  let discovery = DiscoveryGate()
+  let fixture = RouteFixture(
+    apps: [routeTestApp(id: "app.a"), routeTestApp(id: "app.b")],
+    discoveryPause: { await discovery.pause() }
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // A refresh suspends in discovery. A call mutes app.a and a profile moves
+  // app.b to the USB DAC before it resumes.
+  await discovery.arm()
+  let refresh = Task { try await backend.refresh() }
+  await discovery.waitUntilPaused()
+  let mute = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, isMuted: true)
+  )
+  #expect(mute.outcome == .applied)
+  let output = await backend.applyAppIntent(
+    routeIntent(appID: "app.b", volume: 0.5, generation: 11, targetDeviceUID: "usb-dac")
+  )
+  #expect(output.outcome == .applied)
+  await discovery.release()
+  _ = try await refresh.value
+
+  let apps = await backend.currentSnapshot().apps
+  let muted = try #require(apps.first { $0.id == "app.a" })
+  #expect(muted.isMuted)
+  #expect(muted.appliedVolume == 0)
+  #expect(apps.first { $0.id == "app.b" }?.targetDeviceUID == "usb-dac")
 }
 
 // MARK: - Item 3: a device that was both the default and a pinned target
@@ -1036,6 +1125,37 @@ actor RetryGate {
   }
 }
 
+/// Holds one snapshot rebuild in application capture, its first
+/// suspension, until the test releases it.
+actor DiscoveryGate {
+  private var armed = false
+  private var paused: CheckedContinuation<Void, Never>?
+  private var waiter: CheckedContinuation<Void, Never>?
+
+  /// The next capture pauses; later ones run straight through.
+  func arm() { armed = true }
+
+  func pause() async {
+    guard armed else { return }
+    armed = false
+    await withCheckedContinuation { continuation in
+      paused = continuation
+      waiter?.resume()
+      waiter = nil
+    }
+  }
+
+  func waitUntilPaused() async {
+    guard paused == nil else { return }
+    await withCheckedContinuation { waiter = $0 }
+  }
+
+  func release() {
+    paused?.resume()
+    paused = nil
+  }
+}
+
 func routeTestApp(
   id: String = "app.a",
   volume: Float = 0.5,
@@ -1054,7 +1174,24 @@ func routeTestApp(
     appliedVolume: routingState == .managed ? volume : nil,
     routingState: routingState,
     compatibility: .supported,
-    targetDeviceUID: targetDeviceUID
+    targetDeviceUID: targetDeviceUID,
+    runtimeIdentity: routeTestIdentity(id)
+  )
+}
+
+/// A stable identity per test app, so the backend's real discovery merge
+/// recognizes the app as still running across snapshot rebuilds.
+func routeTestIdentity(_ id: String) -> AppRuntimeIdentity {
+  AppRuntimeIdentity(
+    lifetime: AppProcessLifetimeIdentity(pid: 900, startTimeSeconds: 100, startTimeMicroseconds: 0),
+    executablePath: "/Applications/\(id).app/Contents/MacOS/\(id)",
+    outerBundlePath: "/Applications/\(id).app",
+    signingIdentity: AppCodeSigningIdentity(
+      identifier: "com.example.\(id)",
+      teamIdentifier: nil,
+      designatedRequirement: "identifier \"com.example.\(id)\"",
+      codeDirectoryHash: Data(id.utf8)
+    )
   )
 }
 
@@ -1217,14 +1354,34 @@ final class RouteFixture: @unchecked Sendable {
   /// - Parameter rendersDuringHandoff: whether outgoing renderers keep
   ///   rendering while a handoff waits for them to fade out. False models a
   ///   renderer whose device has stopped.
+  /// - Parameter discoveryPause: runs inside every snapshot rebuild's
+  ///   application capture, the rebuild's first suspension, so a test can
+  ///   land newer work while discovery is in flight.
   init(
     apps: [AudioApp],
     retryPause: WorkspaceAudioControlBackend.ControllerRetryPause? = nil,
     rendersDuringHandoff: Bool = true,
-    deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil
+    deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil,
+    discoveryPause: (@Sendable () async -> Void)? = nil
   ) {
     let events = self.events
     let devices = self.devices
+    // Every test app is still running. Captured as background-only processes
+    // so discovery keeps the backend's own rows rather than inventing new ones.
+    let capture = AppRuntimeDiscovery.Capture(
+      applications: apps.map {
+        AppRuntimeDiscovery.CapturedApplication(
+          pid: $0.pid ?? 900,
+          bundleID: $0.bundleID,
+          localizedName: $0.displayName,
+          bundlePath: $0.runtimeIdentity?.outerBundlePath,
+          activationPolicy: .prohibited,
+          isActive: false,
+          iconTIFFData: nil,
+          runtimeIdentity: $0.runtimeIdentity
+        )
+      }
+    )
     backend = WorkspaceAudioControlBackend(
       testingSnapshot: AudioSessionSnapshot(
         apps: apps,
@@ -1284,6 +1441,10 @@ final class RouteFixture: @unchecked Sendable {
       processObjectIDResolver: { _ in [1] },
       processObjectLivenessProvider: { _ in true },
       captureAuthorizationProbe: { .authorized },
+      applicationCaptureProvider: {
+        await discoveryPause?()
+        return capture
+      },
       routeBudgetClock: { .seconds(1) },
       controllerRetryPause: retryPause ?? { _ in },
       handoffSilencePause: { if rendersDuringHandoff { events.pumpRenders() } },

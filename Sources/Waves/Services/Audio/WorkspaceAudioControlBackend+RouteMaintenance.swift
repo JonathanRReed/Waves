@@ -104,6 +104,20 @@ extension WorkspaceAudioControlBackend {
     origin: RouteWorkOrigin,
     mode: ReattachMode = .attach
   ) async {
+    await reattachRoutes(repairContexts(forLogicalIDs: logicalIDs), origin: origin, mode: mode)
+  }
+
+  /// Reattaches the routes `targets` describe. Each context is the route's
+  /// authorization, captured by the caller before its own first suspension
+  /// and before any route in the batch suspends. A route whose app was
+  /// excluded, yielded to another router, or otherwise changed meanwhile
+  /// fails its context check and is skipped; building a fresh context at its
+  /// turn would have authorized it from the changed row.
+  func reattachRoutes(
+    _ targets: [RouteRepairContext],
+    origin: RouteWorkOrigin,
+    mode: ReattachMode = .attach
+  ) async {
     guard !isShuttingDown else { return }
     // A reattach is one coherent setup pass. Capture router activity before
     // any await so every route sees the same verified Security/Core Audio view.
@@ -115,16 +129,8 @@ extension WorkspaceAudioControlBackend {
     // Iterate by logicalID and re-resolve the row after every await — a stale
     // index would trap or write onto the wrong app. Rows that vanished are
     // skipped.
-    //
-    // Each route's authorization is captured here, before any route in the
-    // batch suspends. A route whose app was excluded, yielded to another
-    // router, or otherwise changed while an earlier route was being rebuilt
-    // fails its context check and is skipped; building a fresh context at
-    // its turn would have authorized it from the changed row.
-    let targets = snapshot.apps
-      .filter { logicalIDs.contains($0.logicalID) }
-      .map { (logicalID: $0.logicalID, context: makeRepairContext(for: $0)) }
-    for (logicalID, repairContext) in targets {
+    for repairContext in targets {
+      let logicalID = repairContext.logicalID
       guard !isShuttingDown else { return }
       guard isRepairCurrent(repairContext),
         let app = snapshot.apps.first(where: { $0.logicalID == logicalID })

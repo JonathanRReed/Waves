@@ -276,7 +276,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   func start() async throws {
     try ensureAcceptingOperations()
     guard !isStarted else { return }
-    snapshot = await buildSnapshot(merging: snapshot)
+    snapshot = await buildSnapshot()
     try ensureAcceptingOperations()
     defaultOutputDeviceChange.recordInitialUID(try? currentDefaultOutputDeviceUID())
     isStarted = true
@@ -474,7 +474,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   func refresh() async throws -> AudioSessionSnapshot {
     try ensureAcceptingOperations()
-    let rebuilt = await buildSnapshot(merging: snapshot)
+    let rebuilt = await buildSnapshot()
     try ensureAcceptingOperations()
     snapshot = rebuilt
     return snapshot
@@ -1007,6 +1007,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
 
     retainCleanupDegradations(disposeControllers(keeping: []))
+    // Each route's authorization is captured now, before the snapshot rebuild
+    // suspends: an exclusion or a yield that lands meanwhile must stop that
+    // route's reattachment.
+    let targets = repairContexts(forLogicalIDs: managedLogicalIDs)
     // An explicit repair is the user's say-so to try again: it must not
     // inherit a cooldown that automatic work ran into.
     routeRebuildBudget.resetForUserRecovery()
@@ -1014,11 +1018,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // route-health truth here: it recomputes backendStatus from scratch, so any
     // isRouteRecoveryHealthy/lastError assignment made before it would be
     // immediately overwritten and has no observable effect.
-    snapshot = await buildSnapshot(merging: snapshot)
+    snapshot = await buildSnapshot()
     try ensureAcceptingOperations()
 
-    if !managedLogicalIDs.isEmpty {
-      await reattachRoutes(forLogicalIDs: managedLogicalIDs, origin: .userInitiated)
+    if !targets.isEmpty {
+      await reattachRoutes(targets, origin: .userInitiated)
     }
 
     return snapshot
@@ -1041,17 +1045,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
-  func autoRestoreDevice() async throws -> AudioSessionSnapshot {
-    try ensureAcceptingOperations()
-    return try await restoreDefaultFollowingRoutes {
-      await self.buildSnapshot(merging: self.snapshot)
-    }
-  }
-
-  func restoreDefaultFollowingRoutesForTesting() async throws -> AudioSessionSnapshot {
-    try await restoreDefaultFollowingRoutes { self.snapshot }
-  }
-
   /// Moves every route that follows the system default onto the new default.
   ///
   /// Make before break: no controller is disposed up front. Disposing first
@@ -1067,24 +1060,27 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// live tap: rebuilding it would interrupt audio on a device that did not
   /// move, and a pinned device that disappeared is handled by the inventory
   /// reconciliation instead.
-  private func restoreDefaultFollowingRoutes(
-    rebuildSnapshot: () async -> AudioSessionSnapshot
-  ) async throws -> AudioSessionSnapshot {
-    let managedLogicalIDs = Set(
-      snapshot.apps
-        .filter {
-          $0.targetDeviceUID == nil
-            && ($0.routingState == .managed || controllers[$0.id]?.isActive == true)
-        }
-        .map(\.logicalID)
-    )
+  ///
+  /// Each route's authorization is captured before the snapshot rebuild,
+  /// the pass's first suspension. An exclusion, a call mute, an output choice
+  /// or a yield that lands while discovery runs then stops that route's move;
+  /// capturing it afterwards would have authorized the move from the newer
+  /// state.
+  func autoRestoreDevice() async throws -> AudioSessionSnapshot {
+    try ensureAcceptingOperations()
+    let targets = snapshot.apps
+      .filter {
+        $0.targetDeviceUID == nil
+          && ($0.routingState == .managed || controllers[$0.id]?.isActive == true)
+      }
+      .map(makeRepairContext)
 
-    snapshot = await rebuildSnapshot()
+    snapshot = await buildSnapshot()
     try ensureAcceptingOperations()
     snapshot.updatedAt = .now
 
-    if !managedLogicalIDs.isEmpty {
-      await reattachRoutes(forLogicalIDs: managedLogicalIDs, origin: .automatic, mode: .rehome)
+    if !targets.isEmpty {
+      await reattachRoutes(targets, origin: .automatic, mode: .rehome)
     }
 
     return snapshot
@@ -1105,11 +1101,18 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// changes, reattachment) stale while it is suspended. Background work has
   /// no intent generation of its own, so it records the newest accepted one,
   /// the controller it set out to replace, the output it was aimed at, and
-  /// the routing state that made it eligible. Any change to these means newer
-  /// intent (an edit, an exclusion, an output choice), a yield to another
-  /// router, or newer route work landed first, and the repair must not start
-  /// or install. A batch captures every route's context when it selects the
-  /// route, not when the route's turn comes.
+  /// and whether another router holds the app. Any change to these means
+  /// newer intent (an edit, an exclusion, an output choice), a yield to
+  /// another router, or newer route work landed first, and the repair must
+  /// not start or install. A batch captures every route's context when it
+  /// selects the route, before its first suspension, not when the route's
+  /// turn comes.
+  ///
+  /// The row's routing state itself is not compared: a snapshot rebuild
+  /// recomputes it from controller and audibility state (a released row
+  /// becomes monitor-only, an audible one live), so it changes without any
+  /// newer intent. What a yield or an identity collision changes is
+  /// recorded instead.
   struct RouteRepairContext: Sendable {
     let logicalID: String
     let runtimeID: String
@@ -1117,7 +1120,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let lifecycleEpoch: UInt64
     let incumbent: ObjectIdentifier?
     let targetDeviceUID: String?
-    let routingState: RoutingState
+    let routerHold: RouteHealthContext?
+    let hasAmbiguousIdentity: Bool
   }
 
   struct IntentSupersededError: Error {}
@@ -1147,8 +1151,24 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       lifecycleEpoch: lifecycleEpoch,
       incumbent: controllers[app.id].map(ObjectIdentifier.init),
       targetDeviceUID: app.targetDeviceUID,
-      routingState: app.routingState
+      routerHold: Self.routerHold(of: app),
+      hasAmbiguousIdentity: app.hasAmbiguousIdentity
     )
+  }
+
+  func repairContexts(forLogicalIDs logicalIDs: Set<String>) -> [RouteRepairContext] {
+    snapshot.apps.filter { logicalIDs.contains($0.logicalID) }.map(makeRepairContext)
+  }
+
+  /// The router that holds `app`, if any: the part of its health context a
+  /// yield (or a router's release) changes.
+  static func routerHold(of app: AudioApp) -> RouteHealthContext? {
+    switch app.routeHealthContext {
+    case .verifiedRouterOwnership, .unattributableRouterFallback, .routerMixedOutput, .waveLinkBridge:
+      app.routeHealthContext
+    case nil, .geometryRecoveryInProgress, .geometryRecoveryExhausted:
+      nil
+    }
   }
 
   func isRepairCurrent(_ context: RouteRepairContext) -> Bool {
@@ -1158,7 +1178,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       let app = snapshot.apps.first(where: { $0.logicalID == context.logicalID }),
       app.id == context.runtimeID,
       app.targetDeviceUID == context.targetDeviceUID,
-      app.routingState == context.routingState
+      Self.routerHold(of: app) == context.routerHold,
+      app.hasAmbiguousIdentity == context.hasAmbiguousIdentity
     else { return false }
     return true
   }
@@ -1673,14 +1694,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
   }
 
-  private func buildSnapshot(merging previousSnapshot: AudioSessionSnapshot?) async -> AudioSessionSnapshot {
+  /// Rediscovers running apps and merges the backend's control state into
+  /// them. Discovery suspends (application capture, then detached work), and
+  /// intents, exclusions, yields and route work all run meanwhile. The
+  /// control state merged in is therefore read after the last suspension, from
+  /// the snapshot as it is then: merging the copy taken before discovery
+  /// started would overwrite whatever landed in between (an exclusion, a call
+  /// mute, an output choice) with older values.
+  private func buildSnapshot() async -> AudioSessionSnapshot {
     // Re-check real capture authorization so a snapshot honestly reflects whether
     // Waves can actually take over audio, not merely whether the OS supports it.
     refreshCaptureAuthorization()
     let audible = getAudibleProcesses()
+    let discoveryInputs = snapshot
     // Reuse encoded icons across discovery passes only while the captured
     // process identity still matches. Relaunches must capture fresh bytes.
-    let knownIcons = (previousSnapshot?.apps ?? []).reduce(
+    let knownIcons = discoveryInputs.apps.reduce(
       into: [String: AppRuntimeDiscovery.KnownIcon]()
     ) { result, app in
       guard let data = app.iconTIFFData, let runtimeIdentity = app.runtimeIdentity else { return }
@@ -1698,7 +1727,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         knownIcons: knownIcons
       )
     }
-    let incumbentIdentities = (previousSnapshot?.apps ?? []).reduce(into: [String: AppRuntimeIdentity]()) { result, app in
+    let incumbentIdentities = discoveryInputs.apps.reduce(into: [String: AppRuntimeIdentity]()) { result, app in
       result[app.logicalID] = app.runtimeIdentity
     }
     let runningApps = await Task.detached { [currentBundleID, audible, discoveryCapture, incumbentIdentities] in
@@ -1711,7 +1740,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }.value
     guard !isShuttingDown else { return snapshot }
-    let previousByLogicalID = dictionaryByLogicalID(previousSnapshot?.apps ?? [])
+    // No suspension from here to the caller's assignment.
+    let previousSnapshot = snapshot
+    let previousByLogicalID = dictionaryByLogicalID(previousSnapshot.apps)
     let now = Date()
 
     var mergedApps = runningApps.map { candidate -> AudioApp in
@@ -1773,7 +1804,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     var mergedLogicalIDs = Set(mergedApps.map(\.logicalID))
-    for previous in previousSnapshot?.apps ?? [] {
+    for previous in previousSnapshot.apps {
       guard !mergedLogicalIDs.contains(previous.logicalID) else { continue }
       guard AppRuntimeDiscovery.isStillRunning(previous, in: discoveryCapture, currentBundleID: currentBundleID) else { continue }
 
@@ -1841,12 +1872,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     do {
       deviceReadiness = OutputDeviceReadiness(
         currentDevice: try currentOutputDevice(),
-        previousRecentDeviceIDs: previousSnapshot?.recentDeviceIDs ?? []
+        previousRecentDeviceIDs: previousSnapshot.recentDeviceIDs
       )
     } catch {
       deviceReadiness = OutputDeviceReadiness(
         currentDevice: nil,
-        previousRecentDeviceIDs: previousSnapshot?.recentDeviceIDs ?? [],
+        previousRecentDeviceIDs: previousSnapshot.recentDeviceIDs,
         failureDetail: "Waves could not identify the current output device: \(error.localizedDescription)"
       )
     }
