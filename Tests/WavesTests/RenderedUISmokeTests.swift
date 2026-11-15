@@ -525,6 +525,25 @@ import WavesAudioCore
   }
 }
 
+@Test @MainActor func renderedUnroutableBannerOffersExcludeAll() async throws {
+  let apps = ["Menu Helper", "Clipboard Tool", "Sync Agent"].map { name in
+    AudioApp(
+      id: name, displayName: name, category: .unknown, routingState: .error,
+      hasNoAudioCapability: true, compatibility: .supported)
+  }
+  for appearance in [WavesAppearance.light, .dark] {
+    let banner = ZStack {
+      WavesBackground()
+      UnroutableAppsBanner(apps: apps) {}.padding(18)
+    }
+    .wavesTheme(palette: .waves, appearance: appearance)
+    .frame(width: 760, height: 110)
+    try renderEvidence(
+      banner, filename: "polish-exclude-all-\(appearance.rawValue).png",
+      size: NSSize(width: 760, height: 110), appearance: appearance)
+  }
+}
+
 @Test func primarySurfaceAccessibilityAndKeyboardContractsMatchRenderedControls() {
   for pane in SettingsPane.allCases {
     #expect(pane.accessibilityLabel == "\(pane.title) settings, \(pane.subtitle)")

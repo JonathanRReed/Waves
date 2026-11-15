@@ -414,3 +414,13 @@ func polishApp(
     volumeBoost: boost
   )
 }
+
+// MARK: - Exclude All
+
+@Test func excludingOneUnroutableAppIsImmediateButSeveralAsksFirst() {
+  #expect(UnroutableAppsBanner.asksBeforeExcluding(count: 1) == false)
+  #expect(UnroutableAppsBanner.asksBeforeExcluding(count: 2))
+  #expect(UnroutableAppsBanner.asksBeforeExcluding(count: 12))
+  #expect(UnroutableAppsBanner.confirmationTitle(count: 3) == "Exclude 3 apps from Waves?")
+  #expect(UnroutableAppsBanner.confirmationButton(count: 3) == "Exclude 3 Apps")
+}
