@@ -22,7 +22,7 @@ struct MenuBarFooter: View {
         Image(systemName: "gearshape")
           .frame(width: 22, height: 22)
       }
-      .buttonStyle(.borderless)
+      .buttonStyle(.wavesIcon)
       .accessibilityLabel("Open Settings")
       .help("Settings")
     }

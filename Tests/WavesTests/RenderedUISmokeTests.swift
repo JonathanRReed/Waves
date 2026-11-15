@@ -471,6 +471,7 @@ import WavesAudioCore
   // Adaptive Mix holding the music back and lifting the lecture.
   fixture.store.adaptiveGainsDBByAppID = ["music.background": -6.3, "edu.lecture": 2.2]
   fixture.store.preferences.appEqualizerSettings["music.background"] = EqualizerSettings(isEnabled: true)
+  fixture.store.session.apps[0].volumeBoost = 2
   let apps = Array(fixture.store.session.apps.prefix(3))
 
   for appearance in [WavesAppearance.light, .dark] {
@@ -496,6 +497,29 @@ import WavesAudioCore
       rows,
       filename: "polish-rows-\(appearance.rawValue).png",
       size: NSSize(width: 1180, height: 230),
+      appearance: appearance
+    )
+  }
+}
+
+@Test @MainActor func renderedMenuBarPanelWithIndicatorsAndOverflow() async throws {
+  let fixture = try await makeRenderedUIFixture(snapshot: compactMenuSnapshot())
+  fixture.store.session.apps[0].volumeBoost = 3
+  fixture.store.preferences.appEqualizerSettings[fixture.store.session.apps[1].logicalID] =
+    EqualizerSettings(isEnabled: true)
+  fixture.store.adaptiveGainsDBByAppID = [fixture.store.session.apps[1].logicalID: -4.4]
+  for appearance in [WavesAppearance.light, .dark] {
+    let panel = ZStack(alignment: .top) {
+      WavesBackground()
+      MenuBarMixerView()
+    }
+    .environment(fixture.store)
+    .wavesTheme(palette: .waves, appearance: appearance)
+    .frame(width: MenuBarLayout.panelWidth, height: 760)
+    try renderEvidence(
+      panel,
+      filename: "polish-menu-\(appearance.rawValue).png",
+      size: NSSize(width: MenuBarLayout.panelWidth, height: 760),
       appearance: appearance
     )
   }

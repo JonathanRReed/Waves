@@ -643,15 +643,6 @@ final class AppStore {
     return .idle
   }
 
-  var menuBarIconName: String {
-    switch menuBarStatus {
-    case .setup: "lock.shield.fill"
-    case .playing: "speaker.wave.3.fill"
-    case .muted: "speaker.slash.fill"
-    case .idle: "speaker.wave.2.fill"
-    }
-  }
-
   var sourceInventorySummary: String {
     let count = visibleApps.count
     let label = count == 1 ? "running app" : "running apps"

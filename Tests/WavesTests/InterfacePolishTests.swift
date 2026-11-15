@@ -220,6 +220,72 @@ private func observeLiveLists(_ store: AppStore) -> ObservationFlag {
   #expect(store.isLive(snapshotLevels))
 }
 
+// MARK: - Row and menu-bar polish
+
+@MainActor
+@Test func mainWindowRowHasAVisibleMoreMenuBesideBoost() async throws {
+  let app = polishApp()
+  let fixture = try await makePolishFixture(apps: [app])
+  defer { fixture.cleanup() }
+  let surface = PolishHostedSurface(
+    rootView: MixerRowView(app: app).environment(fixture.store).frame(width: 760),
+    size: NSSize(width: 760, height: 80)
+  )
+  defer { surface.close() }
+
+  let menus = surface.views(of: NSPopUpButton.self)
+  // Boost shows its value as a title; More is the icon-only one.
+  #expect(menus.map(\.title).contains("1x"))
+  #expect(menus.contains { $0.title.isEmpty })
+  #expect(MixerRowAccessibility.moreActionsLabel(for: app) == "More actions for Polish Player")
+  #expect(MenuBarRowAccessibility.moreActionsLabel(for: app) == MixerRowAccessibility.moreActionsLabel(for: app))
+}
+
+@MainActor
+@Test func menuBarRowShowsBoostAndEqualizerWhenTheyAreOn() async throws {
+  let plain = polishApp(id: "com.example.plain")
+  let shaped = polishApp(id: "com.example.shaped", boost: 3)
+  let fixture = try await makePolishFixture(apps: [plain, shaped]) { preferences in
+    preferences.appEqualizerSettings[shaped.logicalID] = EqualizerSettings(isEnabled: true)
+  }
+  defer { fixture.cleanup() }
+  #expect(fixture.store.equalizerSettings(for: shaped).isEnabled)
+
+  func idealWidth(_ app: AudioApp) -> CGFloat {
+    let surface = PolishHostedSurface(rootView: MenuBarAppRow(app: app).environment(fixture.store))
+    defer { surface.close() }
+    return surface.hostingView.fittingSize.width
+  }
+  // The same name length, so only the indicators can account for the difference.
+  #expect(idealWidth(shaped) > idealWidth(plain) + 20)
+}
+
+@MainActor
+@Test func menuBarStatusIconKeepsOneWidthInEveryState() {
+  let statuses: [AppStore.MenuBarStatus] = [.setup, .playing, .muted, .idle]
+  let sizes = statuses.map { MenuBarStatusIcon.image(for: $0).size }
+  #expect(Set(sizes.map(\.width)).count == 1)
+  #expect(Set(sizes.map(\.height)).count == 1)
+  #expect(sizes.allSatisfy { $0 == MenuBarStatusIcon.canvasSize })
+  #expect(statuses.allSatisfy { MenuBarStatusIcon.image(for: $0).isTemplate })
+  // Wide enough for the widest glyph, so nothing is clipped.
+  for status in statuses {
+    let symbol = NSImage(
+      systemSymbolName: MenuBarStatusIcon.symbolName(for: status), accessibilityDescription: nil)
+    #expect((symbol?.size.width ?? .infinity) <= MenuBarStatusIcon.canvasSize.width)
+  }
+  #expect(MenuBarStatusLabel.accessibilityLabel(for: .playing) == "Waves, playing")
+  #expect(MenuBarStatusLabel.accessibilityLabel(for: .setup) == "Waves, finish setup")
+}
+
+@Test func hoverFillIsQuietAndStrongerUnderIncreaseContrast() {
+  #expect(WavesHoverFill.opacity(isHovering: false, isPressed: false, increasedContrast: false) == 0)
+  let hover = WavesHoverFill.opacity(isHovering: true, isPressed: false, increasedContrast: false)
+  let pressed = WavesHoverFill.opacity(isHovering: true, isPressed: true, increasedContrast: false)
+  #expect(hover > 0 && hover < pressed && pressed <= 0.2)
+  #expect(WavesHoverFill.opacity(isHovering: true, isPressed: false, increasedContrast: true) > hover)
+}
+
 // MARK: - Fixtures
 
 @MainActor

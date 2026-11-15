@@ -3,7 +3,7 @@ import WavesAudioCore
 
 enum MenuBarRowAccessibility {
   static func moreActionsLabel(for app: AudioApp) -> String {
-    "More actions for \(app.displayName)"
+    MixerRowAccessibility.moreActionsLabel(for: app)
   }
 
   static func volumeValue(for app: AudioApp) -> String {
@@ -31,6 +31,25 @@ struct MenuBarAppRow: View {
 
         RoutingStateDot(app: app)
 
+        // Boost and EQ are only reachable through More here, so say when they
+        // are on, in the main window's colors.
+        if app.volumeBoost > 1 {
+          Text("\(Int(app.volumeBoost))x")
+            .font(.caption2.monospacedDigit().weight(.semibold))
+            .foregroundStyle(theme.accent)
+            .fixedSize()
+            .help("Boost is \(Int(app.volumeBoost))x")
+            .accessibilityLabel("Boost \(Int(app.volumeBoost))x")
+        }
+
+        if equalizerIsEnabled {
+          Image(systemName: "slider.horizontal.3")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(theme.accent)
+            .help("Equalizer is on")
+            .accessibilityLabel("Equalizer on")
+        }
+
         AdaptiveGainTag(appID: app.logicalID, appName: app.displayName)
 
         Spacer(minLength: 4)
@@ -57,8 +76,10 @@ struct MenuBarAppRow: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
+        .fixedSize()
+        .wavesHoverHighlight()
         .accessibilityLabel(MenuBarRowAccessibility.moreActionsLabel(for: app))
-        .help("More controls")
+        .help(MixerRowAccessibility.moreActionsHelp)
       }
 
       TaperedVolumeSlider(app: app, semantics: volumeSemantics)
@@ -92,7 +113,7 @@ struct MenuBarAppRow: View {
         .frame(width: 22, height: 22)
         .contentShape(Rectangle())
     }
-    .buttonStyle(.borderless)
+    .buttonStyle(.wavesIcon)
     .help(muteSemantics.help)
     .accessibilityLabel(muteSemantics.label)
     .accessibilityValue(muteSemantics.value ?? "")
@@ -127,9 +148,11 @@ struct MenuBarAppRow: View {
       app: app,
       isExcluded: false,
       isRecovering: store.isRecovering,
-      equalizerIsEnabled: store.equalizerSettings(for: app).isEnabled
+      equalizerIsEnabled: equalizerIsEnabled
     )
   }
+
+  private var equalizerIsEnabled: Bool { store.equalizerSettings(for: app).isEnabled }
 
   private var showsLevelMeter: Bool {
     !app.isMuted && (app.routingState == .managed || app.routingState == .live)

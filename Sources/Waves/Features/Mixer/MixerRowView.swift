@@ -20,6 +20,12 @@ enum MixerRowAccessibility {
     app.isMuted ? "Unmute \(app.displayName)" : "Mute \(app.displayName)"
   }
 
+  static let moreActionsHelp = "More controls"
+
+  static func moreActionsLabel(for app: AudioApp) -> String {
+    "More actions for \(app.displayName)"
+  }
+
   static func recoveryLabel(for _: AudioApp) -> String {
     "Recover all managed Waves routes"
   }
@@ -324,7 +330,7 @@ struct MixerRowView: View {
             .frame(width: 28, height: 28)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.wavesIcon)
         .help(equalizerSemantics.help)
         .accessibilityLabel(equalizerSemantics.label)
         .accessibilityValue(equalizerSemantics.value ?? "")
@@ -346,7 +352,7 @@ struct MixerRowView: View {
             .frame(width: 28, height: 28)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.wavesIcon)
         .help(muteSemantics.help)
         .accessibilityLabel(muteSemantics.label)
         .accessibilityValue(muteSemantics.value ?? "")
@@ -354,6 +360,25 @@ struct MixerRowView: View {
         .accessibilitySortPriority(muteSemantics.sortPriority)
         .sensoryFeedback(.selection, trigger: app.isMuted)
         .disabled(!muteSemantics.isEnabled)
+
+        // The same items as the row's context menu, for anyone who does not
+        // think to right-click.
+        Menu {
+          MixerRowContextMenuItems(app: app, opensMainWindow: false)
+        } label: {
+          Image(systemName: "ellipsis")
+            .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        // Secondary, not cyan: a column of accent dots beside the mute
+        // buttons would spend the signal color on chrome.
+        .tint(Color.secondary)
+        .fixedSize()
+        .wavesHoverHighlight()
+        .help(MixerRowAccessibility.moreActionsHelp)
+        .accessibilityLabel(MixerRowAccessibility.moreActionsLabel(for: app))
       }
       // Dim excluded rows, but lift the floor under Increase Contrast so the
       // already-secondary text doesn't fall below a legible ratio.
@@ -758,6 +783,7 @@ private struct BoostMenu: View {
         .contentShape(Rectangle())
     }
     .menuStyle(.borderlessButton)
+    .wavesHoverHighlight()
     .help(semantics.help)
     .accessibilityLabel(semantics.label)
     .accessibilityValue(semantics.value ?? "")

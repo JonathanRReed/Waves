@@ -13,25 +13,30 @@ struct MenuBarAppList: View {
       isExcluded: store.isExcluded
     )
 
-    ScrollView {
-      VStack(alignment: .leading, spacing: 10) {
-        if snapshot.items.isEmpty, !store.isLoading {
-          allQuietState
-        } else {
-          ForEach(snapshot.groups, id: \.self) { group in
-            appGroup(group, snapshot: snapshot)
-          }
-
-          if snapshot.hiddenCount > 0 {
-            overflowButton(snapshot)
+    VStack(alignment: .leading, spacing: 8) {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 10) {
+          if snapshot.items.isEmpty, !store.isLoading {
+            allQuietState
+          } else {
+            ForEach(snapshot.groups, id: \.self) { group in
+              appGroup(group, snapshot: snapshot)
+            }
           }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
-      .frame(maxWidth: .infinity, alignment: .leading)
+      .frame(maxHeight: MenuBarLayout.maximumSectionsHeight)
+      .fixedSize(horizontal: false, vertical: true)
+      .scrollBounceBehavior(.basedOnSize)
+
+      // Outside the scroll view: seven rows overflow it, and a hint at the
+      // bottom of the scrolled content was out of sight exactly when it
+      // mattered.
+      if snapshot.hiddenCount > 0 {
+        overflowButton(snapshot)
+      }
     }
-    .frame(maxHeight: MenuBarLayout.maximumSectionsHeight)
-    .fixedSize(horizontal: false, vertical: true)
-    .scrollBounceBehavior(.basedOnSize)
   }
 
   @ViewBuilder

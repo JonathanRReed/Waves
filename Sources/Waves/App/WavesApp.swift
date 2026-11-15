@@ -174,26 +174,9 @@ struct WavesApp: App {
         )
         .renderCadence(renderActivity)
     } label: {
-      // The accessibility label must live on the status-item label itself —
-      // VoiceOver reads this view for the menu-bar item, not the popover
-      // content above.
-      Image(systemName: store.menuBarIconName)
-        .accessibilityLabel(Text(menuBarAccessibilityLabel))
+      MenuBarStatusLabel(store: store)
     }
     .menuBarExtraStyle(.window)
-  }
-
-  /// VoiceOver label for the menu-bar item, mirroring the three states that
-  /// drive the glyph so the icon-only status is perceivable without sight.
-  /// Shares `store.menuBarStatus` with the icon and the panel header, so the
-  /// spoken label can never contradict what is on screen.
-  private var menuBarAccessibilityLabel: String {
-    switch store.menuBarStatus {
-    case .setup: "Waves, finish setup"
-    case .playing: "Waves, playing"
-    case .muted: "Waves, muted"
-    case .idle: "Waves, idle"
-    }
   }
 }
 
