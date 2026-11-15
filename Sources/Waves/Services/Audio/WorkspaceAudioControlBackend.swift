@@ -24,7 +24,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   private let currentBundleID = Bundle.main.bundleIdentifier
   var controllers: [String: PerAppTapController] = [:]
   var controllerGenerationByRuntimeID: [String: UInt64] = [:]
-  private var equalizerSettingsByAppID: [String: EqualizerSettings] = [:]
+  var equalizerSettingsByAppID: [String: EqualizerSettings] = [:]
   private var managedAudioEqualizerSettings = GlobalEqualizerSettings()
   private var adaptiveGainDBByAppID: [String: Float] = [:]
   private var latestAcceptedGenerationByLogicalID: [String: UInt64] = [:]

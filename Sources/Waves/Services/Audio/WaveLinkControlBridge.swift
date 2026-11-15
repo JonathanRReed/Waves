@@ -22,6 +22,17 @@ protocol WaveLinkControlling: Sendable {
     allowsChannelRelocation: Bool
   ) async throws -> WaveLinkControlConfirmation
 
+  /// `isCurrent` reports whether the caller still wants this change. The
+  /// bridge stops waiting for Wave Link to confirm it once a newer change has
+  /// replaced it, so the newer change does not queue behind it.
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool,
+    allowsChannelRelocation: Bool,
+    isCurrent: @escaping @Sendable () async -> Bool
+  ) async throws -> WaveLinkControlConfirmation
+
   /// Read-only connection test: handshake plus a channel listing, recorded in
   /// the returned status. Never mutates Wave Link.
   func inspect() async -> WaveLinkBridgeStatus
@@ -41,6 +52,21 @@ extension WaveLinkControlling {
     try await apply(bundleIdentifier: bundleIdentifier, volume: volume, isMuted: isMuted)
   }
 
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool,
+    allowsChannelRelocation: Bool,
+    isCurrent: @escaping @Sendable () async -> Bool
+  ) async throws -> WaveLinkControlConfirmation {
+    try await apply(
+      bundleIdentifier: bundleIdentifier,
+      volume: volume,
+      isMuted: isMuted,
+      allowsChannelRelocation: allowsChannelRelocation
+    )
+  }
+
   func inspect() async -> WaveLinkBridgeStatus { .idle }
 
   func currentStatus() async -> WaveLinkBridgeStatus { .idle }
@@ -55,6 +81,12 @@ struct WaveLinkControlConfirmation: Equatable, Sendable {
   var relocated: Bool = false
 }
 
+/// The level and mute Wave Link reported for an app's channel.
+struct WaveLinkChannelState: Equatable, Sendable {
+  let level: Float
+  let isMuted: Bool
+}
+
 enum WaveLinkControlBridgeError: Error, Equatable, LocalizedError, Sendable {
   case invalidBundleIdentifier
   case invalidVolume
@@ -66,9 +98,15 @@ enum WaveLinkControlBridgeError: Error, Equatable, LocalizedError, Sendable {
   case relocationNotPermitted(String)
   case protocolViolation(String)
   case readBackMismatch(String)
+  /// The change reached the app's channel, or may have, but Wave Link did not
+  /// confirm it. `observed` is the last valid state Wave Link reported for that
+  /// channel, so Waves can show what Wave Link actually holds.
+  indirect case unconfirmed(WaveLinkControlBridgeError, observed: WaveLinkChannelState?)
 
   var errorDescription: String? {
     switch self {
+    case .unconfirmed(let reason, _):
+      reason.errorDescription
     case .invalidBundleIdentifier:
       "Wave Link control requires the app's exact bundle identifier."
     case .invalidVolume:
@@ -224,7 +262,8 @@ struct WaveLinkChannel: Codable, Equatable, Sendable {
       level: level,
       isMuted: isMuted,
       mixCount: mixes?.count,
-      isRelocationReady: relocationMixes != nil
+      isRelocationReady: relocationMixes != nil,
+      reportsValidState: reportsValidState
     )
   }
 }
@@ -244,6 +283,17 @@ actor WaveLinkControlBridge: WaveLinkControlling {
   typealias PeerValidator = @Sendable () async throws -> Void
   typealias SequenceFinalizer = @Sendable () async -> Void
   typealias ConnectionDescriber = @Sendable () async -> WaveLinkConnectionDescription?
+  typealias Sleeper = @Sendable (Duration) async throws -> Void
+
+  /// Pauses between read-backs after `setChannel`. Wave Link may answer
+  /// `setChannel` before its channel list shows the new level, so a large
+  /// step can read back the old or an intermediate value if Wave Link fades
+  /// or applies it asynchronously. Waves therefore reads the channel
+  /// right away and then up to six more times, 600 ms in total, and accepts
+  /// the first read that shows the requested state. A small step still
+  /// confirms on the first read. The waits grow so a quick fade costs a few
+  /// short polls and a slow one is not polled hard.
+  static let confirmationDelays: [Duration] = [25, 50, 75, 100, 150, 200].map { .milliseconds($0) }
 
   private struct AddToChannelRequest: Encodable {
     let appID: String
@@ -267,6 +317,7 @@ actor WaveLinkControlBridge: WaveLinkControlling {
   private let validatePeer: PeerValidator
   private let finishSequence: SequenceFinalizer
   private let describeConnection: ConnectionDescriber
+  private let sleep: Sleeper
   private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
   private var status: WaveLinkBridgeStatus = .idle
@@ -279,12 +330,14 @@ actor WaveLinkControlBridge: WaveLinkControlling {
     request: @escaping Request,
     validatePeer: @escaping PeerValidator = {},
     finishSequence: @escaping SequenceFinalizer = {},
-    describeConnection: @escaping ConnectionDescriber = { nil }
+    describeConnection: @escaping ConnectionDescriber = { nil },
+    sleep: @escaping Sleeper = { try await Task.sleep(for: $0) }
   ) {
     self.request = request
     self.validatePeer = validatePeer
     self.finishSequence = finishSequence
     self.describeConnection = describeConnection
+    self.sleep = sleep
   }
 
   init() {
@@ -304,6 +357,7 @@ actor WaveLinkControlBridge: WaveLinkControlling {
     self.describeConnection = {
       await session.connectionDescription
     }
+    self.sleep = { try await Task.sleep(for: $0) }
   }
 
   /// Declared `async` to match the protocol requirement exactly: a synchronous
@@ -333,13 +387,30 @@ actor WaveLinkControlBridge: WaveLinkControlling {
     isMuted: Bool,
     allowsChannelRelocation: Bool
   ) async throws -> WaveLinkControlConfirmation {
+    try await apply(
+      bundleIdentifier: bundleIdentifier,
+      volume: volume,
+      isMuted: isMuted,
+      allowsChannelRelocation: allowsChannelRelocation,
+      isCurrent: { true }
+    )
+  }
+
+  func apply(
+    bundleIdentifier: String,
+    volume: Float,
+    isMuted: Bool,
+    allowsChannelRelocation: Bool,
+    isCurrent: @escaping @Sendable () async -> Bool
+  ) async throws -> WaveLinkControlConfirmation {
     try await serialized {
       do {
         let confirmation = try await self.performApply(
           bundleIdentifier: bundleIdentifier,
           volume: volume,
           isMuted: isMuted,
-          allowsChannelRelocation: allowsChannelRelocation
+          allowsChannelRelocation: allowsChannelRelocation,
+          isCurrent: isCurrent
         )
         await self.finishSequence()
         return confirmation
@@ -390,7 +461,8 @@ actor WaveLinkControlBridge: WaveLinkControlling {
     bundleIdentifier: String,
     volume: Float,
     isMuted: Bool,
-    allowsChannelRelocation: Bool
+    allowsChannelRelocation: Bool,
+    isCurrent: @escaping @Sendable () async -> Bool
   ) async throws -> WaveLinkControlConfirmation {
     guard !bundleIdentifier.isEmpty else {
       throw WaveLinkControlBridgeError.invalidBundleIdentifier
@@ -405,8 +477,12 @@ actor WaveLinkControlBridge: WaveLinkControlling {
     var channels = try await readChannels()
     let matchingChannels = channels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
 
+    // Wave Link stores channel levels as whole percentages. Sending a slider's
+    // fractional value would otherwise fail read-back despite applying it.
+    let channelVolume = (volume * 100).rounded() / 100
+
     let targetChannel: WaveLinkChannel
-    var relocated = false
+    var relocationSource: WaveLinkChannel?
     if matchingChannels.count == 1,
       let dedicated = matchingChannels.first,
       dedicated.apps.count == 1
@@ -430,76 +506,198 @@ actor WaveLinkControlBridge: WaveLinkControlling {
       Self.logger.info(
         "Moving \(bundleIdentifier, privacy: .public) to empty Wave Link channel \(empty.name, privacy: .public)"
       )
-      let addRequest = AddToChannelRequest(appID: bundleIdentifier, channelID: empty.id)
-      _ = try await request("addToChannel", try encoder.encode(addRequest))
-      channels = try await readChannels()
-      let movedMatches = channels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
-      let currentSource = channels.first { $0.id == source.id }
-      guard
-        movedMatches.count == 1,
-        let moved = movedMatches.first,
-        moved.id == empty.id,
-        moved.apps.count == 1,
-        moved.relocationMixes == sourceMixes,
-        currentSource?.relocationMixes == sourceMixes
-      else {
-        // The app has already moved. Restore its original routing before
-        // reporting a failed validation so an uncontrolled empty channel
-        // cannot make previously muted audio audible.
-        let rollbackRequest = AddToChannelRequest(appID: bundleIdentifier, channelID: source.id)
-        _ = try await request("addToChannel", try encoder.encode(rollbackRequest))
-        throw WaveLinkControlBridgeError.readBackMismatch(
-          "The app or mix settings changed while moving to \(empty.name). Check its channel and mix assignments in Wave Link before retrying."
+      // Give the empty channel the requested level and mute before the app
+      // joins it, so the app never plays there at the channel's old level or
+      // unmuted. If Wave Link refuses, the move goes ahead and the level is
+      // set right after it, as before.
+      let prepareRequest = SetChannelRequest(id: empty.id, level: channelVolume, isMuted: isMuted)
+      do {
+        _ = try await request("setChannel", try encoder.encode(prepareRequest))
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        Self.logger.error(
+          "Could not prepare channel \(empty.name, privacy: .public) before the move: \(error.localizedDescription, privacy: .public)"
         )
       }
-      targetChannel = moved
-      relocated = true
+      relocationSource = source
+      do {
+        let addRequest = AddToChannelRequest(appID: bundleIdentifier, channelID: empty.id)
+        _ = try await request("addToChannel", try encoder.encode(addRequest))
+        channels = try await readChannels()
+        let movedMatches = channels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
+        let currentSource = channels.first { $0.id == source.id }
+        guard
+          movedMatches.count == 1,
+          let moved = movedMatches.first,
+          moved.id == empty.id,
+          moved.apps.count == 1,
+          moved.relocationMixes == sourceMixes,
+          currentSource?.relocationMixes == sourceMixes
+        else {
+          throw WaveLinkControlBridgeError.readBackMismatch(
+            "The app or mix settings changed while moving to \(empty.name). Check its channel and mix assignments in Wave Link before retrying."
+          )
+        }
+        targetChannel = moved
+      } catch {
+        throw await undoRelocation(of: bundleIdentifier, to: source, after: error)
+      }
     }
 
+    // A moved app goes back to its original channel unless its new channel
+    // confirms the requested state or a newer change takes it over, so a
+    // failure here can never leave it on a channel at a level or mute nobody
+    // chose.
+    do {
+      return try await setAndConfirm(
+        bundleIdentifier: bundleIdentifier,
+        channel: targetChannel,
+        level: channelVolume,
+        isMuted: isMuted,
+        relocated: relocationSource != nil,
+        applicationInfo: applicationInfo,
+        isCurrent: isCurrent
+      )
+    } catch {
+      // A newer change for the app follows at once and sets its new channel,
+      // so moving the app back would only make that change move it again.
+      guard let relocationSource, await isCurrent() else { throw error }
+      throw await undoRelocation(of: bundleIdentifier, to: relocationSource, after: error)
+    }
+  }
+
+  /// Moves an app back to the channel it was moved from after a failed
+  /// relocation, and returns the error to report. When Wave Link confirms the
+  /// app is back, its routing and level are what they were before, so the
+  /// failure is reported as a change that did not happen. Otherwise the app may
+  /// still sit on the new channel and the change is reported as unconfirmed.
+  private func undoRelocation(
+    of bundleIdentifier: String,
+    to source: WaveLinkChannel,
+    after error: Error
+  ) async -> Error {
+    if error is CancellationError { return error }
+    let reason: WaveLinkControlBridgeError
+    var observed: WaveLinkChannelState?
+    switch error as? WaveLinkControlBridgeError {
+    case .unconfirmed(let underlying, let lastObserved)?:
+      reason = underlying
+      observed = lastObserved
+    case let bridgeError?:
+      reason = bridgeError
+    case nil:
+      reason = .unavailable(error.localizedDescription)
+    }
+    do {
+      let rollbackRequest = AddToChannelRequest(appID: bundleIdentifier, channelID: source.id)
+      _ = try await request("addToChannel", try encoder.encode(rollbackRequest))
+      let holders = try await readChannels().filter { $0.holds(bundleIdentifier) }
+      if holders.count == 1, holders.first?.id == source.id {
+        Self.logger.info(
+          "Moved \(bundleIdentifier, privacy: .public) back to Wave Link channel \(source.name, privacy: .public)"
+        )
+        return reason
+      }
+    } catch {
+      Self.logger.error(
+        "Could not move \(bundleIdentifier, privacy: .public) back to \(source.name, privacy: .public): \(error.localizedDescription, privacy: .public)"
+      )
+    }
+    return WaveLinkControlBridgeError.unconfirmed(reason, observed: observed)
+  }
+
+  private func setAndConfirm(
+    bundleIdentifier: String,
+    channel targetChannel: WaveLinkChannel,
+    level channelVolume: Float,
+    isMuted: Bool,
+    relocated: Bool,
+    applicationInfo: WaveLinkApplicationInfo,
+    isCurrent: @escaping @Sendable () async -> Bool
+  ) async throws -> WaveLinkControlConfirmation {
     guard targetChannel.mixes?.isEmpty != true else {
       throw WaveLinkControlBridgeError.channelNotInMix(targetChannel.name)
     }
 
-    // Wave Link stores channel levels as whole percentages. Sending a slider's
-    // fractional value would otherwise fail read-back despite applying it.
-    let channelVolume = (volume * 100).rounded() / 100
     let setRequest = SetChannelRequest(id: targetChannel.id, level: channelVolume, isMuted: isMuted)
-    _ = try await request("setChannel", try encoder.encode(setRequest))
-
-    let confirmedChannels = try await readChannels()
-    let confirmedMatches = confirmedChannels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
-    guard
-      confirmedMatches.count == 1,
-      let confirmed = confirmedMatches.first,
-      confirmed.id == targetChannel.id,
-      confirmed.apps.count == 1
-    else {
-      throw WaveLinkControlBridgeError.readBackMismatch(
-        "The dedicated app channel disappeared after the update."
-      )
-    }
-    guard confirmed.reportsValidState else {
-      throw WaveLinkControlBridgeError.readBackMismatch(
+    // Once `setChannel` is on its way the channel may already have changed, so
+    // every failure from here on is reported as unconfirmed, with the last
+    // state Wave Link reported, rather than as a change that never happened.
+    var observed: WaveLinkChannelState?
+    do {
+      _ = try await request("setChannel", try encoder.encode(setRequest))
+      let started = ContinuousClock.now
+      var problem = WaveLinkControlBridgeError.readBackMismatch(
         "Wave Link did not report a valid level and mute state for the channel after the update."
       )
-    }
-    guard abs(confirmed.level - channelVolume) <= 0.001, confirmed.isMuted == isMuted else {
-      throw WaveLinkControlBridgeError.readBackMismatch(
-        "Requested \(channelVolume), muted \(isMuted); received \(confirmed.level), muted \(confirmed.isMuted)."
-      )
-    }
+      for (read, delay) in ([Duration.zero] + Self.confirmationDelays).enumerated() {
+        if read > 0 {
+          guard await isCurrent() else {
+            throw WaveLinkControlBridgeError.readBackMismatch(
+              "A newer change replaced this one before Wave Link confirmed it."
+            )
+          }
+          try await sleep(delay)
+        }
+        let confirmedChannels = try await readChannels()
+        let confirmedMatches = confirmedChannels.filter { $0.isSoftware && $0.holds(bundleIdentifier) }
+        guard
+          confirmedMatches.count == 1,
+          let confirmed = confirmedMatches.first,
+          confirmed.id == targetChannel.id,
+          confirmed.apps.count == 1
+        else {
+          throw WaveLinkControlBridgeError.readBackMismatch(
+            "The dedicated app channel disappeared after the update."
+          )
+        }
+        guard confirmed.reportsValidState else { continue }
+        observed = WaveLinkChannelState(level: confirmed.level, isMuted: confirmed.isMuted)
+        guard Self.wholePercent(confirmed.level) == Self.wholePercent(channelVolume),
+          confirmed.isMuted == isMuted
+        else {
+          problem = .readBackMismatch(
+            "Requested \(channelVolume), muted \(isMuted); received \(confirmed.level), muted \(confirmed.isMuted)."
+          )
+          Self.logger.debug(
+            "Read-back \(read + 1, privacy: .public) after \(started.duration(to: .now), privacy: .public): level \(confirmed.level, privacy: .public) muted \(confirmed.isMuted, privacy: .public), requested \(channelVolume, privacy: .public) muted \(isMuted, privacy: .public)"
+          )
+          continue
+        }
 
-    await recordSuccess(applicationInfo: applicationInfo, channels: confirmedChannels)
-    Self.logger.debug(
-      "Applied level \(confirmed.level, privacy: .public) muted \(isMuted, privacy: .public) to \(bundleIdentifier, privacy: .public) on channel \(confirmed.name, privacy: .public)"
-    )
-    return WaveLinkControlConfirmation(
-      channelID: confirmed.id,
-      channelName: confirmed.name,
-      appliedVolume: confirmed.level,
-      isMuted: confirmed.isMuted,
-      relocated: relocated
-    )
+        await recordSuccess(applicationInfo: applicationInfo, channels: confirmedChannels)
+        Self.logger.debug(
+          "Applied level \(confirmed.level, privacy: .public) muted \(isMuted, privacy: .public) to \(bundleIdentifier, privacy: .public) on channel \(confirmed.name, privacy: .public) after \(read + 1, privacy: .public) read(s), \(started.duration(to: .now), privacy: .public)"
+        )
+        return WaveLinkControlConfirmation(
+          channelID: confirmed.id,
+          channelName: confirmed.name,
+          appliedVolume: confirmed.level,
+          isMuted: confirmed.isMuted,
+          relocated: relocated
+        )
+      }
+      throw problem
+    } catch is CancellationError {
+      // A newer edit cancels this task while it waits. The change was already
+      // sent, so what Wave Link last showed still has to reach the row.
+      throw WaveLinkControlBridgeError.unconfirmed(
+        .readBackMismatch("A newer change replaced this one before Wave Link confirmed it."),
+        observed: observed
+      )
+    } catch let error as WaveLinkControlBridgeError {
+      throw WaveLinkControlBridgeError.unconfirmed(error, observed: observed)
+    } catch {
+      throw WaveLinkControlBridgeError.unconfirmed(
+        .unavailable(error.localizedDescription), observed: observed)
+    }
+  }
+
+  /// Wave Link stores channel levels as whole percentages, so a read-back
+  /// confirms a level when it names the same whole percent.
+  private static func wholePercent(_ level: Float) -> Int {
+    Int((level * 100).rounded())
   }
 
   private func handshake() async throws -> WaveLinkApplicationInfo {

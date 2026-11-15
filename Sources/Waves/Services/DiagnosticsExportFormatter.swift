@@ -82,7 +82,8 @@ enum DiagnosticsExportFormatter {
     persistenceFailureCount: Int,
     lastPersistenceError: String?,
     shutdownResult: AppShutdownResult?,
-    previousShutdown: ShutdownReport? = nil
+    previousShutdown: ShutdownReport? = nil,
+    callDetection: CallDetectionDiagnostics? = nil
   ) -> String {
     var lines: [String] = [
       "Waves diagnostics",
@@ -125,6 +126,7 @@ enum DiagnosticsExportFormatter {
     lines.append("Failure count this process: \(max(0, persistenceFailureCount))")
     lines.append("Last failure [error text]: \(boundedOptional(lastPersistenceError, maximumLength: 1_000))")
 
+    appendCallDetection(callDetection, to: &lines)
     appendWaveLinkBridge(waveLinkBridge, to: &lines)
     appendShutdown(shutdownResult, to: &lines)
     appendPreviousShutdown(previousShutdown, to: &lines)
@@ -132,6 +134,22 @@ enum DiagnosticsExportFormatter {
     appendChecks(diagnostics, to: &lines)
 
     return boundedReport(lines)
+  }
+
+  /// Written only while microphone call detection is on. Says whether a chosen
+  /// app is using the microphone and which, never anything about the audio.
+  private static func appendCallDetection(
+    _ callDetection: CallDetectionDiagnostics?,
+    to lines: inout [String]
+  ) {
+    guard let callDetection else { return }
+    lines.append("")
+    lines.append("Call detection (microphone in use by a chosen app)")
+    lines.append("Detected: \(callDetection.isDetected ? "yes" : "no")")
+    if callDetection.isDetected {
+      let names = callDetection.appNames.prefix(8).map { bounded($0, maximumLength: 128) }
+      lines.append("By [app name]: \(names.isEmpty ? "unknown" : names.joined(separator: ", "))")
+    }
   }
 
   /// What the Wave Link control bridge last saw. Channel names and app
@@ -161,8 +179,12 @@ enum DiagnosticsExportFormatter {
     lines.append("Software channels: \(bridge.softwareChannelCount) (\(bridge.freeSoftwareChannelCount) free)")
     for channel in bridge.channels.prefix(maximumWaveLinkChannelRows) {
       let apps = channel.appIdentifiers.isEmpty ? "empty" : channel.appIdentifiers.joined(separator: ", ")
+      let state =
+        channel.reportsValidState == false
+        ? "level and mute not validly reported"
+        : "level \(String(format: "%.2f", channel.level)) · \(channel.isMuted ? "muted" : "unmuted")"
       lines.append(
-        "  Channel [channel name]: \(bounded(channel.name, maximumLength: 128)) · \(channel.isSoftware ? "software" : "hardware") · level \(String(format: "%.2f", channel.level)) · \(channel.isMuted ? "muted" : "unmuted") · apps [identifier]: \(bounded(apps, maximumLength: 512))"
+        "  Channel [channel name]: \(bounded(channel.name, maximumLength: 128)) · \(channel.isSoftware ? "software" : "hardware") · \(state) · apps [identifier]: \(bounded(apps, maximumLength: 512))"
       )
     }
     if bridge.channels.count > maximumWaveLinkChannelRows {

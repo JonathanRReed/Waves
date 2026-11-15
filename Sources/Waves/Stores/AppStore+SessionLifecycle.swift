@@ -263,6 +263,9 @@ extension AppStore {
       NSWorkspace.shared.notificationCenter.removeObserver(appTerminationObserver)
       self.appTerminationObserver = nil
     }
+    microphoneActivityMonitor.stop()
+    let microphoneCallEndHoldTask = microphoneCall.endHoldTask
+    microphoneCall = MicrophoneCallState()
 
     let persistenceTasks = persistenceCoordinator.beginShutdown()
     let intentTasks = appIntentCoordinator.shutdown()
@@ -279,6 +282,7 @@ extension AppStore {
       levelPollTask,
     ].compactMap { $0 }
     if let adaptiveTask { mutationTasks.append(adaptiveTask) }
+    if let microphoneCallEndHoldTask { mutationTasks.append(microphoneCallEndHoldTask) }
     mutationTasks.append(contentsOf: suppressionTasks)
     mutationTasks.append(contentsOf: intentTasks.mutations)
     mutationTasks.append(contentsOf: ownedOperationTasks.values)

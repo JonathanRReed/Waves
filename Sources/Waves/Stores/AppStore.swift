@@ -15,6 +15,9 @@ final class AppStore {
   /// reconciliation. Retained so diagnostics/tests can inspect every source row in
   /// its original order instead of reducing a mixed apply to one boolean.
   var lastProfileApplyResult: ProfileApplyResult?
+  /// Whether saving settings failed for `lastProfileApplyResult`. A failed save
+  /// rolls back the levels kept for apps that were not running.
+  var lastProfileSettingsSaveFailed = false
   /// The profile the user last selected, used to highlight it in the UI and —
   /// for membership-only grouping profiles — to scope the main window. Not
   /// persisted; a fresh launch starts with no active profile.
@@ -47,6 +50,9 @@ final class AppStore {
   /// the menu-bar panel can raise this while the main window does not yet exist.
   private(set) var muteShortcutRequest: String?
   private(set) var muteShortcutToken = 0
+  /// Set when the menu bar asks the main window to show Save Current Mix.
+  var saveCurrentMixRequested = false
+  var saveCurrentMixToken = 0
   var onboarding = OnboardingState()
   private(set) var installLocationClassification: InstallLocationClassification
   private(set) var installationAdvisoryAcknowledged = false
@@ -112,6 +118,8 @@ final class AppStore {
   var shutdownTask: Task<AppShutdownResult, Never>?
   var shutdownResult: AppShutdownResult?
   var ownedOperationTasks: [UUID: Task<Void, Never>] = [:]
+  /// The refresh in flight, so an external caller can wait for its outcome.
+  @ObservationIgnored var refreshTask: Task<Bool, Never>?
   var hasStartedAudioBackend = false
   // Captured once at init from DeviceVolumePresetsStore.load(); consumed (and
   // toasted) the first time start() runs so a corrupt-file recovery is
@@ -255,6 +263,13 @@ final class AppStore {
   // clears it and runs exactly one more pass, which re-reads the *current*
   // frontmost app — so the latest app switch always wins and none are dropped.
   var pendingAutoPausePassRerun = false
+  /// Reads which apps are running microphone input, for microphone call
+  /// detection. Started only while that mode is on.
+  let microphoneActivityMonitor: any MicrophoneActivityMonitoring
+  /// Waits out `CallDetectionPolicy.callEndHold`; injected so tests decide when
+  /// the hold expires.
+  let callEndHoldSleep: @Sendable (Duration) async throws -> Void
+  var microphoneCall = MicrophoneCallState()
   var waveLinkSettingsGeneration: UInt64 = 0
   var pendingWaveLinkRouteRecovery = false
   private let accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster
@@ -276,9 +291,15 @@ final class AppStore {
       duration in try await Task.sleep(for: duration)
     },
     accessibilityAnnouncementPoster: AccessibilityAnnouncementPoster = .live,
-    installLocation: InstallLocationClassification = .applications
+    installLocation: InstallLocationClassification = .applications,
+    microphoneActivityMonitor: (any MicrophoneActivityMonitoring)? = nil,
+    callEndHoldSleep: @escaping @Sendable (Duration) async throws -> Void = {
+      duration in try await Task.sleep(for: duration)
+    }
   ) {
     self.backend = backend
+    self.microphoneActivityMonitor = microphoneActivityMonitor ?? CoreAudioMicrophoneActivityMonitor()
+    self.callEndHoldSleep = callEndHoldSleep
     self.loginItemService = loginItemService
     self.runtimeProcessProbe = runtimeProcessProbe
     self.adaptiveMixCoordinator = AdaptiveMixCoordinator(sleep: adaptiveMixSleep)
@@ -955,7 +976,8 @@ final class AppStore {
       persistenceFailureCount: persistenceFailureCount,
       lastPersistenceError: lastPersistenceError,
       shutdownResult: shutdownResult,
-      previousShutdown: previousShutdownReport
+      previousShutdown: previousShutdownReport,
+      callDetection: callDetectionDiagnostics
     )
   }
 
@@ -972,7 +994,8 @@ final class AppStore {
       toastDismissalCount: toastDismissals.count,
       lingerTaskCount: lingerRemovalTasks.count,
       observerCount: [frontmostAppObserver, appTerminationObserver].compactMap { $0 }.count
-        + (deviceChangeObserver == nil ? 0 : 1),
+        + (deviceChangeObserver == nil ? 0 : 1)
+        + (microphoneActivityMonitor.isRunning ? 1 : 0),
       backendStarted: hasStartedAudioBackend
     )
   }

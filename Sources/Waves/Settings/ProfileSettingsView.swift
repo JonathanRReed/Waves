@@ -154,7 +154,7 @@ private struct ProfileRow: View {
   private var detail: String {
     let count = profile.entries.count
     let noun = count == 1 ? "app" : "apps"
-    var text = profile.carriesLevels ? "\(count) \(noun) · saved levels" : "\(count) \(noun) · group"
+    var text = "\(count) \(noun) · " + (profile.savedContentsPhrase.map { "saved \($0)" } ?? "group")
     if store.preferences.defaultProfileID == profile.id {
       text += " · applied at startup"
     }

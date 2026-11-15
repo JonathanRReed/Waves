@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 import WavesAudioCore
@@ -1423,7 +1424,7 @@ func acceptedURLMuteReplacesAutomaticMuteOwnership(isMuted: Bool) async {
   )
   #expect(fixture.preferencesStore.saveCount == 0)
   #expect(fixture.presetsStore.saveCount == 0)
-  #expect(!fixture.store.toasts.contains { $0.title == "Auto-paused media" })
+  #expect(!fixture.store.toasts.contains { $0.title == "Muted for your call" })
 }
 
 @MainActor
@@ -1493,6 +1494,471 @@ func acceptedURLMuteReplacesAutomaticMuteOwnership(isMuted: Bool) async {
 
   _ = await fixture.store.shutdown()
   #expect(fixture.store.lifecycleSnapshot.isIdle)
+}
+
+// MARK: - Microphone call detection
+
+/// Stands in for Core Audio: the test decides which processes run input.
+@MainActor
+private final class FakeMicrophoneActivityMonitor: MicrophoneActivityMonitoring {
+  private var onChange: (@MainActor () -> Void)?
+  private(set) var startCount = 0
+  var captures: [MicrophoneCaptureProcess] = []
+
+  var isRunning: Bool { onChange != nil }
+
+  func start(onChange: @escaping @MainActor () -> Void) {
+    guard self.onChange == nil else { return }
+    startCount += 1
+    self.onChange = onChange
+  }
+
+  func stop() { onChange = nil }
+
+  func capturingProcesses() -> [MicrophoneCaptureProcess] {
+    isRunning ? captures : []
+  }
+
+  func emit(_ captures: [MicrophoneCaptureProcess]) {
+    self.captures = captures
+    onChange?()
+  }
+}
+
+/// The call-end hold, released only when the test says so.
+@MainActor
+private final class ManualHoldClock {
+  private(set) var requested: [Duration] = []
+  private var liveWaiters = 0
+  private var generation = 0
+
+  nonisolated var sleep: @Sendable (Duration) async throws -> Void {
+    { [self] duration in try await self.wait(duration) }
+  }
+
+  private func wait(_ duration: Duration) async throws {
+    requested.append(duration)
+    let started = generation
+    liveWaiters += 1
+    defer { liveWaiters -= 1 }
+    while generation == started {
+      try await Task.sleep(for: .milliseconds(2))
+    }
+  }
+
+  /// Waits (up to about two seconds) for a hold to be waiting, then lets it
+  /// expire. Records an issue instead of hanging when no hold ever starts.
+  func expire() async {
+    for _ in 0..<1_000 where liveWaiters == 0 {
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+    guard liveWaiters > 0 else {
+      Issue.record("No call-end hold was waiting")
+      return
+    }
+    generation += 1
+  }
+}
+
+private func callTestApp(
+  id: String,
+  pid: Int32,
+  category: AppCategory,
+  displayName: String,
+  isMuted: Bool = false,
+  runtimeIdentity: AppRuntimeIdentity? = nil
+) -> AudioApp {
+  AudioApp(
+    id: "\(id).runtime",
+    logicalID: id,
+    pid: pid,
+    bundleID: id,
+    displayName: displayName,
+    category: category,
+    isActive: true,
+    desiredVolume: 0.5,
+    appliedVolume: isMuted ? 0 : 0.5,
+    isMuted: isMuted,
+    routingState: .managed,
+    compatibility: .supported,
+    targetDeviceUID: "device.original",
+    runtimeIdentity: runtimeIdentity
+  )
+}
+
+/// A helper process inside the call app's bundle, as a browser or Electron app
+/// captures the microphone from.
+private let callHelperCapture = MicrophoneCaptureProcess(
+  pid: 9_001,
+  reportedBundleID: "com.example.call.helper",
+  owningAppBundlePath: "/Applications/Call.app",
+  owningAppBundleID: "com.example.call"
+)
+
+@MainActor
+private func makeMicrophoneCallFixture(
+  apps: [AudioApp]? = nil,
+  chosenAppIDs: [String] = ["com.example.call"]
+) -> (fixture: TransactionFixture, monitor: FakeMicrophoneActivityMonitor, clock: ManualHoldClock) {
+  let monitor = FakeMicrophoneActivityMonitor()
+  let clock = ManualHoldClock()
+  let fixture = makeTransactionFixture(
+    apps: apps ?? [
+      callTestApp(id: "com.example.music", pid: 10, category: .media, displayName: "Music Player"),
+      // A call app Waves happens to class as media must still never be muted.
+      callTestApp(id: "com.example.call", pid: 20, category: .media, displayName: "Call"),
+    ],
+    device: transactionTestDevice(),
+    microphoneActivityMonitor: monitor,
+    callEndHoldSleep: clock.sleep
+  )
+  fixture.store.preferences.autoPauseMusicForConferencing = true
+  fixture.store.preferences.callDetectionMode = .microphoneInUse
+  fixture.store.preferences.callDetectionAppIDs = chosenAppIDs
+  return (fixture, monitor, clock)
+}
+
+@MainActor
+private func settleCallDetection(_ store: AppStore) async {
+  await store.drainOwnedOperations()
+  await store.drainAppIntentTransactions()
+}
+
+@MainActor
+private func muteState(_ store: AppStore, _ appID: String) -> (isMuted: Bool, source: MuteSource)? {
+  store.session.apps.first { $0.logicalID == appID }.map { ($0.isMuted, $0.muteSource) }
+}
+
+@MainActor
+@Test func microphoneModeDoesNothingUntilChosenAndNeverRunsWhileOff() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  store.preferences.callDetectionMode = .frontmostCallApp
+  store.checkAutoPauseMusic()
+  #expect(monitor.startCount == 0)
+  store.preferences.callDetectionMode = .microphoneInUse
+  store.preferences.autoPauseMusicForConferencing = false
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(monitor.startCount == 0)
+  #expect(!monitor.isRunning)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func microphoneCallMutesMediaButNeverTheCallApp() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+
+  #expect(monitor.isRunning)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  #expect(muteState(store, "com.example.music")?.source == .autoConferencing)
+  #expect(muteState(store, "com.example.call")?.isMuted == false)
+  // Not muted and then unmuted again: the call app is never touched.
+  #expect(await fixture.backend.recordedIntents().count == 1)
+  #expect(store.toasts.contains { $0.title == "Muted for your call" })
+  #expect(!store.toasts.contains { $0.title.contains("paused") })
+  // Automation is never saved as the user's own mute.
+  #expect(store.preferences.appAudioIntents["com.example.music"]?.isMuted != true)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func aCallAppMutedEarlierByAutomationIsUnmutedWhenItsCallStarts() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  // An automatic mute from the other mode caught the media-category call app.
+  await store.applyAutomaticConferencingTransition(isConferencingActive: true)
+  #expect(muteState(store, "com.example.call")?.isMuted == true)
+
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.call")?.isMuted == false)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  #expect(muteState(store, "com.example.music")?.source == .autoConferencing)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func addingAMutedAppToTheCallAppsDuringACallUnmutesOnlyThatApp() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The user takes calls in this app too. It must not stay muted until the
+  // call that is already running ends.
+  store.setCallDetectionApp("com.example.music", isChosen: true)
+  await settleCallDetection(store)
+
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(muteState(store, "com.example.music")?.source == .user)
+  #expect(muteState(store, "com.example.call")?.isMuted == false)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func microphoneCallIgnoresAppsThatWereNotChosen() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture(chosenAppIDs: ["com.example.other"])
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func microphoneHelperResolvesToItsAppThroughTheOuterBundle() {
+  var identity = AppRuntimeIdentity(
+    lifetime: AppProcessLifetimeIdentity(pid: 30, startTimeSeconds: 1, startTimeMicroseconds: 0),
+    executablePath: "/Applications/Browser.app/Contents/MacOS/Browser",
+    outerBundlePath: "/Applications/Browser.app",
+    signingIdentity: AppCodeSigningIdentity(
+      identifier: "com.example.browser",
+      teamIdentifier: "TEAM",
+      designatedRequirement: "identifier \"com.example.browser\"",
+      codeDirectoryHash: Data([1])
+    )
+  )
+  let browser = callTestApp(
+    id: "name-browser", pid: 30, category: .browser, displayName: "Browser", runtimeIdentity: identity)
+  // A helper with no bundle ID of its own, matched only by its outer `.app`.
+  let helper = MicrophoneCaptureProcess(
+    pid: 31, reportedBundleID: nil, owningAppBundlePath: "/Applications/Browser.app", owningAppBundleID: nil)
+  #expect(
+    CallDetectionPolicy.callingAppIDs(captures: [helper], chosenAppIDs: ["name-browser"], apps: [browser])
+      == ["name-browser"])
+  identity = AppRuntimeIdentity(
+    lifetime: identity.lifetime,
+    executablePath: "/Applications/Other.app/Contents/MacOS/Other",
+    outerBundlePath: "/Applications/Other.app",
+    signingIdentity: identity.signingIdentity
+  )
+  let other = callTestApp(
+    id: "name-browser", pid: 30, category: .browser, displayName: "Browser", runtimeIdentity: identity)
+  #expect(
+    CallDetectionPolicy.callingAppIDs(captures: [helper], chosenAppIDs: ["name-browser"], apps: [other])
+      .isEmpty)
+  // The app's own process, by PID.
+  let own = MicrophoneCaptureProcess(pid: 30, reportedBundleID: nil, owningAppBundlePath: nil, owningAppBundleID: nil)
+  #expect(
+    CallDetectionPolicy.callingAppIDs(captures: [own], chosenAppIDs: ["name-browser"], apps: [browser])
+      == ["name-browser"])
+}
+
+@MainActor
+@Test func microphoneCallRidesOverABriefReleaseThenUnmutesAfterTheHold() async {
+  let (fixture, monitor, clock) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The mic closes for a moment and comes back: no unmute.
+  monitor.emit([])
+  await settleCallDetection(store)
+  #expect(store.microphoneCall.endHoldTask != nil)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  monitor.emit([callHelperCapture])
+  await settleCallDetection(store)
+  #expect(store.microphoneCall.endHoldTask == nil)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The call ends: still muted until the hold expires.
+  monitor.emit([])
+  let hold = store.microphoneCall.endHoldTask
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  await clock.expire()
+  await hold?.value
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(muteState(store, "com.example.music")?.source == .user)
+  #expect(store.toasts.contains { $0.title == "Unmuted after your call" })
+  #expect(clock.requested == [CallDetectionPolicy.callEndHold, CallDetectionPolicy.callEndHold])
+  #expect(CallDetectionPolicy.callEndHold == .seconds(2))
+  #expect(await fixture.backend.recordedIntents().map(\.reason) == [.automation, .automation])
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func userChoicesDuringAMicrophoneCallWin() async {
+  let apps = [
+    callTestApp(id: "com.example.music", pid: 10, category: .media, displayName: "Music Player"),
+    callTestApp(id: "com.example.video", pid: 11, category: .media, displayName: "Video", isMuted: true),
+    callTestApp(id: "com.example.call", pid: 20, category: .conferencing, displayName: "Call"),
+  ]
+  let (fixture, monitor, clock) = makeMicrophoneCallFixture(apps: apps)
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  // The user unmutes the music mid-call; more capture changes in the same call
+  // must not mute it again.
+  if let music = store.session.apps.first(where: { $0.logicalID == "com.example.music" }) {
+    store.setMuted(false, for: music)
+  }
+  await settleCallDetection(store)
+  monitor.emit([callHelperCapture, MicrophoneCaptureProcess(pid: 20)])
+  // Refreshes and app switches re-run the automatic pass during a call.
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+
+  monitor.emit([])
+  let hold = store.microphoneCall.endHoldTask
+  await clock.expire()
+  await hold?.value
+  await settleCallDetection(store)
+  // The user's own mute from before the call is kept after it.
+  #expect(muteState(store, "com.example.video")?.isMuted == true)
+  #expect(muteState(store, "com.example.video")?.source == .user)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(await fixture.backend.recordedIntents().map(\.reason) == [.automation, .userEdit])
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func turningCallMutingOffReleasesMicrophoneMutesAndStopsTheMonitor() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  store.setAutoPauseMusicEnabled(false)
+  await settleCallDetection(store)
+  #expect(!monitor.isRunning)
+  #expect(!store.microphoneCall.isActive)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+  #expect(store.callDetectionDiagnostics == nil)
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func changingDetectionModeStopsTheMonitorAndReleasesMutesTheNewModeDoesNotSee() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+
+  store.setCallDetectionMode(.frontmostCallApp)
+  await settleCallDetection(store)
+  #expect(!monitor.isRunning)
+  #expect(store.preferences.callDetectionMode == .frontmostCallApp)
+  // The new mode reads the real frontmost app. Unless a call app happens to be
+  // in front on the test machine, it sees no call and releases the mute.
+  let front = NSWorkspace.shared.frontmostApplication
+  let callAppInFront =
+    front.map {
+      AppDiscoveryPolicy.inferCategory(bundleID: $0.bundleIdentifier, displayName: $0.localizedName ?? "")
+    } == .conferencing
+  if !callAppInFront {
+    #expect(muteState(store, "com.example.music")?.isMuted == false)
+  }
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func addingACapturingAppStartsTheCallAtOnce() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture(chosenAppIDs: [])
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  #expect(muteState(store, "com.example.music")?.isMuted == false)
+
+  store.setCallDetectionApp("com.example.call", isChosen: true)
+  await settleCallDetection(store)
+  #expect(store.preferences.callDetectionAppIDs == ["com.example.call"])
+  #expect(muteState(store, "com.example.music")?.isMuted == true)
+  #expect(store.callDetectionDiagnostics == CallDetectionDiagnostics(isDetected: true, appNames: ["Call"]))
+  _ = await store.shutdown()
+}
+
+@MainActor
+@Test func shutdownStopsTheMicrophoneMonitorAndTheHold() async {
+  let (fixture, monitor, _) = makeMicrophoneCallFixture()
+  let store = fixture.store
+  monitor.captures = [callHelperCapture]
+  store.checkAutoPauseMusic()
+  await settleCallDetection(store)
+  monitor.emit([])
+  #expect(store.microphoneCall.endHoldTask != nil)
+
+  _ = await store.shutdown()
+  #expect(!monitor.isRunning)
+  #expect(store.microphoneCall.endHoldTask == nil)
+  #expect(store.lifecycleSnapshot.isIdle)
+}
+
+@MainActor
+@Test func choosingMicrophoneModeFillsInKnownCallAppsOnce() async {
+  let apps = [
+    callTestApp(id: "com.example.music", pid: 10, category: .media, displayName: "Music Player"),
+    callTestApp(id: "com.example.zoomish", pid: 12, category: .conferencing, displayName: "Zoom"),
+    callTestApp(id: "com.example.chat", pid: 13, category: .communication, displayName: "Discord"),
+  ]
+  let (fixture, _, _) = makeMicrophoneCallFixture(apps: apps)
+  let store = fixture.store
+  store.preferences.callDetectionMode = .frontmostCallApp
+  store.preferences.callDetectionAppIDs = nil
+  store.setCallDetectionMode(.microphoneInUse)
+  let filled = store.preferences.callDetectionAppIDs ?? []
+  #expect(Array(filled.prefix(2)) == ["com.example.zoomish", "com.example.chat"])
+  #expect(!filled.contains("com.example.music"))
+
+  // A list the user emptied stays empty when they come back to the mode.
+  store.preferences.callDetectionAppIDs = []
+  store.setCallDetectionMode(.frontmostCallApp)
+  store.setCallDetectionMode(.microphoneInUse)
+  #expect(store.preferences.callDetectionAppIDs == [])
+  _ = await store.shutdown()
+}
+
+@Test func suggestedCallAppsAreSeenCallAppsThenInstalledKnownOnes() {
+  let seen = [
+    AudioApp(id: "a", logicalID: "us.zoom.xos", displayName: "zoom.us", category: .conferencing),
+    AudioApp(id: "b", logicalID: "com.example.music", displayName: "Music", category: .media),
+    AudioApp(id: "c", logicalID: "com.example.chat", displayName: "Chat", category: .communication),
+  ]
+  let suggested = CallDetectionPolicy.suggestedCallAppIDs(
+    seenApps: seen,
+    isInstalled: { ["us.zoom.xos", "com.hnc.Discord"].contains($0) }
+  )
+  #expect(suggested == ["us.zoom.xos", "com.example.chat", "com.hnc.Discord"])
+  for bundleID in CallDetectionPolicy.knownCallAppBundleIDs {
+    let category = AppDiscoveryPolicy.inferCategory(bundleID: bundleID, displayName: "")
+    #expect(category == .conferencing || category == .communication, "\(bundleID) is \(category)")
+  }
+}
+
+@Test func callDetectionPreferencesDefaultToTheFrontmostModeAndRoundTrip() throws {
+  let legacy = try JSONDecoder().decode(UserPreferences.self, from: Data("{}".utf8))
+  #expect(legacy.callDetectionMode == .frontmostCallApp)
+  #expect(legacy.callDetectionAppIDs == nil)
+  #expect(legacy.autoPauseMusicForConferencing)
+
+  var preferences = UserPreferences()
+  preferences.callDetectionMode = .microphoneInUse
+  preferences.callDetectionAppIDs = ["com.google.Chrome"]
+  let decoded = try JSONDecoder().decode(UserPreferences.self, from: JSONEncoder().encode(preferences))
+  #expect(decoded.callDetectionMode == .microphoneInUse)
+  #expect(decoded.callDetectionAppIDs == ["com.google.Chrome"])
 }
 
 @MainActor
@@ -2250,6 +2716,573 @@ func appTerminationImmediatelyClearsWaveLinkOutputActivity(isActive: Bool) async
   #expect(fixture.store.session.apps.allSatisfy { $0.isActive })
 }
 
+// MARK: - Profiles that restore EQ and output (1.8)
+
+private func profileTestEqualizer(gain: Float, role: AdaptiveAppRole = .auto) -> EqualizerSettings {
+  var settings = EqualizerSettings(isEnabled: true, adaptiveRole: role)
+  settings.setGain(gain, at: 0)
+  return settings
+}
+
+private let profileTestHeadphones = AudioDevice(
+  id: "device.headphones",
+  name: "Studio Headphones",
+  kind: .display
+)
+
+@MainActor
+@Test func capturingAMixIncludesEqualizerAndOutputOnlyWhenAsked() async {
+  let app = transactionTestApp(id: "capture.sound", desiredVolume: 0.5, targetDeviceUID: profileTestHeadphones.id)
+  let equalizer = profileTestEqualizer(gain: 4)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.5,
+      equalizerSettings: equalizer,
+      targetDeviceUID: profileTestHeadphones.id
+    ),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  fixture.store.availableDevices = [transactionTestDevice(), profileTestHeadphones]
+
+  let levelsOnly = fixture.store.saveProfile(named: "Levels", appIDs: [app.logicalID], captureLevels: true)
+  let full = fixture.store.saveProfile(
+    named: "Everything",
+    appIDs: [app.logicalID],
+    captureLevels: true,
+    includeEqualizer: true,
+    includeOutput: true
+  )
+
+  let levelsEntry = fixture.store.profiles.first { $0.id == levelsOnly.savedProfileID }?.entries.first
+  #expect(levelsEntry?.desiredVolume == 0.5)
+  #expect(levelsEntry?.equalizer == nil)
+  #expect(levelsEntry?.output == nil)
+
+  let fullEntry = fixture.store.profiles.first { $0.id == full.savedProfileID }?.entries.first
+  #expect(fullEntry?.equalizer == equalizer)
+  #expect(
+    fullEntry?.output == ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: "Studio Headphones"))
+}
+
+@MainActor
+@Test func saveCurrentMixCapturesOnlyAppsWavesManagesAndTheUsersOwnMute() async {
+  let managed = transactionTestApp(id: "mix.managed", desiredVolume: 0.3)
+  // Not media, so call automation leaves it alone and it stays untouched.
+  let untouched = AudioApp(
+    id: "mix.untouched.runtime",
+    logicalID: "mix.untouched",
+    pid: 43,
+    bundleID: "mix.untouched",
+    displayName: "Untouched",
+    category: .system,
+    isActive: true,
+    desiredVolume: 1,
+    routingState: .monitorOnly,
+    compatibility: .supported
+  )
+  let fixture = makeTransactionFixture(
+    apps: [managed, untouched],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: managed.logicalID, desiredVolume: 0.3, isMuted: false)
+  )
+
+  #expect(fixture.store.currentMixAppIDs == [managed.logicalID])
+
+  // A call has the managed app muted right now; the saved mix keeps the
+  // user's own (unmuted) state, never the automatic mute.
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: true)
+  #expect(fixture.store.session.apps.first { $0.logicalID == managed.logicalID }?.muteSource == .autoConferencing)
+
+  let result = fixture.store.saveCurrentMix(named: "Evening", includeEqualizer: true, includeOutput: false)
+  let profile = fixture.store.profiles.first { $0.id == result.savedProfileID }
+  #expect(profile?.entries.map(\.appID) == [managed.logicalID])
+  #expect(profile?.entries.first?.desiredVolume == 0.3)
+  #expect(profile?.entries.first?.isMuted == false)
+  #expect(profile?.entries.first?.equalizer != nil)
+  #expect(profile?.entries.first?.output == nil)
+  #expect(fixture.store.activeProfileID == profile?.id)
+}
+
+@MainActor
+@Test func saveCurrentMixWithNothingManagedExplainsWhatToDo() async {
+  var untouched = transactionTestApp(id: "mix.none", desiredVolume: 1)
+  untouched.routingState = .monitorOnly
+  let fixture = makeTransactionFixture(apps: [untouched], device: transactionTestDevice())
+  let profilesBefore = fixture.store.profiles
+
+  #expect(fixture.store.saveCurrentMix(named: "Empty", includeEqualizer: true, includeOutput: false) == .noMixToSave)
+  #expect(fixture.store.saveCurrentMix(named: " ", includeEqualizer: true, includeOutput: false) == .blankName)
+  #expect(fixture.store.profiles == profilesBefore)
+  #expect(ProfileSaveResult.noMixToSave.message?.contains("Change an app's volume") == true)
+}
+
+@MainActor
+@Test func soundProfileSendsOneCompleteIntentPerAppAndPersistsEqualizerAndOutput() async {
+  let app = transactionTestApp(id: "apply.sound", desiredVolume: 0.8, targetDeviceUID: nil)
+  let currentRole = AdaptiveAppRole.media
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      equalizerSettings: EqualizerSettings(adaptiveRole: currentRole)
+    ),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  let savedEqualizer = profileTestEqualizer(gain: -6, role: .auto)
+  let profile = Profile(
+    name: "Movie",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.4,
+        isMuted: false,
+        volumeBoost: 1,
+        equalizer: savedEqualizer,
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  // Level, EQ, and route travel together in a single intent, so the app never
+  // plays at the new level through the old EQ or the reverse.
+  let intents = await fixture.backend.recordedIntents()
+  #expect(await fixture.backend.recordedProfileCalls().isEmpty)
+  #expect(intents.count == 1)
+  var expectedEqualizer = savedEqualizer
+  expectedEqualizer.adaptiveRole = currentRole
+  #expect(intents.first?.desiredVolume == 0.4)
+  #expect(intents.first?.equalizerSettings == expectedEqualizer)
+  #expect(intents.first?.targetDeviceUID == profileTestHeadphones.id)
+
+  let durable = fixture.store.preferences.appAudioIntents[app.logicalID]
+  #expect(durable?.equalizerSettings == expectedEqualizer)
+  #expect(durable?.targetDeviceUID == profileTestHeadphones.id)
+  #expect(fixture.store.preferences.appEqualizerSettings[app.logicalID] == expectedEqualizer)
+  #expect(fixture.store.toasts.contains { $0.title == "Profile applied" })
+
+  // The next direct volume change is built from the restored EQ, not the old one.
+  _ = await fixture.store.applyAppIntent(
+    forAppID: app.logicalID,
+    overrides: AppIntentOverrides(desiredVolume: 0.5),
+    reason: .userEdit
+  )
+  #expect(await fixture.backend.recordedIntents().last?.equalizerSettings == expectedEqualizer)
+}
+
+@MainActor
+@Test func editDuringASoundProfileKeepsTheEqualizerAlreadyRestoredForThatApp() async {
+  let first = transactionTestApp(id: "apply.sound.first", desiredVolume: 0.8, targetDeviceUID: nil)
+  let second = transactionTestApp(id: "apply.sound.second", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [first, second],
+    device: transactionTestDevice(),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  await fixture.backend.suspendIntent(callNumber: 2)
+  let savedEqualizer = profileTestEqualizer(gain: -6)
+  let headphones = ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+  let profile = Profile(
+    name: "Movie",
+    entries: [
+      ProfileEntry(appID: first.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer, output: headphones),
+      ProfileEntry(appID: second.logicalID, desiredVolume: 0.4, equalizer: savedEqualizer),
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  // The first app's row has landed; the second app's is still in flight.
+  await fixture.backend.waitUntilFirstIntentIsSuspended()
+  let restored = await fixture.backend.recordedIntents().first?.equalizerSettings
+  #expect(restored?.isEnabled == true)
+
+  let edit = Task { @MainActor in
+    await fixture.store.applyAppIntent(
+      forAppID: first.logicalID,
+      overrides: AppIntentOverrides(desiredVolume: 0.5),
+      reason: .userEdit
+    )
+  }
+  await waitUntil { await fixture.backend.recordedIntents().count == 3 }
+  await fixture.backend.resumeFirstIntent()
+  _ = await edit.value
+  await fixture.store.drainAppIntentTransactions()
+
+  // The volume change carries the EQ and output the profile just restored,
+  // not the old ones.
+  let edited = await fixture.backend.recordedIntents().last { $0.appID == first.logicalID }
+  #expect(edited?.desiredVolume == 0.5)
+  #expect(edited?.equalizerSettings == restored)
+  #expect(edited?.targetDeviceUID == profileTestHeadphones.id)
+}
+
+@MainActor
+@Test func levelOnlyProfileLeavesEqualizerAndOutputAlone() async {
+  let app = transactionTestApp(id: "apply.legacy", desiredVolume: 0.8, targetDeviceUID: profileTestHeadphones.id)
+  let equalizer = profileTestEqualizer(gain: 5)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      equalizerSettings: equalizer,
+      targetDeviceUID: profileTestHeadphones.id
+    ),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+
+  fixture.store.applyProfile(
+    Profile(name: "Quiet", entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.2)]))
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(await fixture.backend.recordedProfileCalls().count == 1)
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.desiredVolume == 0.2)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.equalizerSettings == equalizer)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == profileTestHeadphones.id)
+}
+
+@MainActor
+@Test func disconnectedSavedOutputIsSkippedAndNamedWhileTheRestApplies() async {
+  let app = transactionTestApp(id: "apply.absent", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8)
+  )
+  let equalizer = profileTestEqualizer(gain: 3)
+  let profile = Profile(
+    name: "Desk",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.5,
+        equalizer: equalizer,
+        output: ProfileOutput(deviceUID: "device.airpods", deviceName: "AirPods Pro")
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  #expect(!intents.contains { $0.targetDeviceUID == "device.airpods" })
+  #expect(intents.first?.targetDeviceUID == nil)
+  #expect(intents.first?.desiredVolume == 0.5)
+  #expect(intents.first?.equalizerSettings.activeGainsDB == equalizer.activeGainsDB)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == nil)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied" && $0.kind == .info
+        && $0.detail == "AirPods Pro isn't connected, so Test App kept its output."
+    })
+}
+
+@MainActor
+@Test func linkAppliedProfileSetsLevelsAndEqualizerButNeverMovesTheOutput() async {
+  let app = transactionTestApp(id: "apply.link", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  let equalizer = profileTestEqualizer(gain: -6)
+  let profile = Profile(
+    name: "Speakers",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.4,
+        equalizer: equalizer,
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+  fixture.store.preferences.enableURLScheme = true
+  fixture.store.profiles = [profile]
+
+  // Anything that can open a URL can send this, so it must not be able to
+  // move a call or music onto another device.
+  fixture.store.handleURLScheme(URL(string: "waves://apply-profile?name=Speakers")!)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.count == 1)
+  #expect(intents.first?.desiredVolume == 0.4)
+  #expect(intents.first?.equalizerSettings.activeGainsDB == equalizer.activeGainsDB)
+  #expect(intents.first?.targetDeviceUID == nil)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == nil)
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied"
+        && $0.detail == "Links can't move apps to another output, so Test App kept its output."
+    })
+
+  // The same profile applied by the user does move it.
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  #expect(await fixture.backend.recordedIntents().last?.targetDeviceUID == profileTestHeadphones.id)
+}
+
+@MainActor
+@Test func outputOnlyProfileStillNamesTheDevicesThatAreNotConnected() async {
+  let app = transactionTestApp(id: "apply.output-only", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(apps: [app], device: transactionTestDevice())
+  let profile = Profile(
+    name: "Desk",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        output: ProfileOutput(deviceUID: "device.airpods", deviceName: "AirPods Pro")
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  // With its only setting skipped the row has nothing left to apply, which
+  // used to read as a plain "Profile selected".
+  #expect(await fixture.backend.recordedIntents().isEmpty)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile selected" })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied"
+        && $0.detail == "AirPods Pro isn't connected, so Test App kept its output."
+    })
+}
+
+@MainActor
+@Test func excludedAppNeverReceivesAProfilesEqualizerOrOutput() async {
+  let app = transactionTestApp(id: "apply.excluded", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    excludedAppIDs: [app.logicalID],
+    extraOutputDevices: [profileTestHeadphones]
+  )
+  let profile = Profile(
+    name: "Loud",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.5,
+        equalizer: profileTestEqualizer(gain: 6),
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+
+  let intents = await fixture.backend.recordedIntents()
+  #expect(intents.allSatisfy { $0.isExcluded })
+  #expect(!intents.contains { $0.targetDeviceUID == profileTestHeadphones.id })
+  #expect(fixture.store.lastProfileApplyResult?.rows.first?.outcome == .excluded)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID] == nil)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
+  #expect(fixture.store.toasts.contains { $0.detail?.contains("1 excluded") == true })
+}
+
+@MainActor
+@Test func waveLinkAppGetsTheLevelButIsToldItsEqualizerAndOutputStayInWaveLink() async {
+  let app = transactionTestApp(id: "apply.wavelink", desiredVolume: 0.8, targetDeviceUID: nil)
+  let originalEqualizer = profileTestEqualizer(gain: 1)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      equalizerSettings: originalEqualizer
+    ),
+    extraOutputDevices: [profileTestHeadphones],
+    waveLinkAppIDs: [app.logicalID]
+  )
+  let profile = Profile(
+    name: "Stream",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.5,
+        equalizer: profileTestEqualizer(gain: 8),
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.5)
+  let durable = fixture.store.preferences.appAudioIntents[app.logicalID]
+  #expect(durable?.desiredVolume == 0.5)
+  #expect(durable?.equalizerSettings == originalEqualizer)
+  #expect(durable?.targetDeviceUID == nil)
+  #expect(!fixture.store.toasts.contains { $0.title == "Profile applied" })
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Profile partly applied" && $0.kind == .warning
+        && $0.detail == "Wave Link controls Test App, so its EQ and output weren't changed."
+    })
+}
+
+@MainActor
+@Test func waveLinkAppKeepsItsEqualizerWhenAProfileOnlyRestoresEqualizer() async {
+  let app = transactionTestApp(id: "apply.wavelink-eq", desiredVolume: 0.8, targetDeviceUID: nil)
+  let originalEqualizer = profileTestEqualizer(gain: 1)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: 0.8,
+      equalizerSettings: originalEqualizer
+    ),
+    waveLinkAppIDs: [app.logicalID]
+  )
+
+  fixture.store.applyProfile(
+    Profile(
+      name: "Bright",
+      entries: [
+        ProfileEntry(appID: app.logicalID, desiredVolume: 0.5, equalizer: profileTestEqualizer(gain: 8))
+      ]
+    ))
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.desiredVolume == 0.5)
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.equalizerSettings == originalEqualizer)
+  #expect(
+    fixture.store.toasts.contains {
+      $0.detail == "Wave Link controls Test App, so its EQ wasn't changed."
+    })
+}
+
+@MainActor
+@Test func refusedRowForARunningAppIsNotReportedAsSavedForLater() async {
+  let app = transactionTestApp(id: "apply.refused", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8),
+    extraOutputDevices: [profileTestHeadphones],
+    waveLinkAppIDs: [app.logicalID]
+  )
+  // Same level, new output: Wave Link refuses the whole row.
+  let profile = Profile(
+    name: "Route only",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.8,
+        output: ProfileOutput(deviceUID: profileTestHeadphones.id, deviceName: profileTestHeadphones.name)
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.lastProfileApplyResult?.rows.first?.outcome == .unsupported)
+  #expect(fixture.store.session.apps.contains { $0.logicalID == app.logicalID })
+  #expect(fixture.store.preferences.appAudioIntents[app.logicalID]?.targetDeviceUID == nil)
+  #expect(!fixture.store.toasts.contains { $0.detail?.contains("saved for later") == true })
+  #expect(fixture.store.toasts.contains { $0.detail?.contains("Wave Link controls Test App") == true })
+}
+
+@MainActor
+@Test func resetMixAfterASoundProfileRestoresLevelsButNotEqualizer() async {
+  let app = transactionTestApp(id: "reset.sound", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8)
+  )
+  let equalizer = profileTestEqualizer(gain: -4)
+  fixture.store.applyProfile(
+    Profile(
+      name: "Night",
+      entries: [ProfileEntry(appID: app.logicalID, desiredVolume: 0.3, equalizer: equalizer)]
+    ))
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.mixRestorePoint?.entries.first?.equalizer == nil)
+  #expect(fixture.store.mixRestorePoint?.entries.first?.output == nil)
+
+  fixture.store.resetMix()
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.8)
+  #expect(
+    fixture.store.preferences.appAudioIntents[app.logicalID]?.equalizerSettings.activeGainsDB
+      == equalizer.activeGainsDB)
+  #expect(fixture.store.toasts.contains { $0.title == "Mix reset" })
+}
+
+@MainActor
+@Test func defaultProfileAtStartupNamesASkippedOutput() async {
+  let app = transactionTestApp(id: "startup.absent", desiredVolume: 0.8, targetDeviceUID: nil)
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(appID: app.logicalID, desiredVolume: 0.8)
+  )
+  let profile = Profile(
+    name: "Baseline",
+    entries: [
+      ProfileEntry(
+        appID: app.logicalID,
+        desiredVolume: 0.6,
+        output: ProfileOutput(deviceUID: "device.gone", deviceName: "Desk Speakers")
+      )
+    ]
+  )
+
+  fixture.store.applyProfile(profile, purpose: .defaultAtStartup)
+  await fixture.store.drainAppIntentTransactions()
+  await fixture.store.drainPersistenceTasks()
+
+  #expect(!(await fixture.backend.recordedIntents()).contains { $0.targetDeviceUID == "device.gone" })
+  #expect(fixture.store.session.apps.first?.desiredVolume == 0.6)
+  #expect(
+    fixture.store.toasts.contains {
+      $0.title == "Default profile partly applied" && $0.kind == .info
+        && $0.detail == "Desk Speakers isn't connected, so Test App kept its output."
+    })
+}
+
+@MainActor
+@Test func saveCurrentMixRequestIsConsumedOnce() async {
+  let fixture = makeTransactionFixture(apps: [], device: transactionTestDevice())
+  #expect(!fixture.store.consumeSaveCurrentMixRequest())
+  let token = fixture.store.saveCurrentMixToken
+  fixture.store.requestSaveCurrentMix()
+  #expect(fixture.store.saveCurrentMixToken != token)
+  #expect(fixture.store.consumeSaveCurrentMixRequest())
+  #expect(!fixture.store.consumeSaveCurrentMixRequest())
+}
+
 private func transactionTestApp(
   id: String = "test.app",
   pid: Int32 = 42,
@@ -2333,7 +3366,13 @@ private func makeTransactionFixture(
   deviceChangeSuppressionSleep: @escaping DeviceChangeSuppressionCoordinator.Sleep = {
     duration in try await Task.sleep(for: duration)
   },
-  profileStore: TransactionProfilesStore = TransactionProfilesStore()
+  profileStore: TransactionProfilesStore = TransactionProfilesStore(),
+  extraOutputDevices: [AudioDevice] = [],
+  waveLinkAppIDs: Set<String> = [],
+  microphoneActivityMonitor: (any MicrophoneActivityMonitoring)? = nil,
+  callEndHoldSleep: @escaping @Sendable (Duration) async throws -> Void = {
+    duration in try await Task.sleep(for: duration)
+  }
 ) -> TransactionFixture {
   let snapshot = transactionSnapshot(apps: apps, device: device)
   let refreshSnapshot = refreshApps.map { transactionSnapshot(apps: $0, device: device) }
@@ -2344,7 +3383,9 @@ private func makeTransactionFixture(
     profileOutcomes: profileOutcomes,
     suspendFirstIntent: suspendFirstIntent,
     suspendFirstProfile: suspendFirstProfile,
-    resultGenerationOffset: resultGenerationOffset
+    resultGenerationOffset: resultGenerationOffset,
+    extraOutputDevices: extraOutputDevices,
+    waveLinkAppIDs: waveLinkAppIDs
   )
   let preferencesStore = TransactionPreferencesStore()
   // Transaction tests must not react to conferencing apps on the test desktop.
@@ -2385,7 +3426,9 @@ private func makeTransactionFixture(
     deviceVolumePresetsStore: presetsStore,
     initialStartupState: initialStartupState,
     runtimeProcessProbe: runtimeProcessProbe,
-    deviceChangeSuppressionSleep: deviceChangeSuppressionSleep
+    deviceChangeSuppressionSleep: deviceChangeSuppressionSleep,
+    microphoneActivityMonitor: microphoneActivityMonitor,
+    callEndHoldSleep: callEndHoldSleep
   )
   return TransactionFixture(
     store: store,
@@ -2434,9 +3477,13 @@ private actor TransactionBackend: AudioControlBackend {
   private var refreshSnapshot: AudioSessionSnapshot?
   private var outcomes: [AppIntentApplyOutcome]
   private var profileOutcomes: [ProfileRowApplyOutcome]
-  private let suspendFirstIntent: Bool
+  private var suspendedIntentCallNumber: Int?
   private let suspendFirstProfile: Bool
   private let resultGenerationOffset: UInt64
+  private let extraOutputDevices: [AudioDevice]
+  /// Apps Wave Link mixes: like the real bridge, only volume and mute reach
+  /// them, and a change that is purely boost or output is refused.
+  private let waveLinkAppIDs: Set<String>
   private var intents: [AppRouteIntent] = []
   private var profileCalls: [(profile: Profile, generation: UInt64)] = []
   private var latestGenerationByAppID: [String: UInt64] = [:]
@@ -2469,15 +3516,19 @@ private actor TransactionBackend: AudioControlBackend {
     profileOutcomes: [ProfileRowApplyOutcome],
     suspendFirstIntent: Bool,
     suspendFirstProfile: Bool,
-    resultGenerationOffset: UInt64
+    resultGenerationOffset: UInt64,
+    extraOutputDevices: [AudioDevice] = [],
+    waveLinkAppIDs: Set<String> = []
   ) {
     self.snapshot = snapshot
     self.refreshSnapshot = refreshSnapshot
     self.outcomes = outcomes
     self.profileOutcomes = profileOutcomes
-    self.suspendFirstIntent = suspendFirstIntent
+    self.suspendedIntentCallNumber = suspendFirstIntent ? 1 : nil
     self.suspendFirstProfile = suspendFirstProfile
     self.resultGenerationOffset = resultGenerationOffset
+    self.extraOutputDevices = extraOutputDevices
+    self.waveLinkAppIDs = waveLinkAppIDs
   }
 
   func recordedIntents() -> [AppRouteIntent] { intents }
@@ -2503,6 +3554,11 @@ private actor TransactionBackend: AudioControlBackend {
     await withCheckedContinuation { continuation in
       suspensionWaiters.append(continuation)
     }
+  }
+
+  /// Suspends the intent with this call number instead of the first.
+  func suspendIntent(callNumber: Int) {
+    suspendedIntentCallNumber = callNumber
   }
 
   func resumeFirstIntent() {
@@ -2535,7 +3591,7 @@ private actor TransactionBackend: AudioControlBackend {
       latestGenerationByAppID[intent.appID] = intent.generation
     }
 
-    if callNumber == 1, suspendFirstIntent {
+    if callNumber == suspendedIntentCallNumber {
       firstIntentIsSuspended = true
       let waiters = suspensionWaiters
       suspensionWaiters.removeAll()
@@ -2555,6 +3611,38 @@ private actor TransactionBackend: AudioControlBackend {
         resultingApp: snapshot.apps.first { $0.logicalID == intent.appID },
         backendStatus: snapshot.backendStatus,
         detail: "A newer deterministic transaction superseded this intent."
+      )
+    }
+
+    if waveLinkAppIDs.contains(intent.appID),
+      let index = snapshot.apps.firstIndex(where: { $0.logicalID == intent.appID })
+    {
+      completedIntents += 1
+      let previous = snapshot.apps[index]
+      snapshot.apps[index].routingState = .monitorOnly
+      snapshot.apps[index].routeHealthContext = .waveLinkBridge
+      let levelChanged =
+        intent.desiredVolume != previous.desiredVolume || intent.isMuted != previous.isMuted
+      let otherChanged =
+        intent.volumeBoost != previous.volumeBoost || intent.targetDeviceUID != previous.targetDeviceUID
+      if otherChanged, !levelChanged {
+        return AppIntentApplyResult(
+          appID: intent.appID,
+          generation: intent.generation,
+          outcome: .unavailable,
+          resultingApp: snapshot.apps[index],
+          backendStatus: snapshot.backendStatus,
+          detail: "Boost, EQ, and output routing stay in Wave Link."
+        )
+      }
+      snapshot.apps[index].desiredVolume = intent.desiredVolume
+      snapshot.apps[index].isMuted = intent.isMuted
+      return AppIntentApplyResult(
+        appID: intent.appID,
+        generation: intent.generation,
+        outcome: .applied,
+        resultingApp: snapshot.apps[index],
+        backendStatus: snapshot.backendStatus
       )
     }
 
@@ -2767,7 +3855,7 @@ private actor TransactionBackend: AudioControlBackend {
     return await diagnosticsReport()
   }
   func availableOutputDevices() async -> [AudioDevice] {
-    snapshot.currentDevice.map { [$0] } ?? []
+    (snapshot.currentDevice.map { [$0] } ?? []) + extraOutputDevices
   }
   func setDefaultOutputDevice(uid: String) async throws {
     snapshot.currentDevice = AudioDevice(id: uid, name: "Selected", kind: .virtual)
@@ -3197,4 +4285,31 @@ func nonFiniteBoostsEmitUnityBoost(nonFiniteValue: Float) async throws {
 
   #expect(await fixture.backend.recordedIntents().isEmpty)
   #expect(fixture.store.trackedAppIntentTaskCount == 0)
+}
+
+@Test(arguments: [nil, false, true] as [Bool?])
+func diagnosticsMentionTheMicrophoneOnlyWhileThatModeIsOn(detected: Bool?) {
+  let text = DiagnosticsExportFormatter.format(
+    metadata: DiagnosticsMetadata(bundleInfo: [:], operatingSystemVersion: "Version 27.0"),
+    captureAuthorization: nil,
+    session: .empty,
+    apps: [],
+    availableOutputDeviceCount: 0,
+    diagnostics: nil,
+    persistenceFailureCount: 0,
+    lastPersistenceError: nil,
+    shutdownResult: nil,
+    callDetection: detected.map { CallDetectionDiagnostics(isDetected: $0, appNames: $0 ? ["Zoom"] : []) }
+  )
+  switch detected {
+  case nil:
+    #expect(!text.lowercased().contains("microphone"))
+    #expect(!text.contains("Call detection"))
+  case false?:
+    #expect(text.contains("Detected: no"))
+    #expect(!text.contains("By [app name]"))
+  case true?:
+    #expect(text.contains("Detected: yes"))
+    #expect(text.contains("By [app name]: Zoom"))
+  }
 }

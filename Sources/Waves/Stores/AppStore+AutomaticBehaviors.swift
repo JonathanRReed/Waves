@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import WavesAudioCore
 
-// MARK: - Automatic behaviors: settings toggles, auto-pause, conferencing
+// MARK: - Automatic behaviors: settings toggles, muting media during calls
 
 extension AppStore {
   /// Updates the auto-pause preference. Toggling in either direction resets the
@@ -116,6 +116,7 @@ extension AppStore {
 
   func checkAutoPauseMusic() {
     guard requireAudioRunning() else { return }
+    syncMicrophoneCallMonitoring()
     // Coalesce overlapping passes (mirroring handleDeviceChange) so two never
     // run at once. Frontmost detection happens inside each pass, so the
     // coalesced rerun reads the *then-current* frontmost app — the latest app
@@ -140,45 +141,78 @@ extension AppStore {
   }
 
   private func performAutoPausePass() async {
-    let enabled = preferences.autoPauseMusicForConferencing
-    // With the preference off the pass still runs as a resume-only sweep (see
-    // setAutoPauseMusicEnabled) — every other resume path lives inside this
-    // pass, so bailing outright would strand auto-paused apps muted.
-    if !enabled {
+    // With the preference off the pass still runs as an unmute-only sweep (see
+    // setAutoPauseMusicEnabled) — every other unmute path lives inside this
+    // pass, so bailing outright would strand automatically muted apps.
+    guard preferences.autoPauseMusicForConferencing else {
       guard session.apps.contains(where: { $0.isMuted && $0.muteSource == .autoConferencing }) else { return }
+      await applyAutomaticConferencingTransition(isConferencingActive: false)
+      return
     }
 
-    // Detect conferencing from the live frontmost application rather than the
-    // session snapshot, whose `isActive` flags are only refreshed periodically.
-    let frontmost = NSWorkspace.shared.frontmostApplication
-    let currentFrontmostApp = frontmost?.bundleIdentifier
-    guard currentFrontmostApp != previousFrontmostApp else { return }
-    previousFrontmostApp = currentFrontmostApp
+    switch preferences.callDetectionMode {
+    case .microphoneInUse:
+      // Act only on edges, like the frontmost mode below: an app the user
+      // unmutes by hand during a call stays unmuted until the next call.
+      let isCallActive = microphoneCall.isActive
+      let chosenAppAdded = microphoneCall.chosenAppAdded
+      microphoneCall.chosenAppAdded = false
+      guard isCallActive != microphoneCall.lastApplied else {
+        // Mid-call, a newly chosen call app is unmuted if an automatic mute
+        // caught it. Nothing new is muted, so manual unmutes still stand.
+        if isCallActive, chosenAppAdded {
+          await applyAutomaticConferencingTransition(
+            isConferencingActive: true,
+            sparing: Set(callDetectionAppIDs),
+            mutesMedia: false
+          )
+        }
+        return
+      }
+      microphoneCall.lastApplied = isCallActive
+      await applyAutomaticConferencingTransition(
+        isConferencingActive: isCallActive,
+        sparing: Set(callDetectionAppIDs)
+      )
+    case .frontmostCallApp:
+      // Detect conferencing from the live frontmost application rather than the
+      // session snapshot, whose `isActive` flags are only refreshed periodically.
+      let frontmost = NSWorkspace.shared.frontmostApplication
+      let currentFrontmostApp = frontmost?.bundleIdentifier
+      guard currentFrontmostApp != previousFrontmostApp else { return }
+      previousFrontmostApp = currentFrontmostApp
 
-    let frontmostCategory = frontmost.map {
-      AppDiscoveryPolicy.inferCategory(bundleID: $0.bundleIdentifier, displayName: $0.localizedName ?? "")
+      let frontmostCategory = frontmost.map {
+        AppDiscoveryPolicy.inferCategory(bundleID: $0.bundleIdentifier, displayName: $0.localizedName ?? "")
+      }
+      await applyAutomaticConferencingTransition(
+        isConferencingActive: frontmostCategory == .conferencing
+      )
     }
-    let isConferencingAppActive = enabled && frontmostCategory == .conferencing
-
-    await applyAutomaticConferencingTransition(
-      isConferencingActive: isConferencingAppActive
-    )
   }
 
   /// Applies the automatic conferencing transition through the same complete,
   /// generation-aware intent boundary as direct controls. Kept internal so focused
   /// tests can drive the deterministic transition without changing the OS frontmost
   /// application. Automation never requests durable intent or device-preset saves.
+  ///
+  /// `sparing` names the call apps themselves: never muted by this, and
+  /// unmuted if an earlier automatic mute caught one.
+  ///
+  /// `mutesMedia` is false for a pass that only releases spared apps.
   func applyAutomaticConferencingTransition(
-    isConferencingActive: Bool
+    isConferencingActive: Bool,
+    sparing sparedAppIDs: Set<String> = [],
+    mutesMedia: Bool = true
   ) async {
     guard requireAudioRunning() else { return }
-    var pausedNames: [String] = []
-    var resumedNames: [String] = []
+    var mutedNames: [String] = []
+    var unmutedNames: [String] = []
 
-    if isConferencingActive {
+    if isConferencingActive, mutesMedia {
       let musicApps = visibleApps.filter {
         $0.category == .media && !$0.isMuted && !isExcluded($0)
+          && !sparedAppIDs.contains($0.logicalID)
       }
       for app in musicApps {
         let result = await applyAppIntent(
@@ -198,7 +232,7 @@ extension AppStore {
           appIntentCoordinator.isCurrent(result.generation, for: app.logicalID)
         else {
           logger.error(
-            "Auto-pause did not commit for \(app.displayName, privacy: .public): \(String(describing: result.outcome), privacy: .public)"
+            "Call mute did not commit for \(app.displayName, privacy: .public): \(String(describing: result.outcome), privacy: .public)"
           )
           continue
         }
@@ -211,66 +245,67 @@ extension AppStore {
             generation: result.generation
           )
         else { continue }
-        pausedNames.append(app.displayName)
-        logger.info("Auto-paused music app: \(app.displayName, privacy: .public)")
-      }
-    } else {
-      let resumable = visibleApps.filter {
-        $0.isMuted
-          && $0.muteSource == .autoConferencing
-          && appIntentCoordinator.ownsAutomaticMute(for: $0.logicalID)
-          && !isExcluded($0)
-      }
-      for app in resumable {
-        let result = await applyAppIntent(
-          forAppID: app.logicalID,
-          overrides: AppIntentOverrides(isMuted: false, muteSource: .user),
-          reason: .automation,
-          persistencePolicy: .none,
-          feedbackPolicy: .none,
-          optimistic: false
-        )
-        guard (result.outcome == .applied || result.outcome == .noChange),
-          result.resultingApp?.isMuted == false,
-          session.apps.first(matchingAppKey: app.logicalID)?.isMuted == false,
-          appIntentCoordinator.isCurrent(result.generation, for: app.logicalID)
-        else {
-          logger.error(
-            "Auto-resume did not commit for \(app.displayName, privacy: .public): \(String(describing: result.outcome), privacy: .public)"
-          )
-          continue
-        }
-        if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
-          session.apps[index].muteSource = .user
-        }
-        appIntentCoordinator.releaseAutomaticMute(for: app.logicalID)
-        resumedNames.append(app.displayName)
-        logger.info("Auto-resumed music app: \(app.displayName, privacy: .public)")
+        mutedNames.append(app.displayName)
+        logger.info("Muted media app for a call: \(app.displayName, privacy: .public)")
       }
     }
 
-    guard !pausedNames.isEmpty || !resumedNames.isEmpty else { return }
+    let resumable = visibleApps.filter {
+      $0.isMuted
+        && $0.muteSource == .autoConferencing
+        && appIntentCoordinator.ownsAutomaticMute(for: $0.logicalID)
+        && !isExcluded($0)
+        && (!isConferencingActive || sparedAppIDs.contains($0.logicalID))
+    }
+    for app in resumable {
+      let result = await applyAppIntent(
+        forAppID: app.logicalID,
+        overrides: AppIntentOverrides(isMuted: false, muteSource: .user),
+        reason: .automation,
+        persistencePolicy: .none,
+        feedbackPolicy: .none,
+        optimistic: false
+      )
+      guard (result.outcome == .applied || result.outcome == .noChange),
+        result.resultingApp?.isMuted == false,
+        session.apps.first(matchingAppKey: app.logicalID)?.isMuted == false,
+        appIntentCoordinator.isCurrent(result.generation, for: app.logicalID)
+      else {
+        logger.error(
+          "Call unmute did not commit for \(app.displayName, privacy: .public): \(String(describing: result.outcome), privacy: .public)"
+        )
+        continue
+      }
+      if let index = session.apps.firstIndex(matchingAppKey: app.logicalID) {
+        session.apps[index].muteSource = .user
+      }
+      appIntentCoordinator.releaseAutomaticMute(for: app.logicalID)
+      unmutedNames.append(app.displayName)
+      logger.info("Unmuted media app after a call: \(app.displayName, privacy: .public)")
+    }
+
+    guard !mutedNames.isEmpty || !unmutedNames.isEmpty else { return }
     persistSessionSnapshot()
     syncOnboarding(using: session)
 
-    if !pausedNames.isEmpty {
+    if !mutedNames.isEmpty {
       let detail =
-        pausedNames.count == 1
-        ? "\(pausedNames[0]) muted for your call."
-        : "\(pausedNames.count) apps muted for your call."
+        mutedNames.count == 1
+        ? "\(mutedNames[0]) is muted until the call ends."
+        : "\(mutedNames.count) apps are muted until the call ends."
       showToast(
-        title: "Auto-paused media",
+        title: "Muted for your call",
         detail: detail,
         kind: .info,
         duration: .seconds(2.4)
       )
     } else {
       let detail =
-        resumedNames.count == 1
-        ? "\(resumedNames[0]) resumed."
-        : "\(resumedNames.count) apps resumed."
+        unmutedNames.count == 1
+        ? "\(unmutedNames[0]) is unmuted."
+        : "\(unmutedNames.count) apps are unmuted."
       showToast(
-        title: "Resumed media",
+        title: "Unmuted after your call",
         detail: detail,
         kind: .info,
         duration: .seconds(2.0)
