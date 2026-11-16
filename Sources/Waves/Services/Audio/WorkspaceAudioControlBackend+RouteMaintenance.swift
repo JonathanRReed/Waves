@@ -737,6 +737,8 @@ extension WorkspaceAudioControlBackend {
       .filter { $0.routingState == .managed || forceRebuildIDs.contains($0.logicalID) || forceRebuildIDs.contains($0.id) }
       .map { (appID: $0.logicalID, context: makeRepairContext(for: $0)) }
     guard !selected.isEmpty else { return }
+    // One verified-router view for the whole pass, as `reattachRoutes` takes.
+    let routerActivity = routerActivity ?? verifiedRouterActivityProvider?()
 
     var changed = false
     var lastError: String?
@@ -773,6 +775,13 @@ extension WorkspaceAudioControlBackend {
             )
           )
         {
+          continue
+        }
+        // Another router owns the app now: yield to it. Ownership is not a
+        // failed repair, so it never takes the managed fallback below.
+        if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
+          suspendManagedRouteForConflict(at: index, conflict: conflict)
+          changed = true
           continue
         }
 

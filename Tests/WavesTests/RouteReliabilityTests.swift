@@ -312,6 +312,34 @@ private func spendRebuildBudget(_ fixture: RouteFixture) async {
   #expect(recovered.notes == nil)
 }
 
+@Test func aRepairThatFindsAnotherRouterOwningTheAppYieldsInsteadOfFallingBack() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await spendRebuildBudget(fixture)
+  let creations = fixture.events.creations
+  let incumbent = creations + 1
+  // A format change whose rebuild the budget refuses: still pending.
+  fixture.devices.set("builtin", .alive(rate96))
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(40))
+  #expect(fixture.events.hearing("app.a") == "waves #\(incumbent)")
+
+  // By the time the budget allows the rebuild, another router owns the
+  // app, and the incumbent's tap will not let go, so a managed release
+  // would keep it playing. Waves yields: it must not render the app itself.
+  fixture.routerRunning.value = true
+  fixture.events.failNextMuteReleases(1_000)
+  fixture.budgetClock.value = .seconds(600)
+  await maintenancePass(fixture, from: 100)
+
+  #expect(fixture.events.creations == creations)
+  #expect(fixture.events.hearing("app.a") == "own output")
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routingState == .monitorOnly)
+  #expect(row.routeHealthContext == .unattributableRouterFallback)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+}
+
 @Test func aRouteWhoseAggregateSilentlyStoppedIsRebuilt() async throws {
   let fixture = RouteFixture(apps: [routeTestApp()])
   try await fixture.installInitialRoutes()
