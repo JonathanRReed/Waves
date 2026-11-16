@@ -426,6 +426,7 @@ extension WorkspaceAudioControlBackend {
           snapshot.apps[index].peakLevel = 0
           snapshot.apps[index].rmsLevel = 0
         }
+        publishRouteHolds()
       } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability {
         routesNeedingReattach.insert(app.logicalID)
       }

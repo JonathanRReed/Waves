@@ -4245,6 +4245,53 @@ private final class TransactionLoginItemService: LoginItemServicing {
   func openSystemSettingsLoginItems() {}
 }
 
+// MARK: - A hold Waves cannot release stays visible on an excluded row
+
+@MainActor
+@Test func anExcludedAppWavesCannotLetGoOfShowsItIsHeldSilentAtOnceAndThroughARefresh() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.4)])
+  try await fixture.installInitialRoutes()
+  let snapshot = await fixture.backend.currentSnapshot()
+  let preferencesStore = TransactionPreferencesStore()
+  preferencesStore.value.hasCompletedPrivacySetup = true
+  preferencesStore.value.appAudioIntentMigrationVersion = 1
+  let sessionStore = TransactionSessionStore()
+  sessionStore.value = snapshot
+  let store = AppStore(
+    backend: fixture.backend,
+    preferencesStore: preferencesStore,
+    profileStore: TransactionProfilesStore(),
+    sessionStore: sessionStore,
+    loginItemService: TransactionLoginItemService(),
+    deviceVolumePresetsStore: TransactionDevicePresetsStore(),
+    initialStartupState: .running
+  )
+
+  // Excluding the app releases its route, but its tap will neither un-mute
+  // nor go away: the app is silent until Waves quits.
+  fixture.events.failNextMuteReleases(1_000)
+  fixture.events.failNextStops(1_000)
+  let app = try #require(store.session.apps.first)
+  store.setExcluded(true, for: app)
+  await store.drainAppIntentTransactions()
+  #expect(fixture.events.hearing("app.a") == "silent")
+
+  func expectHeldRow(_ moment: String) {
+    let row = store.session.apps.first
+    #expect(row?.isHeldSilentByWaves == true, "\(moment)")
+    #expect(row?.routingState == .error, "\(moment)")
+    #expect(row?.notes?.contains("could not release its hold on App app.a's sound") == true, "\(moment)")
+  }
+  expectHeldRow("right after the exclusion")
+  // Diagnostics says so now too, not after the next maintenance pass.
+  let report = await fixture.backend.diagnosticsReport(reprobeCaptureAuthorization: false)
+  #expect(report.checks.first { $0.title == "Closing audio routes" }?.status == .failed)
+
+  _ = await store.startRefresh(announce: false, reevaluateAutomation: false)?.value
+  expectHeldRow("after a refresh")
+  _ = await store.shutdown()
+}
+
 // MARK: - Slider drag latency (1.4 D1)
 
 @MainActor

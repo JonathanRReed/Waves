@@ -1285,6 +1285,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].hasNoAudioCapability = false
     snapshot.apps[index].notes = nil
     snapshot.apps[index].routeHealthContext = nil
+    // A tap that would not let go holds the app silent: the row says so now,
+    // not on the next maintenance pass.
+    publishRouteHolds()
   }
 
   private func disposeControllerInstalledByGeneration(

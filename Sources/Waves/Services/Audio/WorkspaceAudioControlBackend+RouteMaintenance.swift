@@ -241,6 +241,7 @@ extension WorkspaceAudioControlBackend {
       hasNoAudioCapability: app.hasNoAudioCapability,
       attemptsRemaining: FailOpenRelease.maximumAttempts
     )
+    publishRouteHolds()
   }
 
   /// Puts back what a refresh would otherwise lose: why an app has no route,
@@ -252,7 +253,18 @@ extension WorkspaceAudioControlBackend {
   ///   changes something.
   /// Any other live route explains itself, so its row is left alone.
   func applyStickyRouteNotes(to apps: inout [AudioApp]) {
+    let held = heldSilentRuntimeIDs(in: apps)
+    appsHeldSilentByParkedTaps = held
     for index in apps.indices {
+      let wasHeld = apps[index].isHeldSilentByWaves
+      apps[index].isHeldSilentByWaves = held.contains(apps[index].id)
+      if wasHeld, !apps[index].isHeldSilentByWaves, apps[index].notes == Self.heldSilentNote(for: apps[index]) {
+        // No longer held: the app plays at its own level again.
+        apps[index].notes = nil
+        if apps[index].routeHealthContext == nil, apps[index].routingState == .error {
+          apps[index].routingState = .monitorOnly
+        }
+      }
       let app = apps[index]
       if let controller = controllers[app.id], controller.isActive {
         if let unreleased = unreleasedRoutes[app.id], unreleased.controller == ObjectIdentifier(controller) {
@@ -263,7 +275,7 @@ extension WorkspaceAudioControlBackend {
         }
         continue
       }
-      if appsHeldSilentByParkedTaps.contains(app.id) {
+      if app.isHeldSilentByWaves {
         apps[index].notes = Self.heldSilentNote(for: app)
         apps[index].appliedVolume = nil
         apps[index].peakLevel = 0
@@ -484,6 +496,7 @@ extension WorkspaceAudioControlBackend {
             snapshot.apps[index].appliedVolume = nil
             snapshot.apps[index].peakLevel = 0
             snapshot.apps[index].rmsLevel = 0
+            publishRouteHolds()
             refreshGlobalRouteHealth(latestError: recovery.exhaustedDetail)
             snapshot.updatedAt = .now
             continue
@@ -783,6 +796,7 @@ extension WorkspaceAudioControlBackend {
               snapshot.apps[currentIndex].appliedVolume = nil
               snapshot.apps[currentIndex].peakLevel = 0
               snapshot.apps[currentIndex].rmsLevel = 0
+              publishRouteHolds()
             }
             lastError = exhaustion.localizedDescription
             changed = true

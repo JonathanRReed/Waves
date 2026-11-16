@@ -514,13 +514,13 @@ func aParkedRendererIsNeverRevivedWhenItsAppLosesItsRoute(byYield: Bool) async t
   // tap will never release. #1 stays silent: the app is not rendered by
   // Waves, at any level.
   fixture.events.failNextStops(0)
+  fixture.events.failNextMuteReleases(1_000)
   if byYield {
     fixture.routerRunning.value = true
     await backend.yieldRouteToRouterForTesting(logicalID: "app.a")
   } else {
     _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.8, generation: 11, isExcluded: true))
   }
-  fixture.events.failNextMuteReleases(1_000)
   fixture.events.failNextStops(1_000)
   await maintenancePass(fixture, from: 10)
   #expect(fixture.events.pumpRenders().isEmpty)
@@ -530,6 +530,40 @@ func aParkedRendererIsNeverRevivedWhenItsAppLosesItsRoute(byYield: Bool) async t
   parked.apply(volume: 0.2, volumeBoost: 1, muted: false)
   #expect(fixture.events.pumpRenders().isEmpty)
   #expect(await backend.currentSnapshot().apps.first?.notes?.contains("could not release its hold") == true)
+}
+
+@Test(arguments: ["exclusion", "yield", "release"])
+func losingTheLastRouteReleasesEveryParkedHoldAtOnce(_ path: String) async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  // #1 is retired by a move and will not stop: parked, its tap still muting
+  // while #2 plays the app.
+  fixture.events.failNextStops(1)
+  _ = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  #expect(fixture.events.lastTapMuteEvent(serial: 1) == nil)
+  #expect(fixture.events.hearing("app.a") == "waves #2")
+
+  // #2's route goes. Every release call would succeed, so the app is
+  // audible straight away, before any maintenance pass runs.
+  switch path {
+  case "exclusion":
+    _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 11, isExcluded: true))
+  case "yield":
+    fixture.routerRunning.value = true
+    await backend.yieldRouteToRouterForTesting(logicalID: "app.a")
+  default:
+    // The pinned output disappears: a managed release with no successor.
+    await backend.applyDeviceChangePlanForTesting(
+      DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+      availableDeviceUIDs: ["builtin", "headphones"]
+    )
+  }
+  #expect(fixture.events.lastTapMuteEvent(serial: 1) == "audible #1")
+  #expect(fixture.events.hearing("app.a") == "own output")
+  #expect(await backend.currentSnapshot().apps.first?.isHeldSilentByWaves == false)
 }
 
 @Test func aDisposalWhoseStopFailsDuringAMuteFadeNeverPlaysBesideTheReleasedApp() async throws {
@@ -594,9 +628,10 @@ func everyDisposalLeavesTheAppAudibleOneWayOrTheOther(_ path: DisposalPath, _ fa
   let backend = fixture.backend
   #expect(fixture.events.hearing("app.a") == "waves #1")
 
-  if failure.failsRelease { fixture.events.failNextMuteReleases(1) }
-  if failure.failsStop { fixture.events.failNextStops(1) }
-  if failure.failsDestroy { fixture.events.failNextDestroys(.processTapDestroy, 1) }
+  // A failing call keeps failing, however often it is retried.
+  if failure.failsRelease { fixture.events.failNextMuteReleases(1_000) }
+  if failure.failsStop { fixture.events.failNextStops(1_000) }
+  if failure.failsDestroy { fixture.events.failNextDestroys(.processTapDestroy, 1_000) }
   switch path {
   case .retirement:
     let move = await backend.applyAppIntent(
@@ -632,7 +667,12 @@ func everyDisposalLeavesTheAppAudibleOneWayOrTheOther(_ path: DisposalPath, _ fa
     #expect(row.routingState == .managed)
     #expect(row.appliedVolume == 0.5)
   case .forcedRelease:
-    if heard != "silent" {
+    // Silent only because Waves could not let go: the row says so at once.
+    #expect(row.isHeldSilentByWaves == (heard == "silent"))
+    if heard == "silent" {
+      #expect(row.routingState == .error)
+      #expect(row.notes?.contains("could not release its hold on App app.a's sound") == true)
+    } else {
       #expect(row.routingState == .monitorOnly)
       #expect(row.notes == nil)
     }

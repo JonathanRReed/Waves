@@ -47,6 +47,7 @@ extension WorkspaceAudioControlBackend {
         snapshot.apps[index].muteSource = .user
       }
     }
+    publishRouteHolds()
   }
 
   /// Releases every installed controller whose app is not in `appIDs`, as a
@@ -77,7 +78,10 @@ extension WorkspaceAudioControlBackend {
     kind: PerAppTapController.DisposalKind,
     reason: String? = nil
   ) -> RouteReleaseOutcome {
-    guard let controller = controllers[runtimeID] else { return .released }
+    guard let controller = controllers[runtimeID] else {
+      appLostItsRoute(runtimeID)
+      return .released
+    }
     let result = controller.dispose(kind)
     retainCleanupDegradations(result.degradations)
     if result.outcome == .stillRouting {
@@ -92,7 +96,32 @@ extension WorkspaceAudioControlBackend {
     controllers.removeValue(forKey: runtimeID)
     unreleasedRoutes.removeValue(forKey: runtimeID)
     park(controller)
+    appLostItsRoute(runtimeID)
     return .released
+  }
+
+  /// The app has no live Waves route any more, by whatever path. Every
+  /// parked tap still muting it is released now, in the same operation:
+  /// leaving them to the next maintenance pass left the app silent for
+  /// seconds after every release call that would have succeeded. The row
+  /// shows the resulting hold at once. Destroying the parked controllers'
+  /// native resources stays maintenance work.
+  func appLostItsRoute(_ runtimeID: String) {
+    guard controllers[runtimeID]?.isActive != true else { return }
+    for controller in orphanedControllers where controller.appID == runtimeID && controller.tapMutesApp {
+      retainCleanupDegradations(controller.releaseTapMuteIfHeld())
+    }
+    publishRouteHolds()
+  }
+
+  /// Publishes, on the live snapshot, which apps a parked tap holds silent
+  /// and every other sticky explanation (`applyStickyRouteNotes`). Called
+  /// whenever a release changes them, and by each path that rewrites a
+  /// released row afterwards, so the hold is never overwritten.
+  func publishRouteHolds() {
+    applyStickyRouteNotes(to: &snapshot.apps)
+    refreshGlobalRouteHealth()
+    snapshot.updatedAt = .now
   }
 
   static func stillRoutingNote(appName: String, reason: String?) -> String {
@@ -163,6 +192,7 @@ extension WorkspaceAudioControlBackend {
     let result = controller.dispose(.forcedRelease)
     park(controller)
     retainCleanupDegradations(result.degradations)
+    appLostItsRoute(controller.appID)
   }
 
   private func park(_ controller: PerAppTapController) {
@@ -189,7 +219,7 @@ extension WorkspaceAudioControlBackend {
   /// A tap whose mute will not release leaves its app silent while it has no
   /// live route. Waves cannot fix that from inside the process and does not
   /// paper over it: the app's row and Diagnostics say so
-  /// (`appsHeldSilentByParkedTaps`).
+  /// (`appsHeldSilentByParkedTaps`, `AudioApp.isHeldSilentByWaves`).
   func retryParkedControllers() {
     guard !orphanedControllers.isEmpty else { return }
     for controller in orphanedControllers {
@@ -197,24 +227,19 @@ extension WorkspaceAudioControlBackend {
       _ = controller.retryDispose(releasingTapMute: !hasLiveRoute)
     }
     orphanedControllers.removeAll(where: \.isTornDown)
-    let held = Set(
+    guard heldSilentRuntimeIDs(in: snapshot.apps) != appsHeldSilentByParkedTaps else { return }
+    publishRouteHolds()
+  }
+
+  /// Apps a parked tap holds silent: the tap still mutes the app's own
+  /// output and no live route of Waves plays it.
+  func heldSilentRuntimeIDs(in apps: [AudioApp]) -> Set<String> {
+    let rowIDs = Set(apps.map(\.id))
+    return Set(
       orphanedControllers
-        .filter { $0.tapMutesApp && controllers[$0.appID]?.isActive != true }
+        .filter { $0.tapMutesApp && controllers[$0.appID]?.isActive != true && rowIDs.contains($0.appID) }
         .map(\.appID)
     )
-    guard held != appsHeldSilentByParkedTaps else { return }
-    let releasedIDs = appsHeldSilentByParkedTaps.subtracting(held)
-    appsHeldSilentByParkedTaps = held
-    // An app no longer held plays at its own level again.
-    for index in snapshot.apps.indices where releasedIDs.contains(snapshot.apps[index].id) {
-      let app = snapshot.apps[index]
-      guard controllers[app.id]?.isActive != true, app.notes == Self.heldSilentNote(for: app) else { continue }
-      snapshot.apps[index].notes = nil
-      if app.routeHealthContext == nil { snapshot.apps[index].routingState = .monitorOnly }
-    }
-    applyStickyRouteNotes(to: &snapshot.apps)
-    refreshGlobalRouteHealth()
-    snapshot.updatedAt = .now
   }
 
   /// Cuts every parked renderer of `runtimeID` to silence before a new route

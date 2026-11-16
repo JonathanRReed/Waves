@@ -384,6 +384,7 @@ extension WorkspaceAudioControlBackend {
     failOpenReleases.removeValue(forKey: app.logicalID)
     // The router carries the app now; Waves must not render it as well.
     releaseInstalledController(runtimeID: app.id, kind: .forcedRelease)
+    defer { publishRouteHolds() }
     controllerGenerationByRuntimeID.removeValue(forKey: app.id)
     staleRouteTicks.removeValue(forKey: app.logicalID)
     lastRenderTickByAppID.removeValue(forKey: app.logicalID)

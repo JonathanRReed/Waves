@@ -405,7 +405,12 @@ extension AppStore {
     }
   }
 
+  /// An excluded row is monitor-only at the app's own level, unless Waves
+  /// could not let go of it: a row the backend reports held silent keeps
+  /// that error and its explanation, because the app is not playing at all.
   func makeExcludedPresentation(_ app: inout AudioApp) {
+    let isHeldSilent = app.isHeldSilentByWaves
+    let heldNote = app.notes
     app.desiredVolume = 1
     app.appliedVolume = nil
     app.isMuted = false
@@ -416,6 +421,11 @@ extension AppStore {
     app.peakLevel = 0
     app.rmsLevel = 0
     app.notes = nil
+    if isHeldSilent {
+      app.routingState = .error
+      app.hasNoAudioCapability = false
+      app.notes = heldNote
+    }
   }
 
   private func persistAcceptedAppIntent(
