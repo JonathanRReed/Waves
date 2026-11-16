@@ -36,7 +36,7 @@ Each app shows whether it is visible, monitored, managed, or in an error state. 
 | Loudness Balance | Reduce level differences while respecting priorities |
 | Output routing | Choose an output per app or change the system output |
 | Per-device memory | Restore app levels for each output device |
-| Call automation | Temporarily mute or resume selected media without saving that temporary state as user intent |
+| Call muting | Mute media during a call, detected by the app in front or by microphone use in apps you choose, without saving that temporary mute as yours |
 
 Routes recover after device changes, with recovery work kept outside realtime callbacks. Settings and Diagnostics show route health and manual recovery actions.
 
@@ -44,7 +44,7 @@ Waves is a mixer, not a recorder or audio-plugin host. It processes audio locall
 
 ## Profiles and layout
 
-Create a profile from the sidebar's `+` button, name it, and choose its apps. A profile can just group apps, or `Capture current levels` can save volume, mute, and boost. Profiles with saved levels expose `Apply Levels`. Import and export profiles as JSON.
+Create a profile from the sidebar's `+` button, name it, and choose its apps. A profile can just group apps, or `Capture current levels` can save volume, mute, and boost, and optionally each app's EQ and output device. `Save Current Mix` saves what is playing now as a profile in one step. Profiles with saved levels expose `Apply Levels`. Import and export profiles as JSON.
 
 An import with an existing name creates a separate copy. Profile changes report success after saving to disk; a failed save offers `Retry`. `Reset Mix` keeps its restore point until the previous levels are restored and saved.
 
