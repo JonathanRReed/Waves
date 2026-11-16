@@ -6,6 +6,8 @@ All notable changes to Waves are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-16
+
 ### Added
 - Profiles can save each app's EQ and output device as well as its levels. You
   choose both when saving. Applying a profile skips a saved output that is not
@@ -59,6 +61,13 @@ All notable changes to Waves are documented here. The format follows
   or mute.
 - The Homebrew cask declares that Waves updates itself, so `brew upgrade` leaves
   it to the in-app updater.
+- Waves rebuilds an app's route when its output device changes sample rate or
+  format, drops out and returns, or the Mac wakes, and only the routes that
+  need it.
+- Automatic route rebuilds share one budget with a growing pause between
+  attempts, so a misbehaving device cannot make Waves rebuild in a loop.
+  Diagnostics shows the counts.
+- Quitting Waves hands every app back to its own level first, then shuts down.
 - Excluding several apps at once asks first.
 - The menu-bar icon keeps one width, and the menu bar's "more in Waves" link no
   longer scrolls out of sight. Icon buttons and equalizer chips highlight on
@@ -69,6 +78,21 @@ All notable changes to Waves are documented here. The format follows
   URLs, and CI also runs the tests on macOS 15.
 
 ### Fixed
+- Switching the default output no longer plays apps at their own full volume
+  for a moment. Waves builds the new route silent before it retires the old
+  one. Measured on a Mac through a loopback device across output switches,
+  pinned outputs, quitting and sample-rate changes. Unplugging a device,
+  Bluetooth changes and sleep and wake were tested only with simulated
+  failures.
+- A background route repair can no longer undo a newer change to an app's
+  level, output or exclusion.
+- A volume change made while an output move was failing no longer leaves the
+  app on the old output.
+- Unplugging a device that is both the default output and an app's chosen
+  output moves that app in the same pass.
+- A route that runs out of recovery attempts releases the app, so it plays at
+  its own level instead of staying silent, and Recover Routes starts it afresh.
+- Excluding an app while Waves is still building its route keeps it excluded.
 - Start the control socket on macOS 15. It has been unable to start there since
   1.5.0, which stopped the Stream Deck plugin and `wavesctl` from connecting.
   The same fix applies to macOS 14, which was not run.

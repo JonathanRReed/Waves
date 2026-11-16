@@ -64,8 +64,8 @@ answers requests with the audio stopped. It records the whole seconds of the
 active and idle phases in `activeSeconds` and `idleSeconds`, each at least 30.
 It is not a soak.
 The release owner retired the 4-, 12- and 72-hour soaks and the 30-run launch
-protocol on 2026-11-14; no release requires them. For 1.7.4 the harness was
-`dist/release-1.7.4-preparation/run-qa.py` on the release Mac, which is not
+protocol on 2026-11-14; no release requires them. For 1.8.0 the harness was
+`dist/release-1.8.0-preparation/run-qa.py` on the release Mac, which is not
 tracked.
 
 Evidence never records a check as passed that was not run. A check that cannot
@@ -83,10 +83,17 @@ public key, the external-receipt issuers, and the Waves-specific Sparkle account
 and Ed25519 public key. Private keys and Keychain contents never belong in this
 file.
 
-For 1.7.4 build 22, Jonathan approved deferring the macOS 15 runtime test, the
-hands-on Stream Deck and device matrix, and fresh performance comparisons on
-2026-11-14. The metadata records that approval for that release only; a new
-version and build must not inherit it. Tests, security,
+For 1.8.0 build 25, Jonathan left the choice of deferred checks to the
+assistant preparing the release on 2026-11-15 and asked for the release on
+2026-11-16. Deferred: the macOS 15 runtime test of the signed build, the
+hands-on Stream Deck and device matrix, and the formal performance
+comparisons. The Wave Link changes were not run against Wave Link. In their
+place the signed build ran a measured route test on the release Mac
+(`dist/release-1.8.0-preparation/route-hardware-test.py`, not tracked): a
+fixture app plays a tone, a loopback device is recorded, and the level that
+reaches the device is checked across output switches, pinned outputs, quit and
+sample-rate changes. The metadata records the deferral for that release only; a
+new version and build must not inherit it. Tests, security,
 sanitizers, stability, local QA, platform coverage, package verification,
 Developer ID signing, notarization, stapling, Gatekeeper, provenance, and
 artifact validation must be recorded against the exact candidate.

@@ -14,8 +14,8 @@ require_relative "../release_tool"
 require_relative "../../release/elgato-handoff/finalize-receipt"
 
 class ReleaseInfraTest < Minitest::Test
-  VERSION = "1.7.4"
-  BUILD = 22
+  VERSION = "1.8.0"
+  BUILD = 25
   DEFERRAL_VERSION = "1.7.2"
   DEFERRAL_BUILD = 20
   RELEASE_TAG = "v#{VERSION}"

@@ -5,7 +5,7 @@
 # checksum, lives in the JonathanRReed/homebrew-tap repository; see
 # docs/RELEASE.md, "Update the Homebrew Tap". Nothing mutates this template.
 cask "waves" do
-  version "1.7.4"
+  version "1.8.0"
   sha256 "RELEASE_WORKFLOW_REPLACES_THIS_SHA256"
 
   url "https://github.com/JonathanRReed/Waves/releases/download/v#{version}/Waves.dmg"

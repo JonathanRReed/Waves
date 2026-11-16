@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "version": "1.7.4",
-  "build": 22,
+  "version": "1.8.0",
+  "build": 25,
   "minimumMacOSVersion": "14.2",
   "bundleIdentifier": "com.jonathanreed.Waves",
   "developerID": {
@@ -23,16 +23,16 @@
     "publicEDKey": "STuJLAcpixKkpAOx/hk/ZRSWr3KipzbPhluuYqRXlgg="
   },
   "benchmarkDeferral": {
-    "version": "1.7.4",
-    "build": 22,
-    "approvedOn": "2026-11-14",
-    "reason": "Jonathan approved deferring fresh performance comparisons for Waves 1.7.4 build 22. The release Mac was under heavy unrelated load, so measurements taken then would not be meaningful. The only render-path change since 1.7.3 is one finite-value check in level metering."
+    "version": "1.8.0",
+    "build": 25,
+    "approvedOn": "2026-11-16",
+    "reason": "On 2026-11-15 Jonathan left the choice of deferred release checks for Waves 1.8.0 to Claude, the assistant preparing the release, and on 2026-11-16 asked for it to be tested on the release Mac and published. The four formal performance comparisons are deferred for build 25 because the release Mac was under unrelated load, which makes a comparison against 1.7.4 unreliable. A CPU and memory sample of the signed build while it routes audio is recorded with the bounded runtime check instead."
   },
   "releaseDeferral": {
-    "version": "1.7.4",
-    "build": 22,
-    "approvedOn": "2026-11-14",
-    "reason": "Jonathan approved publishing Waves 1.7.4 build 22 with the macOS 15 runtime test and the hands-on Stream Deck and device matrix deferred. No macOS 15 Mac is available. He reported Wave Link control working on his own hardware with Waves 1.7.3; the 1.7.4 build was not run against Wave Link before publication. Local runtime, companion protocol, signing and package checks remain required.",
+    "version": "1.8.0",
+    "build": 25,
+    "approvedOn": "2026-11-16",
+    "reason": "On 2026-11-15 Jonathan left the choice of deferred release checks for Waves 1.8.0 to Claude, the assistant preparing the release, and on 2026-11-16 asked for it to be tested on the release Mac and published. Deferred for build 25: the macOS 15 runtime test of the signed build, because no macOS 15 Mac is available (the test suite runs on macOS 15 in CI), and the hands-on Stream Deck and device matrix. The Wave Link changes in 1.8.0 were not run against Wave Link before publication because the release Mac has no Wave Link. Local runtime, a measured route test on the release Mac, companion protocol, signing and package checks remain required.",
     "platforms": [
       "sequoiaAppleSilicon"
     ],
