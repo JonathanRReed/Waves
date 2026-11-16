@@ -801,25 +801,34 @@ func losingTheLastRouteReleasesEveryParkedHoldAtOnce(_ path: String) async throw
 // MARK: - Silence is confirmed before anything else plays
 
 /// Queues a render callback on `serial`'s callback queue behind one that is
-/// still running, as Core Audio would. The gate opens from an independent
-/// timer, so a regression cannot hang the suite. The returned box gets what
-/// the user heard of app.a at the moment that callback ran. `serial` is
+/// still running, as Core Audio would, and returns once that running one
+/// has started. It holds the queue until the test opens `gate`, after the
+/// backend has acted; the gate opens by itself after 5 s only so that a
+/// regression cannot hang the suite. The returned box gets what the user
+/// heard of app.a at the moment the queued callback ran. `serial` is
 /// marked as no longer rendering for the fixture's own pumps, which would
 /// otherwise wait on the blocked queue.
 private func queueCallbackAheadOfTheBackend(_ fixture: RouteFixture, serial: Int) throws -> (
-  heard: TestBox<String?>, controller: PerAppTapController
+  heard: TestBox<String?>, controller: PerAppTapController, gate: DispatchSemaphore
 ) {
   let controller = try #require(fixture.events.controller(serial: serial))
   fixture.events.stopRendering(serial: serial)
   let heard = TestBox<String?>(nil)
+  let entered = DispatchSemaphore(value: 0)
   let gate = DispatchSemaphore(value: 0)
-  controller.occupyCallbackQueueForTesting(until: gate) {
+  // Already open: the queued block itself holds the queue, after saying so.
+  // (A semaphore must not end below the value it was made with.)
+  let open = DispatchSemaphore(value: 0)
+  open.signal()
+  controller.occupyCallbackQueueForTesting(until: open) {
+    entered.signal()
+    _ = gate.wait(timeout: .now() + .seconds(5))
     var parts = fixture.events.hearing("app.a").components(separatedBy: " + ").filter { $0 != "silent" }
     if fixture.events.peak(of: controller) > 0 { parts.append("waves #\(serial)") }
     heard.value = parts.isEmpty ? "silent" : parts.joined(separator: " + ")
   }
-  DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(300)) { gate.signal() }
-  return (heard, controller)
+  entered.wait()
+  return (heard, controller, gate)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -837,6 +846,7 @@ func aCallbackAheadOfAManagedReleaseNeverPlaysBesideTheAppsOwnOutput() async thr
     availableDeviceUIDs: ["builtin", "headphones"]
   )
   #expect(!fixture.events.values.contains("audible #1"))
+  queued.gate.signal()
   _ = queued.controller.settledGainsForTesting()
   #expect(queued.heard.value == "waves #1")
   // Not handed back, and the row says so; the release is tried again later.
@@ -871,6 +881,7 @@ func aCallbackAheadOfAForcedReleaseNeverPlaysBesideTheAppOrAReplacement() async 
   // the replacement is discarded rather than un-muted beside it.
   let managed = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 11))
   #expect(managed.outcome == .failed)
+  queued.gate.signal()
   _ = queued.controller.settledGainsForTesting()
   #expect(queued.heard.value == "waves #1")
 
@@ -904,6 +915,7 @@ func aHandoffThatCannotConfirmSilenceKeepsTheIncumbentAndDiscardsTheReplacement(
   let row = try #require(await backend.currentSnapshot().apps.first)
   #expect(row.targetDeviceUID == nil)
   #expect(row.notes == move.detail)
+  queued.gate.signal()
   _ = queued.controller.settledGainsForTesting()
   #expect(queued.heard.value == "waves #1")
   // #1 is still the route, back at its level; #2 never left silence.
@@ -1982,6 +1994,42 @@ private func foregroundPlayerFixture() -> RouteFixture {
   #expect(row.routeHealthContext == .geometryRecoveryExhausted)
   #expect(row.notes?.contains("recovery failed") == true)
   #expect(row.notes?.contains("still playing it") != true)
+  #expect(row.notes?.contains("rebuilding") != true)
+}
+
+extension WorkspaceAudioControlBackend {
+  /// Leaves `runtimeID`'s route installed beside a spent geometry recovery,
+  /// with the terminal row the release would have left. No release keeps
+  /// such a route today (a spent recovery makes it a forced release, which
+  /// always removes it), so this sets the state up directly.
+  fileprivate func keepRouteBesideSpentGeometryRecovery(runtimeID: String, at now: Duration) {
+    var recovery = GeometryRecoveryCoordinator(maximumAttempts: 1)
+    _ = recovery.signalMismatch(at: now)
+    _ = recovery.beginRecovery(at: now)
+    _ = recovery.finishRecovery(succeeded: false, at: now)
+    geometryRecoveryByRuntimeID[runtimeID] = recovery
+    guard let index = snapshot.apps.firstIndex(where: { $0.id == runtimeID }) else { return }
+    markRouteError(at: index, error: BackendError.managedRouteUnavailable(recovery.exhaustedDetail))
+    snapshot.apps[index].routeHealthContext = .geometryRecoveryExhausted
+  }
+}
+
+@Test func aMismatchAfterRecoveryIsSpentNeverClaimsARebuildIsComing() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await backend.keepRouteBesideSpentGeometryRecovery(runtimeID: "app.a", at: .seconds(10))
+
+  // The route is still installed, so its later mismatches still reach the
+  // level tick. Nothing will be rebuilt, and the row keeps saying so.
+  await backend.flagGeometryMismatchForTesting(runtimeID: "app.a")
+  fixture.events.pumpRenders()
+  await backend.updateAudioLevels(at: .seconds(11))
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  #expect(await backend.lifecycleDebugSnapshot().pendingGeometryRecoveries == 0)
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routeHealthContext == .geometryRecoveryExhausted)
+  #expect(row.notes?.contains("recovery failed") == true)
   #expect(row.notes?.contains("rebuilding") != true)
 }
 
