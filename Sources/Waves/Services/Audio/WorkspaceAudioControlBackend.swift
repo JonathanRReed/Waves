@@ -826,17 +826,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     } catch is IntentSupersededError {
       clearStagedIntentIfCurrent(intent, logicalID: logicalID)
       return supersededResult(for: intent, logicalID: logicalID)
-    } catch let unsettled as RouterConflictUnsettledError {
-      // Nothing was captured, and the row is left as it was.
-      clearStagedIntentIfCurrent(intent, logicalID: logicalID)
-      return AppIntentApplyResult(
-        appID: intent.appID,
-        generation: intent.generation,
-        outcome: .failed,
-        resultingApp: snapshot.apps.first(where: { $0.logicalID == logicalID }),
-        backendStatus: snapshot.backendStatus,
-        detail: unsettled.localizedDescription
-      )
     } catch is IntentBackendStoppedError {
       clearStagedIntentIfCurrent(intent, logicalID: logicalID)
       return AppIntentApplyResult(
@@ -1259,14 +1248,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
 
   struct IntentSupersededError: Error {}
-  /// Route work stopped because another router was seen that the conflict
-  /// debouncer has not yet applied. Nothing was captured or yielded.
-  struct RouterConflictUnsettledError: LocalizedError {
-    let appName: String
-    var errorDescription: String? {
-      "\(appName)'s audio may be handled by another router right now, so Waves left it as it was. Try again in a moment."
-    }
-  }
   struct IntentBackendStoppedError: Error {}
 
   func ensureAcceptingOperations() throws {
@@ -1695,8 +1676,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         return created
       } catch let superseded as IntentSupersededError {
         throw superseded
-      } catch let unsettled as RouterConflictUnsettledError {
-        throw unsettled
       } catch let refused as RouteRebuildCeilingError {
         logger.warning("Automatic route rebuild for \(app.displayName, privacy: .public) refused: rebuild ceiling active")
         throw refused
