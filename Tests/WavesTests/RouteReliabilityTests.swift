@@ -627,6 +627,115 @@ func losingTheLastRouteReleasesEveryParkedHoldAtOnce(_ path: String) async throw
   #expect(fixture.events.pumpRenders().isEmpty)
 }
 
+// MARK: - Silence is confirmed before anything else plays
+
+/// Queues a render callback on `serial`'s callback queue behind one that is
+/// still running, as Core Audio would. The gate opens from an independent
+/// timer, so a regression cannot hang the suite. The returned box gets what
+/// the user heard of app.a at the moment that callback ran. `serial` is
+/// marked as no longer rendering for the fixture's own pumps, which would
+/// otherwise wait on the blocked queue.
+private func queueCallbackAheadOfTheBackend(_ fixture: RouteFixture, serial: Int) throws -> (
+  heard: TestBox<String?>, controller: PerAppTapController
+) {
+  let controller = try #require(fixture.events.controller(serial: serial))
+  fixture.events.stopRendering(serial: serial)
+  let heard = TestBox<String?>(nil)
+  let gate = DispatchSemaphore(value: 0)
+  controller.occupyCallbackQueueForTesting(until: gate) {
+    var parts = fixture.events.hearing("app.a").components(separatedBy: " + ").filter { $0 != "silent" }
+    if fixture.events.peak(of: controller) > 0 { parts.append("waves #\(serial)") }
+    heard.value = parts.isEmpty ? "silent" : parts.joined(separator: " + ")
+  }
+  DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(300)) { gate.signal() }
+  return (heard, controller)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func aCallbackAheadOfAManagedReleaseNeverPlaysBesideTheAppsOwnOutput() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5, targetDeviceUID: "usb-dac")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  let queued = try queueCallbackAheadOfTheBackend(fixture, serial: 1)
+
+  // The pinned output goes: a managed release. The silence it queues cannot
+  // land before the earlier callback, and the renderer will not stop.
+  fixture.events.failNextStops(1)
+  await backend.applyDeviceChangePlanForTesting(
+    DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+    availableDeviceUIDs: ["builtin", "headphones"]
+  )
+  #expect(!fixture.events.values.contains("audible #1"))
+  _ = queued.controller.settledGainsForTesting()
+  #expect(queued.heard.value == "waves #1")
+  // Not handed back, and the row says so; the release is tried again later.
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.notes?.contains("still playing it at the level you set") == true)
+  #expect(abs(fixture.events.peak(of: queued.controller) - 0.25) < 0.001)
+  await backend.applyDeviceChangePlanForTesting(
+    DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+    availableDeviceUIDs: ["builtin", "headphones"]
+  )
+  #expect(fixture.events.ownOutputIsAudible("app.a"))
+  #expect(fixture.events.peak(of: queued.controller) == 0)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func aCallbackAheadOfAForcedReleaseNeverPlaysBesideTheAppOrAReplacement() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  let queued = try queueCallbackAheadOfTheBackend(fixture, serial: 1)
+
+  // Excluded while a callback is ahead of the cut, and #1 will not stop: the
+  // tap keeps the app muted until the cut is confirmed.
+  fixture.events.failNextStops(1)
+  let exclusion = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, isExcluded: true)
+  )
+  #expect(exclusion.outcome == .excluded)
+  #expect(!fixture.events.values.contains("audible #1"))
+  #expect(await backend.currentSnapshot().apps.first?.isHeldSilentByWaves == true)
+  // Managed again at once: the parked renderer is not confirmed silent, so
+  // the replacement is discarded rather than un-muted beside it.
+  let managed = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 11))
+  #expect(managed.outcome == .failed)
+  _ = queued.controller.settledGainsForTesting()
+  #expect(queued.heard.value == "waves #1")
+
+  // The queue has drained: the next pass lets the app go, and the user's
+  // next try installs a route.
+  await maintenancePass(fixture, from: 10)
+  #expect(fixture.events.hearing("app.a") == "own output")
+  let retried = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 12))
+  #expect(retried.outcome == .applied)
+  #expect(fixture.events.hearing("app.a") == "waves #3")
+  #expect(fixture.events.overlaps.isEmpty)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func aHandoffThatCannotConfirmSilenceKeepsTheIncumbentAndDiscardsTheReplacement() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)], rendersDuringHandoff: false)
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  let queued = try queueCallbackAheadOfTheBackend(fixture, serial: 1)
+
+  // A move to another output while a callback is ahead of the mute; the
+  // first renderer stop fails.
+  fixture.events.failNextStops(1)
+  let move = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  #expect(move.outcome == .failed)
+  _ = queued.controller.settledGainsForTesting()
+  #expect(queued.heard.value == "waves #1")
+  // #1 is still the route, back at its level; #2 never left silence.
+  _ = fixture.events.peak(of: queued.controller)
+  #expect(abs(fixture.events.peak(of: queued.controller) - 0.25) < 0.001)
+  #expect(fixture.events.pumpRenders().isEmpty)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+}
+
 // MARK: - Every disposal kind leaves the app audible, or says why not
 
 enum DisposalPath: String, CaseIterable, Sendable {
@@ -2306,7 +2415,7 @@ final class RouteEvents: @unchecked Sendable {
     return heardByApp.values.flatMap { $0 }.sorted()
   }
 
-  private func peak(of controller: PerAppTapController) -> Float {
+  func peak(of controller: PerAppTapController) -> Float {
     var input = [Float](repeating: 0.5, count: 512 * 2)
     var output = [Float](repeating: 0, count: input.count)
     input.withUnsafeMutableBytes { inputBytes in

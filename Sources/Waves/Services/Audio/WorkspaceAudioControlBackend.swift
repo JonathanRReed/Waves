@@ -420,7 +420,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       handedBack.append(controller)
     }
     for controller in orphanedControllers {
-      record(controller.releaseTapMuteIfHeld())
+      record(controller.releaseTapMuteIfHeld(until: handBackDeadline))
     }
 
     // Close ingress before awaiting any work. Late native callbacks retain
@@ -1477,16 +1477,21 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     // The handoff. Nothing below suspends, so no other route work can run
-    // between silencing the incumbent and un-muting its replacement.
+    // between silencing the incumbent and un-muting its replacement. The
+    // replacement is un-muted only once every other renderer of the app is
+    // confirmed silent; otherwise it is discarded and the incumbent stays.
     let incumbent = controllers[app.id]
-    if let incumbent, incumbent.isActive {
-      let silence = incumbent.silenceForHandoff(
-        maxPolls: Self.handoffSilenceMaxPolls,
-        pause: handoffSilencePause
-      )
-      if silence == .cut {
-        logger.info("Outgoing route for \(app.displayName, privacy: .public) did not finish its fade; cut to silence")
+    var silence = PerAppTapController.HandoffSilence.faded
+    if confirmParkedRenderersSilent(forRuntimeID: app.id) {
+      if let incumbent, incumbent.isActive {
+        silence = incumbent.silenceForHandoff(maxPolls: Self.handoffSilenceMaxPolls, pause: handoffSilencePause)
       }
+    } else {
+      silence = .unconfirmed
+    }
+    guard silence != .unconfirmed else {
+      discardUnusedReplacement(controller, runtimeID: app.id)
+      throw HandoffSilenceUnconfirmedError(appName: app.displayName)
     }
     controllers[app.id] = controller
     // A fresh controller starts with a fresh geometry-recovery budget. Only
@@ -1507,7 +1512,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     unreleasedRoutes.removeValue(forKey: app.id)
     // The rebuild a pending repair asked for has happened.
     pendingRouteRepairs.removeValue(forKey: app.id)
-    cutParkedRenderers(forRuntimeID: app.id)
     failOpenReleases.removeValue(forKey: app.logicalID)
     // Only now, with every other renderer of the app cut to silence, does the
     // replacement fade in to the app's level.

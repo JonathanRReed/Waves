@@ -207,14 +207,17 @@ private func teardownController(
   let result = controller.releaseHold(.forcedRelease)
   let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
 
-  // The tap is released on time even though the cut has not landed yet.
+  // On time, but the cut has not landed: a callback ahead of it could
+  // still play, so the tap keeps the app muted rather than play beside it.
   #expect(result.outcome == .released)
-  #expect(log.values == ["unmute-tap"])
+  #expect(log.values.isEmpty)
   #expect(elapsed < 500_000_000)
   // The cut is queued ahead of every later render: nothing plays once the
-  // queue frees up.
+  // queue frees up, and only then does the tap let the app go.
   gate.signal()
   #expect(renderedPeak(of: controller) == 0)
+  _ = controller.releaseTapMuteIfHeld()
+  #expect(log.values == ["unmute-tap"])
 }
 
 @Test func aBlockedCallbackQueueCannotHoldUpAManagedRelease() throws {
@@ -228,16 +231,17 @@ private func teardownController(
   let result = controller.releaseHold(.managedRelease)
   let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
 
-  #expect(result.outcome == .released)
-  #expect(log.values == ["unmute-tap"])
+  // Silence was not confirmed, so the app is not handed back: the route
+  // stays, and plays at its level once the queue frees up.
+  #expect(result.outcome == .stillRouting)
+  #expect(log.values.isEmpty)
   #expect(elapsed < 500_000_000)
   gate.signal()
-  #expect(renderedPeak(of: controller) == 0)
-  controller.apply(volume: 1, volumeBoost: 1, muted: false)
-  #expect(renderedPeak(of: controller) == 0)
+  #expect(renderedPeak(of: controller) > 0)
+  #expect(controller.tapMutesApp)
 }
 
-@Test func aHandoffWhoseRendererQueueIsBlockedIsCutWithoutWaitingForIt() throws {
+@Test func aHandoffWhoseRendererQueueIsBlockedIsAbandonedWithoutWaitingForIt() throws {
   let controller = try PerAppTapController.testingController(appID: "app.blocked")
   #expect(renderedPeak(of: controller) > 0)
   let gate = DispatchSemaphore(value: 0)
@@ -248,11 +252,12 @@ private func teardownController(
   let result = controller.silenceForHandoff(maxPolls: 40) { pauses += 1 }
   let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
 
-  #expect(result == .cut)
-  #expect(pauses <= 1)
+  // Not confirmed silent, so it is not cut: it stays the route.
+  #expect(result == .unconfirmed)
+  #expect(pauses == 0)
   #expect(elapsed < 500_000_000)
   gate.signal()
-  #expect(renderedPeak(of: controller) == 0)
+  #expect(renderedPeak(of: controller) > 0)
 }
 
 @Test func aQueuedMuteWithNoRenderSinceIsNotSilence() throws {

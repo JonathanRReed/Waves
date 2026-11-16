@@ -173,6 +173,12 @@ extension WorkspaceAudioControlBackend {
         continue
       } catch is IntentBackendStoppedError {
         return
+      } catch let error as HandoffSilenceUnconfirmedError where controllers[app.id]?.isActive == true {
+        // The incumbent still plays the app at its level. A move it did not
+        // make is left pending, and maintenance retries it.
+        if mode == .rehome { recordPendingRepair(.wrongDevice, runtimeID: app.id) }
+        publishRouteHolds()
+        lastError = error.localizedDescription
       } catch {
         var reported = error
         if mode == .rehome {
@@ -810,6 +816,19 @@ extension WorkspaceAudioControlBackend {
         continue
       } catch is IntentBackendStoppedError {
         return
+      } catch is HandoffSilenceUnconfirmedError
+        where controllers[app.id]?.isActive == true && pendingRepair(for: app.id) != .stalled
+      {
+        // The incumbent still plays the app; whatever this rebuild was for
+        // is retried on the next pass. It proved nothing about the route.
+        if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
+          var recovery = geometryRecoveryByRuntimeID[app.id]
+        {
+          _ = recovery.abandonRecovery(at: now)
+          geometryRecoveryByRuntimeID[app.id] = recovery
+        }
+        publishRouteHolds()
+        continue
       } catch {
         let isGeometryAttempt = geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id)
         // A route forced into a rebuild while it had a controller may not
@@ -972,6 +991,16 @@ enum RouteRepairReason: Equatable, Sendable {
 struct PendingRouteRepair: Sendable {
   let reason: RouteRepairReason
   let controller: ObjectIdentifier
+}
+
+/// A handoff could not confirm that the app's other renderers were silent:
+/// a callback queued ahead of the mute may still play. The replacement was
+/// discarded and the incumbent kept; the move is retried later.
+struct HandoffSilenceUnconfirmedError: LocalizedError {
+  let appName: String
+  var errorDescription: String? {
+    "Waves couldn't confirm the previous audio route for \(appName) had gone quiet, so it kept that route and will try again."
+  }
 }
 
 /// Automatic route work was refused by the backend-wide rebuild ceiling.

@@ -258,15 +258,12 @@ extension WorkspaceAudioControlBackend {
     )
   }
 
-  /// Cuts every parked renderer of `runtimeID` to silence before a new route
-  /// for the app is un-muted. Each was cut when it was disposed and cannot be
-  /// un-muted, so this changes nothing; it makes the handoff's guarantee (no
-  /// other renderer of the app can be heard) independent of how a controller
-  /// came to be parked.
-  func cutParkedRenderers(forRuntimeID runtimeID: String) {
-    for controller in orphanedControllers where controller.appID == runtimeID {
-      controller.cutToSilence()
-    }
+  /// Whether every parked renderer of `runtimeID` is confirmed silent, so a
+  /// new route for the app may be un-muted. Each was cut when it was
+  /// disposed; a cut whose wait timed out may still have a callback ahead of
+  /// it, so it is confirmed here (`PerAppTapController.cutToSilence`).
+  func confirmParkedRenderersSilent(forRuntimeID runtimeID: String) -> Bool {
+    orphanedControllers.filter { $0.appID == runtimeID }.allSatisfy { $0.cutToSilence() }
   }
 
   static func heldSilentNote(for app: AudioApp) -> String {
