@@ -32,7 +32,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case .profiles: "Saved mixes and startup"
     case .control: "Keys and automation"
     case .setup: "Permissions and repair"
-    case .diagnostics: "Diagnostics"
+    case .diagnostics: "Checks and problem reports"
     case .help: "Guide"
     }
   }
@@ -205,5 +205,28 @@ struct SettingsForm<Content: View>: View {
     Form { content }
       .formStyle(.grouped)
       .scrollContentBackground(.hidden)
+  }
+}
+
+/// The note under a settings section. A grouped form on macOS sets a footer
+/// against the trailing edge, so a paragraph ends up ragged on the left and
+/// reads as a stray block. This keeps it on the leading edge, inset to line up
+/// with the section title and the rows of the card it explains, in the same
+/// quiet style as the notes under a row's title.
+struct SettingsFooter: View {
+  private let text: String
+
+  init(_ text: String) {
+    self.text = text
+  }
+
+  var body: some View {
+    Text(text)
+      .font(.callout)
+      .foregroundStyle(.secondary)
+      .multilineTextAlignment(.leading)
+      .fixedSize(horizontal: false, vertical: true)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, 10)
   }
 }

@@ -29,7 +29,7 @@ struct ProfileSettingsView: View {
       } header: {
         Text("Startup")
       } footer: {
-        Text(
+        SettingsFooter(
           store.profiles.contains(where: \.carriesLevels)
             ? "Waves applies this profile's saved levels every time it starts, so your baseline mix is always in place."
             : "Save a profile with captured levels first, then pick it here to have Waves apply it at startup."
@@ -66,7 +66,7 @@ struct ProfileSettingsView: View {
           .textCase(nil)
         }
       } footer: {
-        Text(
+        SettingsFooter(
           "A profile is a group of apps, optionally with saved levels. Apply one before a meeting or a game, then use Reset Mix in the main window to put everything back."
         )
       }

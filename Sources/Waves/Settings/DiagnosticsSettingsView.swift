@@ -16,7 +16,7 @@ struct DiagnosticsSettingsView: View {
       } header: {
         Text("Audio")
       } footer: {
-        Text(
+        SettingsFooter(
           "Waves captures each managed app's audio with a Core Audio process tap, applies your volume, mute, boost, and EQ, and plays it to the output device. Everything is processed on this Mac."
         )
       }
@@ -51,7 +51,7 @@ struct DiagnosticsSettingsView: View {
       } header: {
         Text("Repair")
       } footer: {
-        Text(ProblemReport.explanation)
+        SettingsFooter(ProblemReport.explanation)
       }
 
       if let diagnostics = store.diagnostics {
