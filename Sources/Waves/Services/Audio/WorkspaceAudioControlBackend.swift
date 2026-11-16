@@ -35,6 +35,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   var lifecycleEpoch: UInt64 = 0
   private var shutdownTask: Task<BackendShutdownResult, Never>?
   private var shutdownResult: BackendShutdownResult?
+  /// What `handBackEveryApp` did, once it has run: the controllers it handed
+  /// back, for teardown, and what failed.
+  private var shutdownHandBack: (handedBack: [PerAppTapController], degradations: [CleanupDegradation])?
   private var didFinishDeviceChangeContinuation = false
   var retainedCleanupDegradations: [CleanupDegradation] = []
   /// How many rows were discarded once the buffer filled, so a bounded report
@@ -356,10 +359,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     // Publish the terminal lifecycle state before creating or awaiting any task so
     // actor reentrancy cannot admit a fresh route/device/recovery operation.
-    isShuttingDown = true
-    isStarted = false
-    lifecycleEpoch = lifecycleEpoch == .max ? 0 : lifecycleEpoch + 1
-    stagedIntentByLogicalID.removeAll()
+    enterShutdownState()
 
     let task = Task { [weak self] in
       guard let self else {
@@ -378,6 +378,60 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return await task.value
   }
 
+  func handBackAppsForShutdown() async {
+    enterShutdownState()
+    _ = handBackEveryApp()
+  }
+
+  private func enterShutdownState() {
+    guard !isShuttingDown else { return }
+    isShuttingDown = true
+    isStarted = false
+    lifecycleEpoch = lifecycleEpoch == .max ? 0 : lifecycleEpoch + 1
+    stagedIntentByLogicalID.removeAll()
+  }
+
+  /// First, before anything that can be slow: hand every app back to its
+  /// own output. Each installed route is a managed release (silence, then
+  /// release the tap's mute); each parked one, already silent for good,
+  /// only releases its mute. All of it shares one deadline for waits on
+  /// the controllers' callback queues, so a blocked queue cannot use up
+  /// the app's termination timeout. If Waves is killed after this, each
+  /// tap left is removed by macOS with the process. Runs once.
+  private func handBackEveryApp() -> (handedBack: [PerAppTapController], degradations: [CleanupDegradation]) {
+    if let shutdownHandBack { return shutdownHandBack }
+    var degradations: [CleanupDegradation] = []
+    let handBackDeadline = DispatchTime.now() + Self.shutdownHandBackWaitLimit
+    let installedControllers = controllers.sorted { $0.key < $1.key }.map(\.value)
+    controllers.removeAll()
+    unreleasedRoutes.removeAll()
+    pendingRouteRepairs.removeAll()
+    var handedBack: [PerAppTapController] = []
+    for controller in installedControllers {
+      let hold = controller.releaseHold(.managedRelease, until: handBackDeadline)
+      degradations += hold.degradations
+      guard hold.outcome == .released else {
+        // Still muting the app, and still playing it at the user's level,
+        // until Waves exits.
+        controllersPlayingUntilExit.append(controller)
+        degradations.append(
+          CleanupDegradation(
+            appID: controller.appID,
+            stage: .controllerDisposal,
+            detail:
+              "Waves couldn't hand \(controller.appName) back before quitting, so it played through Waves until Waves exited. macOS removes the tap with Waves."
+          ))
+        continue
+      }
+      handedBack.append(controller)
+    }
+    for controller in orphanedControllers {
+      degradations += controller.releaseTapMuteIfHeld(until: handBackDeadline)
+    }
+    shutdownHandBack = (handedBack, degradations)
+    return (handedBack, degradations)
+  }
+
   private func performCheckedShutdown() async -> BackendShutdownResult {
     var degradations = retainedCleanupDegradations
     retainedCleanupDegradations.removeAll()
@@ -392,41 +446,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       degradations.append(contentsOf: new)
     }
 
-    // First, before anything that can be slow: hand every app back to its
-    // own output. Each installed route is a managed release (silence, then
-    // release the tap's mute); each parked one, already silent for good,
-    // only releases its mute. All of it shares one deadline for waits on
-    // the controllers' callback queues, so a blocked queue cannot use up
-    // the app's termination timeout. If Waves is killed after this, each
-    // tap left is removed by macOS with the process.
-    let handBackDeadline = DispatchTime.now() + Self.shutdownHandBackWaitLimit
-    let installedControllers = controllers.sorted { $0.key < $1.key }.map(\.value)
-    controllers.removeAll()
-    unreleasedRoutes.removeAll()
-    pendingRouteRepairs.removeAll()
-    var handedBack: [PerAppTapController] = []
-    for controller in installedControllers {
-      let hold = controller.releaseHold(.managedRelease, until: handBackDeadline)
-      record(hold.degradations)
-      guard hold.outcome == .released else {
-        // Still muting the app, and still playing it at the user's level,
-        // until Waves exits.
-        controllersPlayingUntilExit.append(controller)
-        record([
-          CleanupDegradation(
-            appID: controller.appID,
-            stage: .controllerDisposal,
-            detail:
-              "Waves couldn't hand \(controller.appName) back before quitting, so it played through Waves until Waves exited. macOS removes the tap with Waves."
-          )
-        ])
-        continue
-      }
-      handedBack.append(controller)
-    }
-    for controller in orphanedControllers {
-      record(controller.releaseTapMuteIfHeld(until: handBackDeadline))
-    }
+    // Usually already done by `handBackAppsForShutdown`.
+    let handBack = handBackEveryApp()
+    record(handBack.degradations)
+    let handedBack = handBack.handedBack
 
     // Close ingress before awaiting any work. Late native callbacks retain
     // their mailbox safely but cannot queue more work after shutdown begins.

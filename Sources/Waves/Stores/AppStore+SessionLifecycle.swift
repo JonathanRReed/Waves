@@ -318,6 +318,11 @@ extension AppStore {
   private func performShutdown(
     settlingTasks: ShutdownSettlingTasks
   ) async -> AppShutdownResult {
+    // Apps go back to their own output before anything is waited for: the
+    // waits and the final flush below can outlast the termination timeout.
+    if hasStartedAudioBackend {
+      await backend.handBackAppsForShutdown()
+    }
     for task in settlingTasks.mutationTasks {
       await task.value
     }

@@ -1031,6 +1031,25 @@ func everyDisposalLeavesTheAppAudibleOneWayOrTheOther(_ path: DisposalPath, _ fa
   #expect(fixture.events.hearing("app.b") == "own output")
 }
 
+@Test func handingAppsBackForQuitKeepsTheSessionReadableAndAdmitsNoNewRoute() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  await backend.handBackAppsForShutdown()
+  #expect(fixture.events.hearing("app.a") == "own output")
+  #expect(await backend.currentSnapshot().apps.count == 1)
+  let late = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.7, generation: 10))
+  #expect(late.outcome == .failed)
+  #expect(fixture.events.creations == 0)
+
+  // The rest of shutdown tears down what was handed back, once.
+  let result = await backend.shutdownWithResult()
+  #expect(result.completion == .clean)
+  #expect(fixture.events.values.filter { $0.hasPrefix("audible") } == ["audible #1"])
+  #expect(fixture.events.values.contains("stop #1"))
+}
+
 @Test func quittingKeepsPlayingAnAppItCouldNotHandBackAndSaysSo() async throws {
   let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
   try await fixture.installInitialRoutes()
