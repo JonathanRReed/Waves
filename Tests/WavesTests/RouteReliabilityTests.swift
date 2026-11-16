@@ -2431,6 +2431,33 @@ private final class ListenerCalls: @unchecked Sendable {
   #expect(app.notes == nil)
 }
 
+@Test(.timeLimit(.minutes(1)))
+func anExclusionForAnAppWithNoRowStopsAnOlderIntentWaitingToRetry() async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(apps: [routeTestApp()], retryPause: { _ in await gate.pause() })
+  let backend = fixture.backend
+  // The user's change builds a route; its first creation fails, and it
+  // waits to retry.
+  fixture.events.failNextCreations(1)
+  let olderIntent = Task { await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 1)) }
+  await gate.waitUntilPaused()
+
+  // Discovery drops the row meanwhile, then the user excludes the app.
+  fixture.captured.value = []
+  _ = try await backend.refresh()
+  #expect(await backend.currentSnapshot().apps.isEmpty)
+  let exclusion = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 2, isExcluded: true)
+  )
+  #expect(exclusion.outcome == .unavailable)
+
+  await gate.release()
+  #expect(await olderIntent.value.outcome == .superseded)
+  #expect(fixture.events.creations == 0)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  #expect(fixture.events.hearing("app.a") == "own output")
+}
+
 @Test func suspendedBackgroundRepairCannotReplaceANewerOutputChoice() async throws {
   let gate = RetryGate()
   let fixture = RouteFixture(apps: [routeTestApp()], retryPause: { _ in await gate.pause() })

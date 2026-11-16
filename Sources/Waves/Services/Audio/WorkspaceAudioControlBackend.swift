@@ -589,8 +589,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     guard let initialIndex = snapshot.apps.firstIndex(preferringLogicalID: intent.appID) else {
       if intent.isExcluded, intent.generation >= latestAcceptedGenerationByLogicalID[intent.appID] ?? 0 {
-        // No row, but a route may still be installed for the app: the
-        // opt-out reaches it by what it was built for.
+        // No row, but older intent work for the app may still be in flight,
+        // and a route may still be installed for it. The opt-out supersedes
+        // the one, and reaches the other by what it was built for.
+        latestAcceptedGenerationByLogicalID[intent.appID] = intent.generation
+        stagedIntentByLogicalID.removeValue(forKey: intent.appID)
         excludedLogicalIDs.insert(intent.appID)
         for runtimeID in controllers.filter({ $0.value.targetProcessFamily.logicalID == intent.appID }).map(\.key) {
           releaseRoute(runtimeID: runtimeID, kind: .forcedRelease)
@@ -1521,6 +1524,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // So does a router that started meanwhile.
       try ensureRouteWorkCurrent(generationContext, repairContext)
       try ensureRouterAuthorityCurrent(for: app, since: &routerGeneration)
+      guard !excludedLogicalIDs.contains(app.logicalID) else { throw IntentSupersededError() }
       if let generationContext,
         let installedGeneration = controllerGenerationByRuntimeID[app.id],
         installedGeneration > generationContext.generation
@@ -1658,6 +1662,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         try ensureRouteWorkCurrent(generationContext, repairContext)
         // Every attempt after the first follows a suspension.
         try ensureRouterAuthorityCurrent(for: app, since: &routerGeneration)
+        guard !excludedLogicalIDs.contains(app.logicalID) else { throw IntentSupersededError() }
         try spendRouteRebuildBudget(origin)
         let created = try createController(
           for: app,
