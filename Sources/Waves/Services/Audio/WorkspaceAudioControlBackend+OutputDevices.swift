@@ -448,7 +448,7 @@ extension WorkspaceAudioControlBackend {
         }
         publishRouteHolds()
       } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability,
-        controllers[app.id]?.isActive != true,
+        controllers[app.id]?.isActive != true, !excludedLogicalIDs.contains(app.logicalID),
         consumeAutomaticAttachAttempt(for: app, isFreshEvent: appearedUIDs.contains(targetDeviceUID))
       {
         routesNeedingReattach.insert(app.logicalID)

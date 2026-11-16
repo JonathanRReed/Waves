@@ -543,6 +543,41 @@ private func maintenancePass(_ fixture: RouteFixture, from start: Int, ticks: In
   #expect(await backend.currentSnapshot().apps.first?.notes == nil)
 }
 
+@Test func aPinnedOutputReturningNeverCapturesAnAppHeldSilentByItsExclusion() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5, targetDeviceUID: "usb-dac")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // Excluded, but the tap will neither release nor stop: parked, the app
+  // held silent, the row in error.
+  fixture.events.failNextMuteReleases(1_000)
+  fixture.events.failNextStops(1_000)
+  _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 10, isExcluded: true))
+  let held = try #require(await backend.currentSnapshot().apps.first)
+  #expect(held.routingState == .error)
+  #expect(held.isHeldSilentByWaves)
+  #expect(held.targetDeviceUID == nil)
+
+  // The pinned output appears again, a fresh event for the pinned route.
+  // The exclusion still stands: nothing is built for the app.
+  await backend.applyDeviceChangePlanForTesting(
+    DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+    availableDeviceUIDs: ["builtin", "usb-dac", "headphones"],
+    appearedDeviceUIDs: ["usb-dac"]
+  )
+  await maintenancePass(fixture, from: 10)
+  #expect(fixture.events.creations == 0)
+  #expect(fixture.events.pumpRenders().isEmpty)
+
+  // Only the user's own intent to manage it again builds a route.
+  fixture.events.failNextStops(0)
+  let managed = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 11, targetDeviceUID: "usb-dac")
+  )
+  #expect(managed.outcome == .applied)
+  #expect(fixture.events.creations == 1)
+}
+
 @Test(arguments: [false, true])
 func aParkedRendererIsNeverRevivedWhenItsAppLosesItsRoute(byYield: Bool) async throws {
   let fixture = RouteFixture(apps: [routeTestApp(volume: 0.8)])

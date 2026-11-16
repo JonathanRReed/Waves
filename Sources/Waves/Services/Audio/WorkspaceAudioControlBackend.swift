@@ -87,6 +87,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// rebuild for it succeeds or the route changes hands. See
   /// `PendingRouteRepair`.
   var pendingRouteRepairs: [String: PendingRouteRepair] = [:]
+  /// Logical IDs the user excluded, by their newest intent. Waves's capture
+  /// authority, kept apart from a row's routing state, error and notes,
+  /// which repairs and holds rewrite: no route is built for an app in it
+  /// until an intent that does not exclude it (`applyRoute`).
+  var excludedLogicalIDs: Set<String> = []
   /// Controllers whose release failed at quit, kept playing their apps
   /// until Waves exits; macOS removes their taps and aggregates with it.
   var controllersPlayingUntilExit: [PerAppTapController] = []
@@ -590,6 +595,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     latestAcceptedGenerationByLogicalID[logicalID] = intent.generation
     stagedIntentByLogicalID[logicalID] = intent
+    if intent.isExcluded {
+      excludedLogicalIDs.insert(logicalID)
+    } else {
+      excludedLogicalIDs.remove(logicalID)
+    }
     // The user's newest intent replaces whatever an automatic repair left.
     failOpenReleases.removeValue(forKey: logicalID)
     legacyGeneration = max(legacyGeneration, intent.generation)
@@ -1301,6 +1311,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].hasNoAudioCapability = false
     snapshot.apps[index].notes = nil
     snapshot.apps[index].routeHealthContext = nil
+    // As the store presents it. Re-including restores the pin from the
+    // store's persisted intent, which the store sends with that intent.
+    snapshot.apps[index].targetDeviceUID = nil
     // A tap that would not let go holds the app silent: the row says so now,
     // not on the next maintenance pass.
     publishRouteHolds()
@@ -1410,6 +1423,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
       throw BackendError.unsupportedOperation(conflict.detail)
     }
+    // The user's exclusion outranks every automatic path that reaches here.
+    guard !excludedLogicalIDs.contains(app.logicalID) else { throw IntentSupersededError() }
 
     try ensureRouteWorkCurrent(generationContext, repairContext)
     let processTarget = try resolveProcessTarget(for: app)
