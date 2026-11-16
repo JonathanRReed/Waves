@@ -83,6 +83,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// Installed routes a managed release could not hand back, by runtime ID.
   /// Each still plays its app at the user's level; see `UnreleasedRoute`.
   var unreleasedRoutes: [String: UnreleasedRoute] = [:]
+  /// Why a live route still needs rebuilding, by runtime ID, kept until a
+  /// rebuild for it succeeds or the route changes hands. See
+  /// `PendingRouteRepair`.
+  var pendingRouteRepairs: [String: PendingRouteRepair] = [:]
   /// Controllers whose release failed at quit, kept playing their apps
   /// until Waves exits; macOS removes their taps and aggregates with it.
   var controllersPlayingUntilExit: [PerAppTapController] = []
@@ -394,6 +398,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let installedControllers = controllers.sorted { $0.key < $1.key }.map(\.value)
     controllers.removeAll()
     unreleasedRoutes.removeAll()
+    pendingRouteRepairs.removeAll()
     var handedBack: [PerAppTapController] = []
     for controller in installedControllers {
       let hold = controller.releaseHold(.managedRelease, until: handBackDeadline)
@@ -1496,6 +1501,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       retireController(incumbent)
     }
     unreleasedRoutes.removeValue(forKey: app.id)
+    // The rebuild a pending repair asked for has happened.
+    pendingRouteRepairs.removeValue(forKey: app.id)
     cutParkedRenderers(forRuntimeID: app.id)
     failOpenReleases.removeValue(forKey: app.logicalID)
     // Only now, with every other renderer of the app cut to silence, does the

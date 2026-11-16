@@ -227,8 +227,12 @@ private func spendRebuildBudget(_ fixture: RouteFixture) async {
   #expect(fixture.events.creations == creations)
   #expect(fixture.events.lastTapMuteEvent(serial: incumbent) == nil)
   #expect(fixture.events.pumpRenders() == [incumbent])
+  // Kept, but not called healthy: its EQ runs at the old rate until the
+  // rebuild, and the row says the rebuild is still to come.
   let kept = try #require(await backend.currentSnapshot().apps.first)
-  #expect(kept.routingState == .managed)
+  #expect(kept.routingState == .error)
+  #expect(kept.notes?.contains("its output device changed format") == true)
+  #expect(kept.notes?.contains("Automatic rebuilds are paused") == true)
   #expect(kept.appliedVolume == 0.5)
 
   // Once the budget refills, the next maintenance pass rebuilds it.
@@ -236,6 +240,45 @@ private func spendRebuildBudget(_ fixture: RouteFixture) async {
   await maintenancePass(fixture, from: 100)
   #expect(fixture.events.creations == creations + 1)
   #expect(fixture.events.pumpRenders() == [incumbent + 1])
+}
+
+@Test func aDeviceResetWhoseRebuildTheBudgetRefusedIsStillRebuiltOnceTheBudgetAllows() async throws {
+  let calls = ListenerCalls()
+  let fixture = RouteFixture(apps: [routeTestApp()], deviceFormatListenerNativeCalls: calls.nativeCalls)
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await backend.syncDeviceFormatListenersForTesting(devices: [10: "builtin"])
+  await spendRebuildBudget(fixture)
+  let creations = fixture.events.creations
+  let incumbent = creations + 1
+
+  // The built-in output drops and comes back with the same format while
+  // automatic rebuilds are paused. Its aggregate may not have survived, so
+  // the route needs rebuilding, but the budget refuses it for now.
+  calls.setAlive(false)
+  calls.fireAliveChange(on: 10)
+  calls.setAlive(true)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(40))
+  #expect(fixture.events.creations == creations)
+  #expect(fixture.events.pumpRenders() == [incumbent])
+  let pending = try #require(await backend.currentSnapshot().apps.first)
+  #expect(pending.routingState == .error)
+  #expect(pending.notes?.contains("disconnected and came back") == true)
+  #expect(pending.appliedVolume == 0.5)
+
+  // The device's own transition was consumed by that pass. The route still
+  // remembers its repair: once the budget allows, maintenance rebuilds it.
+  fixture.budgetClock.value = .seconds(600)
+  await maintenancePass(fixture, from: 100)
+  #expect(fixture.events.creations == creations + 1)
+  #expect(fixture.events.pumpRenders() == [incumbent + 1])
+  let rebuilt = try #require(await backend.currentSnapshot().apps.first)
+  #expect(rebuilt.routingState == .managed)
+  #expect(rebuilt.notes == nil)
+
+  // And it is not rebuilt again.
+  await maintenancePass(fixture, from: 200)
+  #expect(fixture.events.creations == creations + 1)
 }
 
 @Test func aRebuildRefusedByTheCeilingReleasesARouteThatStoppedRenderingAndRetriesLater() async throws {

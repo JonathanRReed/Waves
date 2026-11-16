@@ -50,13 +50,20 @@ extension WorkspaceAudioControlBackend {
     )
     // A device that dropped and returned inside the debounce window was
     // caught by its listener; treat it as seen not alive.
+    let previouslySeenNotAlive = devicesSeenNotAlive.union(deviceFormatListeners.takeDevicesSeenNotAlive())
     let decision = RouteFormatRevalidation.decide(
       bindings: routeOutputBindingByRuntimeID,
       observations: observations,
-      devicesPreviouslySeenNotAlive: devicesSeenNotAlive.union(deviceFormatListeners.takeDevicesSeenNotAlive())
+      devicesPreviouslySeenNotAlive: previouslySeenNotAlive
     )
     devicesSeenNotAlive = decision.devicesSeenNotAlive
     guard !decision.runtimeIDsToRebuild.isEmpty else { return }
+    // The device's transition is consumed here, so the route remembers it:
+    // a rebuild the budget refuses must still happen once it allows.
+    for runtimeID in decision.runtimeIDsToRebuild {
+      let returned = routeOutputBindingByRuntimeID[runtimeID].map { previouslySeenNotAlive.contains($0.deviceUID) } ?? false
+      recordPendingRepair(returned ? .deviceReturned : .formatChanged, runtimeID: runtimeID)
+    }
     logger.info("Output format changed; rebuilding \(decision.runtimeIDsToRebuild.count, privacy: .public) route(s)")
     await performRouteMaintenance(forceRebuildIDs: decision.runtimeIDsToRebuild, now: now)
   }

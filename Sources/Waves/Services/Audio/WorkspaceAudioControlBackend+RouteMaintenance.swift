@@ -275,6 +275,17 @@ extension WorkspaceAudioControlBackend {
           apps[index].notes = unreleased.note
           apps[index].hasNoAudioCapability = false
           apps[index].appliedVolume = app.isMuted ? 0 : app.desiredVolume
+        } else if let reason = pendingRepair(for: app.id) {
+          // Still playing at the user's level, but not healthy: say what is
+          // wrong and that the rebuild is still to come.
+          apps[index].routingState = .error
+          apps[index].notes = Self.pendingRepairNote(
+            appName: app.displayName,
+            reason: reason,
+            rebuildsPaused: isRouteRebuildCeilingActive
+          )
+          apps[index].hasNoAudioCapability = false
+          apps[index].appliedVolume = app.isMuted ? 0 : app.desiredVolume
         }
         continue
       }
@@ -576,6 +587,7 @@ extension WorkspaceAudioControlBackend {
           staleRouteTicks[app.logicalID] = ticks
           if ticks >= staleRouteThresholdTicks {
             routeIDsNeedingRebuild.insert(app.logicalID)
+            recordPendingRepair(.stalled, runtimeID: app.id)
           }
         } else {
           staleRouteTicks.removeValue(forKey: app.logicalID)
@@ -671,6 +683,11 @@ extension WorkspaceAudioControlBackend {
     now: Duration
   ) async {
     guard !isShuttingDown else { return }
+    // A route with a pending repair is rebuilt on every pass the rebuild
+    // budget allows, until a rebuild for it succeeds or it changes hands.
+    // While the budget refuses, it is not attempted at all.
+    let pendingIDs: Set<String> = isRouteRebuildCeilingActive ? [] : Set(snapshot.apps.map(\.id).filter { pendingRepair(for: $0) != nil })
+    let forceRebuildIDs = forceRebuildIDs.union(pendingIDs)
     // Authorization is captured per route at selection, as in
     // `reattachRoutes`: an app excluded or yielded while an earlier route in
     // this pass was suspended must not be rebuilt from its changed row.
@@ -695,6 +712,7 @@ extension WorkspaceAudioControlBackend {
       // A live route bound to a device it should no longer play on, such as
       // the old default after a move that newer work overtook, is moved here.
       let isMisbound = controllers[app.id] != nil && !isRouteOnItsExpectedDevice(app)
+      if isMisbound { recordPendingRepair(.wrongDevice, runtimeID: app.id) }
 
       do {
         // Overtaken while an earlier route in this pass was suspended.
@@ -767,12 +785,15 @@ extension WorkspaceAudioControlBackend {
         // plays. Same policy as a failed move: release it so the app is
         // audible, say why, and retry later. A rebuild the budget refused
         // proved nothing, so a route that still renders on its own device is
-        // kept and rebuilt once the budget allows. Geometry attempts keep
-        // their own bounded retries, which end in the same release.
+        // kept: its repair stays pending, its row says so, and it is rebuilt
+        // once the budget allows. Geometry attempts keep their own bounded
+        // retries, which end in the same release.
         if isMisbound || (shouldForceRebuild && repairContext.incumbent != nil && !isGeometryAttempt) {
           if error is RouteRebuildCeilingError, !isMisbound,
-            controllers[app.id]?.isActive == true, staleRouteTicks[app.logicalID] == nil
+            controllers[app.id]?.isActive == true, staleRouteTicks[app.logicalID] == nil,
+            pendingRepair(for: app.id) != .stalled
           {
+            publishRouteHolds()
             continue
           }
           let reported = isMisbound ? failedMoveError(for: app, error) : failedRepairError(for: app, error)
@@ -854,6 +875,67 @@ extension WorkspaceAudioControlBackend {
   var isRouteRebuildCeilingActive: Bool {
     routeRebuildBudget.isCeilingActive(liveRouteCount: controllers.count, at: routeBudgetClock())
   }
+
+  /// Remembers that `runtimeID`'s live route needs rebuilding. A stalled
+  /// route stays stalled: a later, milder reason must not let a refused
+  /// rebuild keep a route that has stopped playing.
+  func recordPendingRepair(_ reason: RouteRepairReason, runtimeID: String) {
+    guard let controller = controllers[runtimeID] else { return }
+    let reason = pendingRepair(for: runtimeID) == .stalled ? .stalled : reason
+    pendingRouteRepairs[runtimeID] = PendingRouteRepair(reason: reason, controller: ObjectIdentifier(controller))
+  }
+
+  /// The repair `runtimeID`'s live route still needs, if any. One recorded
+  /// for a controller that is no longer installed (rebuilt, released, or
+  /// replaced) is forgotten: the route changed hands.
+  func pendingRepair(for runtimeID: String) -> RouteRepairReason? {
+    guard let pending = pendingRouteRepairs[runtimeID] else { return nil }
+    guard let controller = controllers[runtimeID], ObjectIdentifier(controller) == pending.controller else {
+      pendingRouteRepairs.removeValue(forKey: runtimeID)
+      return nil
+    }
+    return pending.reason
+  }
+
+  static func pendingRepairNote(appName: String, reason: RouteRepairReason, rebuildsPaused: Bool) -> String {
+    let what = "Waves needs to rebuild the audio route for \(appName) because \(reason.explanation)."
+    guard rebuildsPaused else {
+      return "\(what) It keeps playing at the level you set until then."
+    }
+    return
+      "\(what) Automatic rebuilds are paused for a moment, so it keeps playing at the level you set until they resume. Recover Routes rebuilds it now."
+  }
+}
+
+/// Why a live route needs rebuilding.
+enum RouteRepairReason: Equatable, Sendable {
+  /// Its output device changed sample rate or stream layout.
+  case formatChanged
+  /// Its output device disconnected and came back; its aggregate may not
+  /// have survived.
+  case deviceReturned
+  /// It renders to a device it should no longer play on.
+  case wrongDevice
+  /// It stopped rendering while its app plays.
+  case stalled
+
+  var explanation: String {
+    switch self {
+    case .formatChanged: "its output device changed format"
+    case .deviceReturned: "its output device disconnected and came back"
+    case .wrongDevice: "it is playing on a device it should no longer use"
+    case .stalled: "it stopped playing"
+    }
+  }
+}
+
+/// A repair a live route still needs. Tied to the controller it was
+/// recorded for, so a rebuild, a release, or any other change of hands ends
+/// it; a rebuild the budget refuses does not, so the route is rebuilt once
+/// the budget allows instead of being forgotten.
+struct PendingRouteRepair: Sendable {
+  let reason: RouteRepairReason
+  let controller: ObjectIdentifier
 }
 
 /// Automatic route work was refused by the backend-wide rebuild ceiling.

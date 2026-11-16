@@ -99,6 +99,7 @@ extension WorkspaceAudioControlBackend {
     }
     controllers.removeValue(forKey: runtimeID)
     unreleasedRoutes.removeValue(forKey: runtimeID)
+    pendingRouteRepairs.removeValue(forKey: runtimeID)
     park(controller)
     appLostItsRoute(runtimeID)
     return .released
