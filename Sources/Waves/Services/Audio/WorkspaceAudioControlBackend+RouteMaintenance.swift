@@ -123,7 +123,7 @@ extension WorkspaceAudioControlBackend {
     guard !isShuttingDown else { return }
     // A reattach is one coherent setup pass. Capture router activity before
     // any await so every route sees the same verified Security/Core Audio view.
-    let routerActivity = verifiedRouterActivityProvider?()
+    var routerActivity = currentRouterActivity()
     var lastError: String?
 
     // applyRoute suspends (tap-retry backoff) and the actor is reentrant, so a
@@ -141,6 +141,7 @@ extension WorkspaceAudioControlBackend {
       guard isRepairCurrent(repairContext),
         let app = snapshot.apps.first(where: { $0.logicalID == logicalID })
       else { continue }
+      routerActivity = currentRouterActivity(replacing: routerActivity)
 
       if let conflict = competingAudioRouterConflict(
         for: app,
@@ -340,6 +341,7 @@ extension WorkspaceAudioControlBackend {
       guard release.attemptsRemaining > 0, !isRouteRebuildCeilingActive,
         hasUsableOutputDevice(app), isProducingAudio(app)
       else { continue }
+      let routerActivity = currentRouterActivity(replacing: routerActivity)
       if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
         suspendManagedRouteForConflict(at: index, conflict: conflict)
         changed = true
@@ -482,7 +484,7 @@ extension WorkspaceAudioControlBackend {
     var memoizedRouterActivity: VerifiedRouterActivitySnapshot??
     func routerActivity() -> VerifiedRouterActivitySnapshot? {
       if let memoized = memoizedRouterActivity { return memoized }
-      let activity = verifiedRouterActivityProvider?()
+      let activity = currentRouterActivity()
       memoizedRouterActivity = .some(activity)
       return activity
     }
@@ -741,7 +743,7 @@ extension WorkspaceAudioControlBackend {
       .map { (appID: $0.logicalID, context: makeRepairContext(for: $0)) }
     guard !selected.isEmpty else { return }
     // One verified-router view for the whole pass, as `reattachRoutes` takes.
-    let routerActivity = routerActivity ?? verifiedRouterActivityProvider?()
+    var routerActivity = routerActivity ?? currentRouterActivity()
 
     var changed = false
     var lastError: String?
@@ -764,6 +766,16 @@ extension WorkspaceAudioControlBackend {
       do {
         // Overtaken while an earlier route in this pass was suspended.
         guard isRepairCurrent(repairContext) else { throw IntentSupersededError() }
+        // Another router owns the app now: yield to it. First, before the
+        // reuse shortcut and anything that can fail: ownership is not a
+        // failed repair, so it never takes the managed fallback below, and a
+        // healthy route is not kept beside the router.
+        routerActivity = currentRouterActivity(replacing: routerActivity)
+        if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
+          suspendManagedRouteForConflict(at: index, conflict: conflict)
+          changed = true
+          continue
+        }
         let processTarget = try resolveProcessTarget(for: app)
         let processObjectIDs = processTarget.processObjectIDs
         if !shouldForceRebuild,
@@ -778,13 +790,6 @@ extension WorkspaceAudioControlBackend {
             )
           )
         {
-          continue
-        }
-        // Another router owns the app now: yield to it. Ownership is not a
-        // failed repair, so it never takes the managed fallback below.
-        if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
-          suspendManagedRouteForConflict(at: index, conflict: conflict)
-          changed = true
           continue
         }
 

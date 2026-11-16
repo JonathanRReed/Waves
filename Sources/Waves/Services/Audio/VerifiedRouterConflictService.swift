@@ -118,6 +118,9 @@ struct VerifiedRouterActivitySnapshot: Sendable {
   private let routers: [VerifiedRouter]
   private let processObjects: [VerifiedRouterProcessObject]
   private let routerBundleIdentifiers: Set<String>
+  /// The backend's router-observation generation when this view was taken.
+  /// Route work that suspended re-takes a view a router change has outdated.
+  var observationGeneration: UInt64?
 
   init(
     routers: [VerifiedRouter],

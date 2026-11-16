@@ -379,6 +379,74 @@ private func spendRebuildBudget(_ fixture: RouteFixture) async {
   #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
 }
 
+@Test(.timeLimit(.minutes(1)))
+func aRouterThatStartsWhileARouteIsBeingBuiltIsNeverCapturedByIt() async throws {
+  // A pinned route released earlier: no controller, and its row in error.
+  let gate = RetryGate()
+  let fixture = RouteFixture(
+    apps: [routeTestApp(routingState: .error, targetDeviceUID: "usb-dac")],
+    retryPause: { _ in await gate.pause() }
+  )
+  let backend = fixture.backend
+  // Its output comes back. The reattach takes its router view (no router),
+  // its first creation fails, and it waits to retry.
+  fixture.events.failNextCreations(1)
+  let reattach = Task {
+    await backend.applyDeviceChangePlanForTesting(
+      DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+      availableDeviceUIDs: ["builtin", "usb-dac"],
+      appearedDeviceUIDs: ["usb-dac"]
+    )
+  }
+  await gate.waitUntilPaused()
+
+  // Wave Link starts. Its activation is observed while the row still has
+  // no controller, so it changes no row and supersedes nothing.
+  fixture.routerRunning.value = true
+  await backend.markRouterObservationDirty()
+  await backend.updateAudioLevels(at: .seconds(1))
+  await backend.updateAudioLevels(at: .seconds(2))
+  #expect(await backend.currentSnapshot().apps.first?.routingState == .error)
+
+  await gate.release()
+  await reattach.value
+
+  #expect(fixture.events.creations == 0)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  #expect(fixture.events.hearing("app.a") == "own output")
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routeHealthContext == .unattributableRouterFallback)
+}
+
+@Test func maintenanceYieldsToARouterEvenWhenTheAppCannotBeResolved() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  for tick in 1..<20 {
+    fixture.events.pumpRenders()
+    await backend.updateAudioLevels(at: .seconds(tick))
+  }
+
+  // Wave Link starts just before a maintenance pass, inside the observation
+  // debounce. The route must move (it was left on an old default), its
+  // process cannot be resolved right now, and its tap would not let go in a
+  // managed release, so a fallback would keep Waves playing the app.
+  fixture.routerRunning.value = true
+  fixture.devices.defaultUID = "headphones"
+  fixture.resolutionFails.value = true
+  fixture.events.failNextMuteReleases(1_000)
+  await backend.markRouterObservationDirty()
+  fixture.events.pumpRenders()
+  await backend.updateAudioLevels(at: .seconds(20))
+
+  #expect(fixture.events.creations == 0)
+  #expect(fixture.events.hearing("app.a") == "own output")
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routingState == .monitorOnly)
+  #expect(row.routeHealthContext == .unattributableRouterFallback)
+}
+
 @Test func aRouteWhoseAggregateSilentlyStoppedIsRebuilt() async throws {
   let fixture = RouteFixture(apps: [routeTestApp()])
   try await fixture.installInitialRoutes()
@@ -2800,6 +2868,8 @@ final class RouteFixture: @unchecked Sendable {
   let audiblePIDs = TestBox<Set<pid_t>>([])
   /// Whether a verified audio router is mixing every app's output.
   let routerRunning = TestBox(false)
+  /// Whether resolving an app's processes fails.
+  let resolutionFails = TestBox(false)
   /// The running applications discovery captures.
   let captured = TestBox<[AppRuntimeDiscovery.CapturedApplication]>([])
   /// Whether a process lifetime is still running; nil asks the real system.
@@ -2871,6 +2941,7 @@ final class RouteFixture: @unchecked Sendable {
     let playing = self.playing
     let audiblePIDs = self.audiblePIDs
     let routerRunning = self.routerRunning
+    let resolutionFails = self.resolutionFails
     let lifetimeLiveness = self.lifetimeLiveness
     // Every test app is still running. Captured as background-only processes
     // so discovery keeps the backend's own rows rather than inventing new ones.
@@ -2966,7 +3037,10 @@ final class RouteFixture: @unchecked Sendable {
         events.pumpRenders()
         return controller
       },
-      processObjectIDResolver: { _ in [1] },
+      processObjectIDResolver: { _ in
+        guard !resolutionFails.value else { throw BackendError.managedRouteUnavailable("Injected resolution failure") }
+        return [1]
+      },
       processObjectLivenessProvider: { _ in playing.value },
       captureAuthorizationProbe: { .authorized },
       applicationCaptureProvider: {

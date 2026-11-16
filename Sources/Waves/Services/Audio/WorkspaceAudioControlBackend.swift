@@ -678,7 +678,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     if let conflict = competingAudioRouterConflict(
       for: snapshot.apps[acceptedIndex],
-      routerActivity: routerActivity
+      routerActivity: currentRouterActivity(replacing: routerActivity)
     ) {
       if shouldControlThroughWaveLink(snapshot.apps[acceptedIndex], conflict: conflict) {
         return await applyIntentThroughWaveLink(
@@ -1009,7 +1009,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     var rows: [ProfileRowApplyResult] = []
     rows.reserveCapacity(profile.entries.count)
-    let routerActivity = verifiedRouterActivityProvider?()
+    let routerActivity = currentRouterActivity()
 
     for (entryIndex, entry) in profile.entries.enumerated() {
       guard entry.hasLevels else {
@@ -1455,6 +1455,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard supportsPerAppRouting else {
       throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
     }
+    // A view of other routers taken before a router change is not trusted.
+    var routerGeneration = routerActivity?.observationGeneration ?? routerObservationGeneration
+    try ensureRouterAuthorityCurrent(for: app, since: &routerGeneration)
     if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
       throw BackendError.unsupportedOperation(conflict.detail)
     }
@@ -1507,14 +1510,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       equalizerSettings: stagedEqualizer,
       generationContext: generationContext,
       repairContext: repairContext,
-      origin: origin
+      origin: origin,
+      routerGeneration: &routerGeneration
     )
 
     do {
       try ensureAcceptingOperations()
       // Background work was suspended in creation retries; newer intent or
       // newer route work for this app wins and this controller is discarded.
+      // So does a router that started meanwhile.
       try ensureRouteWorkCurrent(generationContext, repairContext)
+      try ensureRouterAuthorityCurrent(for: app, since: &routerGeneration)
       if let generationContext,
         let installedGeneration = controllerGenerationByRuntimeID[app.id],
         installedGeneration > generationContext.generation
@@ -1639,7 +1645,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     equalizerSettings: EqualizerSettings,
     generationContext: IntentGenerationContext?,
     repairContext: RouteRepairContext?,
-    origin: RouteWorkOrigin
+    origin: RouteWorkOrigin,
+    routerGeneration: inout UInt64
   ) async throws -> (PerAppTapController, RouteOutputBinding?) {
     let maxRetries = 3
     var lastError: Error?
@@ -1649,6 +1656,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       try ensureAcceptingOperations()
       do {
         try ensureRouteWorkCurrent(generationContext, repairContext)
+        // Every attempt after the first follows a suspension.
+        try ensureRouterAuthorityCurrent(for: app, since: &routerGeneration)
         try spendRouteRebuildBudget(origin)
         let created = try createController(
           for: app,
