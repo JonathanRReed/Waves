@@ -1003,6 +1003,62 @@ func everyDisposalLeavesTheAppAudibleOneWayOrTheOther(_ path: DisposalPath, _ fa
   #expect(result.degradations.contains { $0.detail?.contains("played through Waves until Waves exited") == true })
 }
 
+// MARK: - A route discovery drops is never left installed and unreachable
+
+@Test func aRouteWhoseRowDiscoveryDroppedStaysVisibleUntilItIsReleased() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  // Discovery misses the app, whose process is still running, and its
+  // tap will not let go once: still routing, and still on the list.
+  fixture.lifetimeLiveness.value = true
+  fixture.captured.value = []
+  fixture.events.failNextMuteReleases(1)
+  _ = try await backend.refresh()
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.notes?.contains("still playing it at the level you set") == true)
+
+  // So the user's exclusion still reaches it.
+  let exclusion = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 10, isExcluded: true))
+  #expect(exclusion.outcome == .excluded)
+  #expect(fixture.events.hearing("app.a") == "own output")
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+}
+
+@Test func aRouteWhoseProcessIsGoneIsForceReleasedEvenIfItsTapWillNotLetGo() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+
+  fixture.lifetimeLiveness.value = false
+  fixture.captured.value = []
+  fixture.events.failNextMuteReleases(1_000)
+  _ = try await backend.refresh()
+
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  #expect(fixture.events.pumpRenders().isEmpty)
+  #expect(fixture.events.ownOutputIsAudible("app.a"))
+}
+
+@Test func terminationAndExclusionReachAControllerThatHasNoRow() async throws {
+  let identity = routeTestIdentity("app.c")
+  func backend(owning controller: PerAppTapController) -> WorkspaceAudioControlBackend {
+    WorkspaceAudioControlBackend(testingSnapshot: .empty, testingControllers: [controller])
+  }
+  let terminated = try PerAppTapController.testingController(appID: "app.c")
+  terminated.ownerProcessLifetime = identity.lifetime
+  let afterTermination = backend(owning: terminated)
+  await afterTermination.releaseControllers(forRuntimeIdentity: identity)
+  #expect(await afterTermination.lifecycleDebugSnapshot().liveControllers == 0)
+
+  let excluded = try PerAppTapController.testingController(appID: "app.c")
+  let afterExclusion = backend(owning: excluded)
+  _ = await afterExclusion.applyAppIntent(routeIntent(appID: "app.c", volume: 1, generation: 1, isExcluded: true))
+  #expect(await afterExclusion.lifecycleDebugSnapshot().liveControllers == 0)
+}
+
 // MARK: - A route released by a failed repair is recoverable and truthful
 
 /// Releases app.a's route: its device resets to 96 kHz, its aggregate stops
@@ -2639,6 +2695,8 @@ final class RouteFixture: @unchecked Sendable {
   let routerRunning = TestBox(false)
   /// The running applications discovery captures.
   let captured = TestBox<[AppRuntimeDiscovery.CapturedApplication]>([])
+  /// Whether a process lifetime is still running; nil asks the real system.
+  let lifetimeLiveness = TestBox<Bool?>(nil)
 
   /// The app quits and opens again: a new process, under the same bundle,
   /// name and therefore the same runtime and logical IDs.
@@ -2706,6 +2764,7 @@ final class RouteFixture: @unchecked Sendable {
     let playing = self.playing
     let audiblePIDs = self.audiblePIDs
     let routerRunning = self.routerRunning
+    let lifetimeLiveness = self.lifetimeLiveness
     // Every test app is still running. Captured as background-only processes
     // so discovery keeps the backend's own rows rather than inventing new ones.
     let captured = self.captured
@@ -2807,6 +2866,7 @@ final class RouteFixture: @unchecked Sendable {
         await discoveryPause?()
         return AppRuntimeDiscovery.Capture(applications: captured.value)
       },
+      processLifetimeLiveness: { lifetimeLiveness.value ?? RuntimeProcessIdentity.mayStillBeRunning($0) },
       routeBudgetClock: { budgetClock.value },
       controllerRetryPause: retryPause ?? { _ in },
       handoffSilencePause: { if rendersDuringHandoff { events.pumpRenders() } },

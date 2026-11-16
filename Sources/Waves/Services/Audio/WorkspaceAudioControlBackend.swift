@@ -565,6 +565,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }
     guard let initialIndex = snapshot.apps.firstIndex(preferringLogicalID: intent.appID) else {
+      if intent.isExcluded, intent.generation >= latestAcceptedGenerationByLogicalID[intent.appID] ?? 0 {
+        // No row, but a route may still be installed for the app: the
+        // opt-out reaches it by what it was built for.
+        excludedLogicalIDs.insert(intent.appID)
+        for runtimeID in controllers.filter({ $0.value.targetProcessFamily.logicalID == intent.appID }).map(\.key) {
+          releaseRoute(runtimeID: runtimeID, kind: .forcedRelease)
+        }
+      }
       return AppIntentApplyResult(
         appID: intent.appID,
         generation: intent.generation,
@@ -1979,8 +1987,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
     }
 
-    let runningIDs: Set<String> = Set(mergedApps.map(\.id))
-    disposeControllers(keeping: runningIDs)
+    releaseRoutesMissing(from: &mergedApps, previous: previousSnapshot.apps)
     // A repair recorded for a process that is gone, or that relaunched under
     // the same IDs, ends here.
     let lifetimeByID = Dictionary(mergedApps.map { ($0.id, $0.runtimeIdentity?.lifetime) }, uniquingKeysWith: { first, _ in first })

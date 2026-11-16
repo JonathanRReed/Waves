@@ -17,9 +17,13 @@ extension WorkspaceAudioControlBackend {
     clearMuteState: Bool = false
   ) async {
     guard !isShuttingDown else { return }
-    let targetIDs = snapshot.apps.filter { app in
+    var targetIDs = snapshot.apps.filter { app in
       app.runtimeIdentity == runtimeIdentity
     }.map(\.id)
+    // A route whose row is gone is found by the process it was built for.
+    targetIDs += controllers.filter {
+      $0.value.ownerProcessLifetime == runtimeIdentity.lifetime && !targetIDs.contains($0.key)
+    }.map(\.key)
 
     guard !targetIDs.isEmpty else { return }
 
@@ -60,6 +64,30 @@ extension WorkspaceAudioControlBackend {
     let stale = Set(controllers.keys).subtracting(appIDs).sorted()
     for appID in stale {
       releaseRoute(runtimeID: appID)
+    }
+  }
+
+  /// Releases every installed controller whose app discovery no longer
+  /// lists. One whose process is confirmed gone is force-released: nothing
+  /// can carry it. Otherwise discovery may merely have missed the app: a
+  /// managed release, and a route still routing keeps its last row
+  /// (`previous`) in `apps`, so the user can still reach it and Waves still
+  /// observes it, until its release completes.
+  func releaseRoutesMissing(from apps: inout [AudioApp], previous: [AudioApp]) {
+    for runtimeID in Set(controllers.keys).subtracting(apps.map(\.id)).sorted() {
+      guard let controller = controllers[runtimeID] else { continue }
+      var lifetimes = controller.targetProcessFamily.processLifetimeIdentities
+      if let owner = controller.ownerProcessLifetime { lifetimes.insert(owner) }
+      guard var row = previous.first(where: { $0.id == runtimeID }),
+        lifetimes.isEmpty || lifetimes.contains(where: processLifetimeLiveness)
+      else {
+        releaseRoute(runtimeID: runtimeID, kind: .forcedRelease)
+        continue
+      }
+      guard releaseRoute(runtimeID: runtimeID) == .stillRouting else { continue }
+      row.isActive = false
+      row.isProducingOutput = false
+      apps.append(row)
     }
   }
 
