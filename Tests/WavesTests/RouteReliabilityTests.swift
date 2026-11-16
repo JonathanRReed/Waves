@@ -1163,6 +1163,19 @@ func aReleasedRouteIsNeverRebuiltAfterNewerOwnership(_ change: String) async thr
   #expect(await backend.currentSnapshot().apps.first?.notes?.contains("plays at its own volume") == true)
 }
 
+@Test func theFirstDeviceListPassDoesNotTreatEveryPresentOutputAsNew() async throws {
+  // A pinned route released before observation started; its output is
+  // present the whole time.
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a", routingState: .error, targetDeviceUID: "usb-dac")])
+  let backend = fixture.backend
+  await backend.startObservingDeviceChangesForTesting()
+
+  // The first device-list notification, with nothing added or removed.
+  await backend.performDeviceChangePassForTesting(changes: [.deviceInventory])
+
+  #expect(fixture.events.creations == 0)
+}
+
 @Test func anUnrelatedDeviceChangeNeverRetriesAPinnedRouteWhoseAllowanceIsSpent() async throws {
   let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5, targetDeviceUID: "usb-dac")])
   try await fixture.installInitialRoutes()

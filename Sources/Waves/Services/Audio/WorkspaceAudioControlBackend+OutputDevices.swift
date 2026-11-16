@@ -220,11 +220,16 @@ extension WorkspaceAudioControlBackend {
     return rawValue as String
   }
 
-  func addDeviceChangeListener() {
+  /// `registersSystemListeners` is false only in tests, which must not
+  /// listen to this Mac's real device list.
+  func addDeviceChangeListener(registersSystemListeners: Bool = true) {
     guard !isShuttingDown else { return }
     // Avoid registering a second listener (and leaking the previous block) if
     // start() runs more than once.
     guard deviceChangeListenerBlock == nil else { return }
+    // What the first pass compares with: without it, every device already
+    // present would count as newly appeared and reset retry allowances.
+    if lastKnownExternalDeviceUIDs == nil { lastKnownExternalDeviceUIDs = currentExternalDeviceUIDs() }
 
     let mailbox = deviceChangeMailbox
     if deviceChangeTask == nil {
@@ -254,7 +259,7 @@ extension WorkspaceAudioControlBackend {
       kAudioHardwarePropertyDevices,
     ]
 
-    for selector in selectors {
+    for selector in selectors where registersSystemListeners {
       var address = AudioObjectPropertyAddress(
         mSelector: selector,
         mScope: kAudioObjectPropertyScopeGlobal,
@@ -348,6 +353,10 @@ extension WorkspaceAudioControlBackend {
     if !changes.isDisjoint(with: [.deviceFormat, .wake, .deviceInventory]) {
       await revalidateRouteFormats(now: Self.monotonicRouteTime())
     }
+  }
+
+  func startObservingDeviceChangesForTesting() {
+    addDeviceChangeListener(registersSystemListeners: false)
   }
 
   func performDeviceChangePassForTesting(changes: AudioPropertyChanges) async {
