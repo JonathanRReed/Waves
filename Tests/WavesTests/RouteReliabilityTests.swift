@@ -258,6 +258,69 @@ private func spendRebuildBudget(_ fixture: RouteFixture) async {
   #expect(fixture.events.pumpRenders() == [incumbent + 1])
 }
 
+/// A muted app on a healthy route whose device changes rate while every
+/// rebuild attempt fails.
+private func mutedRouteThroughAFailedFormatRebuild() async throws -> RouteFixture {
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a", volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  _ = await fixture.backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 10, isMuted: true))
+  #expect(fixture.events.hearing("app.a") == "silent")
+  fixture.devices.set("builtin", .alive(rate96))
+  fixture.events.failNextCreations(3)
+  await fixture.backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+  return fixture
+}
+
+@Test func aFormatRebuildThatFailsKeepsAMutedAppsRouteSoItStaysMuted() async throws {
+  let fixture = try await mutedRouteThroughAFailedFormatRebuild()
+  let backend = fixture.backend
+
+  // Released, the app would play at its own level, which is what the user
+  // muted. Its route is kept instead: the tap still mutes the app.
+  #expect(fixture.events.values.suffix(3) == ["fail app.a", "fail app.a", "fail app.a"])
+  #expect(fixture.events.lastTapMuteEvent(serial: 1) != "audible #1")
+  #expect(fixture.events.hearing("app.a") == "silent")
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  let kept = try #require(await backend.currentSnapshot().apps.first)
+  #expect(kept.isMuted)
+  #expect(kept.routingState == .error)
+  #expect(kept.appliedVolume == 0)
+  #expect(kept.notes?.contains("its output device changed format") == true)
+  #expect(kept.notes?.contains("stays muted") == true, "\(kept.notes ?? "")")
+  #expect(kept.notes?.contains("its own volume") != true, "\(kept.notes ?? "")")
+}
+
+@Test func aMutedRouteWhoseRebuildFailedRestsUntilItIsUnmuted() async throws {
+  let fixture = try await mutedRouteThroughAFailedFormatRebuild()
+  let backend = fixture.backend
+  let events = fixture.events.values.count
+  let creations = fixture.events.creations
+
+  // While it stays muted nothing rebuilds it again, although a rebuild would
+  // now succeed: a route that kept failing must not retry on every pass.
+  await maintenancePass(fixture, from: 100)
+  await maintenancePass(fixture, from: 200)
+  #expect(fixture.events.values.count == events, "\(fixture.events.values.dropFirst(events))")
+  #expect(fixture.events.hearing("app.a") == "silent")
+  #expect(await backend.currentSnapshot().apps.first?.notes?.contains("stays muted") == true)
+
+  // Unmuting plays the app at once on the route it has, at the user's level
+  // and never at its own.
+  let result = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 11, isMuted: false))
+  #expect(result.outcome == .applied)
+  #expect(fixture.events.creations == creations)
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+
+  // And the next pass does the rebuild it still needed.
+  await maintenancePass(fixture, from: 300)
+  #expect(fixture.events.creations == creations + 1)
+  #expect(fixture.events.hearing("app.a") == "waves #2")
+  let rebuilt = try #require(await backend.currentSnapshot().apps.first)
+  #expect(rebuilt.routingState == .managed)
+  #expect(rebuilt.notes == nil)
+}
+
 @Test func aDeviceResetWhoseRebuildTheBudgetRefusedIsStillRebuiltOnceTheBudgetAllows() async throws {
   let calls = ListenerCalls()
   let fixture = RouteFixture(apps: [routeTestApp()], deviceFormatListenerNativeCalls: calls.nativeCalls)

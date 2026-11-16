@@ -63,7 +63,7 @@ All notable changes to Waves are documented here. The format follows
   it to the in-app updater.
 - Waves rebuilds an app's route when its output device changes sample rate or
   format, drops out and returns, or the Mac wakes, and only the routes that
-  need it.
+  need it. If such a rebuild fails, a muted app stays muted.
 - Automatic route rebuilds share one budget with a growing pause between
   attempts, so a misbehaving device cannot make Waves rebuild in a loop.
   Diagnostics shows the counts.
