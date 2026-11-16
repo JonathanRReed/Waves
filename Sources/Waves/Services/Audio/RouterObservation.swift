@@ -18,13 +18,8 @@ struct RouterConflictObservationDebouncer: Sendable {
     self.debounce = debounce
   }
 
-  /// Records a conflict Waves yielded to on a fresh view, without waiting
-  /// out the window, so that its release, once observed, reclaims the row.
-  /// Returns whether that changed the applied state.
-  mutating func recordAppliedConflict() -> Bool {
-    defer { appliedState = true }
-    return appliedState != true
-  }
+  /// Whether the last state this debouncer applied is an active conflict.
+  var hasAppliedConflict: Bool { appliedState == true }
 
   mutating func observe(conflictIsActive: Bool, at now: Duration) -> RouterConflictObservationAction {
     if pendingState != conflictIsActive {
