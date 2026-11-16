@@ -325,6 +325,9 @@ extension WorkspaceAudioControlBackend {
     )
     let externalDeviceUIDs = currentExternalDeviceUIDs()
     let inventoryChanged = externalDeviceUIDs != lastKnownExternalDeviceUIDs
+    // Devices that were not in the last device list: a pinned route whose
+    // output is among them gets a fresh allowance of automatic attempts.
+    let appearedDeviceUIDs = lastKnownExternalDeviceUIDs.map { externalDeviceUIDs.subtracting($0) } ?? externalDeviceUIDs
     lastKnownExternalDeviceUIDs = externalDeviceUIDs
     // On every raw device-list notification, not only when the set of UIDs
     // changed: a device that leaves and returns under the same UID before
@@ -338,7 +341,8 @@ extension WorkspaceAudioControlBackend {
 
     await applyDeviceChangePlan(
       DeviceChangePassPlan(defaultOutputChanged: defaultOutputChanged, inventoryChanged: inventoryChanged),
-      availableDeviceUIDs: { self.availableDeviceUIDs() }
+      availableDeviceUIDs: { self.availableDeviceUIDs() },
+      appearedDeviceUIDs: appearedDeviceUIDs
     )
     guard !isShuttingDown else { return }
     if !changes.isDisjoint(with: [.deviceFormat, .wake, .deviceInventory]) {
@@ -357,7 +361,8 @@ extension WorkspaceAudioControlBackend {
 
   func applyDeviceChangePlan(
     _ plan: DeviceChangePassPlan,
-    availableDeviceUIDs: () -> Set<String>
+    availableDeviceUIDs: () -> Set<String>,
+    appearedDeviceUIDs: Set<String> = []
   ) async {
     guard plan.reconcilesPinnedRoutes || plan.rehomesDefaultFollowingRoutes else { return }
     // Pinned routes first. Unplugging a device that was both the default and
@@ -365,7 +370,10 @@ extension WorkspaceAudioControlBackend {
     // change is consumed by this pass; skipping it here left routes to the
     // vanished device marked managed until something else rebuilt them.
     if plan.reconcilesPinnedRoutes {
-      await reconcilePinnedRoutesAfterDeviceInventoryChange(availableUIDs: availableDeviceUIDs())
+      await reconcilePinnedRoutesAfterDeviceInventoryChange(
+        availableUIDs: availableDeviceUIDs(),
+        appearedUIDs: appearedDeviceUIDs
+      )
       guard !isShuttingDown else { return }
     }
     if plan.rehomesDefaultFollowingRoutes {
@@ -387,9 +395,14 @@ extension WorkspaceAudioControlBackend {
 
   func applyDeviceChangePlanForTesting(
     _ plan: DeviceChangePassPlan,
-    availableDeviceUIDs: Set<String>
+    availableDeviceUIDs: Set<String>,
+    appearedDeviceUIDs: Set<String> = []
   ) async {
-    await applyDeviceChangePlan(plan, availableDeviceUIDs: { availableDeviceUIDs })
+    await applyDeviceChangePlan(
+      plan,
+      availableDeviceUIDs: { availableDeviceUIDs },
+      appearedDeviceUIDs: appearedDeviceUIDs
+    )
   }
 
   /// UIDs of every device that is not one of Waves's own private aggregates.
@@ -402,7 +415,14 @@ extension WorkspaceAudioControlBackend {
     )
   }
 
-  private func reconcilePinnedRoutesAfterDeviceInventoryChange(availableUIDs: Set<String>) async {
+  /// Releases pinned routes whose output went away, and reattaches released
+  /// pinned routes whose output is available, within the allowance they
+  /// share with every other automatic attach (`consumeAutomaticAttachAttempt`).
+  /// A pinned output among `appearedUIDs` is a fresh event for its routes.
+  private func reconcilePinnedRoutesAfterDeviceInventoryChange(
+    availableUIDs: Set<String>,
+    appearedUIDs: Set<String>
+  ) async {
     guard !availableUIDs.isEmpty else { return }
 
     var lastError: String?
@@ -427,7 +447,10 @@ extension WorkspaceAudioControlBackend {
           snapshot.apps[index].rmsLevel = 0
         }
         publishRouteHolds()
-      } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability {
+      } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability,
+        controllers[app.id]?.isActive != true,
+        consumeAutomaticAttachAttempt(for: app, isFreshEvent: appearedUIDs.contains(targetDeviceUID))
+      {
         routesNeedingReattach.insert(app.logicalID)
       }
     }

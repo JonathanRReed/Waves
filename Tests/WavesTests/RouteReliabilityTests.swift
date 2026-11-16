@@ -885,6 +885,54 @@ func aReleasedRouteIsNeverRebuiltAfterNewerOwnership(_ change: String) async thr
   #expect(await backend.currentSnapshot().apps.first?.notes?.contains("plays at its own volume") == true)
 }
 
+@Test func anUnrelatedDeviceChangeNeverRetriesAPinnedRouteWhoseAllowanceIsSpent() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5, targetDeviceUID: "usb-dac")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  // The pinned output resets to 96 kHz, #1's aggregate died, and no rebuild
+  // will work: released fail open, then retried until its allowance is spent.
+  fixture.events.stopRendering(serial: 1)
+  fixture.devices.set("usb-dac", .alive(rate96))
+  fixture.events.failNextCreations(1_000)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  for pass in 0..<6 {
+    await maintenancePass(fixture, from: 20 + pass * 20)
+  }
+  func failedTries() -> Int { fixture.events.values.count { $0 == "fail app.a" } }
+  let spent = failedTries()
+  #expect(spent == 3 + 3 * FailOpenRelease.maximumAttempts)
+
+  // The headphones are unplugged. Nothing about usb-dac changed, so its
+  // route is not retried, however available its output is.
+  await backend.applyDeviceChangePlanForTesting(
+    DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+    availableDeviceUIDs: ["builtin", "usb-dac"]
+  )
+  #expect(failedTries() == spent)
+
+  // usb-dac itself leaves and comes back: a fresh allowance, spent one
+  // attempt at a time by every automatic path alike.
+  await backend.applyDeviceChangePlanForTesting(
+    DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+    availableDeviceUIDs: ["builtin"]
+  )
+  await backend.applyDeviceChangePlanForTesting(
+    DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+    availableDeviceUIDs: ["builtin", "usb-dac"],
+    appearedDeviceUIDs: ["usb-dac"]
+  )
+  #expect(failedTries() == spent + 3)
+  // The maintenance retry spends the rest of that allowance once the rebuild
+  // budget, which these failures used up, allows automatic work again.
+  fixture.budgetClock.value = .seconds(5_000)
+  for pass in 0..<6 {
+    await maintenancePass(fixture, from: 300 + pass * 20)
+  }
+  #expect(failedTries() == spent + 3 * FailOpenRelease.maximumAttempts)
+  #expect(fixture.events.creations == 0)
+}
+
 @Test func aReleasedForegroundAppKeepsItsExplanationAndUnknownLevelAcrossRefreshes() async throws {
   // An ordinary app the user launched: discovery reports it as a fresh
   // candidate on every refresh, and merges the backend's state into it.
@@ -1255,7 +1303,8 @@ private func foregroundPlayerFixture() -> RouteFixture {
   let reattach = Task {
     await backend.applyDeviceChangePlanForTesting(
       DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
-      availableDeviceUIDs: ["builtin", "usb-dac"]
+      availableDeviceUIDs: ["builtin", "usb-dac"],
+      appearedDeviceUIDs: ["usb-dac"]
     )
   }
   await gate.waitUntilPaused()

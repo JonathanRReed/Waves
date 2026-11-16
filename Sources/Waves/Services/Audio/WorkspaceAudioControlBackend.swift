@@ -1075,8 +1075,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // route's reattachment.
     let targets = repairContexts(forLogicalIDs: managedLogicalIDs)
     // An explicit repair is the user's say-so to try again: it must not
-    // inherit a cooldown that automatic work ran into.
+    // inherit a cooldown that automatic work ran into, nor an automatic
+    // retry allowance that is spent.
     routeRebuildBudget.resetForUserRecovery()
+    for logicalID in failOpenReleases.keys {
+      failOpenReleases[logicalID]?.attemptsRemaining = FailOpenRelease.maximumAttempts
+    }
     // buildSnapshot (and the subsequent reattachRoutes) is the single source of
     // route-health truth here: it recomputes backendStatus from scratch, so any
     // isRouteRecoveryHealthy/lastError assignment made before it would be

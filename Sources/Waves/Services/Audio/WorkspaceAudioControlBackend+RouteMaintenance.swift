@@ -180,6 +180,8 @@ extension WorkspaceAudioControlBackend {
           releaseUnrepairedRoute(logicalID: logicalID, runtimeID: app.id, error: reported)
         } else if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
           markRouteError(at: index, error: reported)
+          // A retry spent from a fail-open record keeps the newest reason.
+          failOpenReleases[logicalID]?.adoptExplanation(of: snapshot.apps[index])
         }
         lastError = reported.localizedDescription
       }
@@ -336,7 +338,7 @@ extension WorkspaceAudioControlBackend {
         changed = true
         continue
       }
-      failOpenReleases[logicalID]?.attemptsRemaining -= 1
+      guard consumeAutomaticAttachAttempt(for: app, isFreshEvent: false) else { continue }
       do {
         try await applyRoute(
           for: app,
@@ -366,6 +368,40 @@ extension WorkspaceAudioControlBackend {
       refreshGlobalRouteHealth()
       snapshot.updatedAt = .now
     }
+  }
+
+  /// The one allowance every automatic attempt to attach a released route
+  /// spends, whichever path makes it: the maintenance retry, or a device-list
+  /// change that finds the route's pinned output available. Returns whether
+  /// an attempt may run now, and counts it.
+  ///
+  /// The allowance (`FailOpenRelease.maximumAttempts`) is reset only by a
+  /// meaningful new event about the route's destination (`isFreshEvent`:
+  /// its pinned output has just appeared), by newer user intent (which ends
+  /// the record), or by Recover Routes. A route with no record gets one
+  /// from a fresh event, and nothing otherwise, so an unrelated device-list
+  /// change never retries a route whose allowance is spent.
+  func consumeAutomaticAttachAttempt(for app: AudioApp, isFreshEvent: Bool) -> Bool {
+    if var release = failOpenReleases[app.logicalID], isRepairCurrent(release.context) {
+      if isFreshEvent { release.attemptsRemaining = FailOpenRelease.maximumAttempts }
+      guard release.attemptsRemaining > 0 else {
+        failOpenReleases[app.logicalID] = release
+        return false
+      }
+      release.attemptsRemaining -= 1
+      failOpenReleases[app.logicalID] = release
+      return true
+    }
+    failOpenReleases.removeValue(forKey: app.logicalID)
+    guard isFreshEvent else { return false }
+    failOpenReleases[app.logicalID] = FailOpenRelease(
+      context: makeRepairContext(for: app),
+      routingState: app.routingState,
+      notes: app.notes,
+      hasNoAudioCapability: app.hasNoAudioCapability,
+      attemptsRemaining: FailOpenRelease.maximumAttempts - 1
+    )
+    return true
   }
 
   private func hasUsableOutputDevice(_ app: AudioApp) -> Bool {
@@ -955,10 +991,31 @@ struct FailOpenRelease: Sendable {
   static let maximumAttempts = 3
 
   let context: WorkspaceAudioControlBackend.RouteRepairContext
-  let routingState: RoutingState
-  let notes: String?
-  let hasNoAudioCapability: Bool
+  private(set) var routingState: RoutingState
+  private(set) var notes: String?
+  private(set) var hasNoAudioCapability: Bool
   var attemptsRemaining: Int
+
+  init(
+    context: WorkspaceAudioControlBackend.RouteRepairContext,
+    routingState: RoutingState,
+    notes: String?,
+    hasNoAudioCapability: Bool,
+    attemptsRemaining: Int
+  ) {
+    self.context = context
+    self.routingState = routingState
+    self.notes = notes
+    self.hasNoAudioCapability = hasNoAudioCapability
+    self.attemptsRemaining = attemptsRemaining
+  }
+
+  /// Keeps the row's newest explanation after a retry that failed again.
+  mutating func adoptExplanation(of app: AudioApp) {
+    routingState = app.routingState
+    notes = app.notes
+    hasNoAudioCapability = app.hasNoAudioCapability
+  }
 }
 
 /// An installed route that a managed release could not hand back: its tap's
