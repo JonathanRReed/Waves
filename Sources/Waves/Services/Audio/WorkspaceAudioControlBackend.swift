@@ -80,6 +80,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// Routes released fail open after an automatic repair failed or was
   /// refused, by logical ID. See `FailOpenRelease`.
   var failOpenReleases: [String: FailOpenRelease] = [:]
+  /// Installed routes a managed release could not hand back, by runtime ID.
+  /// Each still plays its app at the user's level; see `UnreleasedRoute`.
+  var unreleasedRoutes: [String: UnreleasedRoute] = [:]
+  /// Controllers whose release failed at quit, kept playing their apps
+  /// until Waves exits; macOS removes their taps and aggregates with it.
+  var controllersPlayingUntilExit: [PerAppTapController] = []
   let routeMaintenanceTickInterval = 20
   let staleRouteThresholdTicks = 24
   var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
@@ -125,6 +131,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// About 40 ms at the default 1 ms pause: one or two IO cycles at any
   /// common buffer size. See `PerAppTapController.silenceForHandoff`.
   static let handoffSilenceMaxPolls = 40
+  /// The one deadline shutdown gives every controller's callback queue
+  /// while it hands the apps back, well inside the app's 250 ms
+  /// termination timeout. See `performCheckedShutdown`.
+  static let shutdownHandBackWaitLimit: DispatchTimeInterval = .milliseconds(60)
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
   let routeMaintenanceOverride: RouteMaintenanceOverride?
@@ -363,6 +373,51 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     var degradations = retainedCleanupDegradations
     retainedCleanupDegradations.removeAll()
 
+    // Everything below goes through `record` rather than appending directly, so
+    // the failures that happen *during shutdown* are logged like every in-session
+    // failure is. They previously bypassed the only logging site, which is why a
+    // degraded quit left nothing behind explaining which stage had failed.
+    func record(_ new: [CleanupDegradation]) {
+      guard !new.isEmpty else { return }
+      logCleanupDegradations(new)
+      degradations.append(contentsOf: new)
+    }
+
+    // First, before anything that can be slow: hand every app back to its
+    // own output. Each installed route is a managed release (silence, then
+    // release the tap's mute); each parked one, already silent for good,
+    // only releases its mute. All of it shares one deadline for waits on
+    // the controllers' callback queues, so a blocked queue cannot use up
+    // the app's termination timeout. If Waves is killed after this, each
+    // tap left is removed by macOS with the process.
+    let handBackDeadline = DispatchTime.now() + Self.shutdownHandBackWaitLimit
+    let installedControllers = controllers.sorted { $0.key < $1.key }.map(\.value)
+    controllers.removeAll()
+    unreleasedRoutes.removeAll()
+    var handedBack: [PerAppTapController] = []
+    for controller in installedControllers {
+      let hold = controller.releaseHold(.managedRelease, until: handBackDeadline)
+      record(hold.degradations)
+      guard hold.outcome == .released else {
+        // Still muting the app, and still playing it at the user's level,
+        // until Waves exits.
+        controllersPlayingUntilExit.append(controller)
+        record([
+          CleanupDegradation(
+            appID: controller.appID,
+            stage: .controllerDisposal,
+            detail:
+              "Waves couldn't hand \(controller.appName) back before quitting, so it played through Waves until Waves exited. macOS removes the tap with Waves."
+          )
+        ])
+        continue
+      }
+      handedBack.append(controller)
+    }
+    for controller in orphanedControllers {
+      record(controller.releaseTapMuteIfHeld())
+    }
+
     // Close ingress before awaiting any work. Late native callbacks retain
     // their mailbox safely but cannot queue more work after shutdown begins.
     deviceChangeMailbox.finish()
@@ -381,26 +436,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       await levelTask.value
     }
 
-    // Everything below goes through `record` rather than appending directly, so
-    // the failures that happen *during shutdown* are logged like every in-session
-    // failure is. They previously bypassed the only logging site, which is why a
-    // degraded quit left nothing behind explaining which stage had failed.
-    func record(_ new: [CleanupDegradation]) {
-      guard !new.isEmpty else { return }
-      logCleanupDegradations(new)
-      degradations.append(contentsOf: new)
-    }
-
     record(removeDeviceChangeListener())
     record(removeRouterObservationListeners())
     if let deviceTask { await deviceTask.value }
     if let routerTask { await routerTask.value }
     defaultOutputDeviceChange.recordInitialUID(nil)
 
-    let installedControllers = controllers.sorted { $0.key < $1.key }
-    controllers.removeAll()
-    for (_, controller) in installedControllers {
-      let controllerDegradations = controller.dispose()
+    // The slow part: stop and destroy what was handed back.
+    for controller in handedBack {
+      let controllerDegradations = controller.finishTeardown()
       record(controllerDegradations)
       if !controller.isTornDown {
         // A failed stop or IO-proc destroy can still be followed by a native
@@ -422,8 +466,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       record(shutdownCleanupOverride())
     }
 
-    // One last attempt at anything a previous teardown could not release, so a
-    // stranded tap does not outlive the process if it can be avoided.
+    // One last attempt at anything a previous teardown could not finish, so
+    // a stranded tap does not outlive the process if it can be avoided.
     for controller in orphanedControllers {
       record(controller.retryDispose())
     }
@@ -1020,7 +1064,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         .map(\.logicalID)
     )
 
-    retainCleanupDegradations(disposeControllers(keeping: []))
+    disposeControllers(keeping: [])
     // Each route's authorization is captured now, before the snapshot rebuild
     // suspends: an exclusion or a yield that lands meanwhile must stop that
     // route's reattachment.
@@ -1228,9 +1272,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func excludeApp(at index: Int) {
     let runtimeID = snapshot.apps[index].id
-    if let controller = controllers.removeValue(forKey: runtimeID) {
-      retainCleanupDegradations(disposeController(controller))
-    }
+    // Exclusion is the user's capture opt-out: Waves must not render the
+    // app by any controller, so this is a forced release.
+    releaseInstalledController(runtimeID: runtimeID, kind: .forcedRelease)
     controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
     staleRouteTicks.removeValue(forKey: runtimeID)
     lastRenderTickByAppID.removeValue(forKey: runtimeID)
@@ -1248,10 +1292,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     generation: UInt64
   ) {
     guard controllerGenerationByRuntimeID[runtimeID] == generation else { return }
+    guard releaseInstalledController(runtimeID: runtimeID, kind: .managedRelease) == .released else { return }
     controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
-    if let controller = controllers.removeValue(forKey: runtimeID) {
-      retainCleanupDegradations(disposeController(controller))
-    }
     staleRouteTicks.removeValue(forKey: runtimeID)
     lastRenderTickByAppID.removeValue(forKey: runtimeID)
   }
@@ -1379,6 +1421,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       controller.setEqualizer(stagedEqualizer)
       controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
       controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
+      // Route work that succeeded on it commits it as the app's route again.
+      unreleasedRoutes.removeValue(forKey: app.id)
       return
     }
 
@@ -1441,6 +1485,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if let incumbent {
       retireController(incumbent)
     }
+    unreleasedRoutes.removeValue(forKey: app.id)
     cutParkedRenderers(forRuntimeID: app.id)
     failOpenReleases.removeValue(forKey: app.logicalID)
     // Only now, with every other renderer of the app cut to silence, does the
@@ -1502,12 +1547,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// Disposes a replacement that was built but not installed. It never left
   /// silence. While an incumbent's tap still keeps the app's own output muted
   /// it is retired without releasing its own tap mute; with no incumbent it
-  /// is disposed fail-open like any lone route, so the app is audible.
+  /// is force-released, so the app is audible. It never carried the app and
+  /// was never committed, so there is no level a managed release could put
+  /// it back to.
   private func discardUnusedReplacement(_ replacement: PerAppTapController, runtimeID: String) {
     if controllers[runtimeID]?.isActive == true {
       retireController(replacement)
     } else {
-      retainCleanupDegradations(disposeController(replacement))
+      forceReleaseUninstalledController(replacement)
     }
   }
 
@@ -1890,7 +1937,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     let runningIDs: Set<String> = Set(mergedApps.map(\.id))
-    retainCleanupDegradations(disposeControllers(keeping: runningIDs))
+    disposeControllers(keeping: runningIDs)
     failOpenReleases = failOpenReleases.filter { runningIDs.contains($0.value.context.runtimeID) }
     applyStickyRouteNotes(to: &mergedApps)
 

@@ -382,9 +382,8 @@ extension WorkspaceAudioControlBackend {
     let app = snapshot.apps[index]
     // The router owns the app now; no automatic repair may reclaim it.
     failOpenReleases.removeValue(forKey: app.logicalID)
-    if let controller = controllers.removeValue(forKey: app.id) {
-      retainCleanupDegradations(disposeController(controller))
-    }
+    // The router carries the app now; Waves must not render it as well.
+    releaseInstalledController(runtimeID: app.id, kind: .forcedRelease)
     controllerGenerationByRuntimeID.removeValue(forKey: app.id)
     staleRouteTicks.removeValue(forKey: app.logicalID)
     lastRenderTickByAppID.removeValue(forKey: app.logicalID)

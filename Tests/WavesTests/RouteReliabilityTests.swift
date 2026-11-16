@@ -550,6 +550,177 @@ func aParkedRendererIsNeverRevivedWhenItsAppLosesItsRoute(byYield: Bool) async t
   #expect(fixture.events.pumpRenders().isEmpty)
 }
 
+// MARK: - Every disposal kind leaves the app audible, or says why not
+
+enum DisposalPath: String, CaseIterable, Sendable {
+  /// A move to another output: a live successor takes over.
+  case retirement
+  /// Exclusion: Waves must not render the app at all.
+  case forcedRelease
+  /// The pinned output disappears: no successor, and Waves may still play it.
+  case managedRelease
+}
+
+enum TeardownFailure: String, CaseIterable, Sendable {
+  case none, release, stop, destroy, releaseAndStop, releaseAndDestroy
+
+  var failsRelease: Bool { [.release, .releaseAndStop, .releaseAndDestroy].contains(self) }
+  var failsStop: Bool { [.stop, .releaseAndStop].contains(self) }
+  var failsDestroy: Bool { [.destroy, .releaseAndDestroy].contains(self) }
+}
+
+/// What the user hears right after each disposal: the route that replaced
+/// it, the app's own output, or, for a managed release whose tap would not
+/// let go, the same renderer at the level the user set. Only a forced
+/// release whose tap neither releases nor goes away leaves the app silent,
+/// because rendering an excluded app is never allowed; the row says so.
+func expectedHearing(_ path: DisposalPath, _ failure: TeardownFailure) -> String {
+  switch path {
+  case .retirement:
+    "waves #2"
+  case .forcedRelease:
+    failure == .releaseAndStop || failure == .releaseAndDestroy ? "silent" : "own output"
+  case .managedRelease:
+    failure.failsRelease ? "waves #1" : "own output"
+  }
+}
+
+@Test(arguments: DisposalPath.allCases, TeardownFailure.allCases)
+func everyDisposalLeavesTheAppAudibleOneWayOrTheOther(_ path: DisposalPath, _ failure: TeardownFailure) async throws {
+  let fixture = RouteFixture(
+    apps: [routeTestApp(volume: 0.5, targetDeviceUID: path == .managedRelease ? "usb-dac" : nil)]
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+
+  if failure.failsRelease { fixture.events.failNextMuteReleases(1) }
+  if failure.failsStop { fixture.events.failNextStops(1) }
+  if failure.failsDestroy { fixture.events.failNextDestroys(.processTapDestroy, 1) }
+  switch path {
+  case .retirement:
+    let move = await backend.applyAppIntent(
+      routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+    )
+    #expect(move.outcome == .applied)
+  case .forcedRelease:
+    let exclusion = await backend.applyAppIntent(
+      routeIntent(appID: "app.a", volume: 0.5, generation: 10, isExcluded: true)
+    )
+    #expect(exclusion.outcome == .excluded)
+  case .managedRelease:
+    await backend.applyDeviceChangePlanForTesting(
+      DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+      availableDeviceUIDs: ["builtin", "headphones"]
+    )
+  }
+
+  let heard = fixture.events.hearing("app.a")
+  #expect(heard == expectedHearing(path, failure))
+  #expect(!heard.contains("+"), "the app's own output and a Waves renderer must never play together")
+  // A Waves renderer that still plays the app plays it at the level the
+  // user set (input 0.5 x volume 0.5), never louder.
+  if let serial = Int(heard.split(separator: "#").last ?? ""), heard.hasPrefix("waves") {
+    fixture.events.pumpRenders()
+    let peak = try #require(fixture.events.lastPeak(serial: serial))
+    #expect(abs(peak - 0.25) < 0.001)
+  }
+
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  switch path {
+  case .retirement:
+    #expect(row.routingState == .managed)
+    #expect(row.appliedVolume == 0.5)
+  case .forcedRelease:
+    if heard != "silent" {
+      #expect(row.routingState == .monitorOnly)
+      #expect(row.notes == nil)
+    }
+  case .managedRelease:
+    #expect(row.routingState == .error)
+    if failure.failsRelease {
+      #expect(row.notes?.contains("couldn't hand App app.a back to macOS, so it is still playing it at the level you set") == true)
+      #expect(row.notes?.contains("chosen output device for App app.a is unavailable") == true)
+      #expect(row.appliedVolume == 0.5)
+    } else {
+      #expect(row.notes?.contains("chosen output device for App app.a is unavailable") == true)
+      #expect(row.appliedVolume == nil)
+    }
+  }
+}
+
+@Test func aRouteThatCouldNotBeHandedBackFollowsTheUserAndCanBeReleasedLater() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5, targetDeviceUID: "usb-dac")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.failNextMuteReleases(1)
+  await backend.applyDeviceChangePlanForTesting(
+    DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+    availableDeviceUIDs: ["builtin", "headphones"]
+  )
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  #expect(await backend.lifecycleDebugSnapshot().orphanedControllers == 0)
+
+  // The explanation survives a refresh: the live route does not claim to be healthy.
+  _ = try await backend.refresh()
+  #expect(await backend.currentSnapshot().apps.first?.notes?.contains("still playing it at the level you set") == true)
+
+  // It is still the app's route: it follows the user's level and mute.
+  let quieter = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.3, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  #expect(quieter.outcome == .applied)
+  fixture.events.pumpRenders()
+  fixture.events.pumpRenders()
+  #expect(abs((fixture.events.lastPeak(serial: 1) ?? 0) - 0.15) < 0.001)
+  let muted = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.3, generation: 11, isMuted: true, targetDeviceUID: "usb-dac")
+  )
+  #expect(muted.outcome == .applied)
+  fixture.events.pumpRenders()
+  #expect(fixture.events.hearing("app.a") == "silent")
+
+  // And it can be released later, once its tap lets go.
+  let exclusion = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.3, generation: 12, isExcluded: true))
+  #expect(exclusion.outcome == .excluded)
+  #expect(fixture.events.hearing("app.a") == "own output")
+  #expect(fixture.events.creations == 0)
+}
+
+@Test func quittingHandsEveryAppBackBeforeStoppingAnyRenderer() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a"), routeTestApp(id: "app.b")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  // app.a's route is retired by a move and parked (it will not stop).
+  fixture.events.failNextStops(1)
+  _ = await backend.applyAppIntent(
+    routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
+  )
+  fixture.events.reset()
+
+  _ = await backend.shutdownWithResult()
+
+  // Every tap is released, installed and parked alike, before the first
+  // renderer is stopped or anything is destroyed.
+  let values = fixture.events.values
+  let firstStop = try #require(values.firstIndex { $0.hasPrefix("stop") })
+  #expect(Set(values[..<firstStop]) == ["audible #2", "audible #3", "audible #1"])
+  #expect(fixture.events.hearing("app.a") == "own output")
+  #expect(fixture.events.hearing("app.b") == "own output")
+}
+
+@Test func quittingKeepsPlayingAnAppItCouldNotHandBackAndSaysSo() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  fixture.events.failNextMuteReleases(1)
+
+  let result = await fixture.backend.shutdownWithResult()
+
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+  #expect(result.degradations.contains { $0.detail?.contains("played through Waves until Waves exited") == true })
+}
+
 // MARK: - A route released by a failed repair is recoverable and truthful
 
 /// Releases app.a's route: its device resets to 96 kHz, its aggregate stops
@@ -1806,6 +1977,11 @@ final class RouteEvents: @unchecked Sendable {
   private var failuresRemaining = 0
   private var stopFailuresRemaining = 0
   private var muteReleaseFailuresRemaining = 0
+  private var destroyFailuresRemaining: [CleanupStage: Int] = [:]
+  /// Serials whose tap still mutes its app's own output: from creation until
+  /// a mute release or a tap destroy succeeds.
+  private var muting: Set<Int> = []
+  private var lastPeaks: [Int: Float] = [:]
   private var dead: Set<Int> = []
   private var created: [Int: (appID: String, controller: PerAppTapController)] = [:]
 
@@ -1852,6 +2028,45 @@ final class RouteEvents: @unchecked Sendable {
     }
   }
 
+  /// The next `count` destroys of `stage` (IO proc, aggregate device or
+  /// process tap) fail.
+  func failNextDestroys(_ stage: CleanupStage, _ count: Int) {
+    lock.withLock { destroyFailuresRemaining[stage] = count }
+  }
+
+  func consumeDestroyFailure(_ stage: CleanupStage) -> Bool {
+    lock.withLock {
+      guard let remaining = destroyFailuresRemaining[stage], remaining > 0 else { return false }
+      destroyFailuresRemaining[stage] = remaining - 1
+      return true
+    }
+  }
+
+  func tapCreated(serial: Int) { lock.withLock { _ = muting.insert(serial) } }
+  func tapReleased(serial: Int) { lock.withLock { _ = muting.remove(serial) } }
+
+  /// Whether `appID` plays through its own output: no tap of any of its
+  /// controllers still mutes it.
+  func ownOutputIsAudible(_ appID: String) -> Bool {
+    lock.withLock { !muting.contains { created[$0]?.appID == appID } }
+  }
+
+  /// What the user hears of `appID` right now, after one buffer through
+  /// every running renderer: "own output", "waves #n", "silent", or
+  /// "own output + waves #n" (louder than set: never acceptable).
+  func hearing(_ appID: String) -> String {
+    let renderers = pumpRenders().filter { controllerAppID(serial: $0) == appID }
+    var heard: [String] = []
+    if ownOutputIsAudible(appID) { heard.append("own output") }
+    heard += renderers.map { "waves #\($0)" }
+    return heard.isEmpty ? "silent" : heard.joined(separator: " + ")
+  }
+
+  /// The loudest sample serial `serial` produced in the last `pumpRenders`.
+  func lastPeak(serial: Int) -> Float? { lock.withLock { lastPeaks[serial] } }
+
+  private func controllerAppID(serial: Int) -> String? { lock.withLock { created[serial]?.appID } }
+
   /// The last thing that happened to a controller's tap mute: "audible"
   /// (released, the app plays at its own level) or "muted" (re-muted).
   func lastTapMuteEvent(serial: Int) -> String? {
@@ -1880,7 +2095,10 @@ final class RouteEvents: @unchecked Sendable {
   func pumpRenders() -> [Int] {
     let running = lock.withLock { created.filter { $0.value.controller.isActive && !dead.contains($0.key) } }
     var heardByApp: [String: [Int]] = [:]
-    for (serial, entry) in running.sorted(by: { $0.key < $1.key }) where peak(of: entry.controller) > 0 {
+    for (serial, entry) in running.sorted(by: { $0.key < $1.key }) {
+      let level = peak(of: entry.controller)
+      lock.withLock { lastPeaks[serial] = level }
+      guard level > 0 else { continue }
       heardByApp[entry.appID, default: []].append(serial)
     }
     for (appID, serials) in heardByApp.sorted(by: { $0.key < $1.key }) where serials.count > 1 {
@@ -2054,6 +2272,7 @@ final class RouteFixture: @unchecked Sendable {
         }
         let serial = events.nextSerial()
         events.record("create \(app.id) #\(serial)")
+        events.tapCreated(serial: serial)
         let controller = try PerAppTapController.testingController(
           appID: app.id,
           logicalID: app.logicalID,
@@ -2067,6 +2286,7 @@ final class RouteFixture: @unchecked Sendable {
                 return -1
               }
               events.record("audible #\(serial)")
+              events.tapReleased(serial: serial)
               return noErr
             },
             stopIOProc: {
@@ -2075,6 +2295,17 @@ final class RouteFixture: @unchecked Sendable {
                 return -1
               }
               events.record("stop #\(serial)")
+              return noErr
+            },
+            destroyIOProc: { _, _ in events.consumeDestroyFailure(.ioProcDestroy) ? -1 : noErr },
+            destroyAggregateDevice: { _ in events.consumeDestroyFailure(.aggregateDeviceDestroy) ? -1 : noErr },
+            destroyProcessTap: { _ in
+              guard !events.consumeDestroyFailure(.processTapDestroy) else {
+                events.record("destroy tap failed #\(serial)")
+                return -1
+              }
+              // A destroyed tap no longer mutes anything.
+              events.tapReleased(serial: serial)
               return noErr
             }
           )

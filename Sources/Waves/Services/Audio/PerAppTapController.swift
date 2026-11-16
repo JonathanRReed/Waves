@@ -90,6 +90,21 @@ final class PerAppTapController: @unchecked Sendable {
   /// write can un-mute this renderer: a retired, released or parked
   /// controller never plays again, whoever still holds a reference to it.
   private var isCutForGood = false
+  /// The caller's view of `isCutForGood`, set when the cut is requested. The
+  /// backend calls every control method from its actor, so this needs no
+  /// queue hop; the render path never reads it.
+  private var wasCutForGood = false
+  /// The mute state a managed release found before silencing the renderer,
+  /// so a release that fails can put it back. Touched only on `callbackQueue`.
+  private var mutedBeforeManagedRelease = false
+  /// The process lifetime of the app row this controller was built for.
+  /// Set by the backend when it creates the controller, and compared with
+  /// the row's current identity, so state about this controller (a hold it
+  /// keeps on the app's sound) is never attributed to a relaunched process
+  /// that reuses the app's IDs.
+  var ownerProcessLifetime: AppProcessLifetimeIdentity?
+  /// Set at the start of `deinit`; see `onCallbackQueue(until:_:)`.
+  private var isDeinitializing = false
   /// Frames a mute or unmute fades over (about 5 ms).
   private let muteRampFrameCount: Float
   /// Testing reaches the controller's real disposal sequence while replacing
@@ -221,6 +236,17 @@ final class PerAppTapController: @unchecked Sendable {
     stateBox.flagGeometryMismatch()
   }
 
+  /// Models a renderer whose IO proc is no longer running.
+  func markRendererInactiveForTesting() {
+    stateBox.setInactive()
+  }
+
+  /// Holds the callback queue, as a blocked IO callback would, until `gate`
+  /// is signalled.
+  func occupyCallbackQueueForTesting(until gate: DispatchSemaphore) {
+    callbackQueue.async { gate.wait() }
+  }
+
   /// The volume and boost the render path will use once every queued control
   /// write has landed. Control writes are asynchronous, so a test that read the
   /// state straight after a write would see the value from before it.
@@ -302,36 +328,68 @@ final class PerAppTapController: @unchecked Sendable {
   /// `maxPolls` pauses is either not rendering at all (its device is gone or
   /// stopped) or running an unusually long buffer. Either way the cut ends
   /// it without a fade. The cut may click; it is never louder.
+  ///
+  /// Every read of the render state waits at most `callbackQueueWaitLimit`.
+  /// A read that times out means the callback queue is blocked: polling
+  /// stops and the renderer is cut. The cut is queued ahead of every render
+  /// callback queued after it, so nothing rendered later can be heard.
   func silenceForHandoff(maxPolls: Int, pause: () -> Void) -> HandoffSilence {
-    onCallbackQueue {
+    callbackQueue.async { [self] in
+      guard !isCutForGood else { return }
       let state = stateBox.read()
       stateBox.writeVolumeAndMute(volume: state.volume, volumeBoost: state.volumeBoost, muted: true)
     }
-    var faded = isRenderSilent
+    var faded = readRenderSilence() ?? false
     var polls = 0
     while !faded, polls < maxPolls {
       pause()
       polls += 1
-      faded = isRenderSilent
+      guard let silent = readRenderSilence() else { break }
+      faded = silent
     }
     cutToSilence()
     return faded ? .faded : .cut
   }
 
+  /// How long a control path waits for one block on `callbackQueue`. The IO
+  /// proc is dispatched onto that queue by Core Audio, so Waves does not
+  /// control when it is free. A block normally runs within microseconds; a
+  /// queue still busy after this long is treated as blocked, and the work
+  /// that waited goes ahead without the answer (see each caller).
+  static let callbackQueueWaitLimit: DispatchTimeInterval = .milliseconds(20)
+
   /// The one definition of a silent renderer: the gain the render path will
   /// start its next buffer from is zero, and its target is muted, so that
   /// buffer and every later one is zeros. Read on `callbackQueue` after every
   /// queued control write, so a mute that was only requested, or a fade still
-  /// part way down, is not silent.
+  /// part way down, is not silent. False if the queue did not answer in time.
   var isRenderSilent: Bool {
-    onCallbackQueue { renderedMuteGain == 0 && stateBox.read().isMuted != 0 }
+    readRenderSilence() ?? false
+  }
+
+  /// `isRenderSilent`, or nil if the callback queue did not answer within
+  /// `callbackQueueWaitLimit`.
+  private func readRenderSilence() -> Bool? {
+    let answer = LockedValue<Bool?>(nil)
+    let answered = onCallbackQueue(until: .now() + Self.callbackQueueWaitLimit) { [self] in
+      answer.set(renderedMuteGain == 0 && stateBox.read().isMuted != 0)
+    }
+    return answered ? answer.get() : nil
   }
 
   /// Cuts the renderer to silence at once and for good. On `callbackQueue`,
   /// so it lands between two render callbacks: every buffer rendered after it
-  /// returns is zeros, and no later control write can un-mute it. Idempotent.
-  func cutToSilence() {
-    onCallbackQueue {
+  /// lands is zeros, and no later control write can un-mute it. Idempotent.
+  ///
+  /// Waits for the cut to land until `deadline` (by default
+  /// `callbackQueueWaitLimit` from now) and returns whether it did. A cut
+  /// that has not landed yet is still queued ahead of every render callback
+  /// queued after it, so at most a buffer already waiting on the blocked
+  /// queue can still play.
+  @discardableResult
+  func cutToSilence(until deadline: DispatchTime? = nil) -> Bool {
+    wasCutForGood = true
+    return onCallbackQueue(until: deadline ?? .now() + Self.callbackQueueWaitLimit) { [self] in
       isCutForGood = true
       let state = stateBox.read()
       stateBox.writeVolumeAndMute(volume: state.volume, volumeBoost: state.volumeBoost, muted: true)
@@ -339,14 +397,60 @@ final class PerAppTapController: @unchecked Sendable {
     }
   }
 
-  /// Runs `body` on `callbackQueue`, or directly if already on it (a
-  /// controller released from inside one of its own queued blocks deinits
-  /// there, and `sync` onto the current queue would deadlock).
-  private func onCallbackQueue<T>(_ body: () -> T) -> T {
-    if DispatchQueue.getSpecific(key: callbackQueueKey) == callbackQueueToken {
-      return body()
+  /// Silences the renderer at once without latching it, for a managed
+  /// release that may have to put it back. Same queueing guarantee and wait
+  /// as `cutToSilence`.
+  private func silenceForManagedRelease(until deadline: DispatchTime) {
+    onCallbackQueue(until: deadline) { [self] in
+      guard !isCutForGood else { return }
+      let state = stateBox.read()
+      mutedBeforeManagedRelease = state.isMuted != 0
+      stateBox.writeVolumeAndMute(volume: state.volume, volumeBoost: state.volumeBoost, muted: true)
+      renderedMuteGain = 0
     }
-    return callbackQueue.sync(execute: body)
+  }
+
+  /// Puts the renderer back to the level and mute it had before
+  /// `silenceForManagedRelease`. It fades back in over the usual mute ramp.
+  /// Queued, not waited for: nothing is released after it.
+  private func restoreAfterFailedManagedRelease() {
+    callbackQueue.async { [self] in
+      guard !isCutForGood else { return }
+      let state = stateBox.read()
+      stateBox.writeVolumeAndMute(
+        volume: state.volume,
+        volumeBoost: state.volumeBoost,
+        muted: mutedBeforeManagedRelease
+      )
+    }
+  }
+
+  /// Runs `body` on `callbackQueue` and waits for it until `deadline`, or
+  /// runs it directly if already on that queue (a controller released from
+  /// inside one of its own queued blocks deinits there, and waiting on the
+  /// current queue would deadlock). Returns whether it ran in time. A block
+  /// that has not run by the deadline still runs later, in queue order.
+  ///
+  /// During `deinit` it waits without a deadline instead: a block that
+  /// outlived the wait would run on a freed controller. That wait is short
+  /// in practice, because the IO proc holds the controller strongly, so a
+  /// controller being freed has no IO proc left to occupy the queue.
+  @discardableResult
+  private func onCallbackQueue(until deadline: DispatchTime, _ body: @escaping @Sendable () -> Void) -> Bool {
+    if DispatchQueue.getSpecific(key: callbackQueueKey) == callbackQueueToken {
+      body()
+      return true
+    }
+    if isDeinitializing {
+      callbackQueue.sync(execute: body)
+      return true
+    }
+    let done = DispatchSemaphore(value: 0)
+    callbackQueue.async {
+      body()
+      done.signal()
+    }
+    return done.wait(timeout: deadline) == .success
   }
 
   func setVolumeBoost(_ boost: Float) {
@@ -632,13 +736,14 @@ final class PerAppTapController: @unchecked Sendable {
     return count
   }
 
+  /// Retries a parked controller's teardown. Its renderer was cut for good
+  /// when it was first disposed. `releasingTapMute` also retries releasing
+  /// its tap's mute, for an app that no longer has a live route.
   @discardableResult
-  /// Retries a teardown that previously failed. Distinct from `dispose()`,
-  /// which stays idempotent so a second shutdown request never repeats
-  /// destructive native cleanup.
   func retryDispose(releasingTapMute: Bool = true) -> [CleanupDegradation] {
     disposeOnce.reset()
-    return dispose(releasingTapMute: releasingTapMute)
+    let released = releasingTapMute ? releaseTapMuteIfHeld() : []
+    return released + finishTeardown()
   }
 
   @available(macOS 14.2, *)
@@ -670,23 +775,134 @@ final class PerAppTapController: @unchecked Sendable {
     ioProcID == nil && aggregateDeviceID == .unknown && tapID == .unknown
   }
 
-  /// Tears the controller down. The order is the safety contract:
+  /// How a controller is taken down. Each kind is a different promise about
+  /// what the user hears afterwards.
+  enum DisposalKind: Equatable, Sendable {
+    /// A live successor has taken over and its tap mutes the app's own
+    /// output. The renderer is cut for good and this tap stays muted: the
+    /// app is heard through the successor alone.
+    case retirement
+    /// Waves must not render the app at all any more: it was excluded, it
+    /// was yielded to another router, or its process is gone. The renderer
+    /// is cut for good first, then the tap's mute is released and the
+    /// controller stopped and destroyed. If the mute will not release and
+    /// the teardown cannot finish, the app stays silent and the backend
+    /// says so; Waves never renders it again to cover for that.
+    case forcedRelease
+    /// Every other release. The app must end up audible one way or the
+    /// other: through its own output if the tap's mute releases, otherwise
+    /// through this controller at the level the user set (see `dispose`).
+    case managedRelease
+  }
+
+  enum DisposalOutcome: Equatable, Sendable {
+    /// The renderer is cut for good. Its native teardown may not have
+    /// finished (`isTornDown`); the backend parks it until it has.
+    case released
+    /// A managed release could not release the tap's mute. The renderer is
+    /// back at its committed level and the controller is still the app's
+    /// route: it follows later level and mute changes and can be released
+    /// again later. Never returned for any other kind.
+    case stillRouting
+  }
+
+  struct DisposalResult: Sendable {
+    let outcome: DisposalOutcome
+    let degradations: [CleanupDegradation]
+  }
+
+  /// Takes the controller down as `kind` describes: `releaseHold`, then,
+  /// unless the controller is still routing, `finishTeardown`.
+  func dispose(_ kind: DisposalKind) -> DisposalResult {
+    let hold = releaseHold(kind)
+    guard hold.outcome == .released else { return hold }
+    return DisposalResult(outcome: .released, degradations: hold.degradations + finishTeardown())
+  }
+
+  /// The part of a release that stands between the user and audible sound:
+  /// silencing the renderer and handing the app back to its own output. One
+  /// bounded wait on `callbackQueue` (until `deadline`, by default
+  /// `callbackQueueWaitLimit` from now) and one Core Audio property write.
   ///
-  /// 1. The renderer is cut to silence for good (`cutToSilence`), before any
-  ///    Core Audio call can fail. Whatever happens below, this controller
-  ///    never plays the app again: it cannot double a successor, play an app
-  ///    that was excluded or yielded to another router, or resume later.
-  /// 2. By default the tap's mute is released so the app falls back to its
-  ///    own output (fail open). A controller retired in favour of a successor
-  ///    passes `releasingTapMute: false`: the successor's tap keeps the app's
-  ///    own output muted, and the app is heard through the successor.
-  /// 3. The IO proc is stopped. Until that succeeds a late callback may still
-  ///    run, so nothing it uses may be freed; the controller is kept (the
-  ///    backend parks it) and the teardown retried. Its callbacks render zeros.
-  /// 4. The IO proc, aggregate device and tap are destroyed. Destroying the
-  ///    tap also ends its mute, so a release that failed in step 2 is undone
-  ///    here once the renderer has stopped.
-  func dispose(releasingTapMute: Bool = true) -> [CleanupDegradation] {
+  /// - Retirement cuts the renderer and leaves the tap muted.
+  /// - A forced release cuts the renderer, then releases the tap's mute.
+  ///   A mute that will not release is ended by destroying the tap in
+  ///   `finishTeardown`, once the renderer has stopped.
+  /// - A managed release silences the renderer without latching it, then
+  ///   releases the tap's mute. Silence comes first, so the app's own
+  ///   output and the Waves copy never play together. If the release
+  ///   succeeds the renderer is cut for good. If it fails, the renderer is
+  ///   put back to its committed level and the outcome is `.stillRouting`:
+  ///   the app keeps playing through Waves instead of going silent. A
+  ///   renderer that is not running (`isActive` false), or one already cut,
+  ///   cannot carry the app, so it is released as a forced release would be.
+  func releaseHold(_ kind: DisposalKind, until deadline: DispatchTime? = nil) -> DisposalResult {
+    let deadline = deadline ?? .now() + Self.callbackQueueWaitLimit
+    switch kind {
+    case .retirement:
+      cutToSilence(until: deadline)
+      return DisposalResult(outcome: .released, degradations: [])
+    case .managedRelease where !wasCutForGood && isActive && tapMutesApp && tapID != .unknown:
+      silenceForManagedRelease(until: deadline)
+      let status = writeTapMuteRelease()
+      let degradations = checkedCleanupDegradations(from: [tapMuteReleaseObservation(status)])
+      guard status == noErr else {
+        restoreAfterFailedManagedRelease()
+        return DisposalResult(outcome: .stillRouting, degradations: degradations)
+      }
+      tapMutesApp = false
+      cutToSilence(until: deadline)
+      return DisposalResult(outcome: .released, degradations: degradations)
+    case .forcedRelease, .managedRelease:
+      cutToSilence(until: deadline)
+      return DisposalResult(outcome: .released, degradations: releaseTapMuteIfHeld())
+    }
+  }
+
+  /// Releases the tap's mute if it is still held, so the app plays at its
+  /// own level. For a renderer already cut for good: a parked controller, or
+  /// one being force-released.
+  func releaseTapMuteIfHeld() -> [CleanupDegradation] {
+    guard tapMutesApp, tapID != .unknown else { return [] }
+    let status = writeTapMuteRelease()
+    if status == noErr { tapMutesApp = false }
+    return checkedCleanupDegradations(from: [tapMuteReleaseObservation(status)])
+  }
+
+  private func writeTapMuteRelease() -> OSStatus {
+    if let teardownNativeCalls {
+      return teardownNativeCalls.makeOriginalAudioAudible()
+    } else if #available(macOS 14.2, *) {
+      return makeOriginalAudioAudible()
+    }
+    return noErr
+  }
+
+  private func tapMuteReleaseObservation(_ status: OSStatus) -> CleanupStatusObservation {
+    CleanupStatusObservation(
+      appID: appID,
+      stage: .processTapReleaseMute,
+      nativeStatus: status,
+      detail: "Release process tap mute before teardown"
+    )
+  }
+
+  /// Stops and destroys what `releaseHold` left: the slow part of a
+  /// release, which never decides whether the app is heard. The renderer is
+  /// cut for good first (a no-op after `releaseHold`). Idempotent; a
+  /// teardown that failed is retried with `retryDispose`.
+  ///
+  /// 1. The IO proc is stopped. Until that succeeds a late callback may
+  ///    still run, so nothing it uses may be freed; the controller is kept
+  ///    (the backend parks it) and the teardown retried. Its callbacks
+  ///    render zeros.
+  /// 2. A callback already running is waited out, at most
+  ///    `callbackQueueWaitLimit`. If the queue is still busy the destroys
+  ///    are left for the next retry.
+  /// 3. The IO proc, aggregate device and tap are destroyed. Destroying the
+  ///    tap also ends its mute, so a forced release whose mute would not
+  ///    release is undone here once the renderer has stopped.
+  func finishTeardown() -> [CleanupDegradation] {
     disposeOnce.run { [self] in
       var observations: [CleanupStatusObservation] = []
 
@@ -699,26 +915,6 @@ final class PerAppTapController: @unchecked Sendable {
       }
 
       cutToSilence()
-
-      if releasingTapMute, tapMutesApp, tapID != .unknown {
-        let status: OSStatus
-        if let teardownNativeCalls {
-          status = teardownNativeCalls.makeOriginalAudioAudible()
-        } else if #available(macOS 14.2, *) {
-          status = makeOriginalAudioAudible()
-        } else {
-          status = noErr
-        }
-        if status == noErr { tapMutesApp = false }
-        observations.append(
-          CleanupStatusObservation(
-            appID: appID,
-            stage: .processTapReleaseMute,
-            nativeStatus: status,
-            detail: "Release process tap mute before teardown"
-          )
-        )
-      }
 
       if teardownNativeCalls != nil || (didStartIOProc && ioProcID != nil && aggregateDeviceID != .unknown) {
         let stopStatus: OSStatus
@@ -742,7 +938,7 @@ final class PerAppTapController: @unchecked Sendable {
       stateBox.setInactive()
       didStartIOProc = false
       // Wait out a callback already running, so nothing below frees state it uses.
-      onCallbackQueue {}
+      guard onCallbackQueue(until: .now() + Self.callbackQueueWaitLimit, {}) else { return finish() }
 
       // Each handle is forgotten only once its own destroy has SUCCEEDED, so a
       // retry re-attempts exactly the stages that failed and never re-destroys
@@ -806,8 +1002,11 @@ final class PerAppTapController: @unchecked Sendable {
     }
   }
 
+  /// A controller nobody disposed is force-released: nothing is left to
+  /// carry the app, so its tap must not keep muting it.
   deinit {
-    _ = dispose()
+    isDeinitializing = true
+    _ = dispose(.forcedRelease)
   }
 
   // REALTIME_CALLBACK_AUDIT_BEGIN validatesCallbackGeometry
@@ -1055,6 +1254,16 @@ final class PerAppTapController: @unchecked Sendable {
     }
   }
   // REALTIME_CALLBACK_AUDIT_END zeroOutput
+}
+
+/// A value written by one thread and read by another, for a bounded wait
+/// whose block may still run after the waiter has given up.
+private final class LockedValue<Value>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: Value
+  init(_ value: Value) { self.value = value }
+  func set(_ newValue: Value) { lock.withLock { value = newValue } }
+  func get() -> Value { lock.withLock { value } }
 }
 
 /// Which of an aggregate device's input streams carry the tap.

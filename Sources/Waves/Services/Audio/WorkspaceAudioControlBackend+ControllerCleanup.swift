@@ -5,9 +5,11 @@ import WavesAudioCore
 
 // MARK: - Controller disposal and cleanup accounting
 //
-// Disposal is idempotent and fail-open for the target app's audio. A
-// controller whose native teardown fails is parked: silent for good, and
-// retried on every maintenance pass until it is gone.
+// Every release names its kind (`PerAppTapController.DisposalKind`):
+// retirement beside a successor, a forced release when Waves must not render
+// the app at all, or a managed release, which leaves the app audible one way
+// or the other. A controller whose native teardown fails is parked: silent
+// for good, and retried on every maintenance pass until it is gone.
 
 extension WorkspaceAudioControlBackend {
   func releaseControllers(
@@ -22,9 +24,8 @@ extension WorkspaceAudioControlBackend {
     guard !targetIDs.isEmpty else { return }
 
     for id in targetIDs {
-      if let controller = controllers.removeValue(forKey: id) {
-        retainCleanupDegradations(disposeController(controller))
-      }
+      // The process is gone: nothing may carry it, and nothing can.
+      releaseInstalledController(runtimeID: id, kind: .forcedRelease)
       controllerGenerationByRuntimeID.removeValue(forKey: id)
       staleRouteTicks.removeValue(forKey: id)
       lastRenderTickByAppID.removeValue(forKey: id)
@@ -48,20 +49,56 @@ extension WorkspaceAudioControlBackend {
     }
   }
 
-  func disposeControllers(keeping appIDs: Set<String>) -> [CleanupDegradation] {
+  /// Releases every installed controller whose app is not in `appIDs`, as a
+  /// managed release. One that is still routing stays installed.
+  func disposeControllers(keeping appIDs: Set<String>) {
     let stale = Set(controllers.keys).subtracting(appIDs).sorted()
-    var degradations: [CleanupDegradation] = []
     for appID in stale {
-      if let controller = controllers.removeValue(forKey: appID) {
-        degradations.append(contentsOf: disposeController(controller))
-      }
-      controllerGenerationByRuntimeID.removeValue(forKey: appID)
-      staleRouteTicks.removeValue(forKey: appID)
-      lastRenderTickByAppID.removeValue(forKey: appID)
-      geometryRecoveryByRuntimeID.removeValue(forKey: appID)
-      routeOutputBindingByRuntimeID.removeValue(forKey: appID)
+      releaseRoute(runtimeID: appID)
     }
-    return degradations
+  }
+
+  /// What became of an app's installed route when Waves let it go.
+  enum RouteReleaseOutcome: Equatable {
+    /// No controller of Waves's carries the app any more.
+    case released
+    /// A managed release could not hand the app back; its controller is
+    /// still installed and still plays it at the level the user set.
+    case stillRouting
+  }
+
+  /// Takes down `runtimeID`'s installed controller, if any, as `kind`
+  /// describes (`PerAppTapController.DisposalKind`), and parks it if its
+  /// teardown did not finish. A controller that is still routing stays
+  /// installed, and its row says why (`unreleasedRoutes`).
+  @discardableResult
+  func releaseInstalledController(
+    runtimeID: String,
+    kind: PerAppTapController.DisposalKind,
+    reason: String? = nil
+  ) -> RouteReleaseOutcome {
+    guard let controller = controllers[runtimeID] else { return .released }
+    let result = controller.dispose(kind)
+    retainCleanupDegradations(result.degradations)
+    if result.outcome == .stillRouting {
+      let name = snapshot.apps.first { $0.id == runtimeID }?.displayName ?? controller.appName
+      unreleasedRoutes[runtimeID] = UnreleasedRoute(
+        controller: ObjectIdentifier(controller),
+        note: Self.stillRoutingNote(appName: name, reason: reason)
+      )
+      applyStickyRouteNotes(to: &snapshot.apps)
+      return .stillRouting
+    }
+    controllers.removeValue(forKey: runtimeID)
+    unreleasedRoutes.removeValue(forKey: runtimeID)
+    park(controller)
+    return .released
+  }
+
+  static func stillRoutingNote(appName: String, reason: String?) -> String {
+    let note = "Waves couldn't hand \(appName) back to macOS, so it is still playing it at the level you set."
+    guard let reason, !reason.isEmpty else { return note }
+    return "\(note) \(reason)"
   }
 
   func dictionaryByLogicalID(_ apps: [AudioApp]) -> [String: AudioApp] {
@@ -112,25 +149,20 @@ extension WorkspaceAudioControlBackend {
     logCleanupDegradations(degradations)
   }
 
-  /// Disposes a controller fail open and parks it if its native teardown did
-  /// not finish.
-  ///
-  /// A failed teardown is not cosmetic: the process tap is created with
-  /// `.mutedWhenTapped`, so while it exists the app's own output can stay
-  /// muted. Dropping it would also free callback state Core Audio may still
-  /// use. Parking keeps it until a retry finishes the job.
-  func disposeController(_ controller: PerAppTapController) -> [CleanupDegradation] {
-    let degradations = controller.dispose()
+  /// Retires a controller that a successor has replaced, without releasing
+  /// its tap mute (`PerAppTapController.DisposalKind.retirement`).
+  func retireController(_ controller: PerAppTapController) {
+    let result = controller.dispose(.retirement)
     park(controller)
-    return degradations
+    retainCleanupDegradations(result.degradations)
   }
 
-  /// Retires a controller that a successor has replaced, without releasing its
-  /// tap mute (see `PerAppTapController.dispose(releasingTapMute:)`).
-  func retireController(_ controller: PerAppTapController) {
-    let degradations = controller.dispose(releasingTapMute: false)
+  /// Force-releases a controller that is not installed: a replacement that
+  /// never left silence, so there is nothing for it to carry.
+  func forceReleaseUninstalledController(_ controller: PerAppTapController) {
+    let result = controller.dispose(.forcedRelease)
     park(controller)
-    retainCleanupDegradations(degradations)
+    retainCleanupDegradations(result.degradations)
   }
 
   private func park(_ controller: PerAppTapController) {

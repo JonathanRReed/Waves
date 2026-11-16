@@ -62,7 +62,7 @@ private func teardownController(
   let controller = try teardownController(log)
   #expect(renderedPeak(of: controller) > 0)
 
-  #expect(controller.dispose().isEmpty)
+  #expect(controller.dispose(.forcedRelease).degradations.isEmpty)
 
   #expect(log.values == ["unmute-tap", "stop-io", "destroy-tap"])
   #expect(controller.isRenderSilent)
@@ -76,7 +76,7 @@ private func teardownController(
   let log = TeardownLog()
   let controller = try teardownController(log, stop: -2)
 
-  #expect(!controller.dispose().isEmpty)
+  #expect(!controller.dispose(.forcedRelease).degradations.isEmpty)
 
   #expect(log.values == ["unmute-tap", "stop-io"])
   #expect(!controller.tapMutesApp)
@@ -94,11 +94,164 @@ private func teardownController(
   let log = TeardownLog()
   let controller = try teardownController(log, release: -1)
 
-  #expect(!controller.dispose().isEmpty)
+  #expect(!controller.dispose(.forcedRelease).degradations.isEmpty)
 
   #expect(log.values == ["unmute-tap", "stop-io", "destroy-tap"])
   #expect(controller.isTornDown)
   #expect(!controller.tapMutesApp)
+  #expect(renderedPeak(of: controller) == 0)
+}
+
+// MARK: Managed release: the app ends up audible one way or the other
+
+@Test func aManagedReleaseSilencesTheRendererBeforeItHandsTheAppBack() throws {
+  let log = TeardownLog()
+  let peakAtRelease = TestBox<Float?>(nil)
+  let holder = TestBox<PerAppTapController?>(nil)
+  let controller = try PerAppTapController.testingController(
+    appID: "app.managed",
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: {
+        peakAtRelease.value = holder.value.map { renderedPeak(of: $0) }
+        log.record("unmute-tap")
+        return noErr
+      },
+      stopIOProc: {
+        log.record("stop-io")
+        return noErr
+      },
+      destroyProcessTap: { _ in
+        log.record("destroy-tap")
+        return noErr
+      }
+    )
+  )
+  holder.value = controller
+  #expect(renderedPeak(of: controller) > 0)
+
+  let result = controller.dispose(.managedRelease)
+
+  #expect(result.outcome == .released)
+  // Silent before the app's own output comes back, so the two never overlap.
+  #expect(peakAtRelease.value == 0)
+  #expect(log.values == ["unmute-tap", "stop-io", "destroy-tap"])
+  #expect(controller.isTornDown)
+  holder.value = nil
+}
+
+@Test func aManagedReleaseWhoseTapWillNotLetGoKeepsTheRendererAtItsLevel() throws {
+  // v1.7.4's audible fallback: an app Waves cannot hand back keeps playing
+  // through Waves at the level the user set, rather than going silent.
+  let log = TeardownLog()
+  let controller = try teardownController(log, release: -1)
+  controller.apply(volume: 0.5, volumeBoost: 1, muted: false)
+  #expect(renderedPeak(of: controller) > 0)
+
+  let result = controller.dispose(.managedRelease)
+
+  #expect(result.outcome == .stillRouting)
+  #expect(!result.degradations.isEmpty)
+  #expect(log.values == ["unmute-tap"])
+  #expect(controller.tapMutesApp)
+  #expect(!controller.isTornDown)
+  // Back at its level (input 0.5 x volume 0.5) once the fade-in is done.
+  _ = renderedPeak(of: controller)
+  #expect(abs(renderedPeak(of: controller) - 0.25) < 0.001)
+  // Still the route: it follows the user.
+  controller.apply(volume: 0.25, volumeBoost: 1, muted: false)
+  _ = renderedPeak(of: controller)
+  #expect(abs(renderedPeak(of: controller) - 0.125) < 0.001)
+}
+
+@Test func aManagedReleaseThatHandsTheAppBackNeverPlaysAgainEvenIfItWillNotStop() throws {
+  // The app plays at its own level; the renderer that could not stop must
+  // stay silent beside it, and its tap must not be muted again.
+  let log = TeardownLog()
+  let controller = try teardownController(log, stop: -2)
+
+  let result = controller.dispose(.managedRelease)
+
+  #expect(result.outcome == .released)
+  #expect(log.values == ["unmute-tap", "stop-io"])
+  #expect(!controller.tapMutesApp)
+  #expect(!controller.isTornDown)
+  controller.apply(volume: 1, volumeBoost: 1, muted: false)
+  #expect(renderedPeak(of: controller) == 0)
+}
+
+@Test func aManagedReleaseOfARendererThatIsNotRunningIsReleasedLikeAForcedOne() throws {
+  // A renderer that is not running cannot carry the app, so it is no
+  // fallback: a tap that will not let go is ended by destroying it.
+  let log = TeardownLog()
+  let controller = try teardownController(log, release: -1)
+  controller.markRendererInactiveForTesting()
+
+  let result = controller.dispose(.managedRelease)
+
+  #expect(result.outcome == .released)
+  #expect(log.values == ["unmute-tap", "stop-io", "destroy-tap"])
+  #expect(!controller.tapMutesApp)
+  #expect(controller.isTornDown)
+}
+
+// MARK: Bounded waits on the callback queue
+
+@Test func aBlockedCallbackQueueCannotHoldUpAForcedRelease() throws {
+  let log = TeardownLog()
+  let controller = try teardownController(log)
+  #expect(renderedPeak(of: controller) > 0)
+  let gate = DispatchSemaphore(value: 0)
+  controller.occupyCallbackQueueForTesting(until: gate)
+
+  let started = DispatchTime.now()
+  let result = controller.releaseHold(.forcedRelease)
+  let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
+
+  // The tap is released on time even though the cut has not landed yet.
+  #expect(result.outcome == .released)
+  #expect(log.values == ["unmute-tap"])
+  #expect(elapsed < 500_000_000)
+  // The cut is queued ahead of every later render: nothing plays once the
+  // queue frees up.
+  gate.signal()
+  #expect(renderedPeak(of: controller) == 0)
+}
+
+@Test func aBlockedCallbackQueueCannotHoldUpAManagedRelease() throws {
+  let log = TeardownLog()
+  let controller = try teardownController(log)
+  #expect(renderedPeak(of: controller) > 0)
+  let gate = DispatchSemaphore(value: 0)
+  controller.occupyCallbackQueueForTesting(until: gate)
+
+  let started = DispatchTime.now()
+  let result = controller.releaseHold(.managedRelease)
+  let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
+
+  #expect(result.outcome == .released)
+  #expect(log.values == ["unmute-tap"])
+  #expect(elapsed < 500_000_000)
+  gate.signal()
+  #expect(renderedPeak(of: controller) == 0)
+  controller.apply(volume: 1, volumeBoost: 1, muted: false)
+  #expect(renderedPeak(of: controller) == 0)
+}
+
+@Test func aHandoffWhoseRendererQueueIsBlockedIsCutWithoutWaitingForIt() throws {
+  let controller = try PerAppTapController.testingController(appID: "app.blocked")
+  #expect(renderedPeak(of: controller) > 0)
+  let gate = DispatchSemaphore(value: 0)
+  controller.occupyCallbackQueueForTesting(until: gate)
+  var pauses = 0
+
+  let started = DispatchTime.now()
+  let result = controller.silenceForHandoff(maxPolls: 40) { pauses += 1 }
+  let elapsed = DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
+
+  #expect(result == .cut)
+  #expect(pauses <= 1)
+  #expect(elapsed < 500_000_000)
+  gate.signal()
   #expect(renderedPeak(of: controller) == 0)
 }
 

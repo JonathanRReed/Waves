@@ -222,9 +222,10 @@ extension WorkspaceAudioControlBackend {
   /// Releases a route that automatic repair could not rebuild: fail open, so
   /// the app plays at its own level, and the row says why. The explanation
   /// survives refreshes, and the repair is retried under the authorization
-  /// the app has now (see `FailOpenRelease`).
+  /// the app has now (see `FailOpenRelease`). A route whose tap would not
+  /// let the app go keeps playing it at the user's level instead, and says so.
   func releaseUnrepairedRoute(logicalID: String, runtimeID: String, error: Error) {
-    releaseRoute(runtimeID: runtimeID)
+    guard releaseRoute(runtimeID: runtimeID, reason: error.localizedDescription) == .released else { return }
     guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID || $0.id == runtimeID }) else {
       return
     }
@@ -242,14 +243,26 @@ extension WorkspaceAudioControlBackend {
     )
   }
 
-  /// Puts back what a refresh would otherwise lose: why an app has no route.
-  /// A row a parked tap holds silent says so; a row released by a failed
-  /// repair keeps its explanation, and its applied level stays unknown,
-  /// until a route is installed or the user changes something. A live route
-  /// explains itself, so its row is left alone.
+  /// Puts back what a refresh would otherwise lose: why an app has no route,
+  /// or why the route it has is not the one Waves meant to leave.
+  /// - A live route a managed release could not hand back says so.
+  /// - A row a parked tap holds silent says so.
+  /// - A row released by a failed repair keeps its explanation, and its
+  ///   applied level stays unknown, until a route is installed or the user
+  ///   changes something.
+  /// Any other live route explains itself, so its row is left alone.
   func applyStickyRouteNotes(to apps: inout [AudioApp]) {
-    for index in apps.indices where controllers[apps[index].id]?.isActive != true {
+    for index in apps.indices {
       let app = apps[index]
+      if let controller = controllers[app.id], controller.isActive {
+        if let unreleased = unreleasedRoutes[app.id], unreleased.controller == ObjectIdentifier(controller) {
+          apps[index].routingState = .error
+          apps[index].notes = unreleased.note
+          apps[index].hasNoAudioCapability = false
+          apps[index].appliedVolume = app.isMuted ? 0 : app.desiredVolume
+        }
+        continue
+      }
       if appsHeldSilentByParkedTaps.contains(app.id) {
         apps[index].notes = Self.heldSilentNote(for: app)
         apps[index].appliedVolume = nil
@@ -342,16 +355,26 @@ extension WorkspaceAudioControlBackend {
     }
   }
 
-  /// Disposes an app's controller and forgets its per-route bookkeeping.
-  func releaseRoute(runtimeID: String) {
-    if let controller = controllers.removeValue(forKey: runtimeID) {
-      retainCleanupDegradations(disposeController(controller))
+  /// Releases an app's installed route (by default as a managed release,
+  /// which leaves the app audible one way or the other) and forgets its
+  /// per-route bookkeeping. A route still routing keeps its bookkeeping:
+  /// it is still the app's route. `reason` is why it was released, for the
+  /// row of a route that could not be.
+  @discardableResult
+  func releaseRoute(
+    runtimeID: String,
+    kind: PerAppTapController.DisposalKind = .managedRelease,
+    reason: String? = nil
+  ) -> RouteReleaseOutcome {
+    guard releaseInstalledController(runtimeID: runtimeID, kind: kind, reason: reason) == .released else {
+      return .stillRouting
     }
     controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
     staleRouteTicks.removeValue(forKey: runtimeID)
     lastRenderTickByAppID.removeValue(forKey: runtimeID)
     geometryRecoveryByRuntimeID.removeValue(forKey: runtimeID)
     routeOutputBindingByRuntimeID.removeValue(forKey: runtimeID)
+    return .released
   }
 
   func startLevelUpdateTask() {
@@ -449,7 +472,10 @@ extension WorkspaceAudioControlBackend {
             // The rebuilt route keeps mismatching. Its tap mutes the app while
             // the callback renders silence, so keeping it alive would leave the
             // app inaudible; release it and report the failure instead.
-            releaseRoute(runtimeID: appID)
+            guard releaseRoute(runtimeID: appID, reason: recovery.exhaustedDetail) == .released else {
+              snapshot.updatedAt = .now
+              continue
+            }
             markRouteError(
               at: index,
               error: BackendError.managedRouteUnavailable(recovery.exhaustedDetail)
@@ -748,8 +774,10 @@ extension WorkspaceAudioControlBackend {
             // controller that kept mismatching mutes the app while rendering
             // silence, so release it (the app is audible again) and drop the
             // spent coordinator so the next controller starts with a full one.
-            releaseRoute(runtimeID: app.id)
-            if let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID }) {
+            let outcome = releaseRoute(runtimeID: app.id, reason: recovery.exhaustedDetail)
+            if outcome == .released,
+              let currentIndex = snapshot.apps.firstIndex(where: { $0.logicalID == appID || $0.id == appID })
+            {
               markRouteError(at: currentIndex, error: exhaustion)
               snapshot.apps[currentIndex].routeHealthContext = .geometryRecoveryExhausted
               snapshot.apps[currentIndex].appliedVolume = nil
@@ -830,4 +858,13 @@ struct FailOpenRelease: Sendable {
   let notes: String?
   let hasNoAudioCapability: Bool
   var attemptsRemaining: Int
+}
+
+/// An installed route that a managed release could not hand back: its tap's
+/// mute would not release, so it was put back to the user's level and left
+/// installed rather than leaving the app silent. Tied to that controller: a
+/// later release, a replacement, or route work that succeeds on it ends it.
+struct UnreleasedRoute: Sendable {
+  let controller: ObjectIdentifier
+  let note: String
 }

@@ -414,17 +414,18 @@ extension WorkspaceAudioControlBackend {
       let targetIsAvailable = availableUIDs.contains(targetDeviceUID)
 
       if isActivelyManaged, !targetIsAvailable {
-        releaseRoute(runtimeID: app.id)
         let error = BackendError.managedRouteUnavailable(
           "The chosen output device for \(app.displayName) is unavailable. Pick another in the app's Output Device menu."
         )
+        lastError = error.localizedDescription
+        guard releaseRoute(runtimeID: app.id, reason: error.localizedDescription) == .released else { continue }
         if let index = snapshot.apps.firstIndex(where: { $0.id == app.id || $0.logicalID == app.logicalID }) {
           markRouteError(at: index, error: error)
-          snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+          // Handed back: it plays at its own level, which Waves did not set.
+          snapshot.apps[index].appliedVolume = nil
           snapshot.apps[index].peakLevel = 0
           snapshot.apps[index].rmsLevel = 0
         }
-        lastError = error.localizedDescription
       } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability {
         routesNeedingReattach.insert(app.logicalID)
       }
