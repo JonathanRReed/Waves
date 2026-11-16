@@ -289,7 +289,7 @@ extension WorkspaceAudioControlBackend {
     guard controllers[app.id]?.isActive == true else { return nil }
     if let conflict = competingAudioRouterConflict(
       for: app,
-      routerActivity: currentRouterActivity()
+      routerActivity: verifiedRouterActivityProvider?()
     ) {
       suspendManagedRouteForConflict(at: currentIndex, conflict: conflict)
       snapshot.updatedAt = .now
@@ -321,7 +321,7 @@ extension WorkspaceAudioControlBackend {
   }
 
   func refreshCompetingRouterControlPresentation() {
-    let routerActivity = currentRouterActivity()
+    let routerActivity = verifiedRouterActivityProvider?()
     var changed = false
     for index in snapshot.apps.indices {
       // Restamp only rows the route machinery already owns: managed routes,
@@ -368,38 +368,6 @@ extension WorkspaceAudioControlBackend {
       controller: perAppAudioController,
       compatibilityEnabled: waveLinkCompatibilityEnabled
     )
-  }
-
-  /// The verified-router view as of now, stamped with the observation
-  /// generation it reflects.
-  func currentRouterActivity() -> VerifiedRouterActivitySnapshot? {
-    var activity = verifiedRouterActivityProvider?()
-    activity?.observationGeneration = routerObservationGeneration
-    return activity
-  }
-
-  /// `activity`, or a fresh view if a router change was observed after it
-  /// was taken.
-  func currentRouterActivity(replacing activity: VerifiedRouterActivitySnapshot?) -> VerifiedRouterActivitySnapshot? {
-    guard let activity, activity.observationGeneration != routerObservationGeneration else { return activity }
-    return currentRouterActivity()
-  }
-
-  /// Router authority for route work that may have suspended since it last
-  /// checked, at observation generation `generation`. A router that started
-  /// meanwhile is seen even when its activation changed no row (the app had
-  /// no route yet), so cached views and repair contexts cannot vouch for it:
-  /// if the generation moved, the verdict is taken again, and a router that
-  /// owns the app now wins. The row yields and the work is superseded.
-  func ensureRouterAuthorityCurrent(for app: AudioApp, since generation: inout UInt64) throws {
-    guard routerObservationGeneration != generation else { return }
-    generation = routerObservationGeneration
-    guard let conflict = competingAudioRouterConflict(for: app, routerActivity: currentRouterActivity()) else { return }
-    if let index = snapshot.apps.firstIndex(where: { $0.id == app.id && $0.logicalID == app.logicalID }) {
-      suspendManagedRouteForConflict(at: index, conflict: conflict)
-      snapshot.updatedAt = .now
-    }
-    throw IntentSupersededError()
   }
 
   func yieldRouteToRouterForTesting(logicalID: String) {
