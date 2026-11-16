@@ -1551,7 +1551,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     guard silence != .unconfirmed else {
       discardUnusedReplacement(controller, runtimeID: app.id)
-      throw HandoffSilenceUnconfirmedError(appName: app.displayName)
+      // Only background work is retried; a user's change is not.
+      throw HandoffSilenceUnconfirmedError(appName: app.displayName, retriesAutomatically: generationContext == nil)
     }
     controllers[app.id] = controller
     // A fresh controller starts with a fresh geometry-recovery budget. Only

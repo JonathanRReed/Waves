@@ -898,6 +898,12 @@ func aHandoffThatCannotConfirmSilenceKeepsTheIncumbentAndDiscardsTheReplacement(
     routeIntent(appID: "app.a", volume: 0.5, generation: 10, targetDeviceUID: "usb-dac")
   )
   #expect(move.outcome == .failed)
+  // Nothing retries a user's own change: the row says so, and asks.
+  #expect(move.detail?.contains("stayed on its previous output. Try again.") == true)
+  #expect(move.detail?.contains("will try again") == false)
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.targetDeviceUID == nil)
+  #expect(row.notes == move.detail)
   _ = queued.controller.settledGainsForTesting()
   #expect(queued.heard.value == "waves #1")
   // #1 is still the route, back at its level; #2 never left silence.

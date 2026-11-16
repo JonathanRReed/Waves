@@ -1015,11 +1015,16 @@ struct PendingRouteRepair: Sendable {
 
 /// A handoff could not confirm that the app's other renderers were silent:
 /// a callback queued ahead of the mute may still play. The replacement was
-/// discarded and the incumbent kept; the move is retried later.
+/// discarded and the incumbent kept. Automatic work retries the move later;
+/// a user's own change is rolled back, and nothing retries it.
 struct HandoffSilenceUnconfirmedError: LocalizedError {
   let appName: String
+  var retriesAutomatically = true
   var errorDescription: String? {
-    "Waves couldn't confirm the previous audio route for \(appName) had gone quiet, so it kept that route and will try again."
+    let cause = "Waves couldn't confirm the previous audio route for \(appName) had gone quiet"
+    return retriesAutomatically
+      ? "\(cause), so it kept that route and will try again."
+      : "\(cause), so \(appName) stayed on its previous output. Try again."
   }
 }
 
