@@ -112,11 +112,13 @@ extension WorkspaceAudioControlBackend {
   /// and before any route in the batch suspends. A route whose app was
   /// excluded, yielded to another router, or otherwise changed meanwhile
   /// fails its context check and is skipped; building a fresh context at its
-  /// turn would have authorized it from the changed row.
+  /// turn would have authorized it from the changed row. A route in
+  /// `forceRebuildRuntimeIDs` is replaced even in `.attach` mode.
   func reattachRoutes(
     _ targets: [RouteRepairContext],
     origin: RouteWorkOrigin,
-    mode: ReattachMode = .attach
+    mode: ReattachMode = .attach,
+    forceRebuildRuntimeIDs: Set<String> = []
   ) async {
     guard !isShuttingDown else { return }
     // A reattach is one coherent setup pass. Capture router activity before
@@ -155,7 +157,7 @@ extension WorkspaceAudioControlBackend {
           for: app,
           toVolume: app.desiredVolume,
           muted: app.isMuted,
-          forceRebuild: mode == .rehome,
+          forceRebuild: mode == .rehome || forceRebuildRuntimeIDs.contains(app.id),
           repairContext: repairContext,
           origin: origin,
           routerActivity: routerActivity

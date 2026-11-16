@@ -281,6 +281,29 @@ private func spendRebuildBudget(_ fixture: RouteFixture) async {
   #expect(fixture.events.creations == creations + 1)
 }
 
+@Test func recoverRoutesReplacesARouteItCouldNotReleaseRatherThanReusingIt() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await spendRebuildBudget(fixture)
+  let creations = fixture.events.creations
+  let incumbent = creations + 1
+  // A format change whose rebuild the budget refused: still pending.
+  fixture.devices.set("builtin", .alive(rate96))
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(40))
+
+  // Recover Routes cannot hand the app back (its tap will not let go once),
+  // so the incumbent stays installed. It must still be rebuilt.
+  fixture.events.failNextMuteReleases(1)
+  _ = try await backend.recoverRoutes()
+
+  #expect(fixture.events.creations == creations + 1)
+  #expect(fixture.events.hearing("app.a") == "waves #\(incumbent + 1)")
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routingState == .managed)
+  #expect(row.notes == nil)
+}
+
 @Test func aRebuildRefusedByTheCeilingReleasesARouteThatStoppedRenderingAndRetriesLater() async throws {
   let fixture = RouteFixture(apps: [routeTestApp(id: "app.a")])
   try await fixture.installInitialRoutes()

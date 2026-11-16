@@ -1088,6 +1088,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     )
 
     disposeControllers(keeping: [])
+    // A route still installed now could not be handed back, and may carry
+    // a pending repair or a spent recovery: it is replaced, never reused.
+    let retainedRuntimeIDs = Set(controllers.keys)
     // Each route's authorization is captured now, before the snapshot rebuild
     // suspends: an exclusion or a yield that lands meanwhile must stop that
     // route's reattachment.
@@ -1107,7 +1110,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     try ensureAcceptingOperations()
 
     if !targets.isEmpty {
-      await reattachRoutes(targets, origin: .userInitiated)
+      await reattachRoutes(targets, origin: .userInitiated, forceRebuildRuntimeIDs: retainedRuntimeIDs)
+      // A retained route that could not be replaced keeps saying why.
+      publishRouteHolds()
     }
 
     return snapshot
