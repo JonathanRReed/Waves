@@ -182,16 +182,15 @@ extension WorkspaceAudioControlBackend {
         publishRouteHolds()
         lastError = error.localizedDescription
       } catch {
-        var reported = error
+        lastError = error.localizedDescription
         if mode == .rehome {
-          reported = failedMoveError(for: app, error)
-          releaseUnrepairedRoute(logicalID: logicalID, runtimeID: app.id, error: reported)
+          lastError = releaseUnrepairedRoute(
+            logicalID: logicalID, runtimeID: app.id, summary: Self.failedMoveSummary(for: app), error: error)
         } else if let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) {
-          markRouteError(at: index, error: reported)
+          markRouteError(at: index, error: error)
           // A retry spent from a fail-open record keeps the newest reason.
           failOpenReleases[logicalID]?.adoptExplanation(of: snapshot.apps[index])
         }
-        lastError = reported.localizedDescription
       }
     }
 
@@ -201,32 +200,14 @@ extension WorkspaceAudioControlBackend {
     snapshot.updatedAt = .now
   }
 
-  /// What a route that could not be moved to its new output reports once it
-  /// has been released.
-  func failedMoveError(for app: AudioApp, _ error: Error) -> Error {
-    switch error {
-    case BackendError.noActiveAudioStream, BackendError.noAudioCapability:
-      // Not a route failure: the app has nothing to tap right now, and
-      // markRouteError already classifies these.
-      return error
-    default:
-      return BackendError.managedRouteUnavailable(
-        "Waves couldn't move \(app.displayName) to the new output device, so it now plays at its own volume. \(error.localizedDescription)"
-      )
-    }
+  /// Why a route could not be moved to its new output, or rebuilt. Only the
+  /// cause: what the user hears is known once the release has run.
+  static func failedMoveSummary(for app: AudioApp) -> String {
+    "Waves couldn't move \(app.displayName) to the new output device"
   }
 
-  /// What a route that was known not to work, and could not be rebuilt,
-  /// reports once it has been released.
-  func failedRepairError(for app: AudioApp, _ error: Error) -> Error {
-    switch error {
-    case BackendError.noActiveAudioStream, BackendError.noAudioCapability:
-      return error
-    default:
-      return BackendError.managedRouteUnavailable(
-        "Waves couldn't rebuild the audio route for \(app.displayName), so it now plays at its own volume. \(error.localizedDescription)"
-      )
-    }
+  static func failedRepairSummary(for app: AudioApp) -> String {
+    "Waves couldn't rebuild the audio route for \(app.displayName)"
   }
 
   /// Releases a route that automatic repair could not rebuild: fail open, so
@@ -234,12 +215,29 @@ extension WorkspaceAudioControlBackend {
   /// survives refreshes, and the repair is retried under the authorization
   /// the app has now (see `FailOpenRelease`). A route whose tap would not
   /// let the app go keeps playing it at the user's level instead, and says so.
-  func releaseUnrepairedRoute(logicalID: String, runtimeID: String, error: Error) {
-    guard releaseRoute(runtimeID: runtimeID, reason: error.localizedDescription) == .released else { return }
-    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID || $0.id == runtimeID }) else {
-      return
+  /// The cause (`summary`, `error`) is worded with the outcome only once the
+  /// release has run. Returns the explanation the row now carries.
+  @discardableResult
+  func releaseUnrepairedRoute(logicalID: String, runtimeID: String, summary: String, error: Error) -> String {
+    // No process to tap right now is not a route failure; markRouteError
+    // classifies it itself.
+    let isRouteFailure: Bool
+    switch error {
+    case BackendError.noActiveAudioStream, BackendError.noAudioCapability: isRouteFailure = false
+    default: isRouteFailure = true
     }
-    markRouteError(at: index, error: error)
+    let cause = isRouteFailure ? "\(summary). \(error.localizedDescription)" : error.localizedDescription
+    guard releaseRoute(runtimeID: runtimeID, reason: cause) == .released else {
+      return unreleasedRoutes[runtimeID]?.note ?? cause
+    }
+    let outcome =
+      isRouteFailure
+      ? BackendError.managedRouteUnavailable(
+        "\(summary), so it now plays at its own volume. \(error.localizedDescription)") : error
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID || $0.id == runtimeID }) else {
+      return outcome.localizedDescription
+    }
+    markRouteError(at: index, error: outcome)
     snapshot.apps[index].appliedVolume = nil
     snapshot.apps[index].peakLevel = 0
     snapshot.apps[index].rmsLevel = 0
@@ -252,6 +250,7 @@ extension WorkspaceAudioControlBackend {
       attemptsRemaining: FailOpenRelease.maximumAttempts
     )
     publishRouteHolds()
+    return outcome.localizedDescription
   }
 
   /// Puts back what a refresh would otherwise lose: why an app has no route,
@@ -864,9 +863,12 @@ extension WorkspaceAudioControlBackend {
             publishRouteHolds()
             continue
           }
-          let reported = isMisbound ? failedMoveError(for: app, error) : failedRepairError(for: app, error)
-          releaseUnrepairedRoute(logicalID: app.logicalID, runtimeID: app.id, error: reported)
-          lastError = reported.localizedDescription
+          lastError = releaseUnrepairedRoute(
+            logicalID: app.logicalID,
+            runtimeID: app.id,
+            summary: isMisbound ? Self.failedMoveSummary(for: app) : Self.failedRepairSummary(for: app),
+            error: error
+          )
           changed = true
           continue
         }

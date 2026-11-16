@@ -203,6 +203,22 @@ final class BudgetBox {
   #expect(app.notes?.contains("plays at its own volume") == true)
 }
 
+@Test func aFailedRepairThatCouldNotHandTheAppBackNeverAlsoClaimsItPlaysOnItsOwn() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a", volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.devices.set("builtin", .alive(rate96))
+  fixture.events.failNextCreations(3)
+  fixture.events.failNextMuteReleases(1)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+  let note = try #require(await backend.currentSnapshot().apps.first?.notes)
+  #expect(note.contains("still playing it at the level you set"))
+  #expect(note.contains("couldn't rebuild the audio route for App app.a"))
+  #expect(!note.contains("its own volume"), "\(note)")
+}
+
 /// Spends the automatic rebuild budget with geometry repairs of app.a.
 private func spendRebuildBudget(_ fixture: RouteFixture) async {
   for cycle in 0..<RouteRebuildBudget.minimumCapacity {
