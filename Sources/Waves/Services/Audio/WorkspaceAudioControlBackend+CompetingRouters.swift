@@ -380,6 +380,8 @@ extension WorkspaceAudioControlBackend {
 
   func suspendManagedRouteForConflict(at index: Int, conflict: VerifiedRouterConflict) {
     let app = snapshot.apps[index]
+    // The router owns the app now; no automatic repair may reclaim it.
+    failOpenReleases.removeValue(forKey: app.logicalID)
     if let controller = controllers.removeValue(forKey: app.id) {
       retainCleanupDegradations(disposeController(controller))
     }

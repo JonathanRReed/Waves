@@ -203,29 +203,70 @@ final class BudgetBox {
   #expect(app.notes?.contains("plays at its own volume") == true)
 }
 
-@Test func aFormatRebuildRefusedByTheRebuildCeilingReleasesTheRoute() async throws {
+/// Spends the automatic rebuild budget with geometry repairs of app.a.
+private func spendRebuildBudget(_ fixture: RouteFixture) async {
+  for cycle in 0..<RouteRebuildBudget.minimumCapacity {
+    await fixture.backend.flagGeometryMismatchForTesting(runtimeID: "app.a")
+    await fixture.backend.updateAudioLevels(at: .seconds(10 + cycle * 2))
+  }
+}
+
+@Test func aFormatRebuildRefusedByTheRebuildCeilingKeepsARouteThatStillRenders() async throws {
   let fixture = RouteFixture(apps: [routeTestApp(id: "app.a")])
   try await fixture.installInitialRoutes()
   let backend = fixture.backend
-
-  // Automatic rebuilds have spent the budget.
-  for cycle in 0..<RouteRebuildBudget.minimumCapacity {
-    await backend.flagGeometryMismatchForTesting(runtimeID: "app.a")
-    await backend.updateAudioLevels(at: .seconds(10 + cycle * 2))
-  }
+  await spendRebuildBudget(fixture)
   let creations = fixture.events.creations
   let incumbent = creations + 1
-  fixture.events.stopRendering(serial: incumbent)
+
+  // The rate changes while automatic rebuilds are paused. The refusal says
+  // nothing about the route, which still plays the app at its level.
   fixture.devices.set("builtin", .alive(rate96))
   await backend.revalidateRouteFormatsForTesting(at: .seconds(40))
 
-  // Refused, so the route that no longer works is released, not kept.
+  #expect(fixture.events.creations == creations)
+  #expect(fixture.events.lastTapMuteEvent(serial: incumbent) == nil)
+  #expect(fixture.events.pumpRenders() == [incumbent])
+  let kept = try #require(await backend.currentSnapshot().apps.first)
+  #expect(kept.routingState == .managed)
+  #expect(kept.appliedVolume == 0.5)
+
+  // Once the budget refills, the next maintenance pass rebuilds it.
+  fixture.budgetClock.value = .seconds(600)
+  await maintenancePass(fixture, from: 100)
+  #expect(fixture.events.creations == creations + 1)
+  #expect(fixture.events.pumpRenders() == [incumbent + 1])
+}
+
+@Test func aRebuildRefusedByTheCeilingReleasesARouteThatStoppedRenderingAndRetriesLater() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(id: "app.a")])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await spendRebuildBudget(fixture)
+  let creations = fixture.events.creations
+  let incumbent = creations + 1
+
+  // The aggregate stopped rendering while the app plays into its tap, so the
+  // app is silent. The rebuild is refused: release it, and say why.
+  fixture.events.stopRendering(serial: incumbent)
+  await maintenancePass(fixture, from: 100, ticks: 30)
   #expect(fixture.events.creations == creations)
   #expect(fixture.events.lastTapMuteEvent(serial: incumbent) == "audible #\(incumbent)")
   #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
-  let app = try #require(await backend.currentSnapshot().apps.first)
-  #expect(app.routingState == .error)
-  #expect(app.notes?.contains("paused automatic audio route rebuilds") == true)
+  let released = try #require(await backend.currentSnapshot().apps.first)
+  #expect(released.routingState == .error)
+  #expect(released.appliedVolume == nil)
+  #expect(released.notes?.contains("paused automatic audio route rebuilds") == true)
+
+  // The release is recoverable: once automatic rebuilds are allowed again,
+  // the route comes back without the user pressing Recover Routes.
+  fixture.budgetClock.value = .seconds(600)
+  await maintenancePass(fixture, from: 200)
+  #expect(fixture.events.creations == creations + 1)
+  let recovered = try #require(await backend.currentSnapshot().apps.first)
+  #expect(recovered.routingState == .managed)
+  #expect(recovered.appliedVolume == 0.5)
+  #expect(recovered.notes == nil)
 }
 
 @Test func aRouteWhoseAggregateSilentlyStoppedIsRebuilt() async throws {
@@ -509,6 +550,118 @@ func aParkedRendererIsNeverRevivedWhenItsAppLosesItsRoute(byYield: Bool) async t
   #expect(fixture.events.pumpRenders().isEmpty)
 }
 
+// MARK: - A route released by a failed repair is recoverable and truthful
+
+/// Releases app.a's route: its device resets to 96 kHz, its aggregate stops
+/// rendering, and every rebuild attempt fails.
+private func releaseAfterFailedRepair(_ fixture: RouteFixture, app: String = "app.a") async {
+  fixture.events.stopRendering(serial: 1)
+  fixture.devices.set("builtin", .alive(rate96))
+  fixture.events.failNextCreations(3)
+  await fixture.backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+}
+
+@Test func aRouteReleasedByAFailedRepairComesBackOnceItCanBeBuilt() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await releaseAfterFailedRepair(fixture)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+
+  // Paused: nothing to tap, so no attempt is made (or spent).
+  fixture.playing.value = false
+  await maintenancePass(fixture, from: 20)
+  // Playing, but its output device is mid-reset.
+  fixture.playing.value = true
+  fixture.devices.set("builtin", .notAlive)
+  await maintenancePass(fixture, from: 40)
+  #expect(fixture.events.creations == 0)
+
+  // The device reports a usable format: the next pass rebuilds the route.
+  fixture.devices.set("builtin", .alive(rate96))
+  await maintenancePass(fixture, from: 60)
+  #expect(fixture.events.creations == 1)
+  #expect(fixture.events.pumpRenders() == [2])
+  let app = try #require(await backend.currentSnapshot().apps.first)
+  #expect(app.routingState == .managed)
+  #expect(app.appliedVolume == 0.5)
+  #expect(app.notes == nil)
+}
+
+@Test(arguments: ["exclusion", "yield", "newer intent"])
+func aReleasedRouteIsNeverRebuiltAfterNewerOwnership(_ change: String) async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await releaseAfterFailedRepair(fixture)
+
+  switch change {
+  case "exclusion":
+    _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.5, generation: 10, isExcluded: true))
+  case "yield":
+    fixture.routerRunning.value = true
+    await backend.yieldRouteToRouterForTesting(logicalID: "app.a")
+  default:
+    // A newer edit that itself fails: the user's newest intent owns the row.
+    fixture.events.failNextCreations(3)
+    _ = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.3, generation: 10))
+  }
+  for pass in 0..<3 {
+    await maintenancePass(fixture, from: 20 + pass * 20)
+  }
+  #expect(fixture.events.creations == 0)
+  #expect(fixture.events.pumpRenders().isEmpty)
+}
+
+@Test func automaticRetriesAfterAFailOpenReleaseAreBounded() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  await releaseAfterFailedRepair(fixture)
+  fixture.events.failNextCreations(1_000)
+
+  for pass in 0..<6 {
+    await maintenancePass(fixture, from: 20 + pass * 20)
+  }
+
+  // Three creation tries for the repair itself, then three for each of the
+  // bounded number of retries, and nothing after that.
+  let attempts = fixture.events.values.count { $0 == "fail app.a" }
+  #expect(attempts == 3 + 3 * FailOpenRelease.maximumAttempts)
+  #expect(await backend.currentSnapshot().apps.first?.notes?.contains("plays at its own volume") == true)
+}
+
+@Test func aReleasedForegroundAppKeepsItsExplanationAndUnknownLevelAcrossRefreshes() async throws {
+  // An ordinary app the user launched: discovery reports it as a fresh
+  // candidate on every refresh, and merges the backend's state into it.
+  let fixture = RouteFixture(
+    apps: [routeTestApp(id: "com.example.player", volume: 0.3, bundleID: "com.example.player")],
+    foreground: true
+  )
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.stopRendering(serial: 1)
+  fixture.devices.set("builtin", .alive(rate96))
+  fixture.events.failNextCreations(1_000)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+
+  // Released at the app's own level, which Waves did not set and cannot read.
+  func expectReleasedRow() async throws {
+    let app = try #require(await backend.currentSnapshot().apps.first)
+    #expect(app.routingState == .error)
+    #expect(app.appliedVolume == nil)
+    #expect(app.notes?.contains("plays at its own volume") == true)
+  }
+  try await expectReleasedRow()
+  _ = try await backend.refresh()
+  try await expectReleasedRow()
+  // Discovery now hears it playing (at its own level). That is no reason to
+  // claim the old attenuated level or drop the explanation.
+  fixture.audiblePIDs.value = [900]
+  _ = try await backend.refresh()
+  try await expectReleasedRow()
+}
+
 // MARK: - A replacement that will not start
 
 @Test func aReplacementThatWillNotStartNeverUnmutesItsTapBesideTheLiveRoute() async throws {
@@ -527,7 +680,7 @@ func aParkedRendererIsNeverRevivedWhenItsAppLosesItsRoute(byYield: Bool) async t
       stopIOProc: {
         events.record("stop #99")
         return noErr
-      },
+      }
     )
   )
 
@@ -1584,13 +1737,14 @@ func routeTestApp(
   id: String = "app.a",
   volume: Float = 0.5,
   routingState: RoutingState = .managed,
-  targetDeviceUID: String? = nil
+  targetDeviceUID: String? = nil,
+  bundleID: String? = nil
 ) -> AudioApp {
   AudioApp(
     id: id,
     logicalID: id,
     pid: 900,
-    bundleID: "com.example.\(id)",
+    bundleID: bundleID ?? "com.example.\(id)",
     displayName: "App \(id)",
     category: .media,
     isActive: true,
@@ -1818,6 +1972,12 @@ final class RouteFixture: @unchecked Sendable {
   let events = RouteEvents()
   let devices = DeviceFormatState()
   let inventory = DeviceInventory()
+  /// The rebuild budget's clock.
+  let budgetClock = TestBox<Duration>(.seconds(1))
+  /// Whether the apps' processes are producing output.
+  let playing = TestBox(true)
+  /// PIDs discovery sees as audible.
+  let audiblePIDs = TestBox<Set<pid_t>>([])
   /// Whether a verified audio router is mixing every app's output.
   let routerRunning = TestBox(false)
 
@@ -1827,16 +1987,23 @@ final class RouteFixture: @unchecked Sendable {
   /// - Parameter discoveryPause: runs inside every snapshot rebuild's
   ///   application capture, the rebuild's first suspension, so a test can
   ///   land newer work while discovery is in flight.
+  /// - Parameter foreground: captures the apps as regular, foreground apps,
+  ///   so discovery reports them as fresh candidates (the merge path ordinary
+  ///   apps take) rather than keeping the backend's rows.
   init(
     apps: [AudioApp],
     retryPause: WorkspaceAudioControlBackend.ControllerRetryPause? = nil,
     rendersDuringHandoff: Bool = true,
     deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil,
-    discoveryPause: (@Sendable () async -> Void)? = nil
+    discoveryPause: (@Sendable () async -> Void)? = nil,
+    foreground: Bool = false
   ) {
     let events = self.events
     let devices = self.devices
     let inventory = self.inventory
+    let budgetClock = self.budgetClock
+    let playing = self.playing
+    let audiblePIDs = self.audiblePIDs
     let routerRunning = self.routerRunning
     // Every test app is still running. Captured as background-only processes
     // so discovery keeps the backend's own rows rather than inventing new ones.
@@ -1847,8 +2014,8 @@ final class RouteFixture: @unchecked Sendable {
           bundleID: $0.bundleID,
           localizedName: $0.displayName,
           bundlePath: $0.runtimeIdentity?.outerBundlePath,
-          activationPolicy: .prohibited,
-          isActive: false,
+          activationPolicy: foreground ? .regular : .prohibited,
+          isActive: foreground,
           iconTIFFData: nil,
           runtimeIdentity: $0.runtimeIdentity
         )
@@ -1919,18 +2086,19 @@ final class RouteFixture: @unchecked Sendable {
         return controller
       },
       processObjectIDResolver: { _ in [1] },
-      processObjectLivenessProvider: { _ in true },
+      processObjectLivenessProvider: { _ in playing.value },
       captureAuthorizationProbe: { .authorized },
       applicationCaptureProvider: {
         await discoveryPause?()
         return capture
       },
-      routeBudgetClock: { .seconds(1) },
+      routeBudgetClock: { budgetClock.value },
       controllerRetryPause: retryPause ?? { _ in },
       handoffSilencePause: { if rendersDuringHandoff { events.pumpRenders() } },
       outputDeviceUIDProvider: { devices.outputUID(for: $0) },
       deviceInventoryProvider: { inventory.current },
       deviceFormatObservationProvider: { devices.observation($0) },
+      audibleProcessIndexProvider: { .init(pids: audiblePIDs.value) },
       deviceFormatListenerNativeCalls: deviceFormatListenerNativeCalls
         ?? DeviceFormatListenerNativeCalls(add: { _, _, _ in noErr }, remove: { _, _, _ in noErr })
     )

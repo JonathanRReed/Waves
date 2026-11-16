@@ -77,6 +77,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// Runtime IDs of apps a parked tap holds silent: they have no live route,
   /// and the tap's mute would not release on the last pass.
   var appsHeldSilentByParkedTaps: Set<String> = []
+  /// Routes released fail open after an automatic repair failed or was
+  /// refused, by logical ID. See `FailOpenRelease`.
+  var failOpenReleases: [String: FailOpenRelease] = [:]
   let routeMaintenanceTickInterval = 20
   let staleRouteThresholdTicks = 24
   var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
@@ -156,6 +159,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// Output devices by object ID, replacing the Core Audio device list in tests.
   let deviceInventoryProvider: (@Sendable () -> [AudioObjectID: String])?
   let deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)?
+  /// Which processes are producing output, replacing the Core Audio scan in
+  /// tests of the discovery merge.
+  let audibleProcessIndexProvider: (@Sendable () -> AudibleProcessIndex)?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
@@ -193,6 +199,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.outputDeviceUIDProvider = nil
     self.deviceInventoryProvider = nil
     self.deviceFormatObservationProvider = nil
+    self.audibleProcessIndexProvider = nil
     self.deviceFormatListeners = DeviceFormatListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.device-format"))
     )
@@ -230,6 +237,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     outputDeviceUIDProvider: (@Sendable (AudioApp) -> String?)? = nil,
     deviceInventoryProvider: (@Sendable () -> [AudioObjectID: String])? = nil,
     deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)? = nil,
+    audibleProcessIndexProvider: (@Sendable () -> AudibleProcessIndex)? = nil,
     deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -261,6 +269,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.outputDeviceUIDProvider = outputDeviceUIDProvider
     self.deviceInventoryProvider = deviceInventoryProvider
     self.deviceFormatObservationProvider = deviceFormatObservationProvider
+    self.audibleProcessIndexProvider = audibleProcessIndexProvider
     self.deviceFormatListeners = DeviceFormatListenerLifecycle(
       nativeCalls: deviceFormatListenerNativeCalls
         ?? .live(on: DispatchQueue(label: "com.waves.backend.device-format"))
@@ -420,6 +429,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     orphanedControllers.removeAll(where: \.isTornDown)
     appsHeldSilentByParkedTaps.removeAll()
+    failOpenReleases.removeAll()
 
     // Never let the buffer's cap hide the fact that it capped: a truncated
     // report that looks complete is worse than one that admits the gap.
@@ -531,6 +541,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     latestAcceptedGenerationByLogicalID[logicalID] = intent.generation
     stagedIntentByLogicalID[logicalID] = intent
+    // The user's newest intent replaces whatever an automatic repair left.
+    failOpenReleases.removeValue(forKey: logicalID)
     legacyGeneration = max(legacyGeneration, intent.generation)
 
     guard let acceptedIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else {
@@ -1003,7 +1015,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
             $0,
             hasActiveController: controllers[$0.id]?.isActive == true,
             reclaimMixedOutput: !waveLinkCompatibilityEnabled
-          )
+          ) || failOpenReleases[$0.logicalID] != nil
         }
         .map(\.logicalID)
     )
@@ -1430,6 +1442,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       retireController(incumbent)
     }
     cutParkedRenderers(forRuntimeID: app.id)
+    failOpenReleases.removeValue(forKey: app.logicalID)
     // Only now, with every other renderer of the app cut to silence, does the
     // replacement fade in to the app's level.
     controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
@@ -1723,7 +1736,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // Re-check real capture authorization so a snapshot honestly reflects whether
     // Waves can actually take over audio, not merely whether the OS supports it.
     refreshCaptureAuthorization()
-    let audible = getAudibleProcesses()
+    let audible = audibleProcessIndexProvider?() ?? getAudibleProcesses()
     let discoveryInputs = snapshot
     // Reuse encoded icons across discovery passes only while the captured
     // process identity still matches. Relaunches must capture fresh bytes.
@@ -1878,6 +1891,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     let runningIDs: Set<String> = Set(mergedApps.map(\.id))
     retainCleanupDegradations(disposeControllers(keeping: runningIDs))
+    failOpenReleases = failOpenReleases.filter { runningIDs.contains($0.value.context.runtimeID) }
     applyStickyRouteNotes(to: &mergedApps)
 
     let hasRouteErrors = hasBlockingRouteErrors(in: mergedApps)
