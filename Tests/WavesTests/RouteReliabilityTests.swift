@@ -281,39 +281,39 @@ private func mutedRouteThroughAFailedFormatRebuild() async throws -> RouteFixtur
   #expect(fixture.events.lastTapMuteEvent(serial: 1) != "audible #1")
   #expect(fixture.events.hearing("app.a") == "silent")
   #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  // The route carries on as built, as it did before Waves rebuilt on format
+  // changes, so its row is an ordinary muted route's.
   let kept = try #require(await backend.currentSnapshot().apps.first)
   #expect(kept.isMuted)
-  #expect(kept.routingState == .error)
+  #expect(kept.routingState == .managed)
   #expect(kept.appliedVolume == 0)
-  #expect(kept.notes?.contains("its output device changed format") == true)
-  #expect(kept.notes?.contains("stays muted") == true, "\(kept.notes ?? "")")
-  #expect(kept.notes?.contains("its own volume") != true, "\(kept.notes ?? "")")
+  #expect(kept.notes == nil, "\(kept.notes ?? "")")
 }
 
-@Test func aMutedRouteWhoseRebuildFailedRestsUntilItIsUnmuted() async throws {
+@Test func aMutedRouteWhoseFormatRebuildFailedIsNotRetriedUntilItsDeviceChangesAgain() async throws {
   let fixture = try await mutedRouteThroughAFailedFormatRebuild()
   let backend = fixture.backend
   let events = fixture.events.values.count
   let creations = fixture.events.creations
 
-  // While it stays muted nothing rebuilds it again, although a rebuild would
-  // now succeed: a route that kept failing must not retry on every pass.
+  // Nothing asks for the rebuild again, although one would now succeed: a
+  // route that could not be rebuilt must not retry on every pass.
   await maintenancePass(fixture, from: 100)
   await maintenancePass(fixture, from: 200)
   #expect(fixture.events.values.count == events, "\(fixture.events.values.dropFirst(events))")
   #expect(fixture.events.hearing("app.a") == "silent")
-  #expect(await backend.currentSnapshot().apps.first?.notes?.contains("stays muted") == true)
 
-  // Unmuting plays the app at once on the route it has, at the user's level
-  // and never at its own.
+  // Unmuting plays the app on the route it has, at the user's level and
+  // never at its own.
   let result = await backend.applyAppIntent(
     routeIntent(appID: "app.a", volume: 0.5, generation: 11, isMuted: false))
   #expect(result.outcome == .applied)
   #expect(fixture.events.creations == creations)
   #expect(fixture.events.hearing("app.a") == "waves #1")
 
-  // And the next pass does the rebuild it still needed.
-  await maintenancePass(fixture, from: 300)
+  // A device change that is new asks again, and this rebuild succeeds.
+  fixture.devices.set("builtin", .alive(rate48))
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(300))
   #expect(fixture.events.creations == creations + 1)
   #expect(fixture.events.hearing("app.a") == "waves #2")
   let rebuilt = try #require(await backend.currentSnapshot().apps.first)

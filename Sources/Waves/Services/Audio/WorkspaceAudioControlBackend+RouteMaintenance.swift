@@ -291,8 +291,7 @@ extension WorkspaceAudioControlBackend {
           apps[index].notes = Self.pendingRepairNote(
             appName: app.displayName,
             reason: reason,
-            rebuildsPaused: isRouteRebuildCeilingActive,
-            restsWhileMuted: isRebuildResting(app)
+            rebuildsPaused: isRouteRebuildCeilingActive
           )
           apps[index].hasNoAudioCapability = false
           apps[index].appliedVolume = app.isMuted ? 0 : app.desiredVolume
@@ -733,21 +732,12 @@ extension WorkspaceAudioControlBackend {
     // budget allows, until a rebuild for it succeeds or it changes hands.
     // While the budget refuses, it is not attempted at all.
     let pendingIDs: Set<String> = isRouteRebuildCeilingActive ? [] : Set(snapshot.apps.map(\.id).filter { pendingRepair(for: $0) != nil })
-    // A muted route whose rebuild already failed is not rebuilt again while
-    // it stays muted (see the catch below): it renders silence either way,
-    // and retrying it on every pass would spend the shared budget for
-    // nothing. It is still maintained like any live route.
-    let restingApps = snapshot.apps.filter { isRebuildResting($0) }
-    let restingIDs = Set(restingApps.flatMap { [$0.id, $0.logicalID] })
-    let forceRebuildIDs = forceRebuildIDs.union(pendingIDs).subtracting(restingIDs)
+    let forceRebuildIDs = forceRebuildIDs.union(pendingIDs)
     // Authorization is captured per route at selection, as in
     // `reattachRoutes`: an app excluded or yielded while an earlier route in
     // this pass was suspended must not be rebuilt from its changed row.
     let selected = snapshot.apps
-      .filter {
-        $0.routingState == .managed || forceRebuildIDs.contains($0.logicalID) || forceRebuildIDs.contains($0.id)
-          || restingIDs.contains($0.id)
-      }
+      .filter { $0.routingState == .managed || forceRebuildIDs.contains($0.logicalID) || forceRebuildIDs.contains($0.id) }
       .map { (appID: $0.logicalID, context: makeRepairContext(for: $0)) }
     guard !selected.isEmpty else { return }
     // One verified-router view for the whole pass, as `reattachRoutes` takes.
@@ -863,23 +853,33 @@ extension WorkspaceAudioControlBackend {
         // audible, say why, and retry later. A rebuild the budget refused
         // proved nothing, so a route that still renders on its own device is
         // kept: its repair stays pending, its row says so, and it is rebuilt
-        // once the budget allows. A muted app's route is kept on the same
-        // terms whatever the rebuild failed on: its route is its mute, so
-        // releasing it would play the app at its own level, the one thing the
-        // user asked not to hear, and a route that renders silence cannot
-        // sound wrong at its device's new format. After a rebuild that
-        // really failed, its repair rests until the app is unmuted (see
-        // `isRebuildResting`), so one failing route cannot retry for ever.
-        // Geometry attempts keep their own bounded retries, which end in the
-        // same release.
+        // once the budget allows. A muted app's route that still renders on
+        // its own device is kept too, whatever the rebuild failed on: its
+        // route is its mute, so releasing it would play the app at its own
+        // level, the one thing the user asked not to hear, and a route that
+        // renders silence cannot sound wrong at its device's new format.
+        // After a rebuild that really failed, the request is dropped and
+        // the route carries on as built (`abandonRepair`), so a route that
+        // cannot be rebuilt is not retried on every pass. Geometry attempts
+        // keep their own bounded retries, which end in the same release.
         if isMisbound || (shouldForceRebuild && repairContext.incumbent != nil && !isGeometryAttempt) {
           let isRefusal = error is RouteRebuildCeilingError
-          let isMuted = snapshot.apps.first { $0.id == app.id }?.isMuted ?? app.isMuted
+          let currentIndex = snapshot.apps.firstIndex { $0.id == app.id }
+          let isMuted = currentIndex.map { snapshot.apps[$0].isMuted } ?? app.isMuted
           if isRefusal || isMuted, !isMisbound,
             controllers[app.id]?.isActive == true, staleRouteTicks[app.logicalID] == nil,
             pendingRepair(for: app.id) != .stalled
           {
-            if !isRefusal { pendingRouteRepairs[app.id]?.rebuildFailedWhileMuted = true }
+            if !isRefusal {
+              abandonRepair(runtimeID: app.id)
+              if let currentIndex {
+                snapshot.apps[currentIndex].routingState = .managed
+                snapshot.apps[currentIndex].appliedVolume = 0
+                snapshot.apps[currentIndex].notes = nil
+                snapshot.apps[currentIndex].routeHealthContext = nil
+              }
+              changed = true
+            }
             publishRouteHolds()
             continue
           }
@@ -972,23 +972,19 @@ extension WorkspaceAudioControlBackend {
   func recordPendingRepair(_ reason: RouteRepairReason, runtimeID: String) {
     guard let controller = controllers[runtimeID] else { return }
     let reason = pendingRepair(for: runtimeID) == .stalled ? .stalled : reason
-    // `pendingRepair(for:)` has just dropped a record for another controller.
-    let rebuildFailedWhileMuted = pendingRouteRepairs[runtimeID]?.rebuildFailedWhileMuted ?? false
-    pendingRouteRepairs[runtimeID] = PendingRouteRepair(
-      reason: reason,
-      controller: ObjectIdentifier(controller),
-      rebuildFailedWhileMuted: rebuildFailedWhileMuted
-    )
+    pendingRouteRepairs[runtimeID] = PendingRouteRepair(reason: reason, controller: ObjectIdentifier(controller))
   }
 
-  /// Whether `app`'s pending rebuild is resting: the app is muted, a rebuild
-  /// for this repair already failed while it was, and its route still plays
-  /// (a stalled route is rebuilt regardless). Automatic maintenance leaves
-  /// such a route as it is. Unmuting the app ends the rest, and so does
-  /// Recover Routes, which rebuilds every route itself.
-  func isRebuildResting(_ app: AudioApp) -> Bool {
-    guard app.isMuted, let reason = pendingRepair(for: app.id), reason != .stalled else { return false }
-    return pendingRouteRepairs[app.id]?.rebuildFailedWhileMuted == true
+  /// Gives up the rebuild a device change asked of `runtimeID`'s live route
+  /// and takes the device as it is now for the route's own, so format
+  /// revalidation does not ask again until the device changes again. The
+  /// route carries on as it was built, which is what every route did before
+  /// Waves rebuilt on format changes.
+  func abandonRepair(runtimeID: String) {
+    pendingRouteRepairs.removeValue(forKey: runtimeID)
+    if let binding = routeOutputBindingByRuntimeID[runtimeID] {
+      routeOutputBindingByRuntimeID[runtimeID] = outputBinding(forDeviceUID: binding.deviceUID)
+    }
   }
 
   /// The repair `runtimeID`'s live route still needs, if any. One recorded
@@ -1003,16 +999,8 @@ extension WorkspaceAudioControlBackend {
     return pending.reason
   }
 
-  static func pendingRepairNote(
-    appName: String,
-    reason: RouteRepairReason,
-    rebuildsPaused: Bool,
-    restsWhileMuted: Bool = false
-  ) -> String {
+  static func pendingRepairNote(appName: String, reason: RouteRepairReason, rebuildsPaused: Bool) -> String {
     let what = "Waves needs to rebuild the audio route for \(appName) because \(reason.explanation)."
-    guard !restsWhileMuted else {
-      return "\(what) The last attempt failed, so it stays muted on its current route. Waves rebuilds it when you unmute it, or use Recover Routes."
-    }
     guard rebuildsPaused else {
       return "\(what) It keeps playing at the level you set until then."
     }
@@ -1050,9 +1038,6 @@ enum RouteRepairReason: Equatable, Sendable {
 struct PendingRouteRepair: Sendable {
   let reason: RouteRepairReason
   let controller: ObjectIdentifier
-  /// A rebuild for this repair failed while its app was muted, and the route
-  /// was kept so the app stayed muted.
-  var rebuildFailedWhileMuted = false
 }
 
 /// A handoff could not confirm that the app's other renderers were silent:
