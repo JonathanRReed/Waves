@@ -610,6 +610,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     // The user's newest intent replaces whatever an automatic repair left.
     failOpenReleases.removeValue(forKey: logicalID)
+    resetReleasePacing(runtimeID: currentApp.id)
     legacyGeneration = max(legacyGeneration, intent.generation)
 
     guard let acceptedIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else {
@@ -1075,6 +1076,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // An explicit repair is the one place a fresh authorization verdict is
     // worth a system-wide probe tap; the periodic refresh trusts the cache.
     refreshCaptureAuthorization(force: true)
+    resetReleasePacing()
     let managedLogicalIDs = Set(
       snapshot.apps
         .filter {

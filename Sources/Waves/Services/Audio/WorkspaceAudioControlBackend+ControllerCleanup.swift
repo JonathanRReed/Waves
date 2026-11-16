@@ -117,13 +117,25 @@ extension WorkspaceAudioControlBackend {
     // A route that cannot carry the app is no audible fallback: release it
     // as Waves would an app it must not render, and say so if that fails.
     let kind = kind == .managedRelease && isKnownUnableToRender(runtimeID) ? .forcedRelease : kind
+    // A managed release that failed waits for its next attempt; the route
+    // keeps playing the app meanwhile, and nothing waits on its queue.
+    let failed = unreleasedRoutes[runtimeID].flatMap { $0.controller == ObjectIdentifier(controller) ? $0 : nil }
+    if kind == .managedRelease, let failed, routeBudgetClock() < failed.nextAttemptAt {
+      return .stillRouting
+    }
     let result = controller.dispose(kind)
     retainCleanupDegradations(result.degradations)
     if result.outcome == .stillRouting {
       let name = snapshot.apps.first { $0.id == runtimeID }?.displayName ?? controller.appName
+      let interval = max(
+        UnreleasedRoute.firstRetryInterval,
+        min((failed?.retryInterval ?? .zero) * 2, UnreleasedRoute.maximumRetryInterval)
+      )
       unreleasedRoutes[runtimeID] = UnreleasedRoute(
         controller: ObjectIdentifier(controller),
-        note: Self.stillRoutingNote(appName: name, reason: reason)
+        note: Self.stillRoutingNote(appName: name, reason: reason),
+        nextAttemptAt: routeBudgetClock() + interval,
+        retryInterval: interval
       )
       applyStickyRouteNotes(to: &snapshot.apps)
       return .stillRouting
@@ -145,6 +157,16 @@ extension WorkspaceAudioControlBackend {
     if geometryRecoveryByRuntimeID[runtimeID]?.isUnusable == true { return true }
     guard let deviceUID = routeOutputBindingByRuntimeID[runtimeID]?.deviceUID else { return false }
     return deviceFormatObservation(uid: deviceUID) == .missing
+  }
+
+  /// Lets failed managed releases (of `runtimeID`, or all) try again at
+  /// once, with their backoff restarted: the user asked for something, or
+  /// a device came or went.
+  func resetReleasePacing(runtimeID: String? = nil) {
+    for id in unreleasedRoutes.keys where runtimeID == nil || id == runtimeID {
+      unreleasedRoutes[id]?.nextAttemptAt = .zero
+      unreleasedRoutes[id]?.retryInterval = .zero
+    }
   }
 
   /// The app has no live Waves route any more, by whatever path. Every

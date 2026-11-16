@@ -1066,7 +1066,16 @@ struct FailOpenRelease: Sendable {
 /// mute would not release, so it was put back to the user's level and left
 /// installed rather than leaving the app silent. Tied to that controller: a
 /// later release, a replacement, or route work that succeeds on it ends it.
+///
+/// Another managed release is not attempted before `nextAttemptAt` (route
+/// budget clock): the first wait is the maintenance cadence, doubling per
+/// failure up to a cap, until `resetReleasePacing`.
 struct UnreleasedRoute: Sendable {
+  static let firstRetryInterval: Duration = .seconds(5)
+  static let maximumRetryInterval: Duration = .seconds(80)
+
   let controller: ObjectIdentifier
   let note: String
+  var nextAttemptAt: Duration
+  var retryInterval: Duration
 }

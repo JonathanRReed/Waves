@@ -1066,6 +1066,41 @@ func everyDisposalLeavesTheAppAudibleOneWayOrTheOther(_ path: DisposalPath, _ fa
   #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
 }
 
+@Test func aReleaseThatKeepsFailingIsRetriedWithBackoffWhileTheRouteKeepsPlaying() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.lifetimeLiveness.value = true
+  fixture.captured.value = []
+  fixture.events.failNextMuteReleases(1_000)
+  func attempts() -> Int { fixture.events.values.count { $0 == "release failed #1" } }
+  func refresh(after seconds: Int) async throws {
+    fixture.budgetClock.value += .seconds(seconds)
+    _ = try await backend.refresh()
+  }
+
+  // Each refresh would retry the release. The first failure waits one
+  // maintenance cadence, then the wait doubles.
+  try await refresh(after: 0)
+  try await refresh(after: 0)
+  #expect(attempts() == 1)
+  try await refresh(after: 5)
+  #expect(attempts() == 2)
+  try await refresh(after: 5)
+  #expect(attempts() == 2)
+  try await refresh(after: 5)
+  #expect(attempts() == 3)
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+
+  // A device coming or going is worth trying again at once.
+  await backend.applyDeviceChangePlanForTesting(
+    DeviceChangePassPlan(defaultOutputChanged: false, inventoryChanged: true),
+    availableDeviceUIDs: ["builtin", "headphones"]
+  )
+  try await refresh(after: 0)
+  #expect(attempts() == 4)
+}
+
 @Test func aRouteWhoseProcessIsGoneIsForceReleasedEvenIfItsTapWillNotLetGo() async throws {
   let fixture = RouteFixture(apps: [routeTestApp(volume: 0.5)])
   try await fixture.installInitialRoutes()

@@ -374,6 +374,7 @@ extension WorkspaceAudioControlBackend {
     appearedDeviceUIDs: Set<String> = []
   ) async {
     guard plan.reconcilesPinnedRoutes || plan.rehomesDefaultFollowingRoutes else { return }
+    resetReleasePacing()
     // Pinned routes first. Unplugging a device that was both the default and
     // a pinned destination raises both changes at once, and the inventory
     // change is consumed by this pass; skipping it here left routes to the
