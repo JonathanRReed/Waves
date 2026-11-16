@@ -47,6 +47,10 @@ struct GeometryRecoveryCoordinator: Sendable {
 
   var isVerifying: Bool { verifyingSince != nil }
 
+  /// The route's callbacks render silence: a mismatch is waiting for its
+  /// rebuild, or recovery gave up.
+  var isUnusable: Bool { isExhausted || hasPendingRecoveryWork }
+
   init(
     maximumAttempts: Int = 3,
     baseBackoff: Duration = .milliseconds(250),

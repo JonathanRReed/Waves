@@ -559,6 +559,8 @@ extension WorkspaceAudioControlBackend {
             snapshot.updatedAt = .now
             continue
           case .scheduleRecovery, .none, .attempt, .verifying, .recovered:
+            // Only while a rebuild is really coming; spent recovery stays spent.
+            guard recovery.hasPendingRecoveryWork else { break }
             snapshot.apps[index].routeHealthContext = .geometryRecoveryInProgress
             snapshot.apps[index].notes = "Audio geometry changed. Waves is rebuilding this route asynchronously."
             snapshot.updatedAt = .now
@@ -826,7 +828,7 @@ extension WorkspaceAudioControlBackend {
       } catch is IntentBackendStoppedError {
         return
       } catch is HandoffSilenceUnconfirmedError
-        where controllers[app.id]?.isActive == true && pendingRepair(for: app.id) != .stalled
+        where controllers[app.id]?.isActive == true && !isKnownUnableToRender(app.id)
       {
         // The incumbent still plays the app; whatever this rebuild was for
         // is retried on the next pass. It proved nothing about the route.

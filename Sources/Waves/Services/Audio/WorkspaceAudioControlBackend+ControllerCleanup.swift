@@ -86,6 +86,9 @@ extension WorkspaceAudioControlBackend {
       appLostItsRoute(runtimeID)
       return .released
     }
+    // A route that cannot carry the app is no audible fallback: release it
+    // as Waves would an app it must not render, and say so if that fails.
+    let kind = kind == .managedRelease && isKnownUnableToRender(runtimeID) ? .forcedRelease : kind
     let result = controller.dispose(kind)
     retainCleanupDegradations(result.degradations)
     if result.outcome == .stillRouting {
@@ -103,6 +106,17 @@ extension WorkspaceAudioControlBackend {
     park(controller)
     appLostItsRoute(runtimeID)
     return .released
+  }
+
+  /// Whether `runtimeID`'s installed route is known to be unable to carry
+  /// its app: it stopped rendering while the app plays, its callback
+  /// geometry is unusable, or its output device is gone. (A renderer that
+  /// is not running at all is caught by the controller itself.)
+  func isKnownUnableToRender(_ runtimeID: String) -> Bool {
+    if pendingRepair(for: runtimeID) == .stalled { return true }
+    if geometryRecoveryByRuntimeID[runtimeID]?.isUnusable == true { return true }
+    guard let deviceUID = routeOutputBindingByRuntimeID[runtimeID]?.deviceUID else { return false }
+    return deviceFormatObservation(uid: deviceUID) == .missing
   }
 
   /// The app has no live Waves route any more, by whatever path. Every
