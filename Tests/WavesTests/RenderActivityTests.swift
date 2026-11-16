@@ -90,14 +90,12 @@ import WavesAudioCore
   // sees this.
   fixture.store.setUISurfaceVisible(false)
   await boundedObservationWindow()
-  await fixture.backend.resetLevelCallCount()
-  let elapsed = await boundedObservationWindow()
+  let (hiddenCalls, elapsed) = await observeHeartbeat(on: fixture.backend)
 
   // Bounded on BOTH sides. An upper bound alone would be satisfied by the poll
   // stopping altogether — which is exactly the regression that made the
   // menu-bar glyph claim "idle" during playback — so the lower bound is the
   // half that actually protects the fix.
-  let hiddenCalls = await fixture.backend.levelCallCount()
   let allowed = Int(elapsed.rounded(.up)) + 1
   #expect(
     hiddenCalls > 0,
@@ -142,10 +140,8 @@ import WavesAudioCore
 
   fixture.store.endLiveLevels()
   await boundedObservationWindow()
-  await fixture.backend.resetLevelCallCount()
-  let elapsed = await boundedObservationWindow()
+  let (calls, elapsed) = await observeHeartbeat(on: fixture.backend)
 
-  let calls = await fixture.backend.levelCallCount()
   let allowed = Int(elapsed.rounded(.up)) + 1
   // Both bounds again: releasing the last meter surface drops to the heartbeat,
   // it does not stop the poll.
@@ -251,6 +247,31 @@ private func boundedObservationWindow(_ duration: Duration = .milliseconds(900))
   let elapsed = ContinuousClock.now - start
   return Double(elapsed.components.seconds)
     + Double(elapsed.components.attoseconds) / 1e18
+}
+
+/// Counts level passes from now for at least `minimum`, and, if none has
+/// happened by then, keeps watching until the first one or `patience` runs
+/// out. The count and the elapsed time are read together, so a caller can hold
+/// both bounds: more than zero, and no more than the heartbeat allows for the
+/// time that really passed. On a starved test host the main actor can go
+/// seconds without running the heartbeat; a fixed window then reads zero calls
+/// although the poll never stopped.
+private func observeHeartbeat(
+  on backend: RenderActivityBackend,
+  minimum: Duration = .milliseconds(900),
+  patience: Duration = .seconds(30)
+) async -> (calls: Int, elapsed: Double) {
+  await backend.resetLevelCallCount()
+  let start = ContinuousClock.now
+  while true {
+    let calls = await backend.levelCallCount()
+    let waited = ContinuousClock.now - start
+    if (waited >= minimum && calls > 0) || waited >= patience {
+      let seconds = Double(waited.components.seconds) + Double(waited.components.attoseconds) / 1e18
+      return (calls, seconds)
+    }
+    await Task.yield()
+  }
 }
 
 // MARK: - Fixture
