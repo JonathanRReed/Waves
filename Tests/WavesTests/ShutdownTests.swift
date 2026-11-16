@@ -68,6 +68,39 @@ import WavesAudioCore
 }
 
 @MainActor
+@Test func appStoreShutdownHandsAppsBackBeforeWaitingForAnyWork() async {
+  let fixture = await makeShutdownFixture(initialStartupState: .running)
+  fixture.preferencesStore.suspendNextSave()
+  fixture.store.preferences.showRecentApps.toggle()
+  fixture.store.persistPreferences()
+  await fixture.preferencesStore.waitUntilSaveIsSuspended()
+  fixture.store.setMuted(true, for: fixture.app)
+  await fixture.backend.waitUntilIntentIsSuspended()
+
+  let shutdown = Task { @MainActor in await fixture.store.shutdown() }
+
+  // An intent and a save are still in flight, and every app is already
+  // handed back: none of that waiting can delay it.
+  #expect(await waitUntil { fixture.recorder.events().contains("backend.handBack") })
+  #expect(!fixture.recorder.events().contains("backend.intent.complete"))
+  fixture.backend.resumeIntent()
+  fixture.preferencesStore.resumeSave()
+  let result = await shutdown.value
+
+  // What is persisted, and when, is unchanged: the final flush still lands
+  // before the backend's own shutdown.
+  #expect(result.completion == .clean)
+  let events = fixture.recorder.events()
+  let handBack = try? #require(events.firstIndex(of: "backend.handBack"))
+  let finalFlush = try? #require(events.lastIndex(where: { $0.hasSuffix(".flush") }))
+  let backendShutdown = try? #require(events.firstIndex(of: "backend.shutdown"))
+  if let handBack, let finalFlush, let backendShutdown {
+    #expect(handBack < finalFlush)
+    #expect(finalFlush < backendShutdown)
+  }
+}
+
+@MainActor
 @Test func appStoreShutdownSkipsBackendWhenPrivacyGatedAndIsIdempotent() async {
   let fixture = await makeShutdownFixture(initialStartupState: .awaitingPrivacy)
   #expect(fixture.store.preferences.hasCompletedPrivacySetup == false)
@@ -681,6 +714,10 @@ private actor ShutdownBackend: AudioControlBackend {
   func applyProfileWithResults(_ profile: Profile, generation: UInt64) async -> ProfileApplyResult {
     recorder.append("backend.profile")
     return ProfileApplyResult(rows: [], backendStatus: snapshot.backendStatus)
+  }
+
+  func handBackAppsForShutdown() async {
+    recorder.append("backend.handBack")
   }
 
   func shutdownWithResult() async -> BackendShutdownResult {

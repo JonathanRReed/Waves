@@ -127,7 +127,7 @@ func appIdentityCollisionRetainsTheManagedController(kind: String) async throws 
 
   let rejected = await fixture.backend.applyAppIntent(collisionIntent(generation: 1))
   #expect(rejected.outcome == .unsupported)
-  await fixture.backend.reattachRoutes(forLogicalIDs: [retained.logicalID])
+  await fixture.backend.reattachRoutes(forLogicalIDs: [retained.logicalID], origin: .userInitiated)
   #expect(fixture.events.values.isEmpty)
   #expect(fixture.controller.isActive)
 
@@ -255,8 +255,7 @@ private func collisionBackendFixture(
       },
       stopIOProc: {
         events.record("stop-original"); return 0
-      },
-      restoreTapMuting: { return 0 }
+      }
     )
   )
   controller.apply(volume: 0.27, volumeBoost: 1, muted: true)
@@ -280,7 +279,7 @@ private func collisionBackendFixture(
         return try PerAppTapController.testingController(
           appID: app.id, targetProcessObjectIDs: processObjectIDs,
           teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
-            makeOriginalAudioAudible: { 0 }, stopIOProc: { 0 }, restoreTapMuting: { 0 }
+            makeOriginalAudioAudible: { 0 }, stopIOProc: { 0 }
           )
         )
       }

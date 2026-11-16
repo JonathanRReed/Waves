@@ -370,11 +370,21 @@ extension WorkspaceAudioControlBackend {
     )
   }
 
+  func yieldRouteToRouterForTesting(logicalID: String) {
+    guard let index = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else { return }
+    suspendManagedRouteForConflict(
+      at: index,
+      conflict: VerifiedRouterConflict(routerName: "Router", kind: .publicTapMembership, detail: "Yielded.")
+    )
+  }
+
   func suspendManagedRouteForConflict(at index: Int, conflict: VerifiedRouterConflict) {
     let app = snapshot.apps[index]
-    if let controller = controllers.removeValue(forKey: app.id) {
-      retainCleanupDegradations(disposeController(controller))
-    }
+    // The router owns the app now; no automatic repair may reclaim it.
+    failOpenReleases.removeValue(forKey: app.logicalID)
+    // The router carries the app now; Waves must not render it as well.
+    releaseInstalledController(runtimeID: app.id, kind: .forcedRelease)
+    defer { publishRouteHolds() }
     controllerGenerationByRuntimeID.removeValue(forKey: app.id)
     staleRouteTicks.removeValue(forKey: app.logicalID)
     lastRenderTickByAppID.removeValue(forKey: app.logicalID)

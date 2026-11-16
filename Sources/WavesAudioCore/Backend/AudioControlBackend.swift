@@ -69,6 +69,11 @@ public protocol AudioControlBackend: AnyObject, Sendable {
   /// Stops the backend and reports cleanup confidence.
   func shutdownWithResult() async -> BackendShutdownResult
 
+  /// The first, urgent part of quitting: stop accepting route work and hand
+  /// every app back to its own output now, before slower shutdown work.
+  /// The snapshot stays readable until `shutdownWithResult`.
+  func handBackAppsForShutdown() async
+
   /// The Wave Link control bridge's last recorded state, or nil when this
   /// backend has no bridge. Cheap: reads a cached value, never talks to
   /// Wave Link.
@@ -147,6 +152,8 @@ public extension AudioControlBackend {
     await stop()
     return BackendShutdownResult(completion: .unverified)
   }
+
+  func handBackAppsForShutdown() async {}
 
 }
 

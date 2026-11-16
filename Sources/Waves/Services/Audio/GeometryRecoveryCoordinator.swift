@@ -47,6 +47,10 @@ struct GeometryRecoveryCoordinator: Sendable {
 
   var isVerifying: Bool { verifyingSince != nil }
 
+  /// The route's callbacks render silence: a mismatch is waiting for its
+  /// rebuild, or recovery gave up.
+  var isUnusable: Bool { isExhausted || hasPendingRecoveryWork }
+
   init(
     maximumAttempts: Int = 3,
     baseBackoff: Duration = .milliseconds(250),
@@ -87,6 +91,17 @@ struct GeometryRecoveryCoordinator: Sendable {
       return .verifying
     }
     return scheduleNextAttemptOrExhaust(at: now)
+  }
+
+  /// The rebuild was overtaken by newer work for the same route before it
+  /// could install. It is not a failed attempt; retry on the next tick.
+  mutating func abandonRecovery(at now: Duration) -> GeometryRecoveryAction {
+    guard recoveryInProgress else { return .none }
+    recoveryInProgress = false
+    attempts = max(0, attempts - 1)
+    scheduledRecoveryAt = now
+    health = .recovering
+    return .scheduleRecovery(at: now)
   }
 
   /// Advances the verification window. Returns `.recovered` once the rebuilt

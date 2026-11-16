@@ -19,56 +19,12 @@ import WavesAudioCore
   #expect(unverifiedConflict.routeDisposition == .none)
 }
 
-@Test func unmuteThenRendererStopFailureRestoresTapMuteAndKeepsRendererAlive() {
-  var events: [String] = []
-
-  let result = MutingTapTeardownPreparation.perform(
-    makeOriginalAudioAudible: {
-      events.append("unmute-tap")
-      return noErr
-    },
-    stopIOProc: {
-      events.append("stop-io")
-      return -1
-    },
-    restoreTapMuting: {
-      events.append("restore-tap-mute")
-      return noErr
-    },
-    deactivateRenderer: {
-      events.append("deactivate-renderer")
-    }
-  )
-
-  #expect(events == ["unmute-tap", "stop-io", "restore-tap-mute"])
-  #expect(result.tapMuteRestoreStatus == noErr)
-  #expect(!result.canDestroyNativeResources)
-  #expect(result.keepsRendererAndCallbackResourcesAlive)
-  #expect(result.audiblePath == .wavesRenderer)
-}
-
-@Test func failedMuteRollbackRetainsResourcesAndReportsCriticalDiagnostic() {
-  let result = MutingTapTeardownPreparation.perform(
-    makeOriginalAudioAudible: { noErr },
-    stopIOProc: { -1 },
-    restoreTapMuting: { -2 },
-    deactivateRenderer: {}
-  )
-
-  #expect(result.tapMuteRestoreStatus == -2)
-  #expect(result.keepsRendererAndCallbackResourcesAlive)
-  #expect(result.criticalDiagnostic?.contains("mute rollback failed") == true)
-  #expect(result.cleanupDegradation(appID: "app.test")?.stage == .controllerDisposal)
-  #expect(result.cleanupDegradation(appID: "app.test")?.detail?.contains("mute rollback failed") == true)
-}
-
-@Test func muteRollbackFailureDegradationReachesTheBackendCleanupReport() async throws {
+@Test func aRendererStopFailureAtShutdownReachesTheBackendCleanupReport() async throws {
   let controller = try PerAppTapController.testingController(
     appID: "app.test",
     teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
       makeOriginalAudioAudible: { noErr },
-      stopIOProc: { -1 },
-      restoreTapMuting: { -2 }
+      stopIOProc: { -2 }
     )
   )
   let backend = WorkspaceAudioControlBackend(
@@ -82,11 +38,9 @@ import WavesAudioCore
   #expect(cleanupReport.completion == .degraded)
   #expect(
     cleanupReport.degradations.contains {
-      $0.appID == "app.test"
-        && $0.stage == .controllerDisposal
-        && $0.nativeStatus == -2
-        && $0.detail?.contains("mute rollback failed") == true
+      $0.appID == "app.test" && $0.stage == .ioProcStop && $0.nativeStatus == -2
     })
+  #expect(cleanupReport.degradations.contains { $0.appID == "app.test" && $0.stage == .controllerDisposal })
 }
 
 @Test func geometryMismatchCoalescesIntoOneAsynchronousRecovery() {

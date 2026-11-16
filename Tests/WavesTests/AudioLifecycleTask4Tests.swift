@@ -151,20 +151,24 @@ private final class BackendOwnedLifecycleFixture: @unchecked Sendable {
   let backend: WorkspaceAudioControlBackend
   private let processIDs: TestingProcessObjectIDs
   private let teardown: TestingTeardownSwitch
+  private let budgetClock: TestingBudgetClock
 
   private init(
     backend: WorkspaceAudioControlBackend,
     processIDs: TestingProcessObjectIDs,
-    teardown: TestingTeardownSwitch
+    teardown: TestingTeardownSwitch,
+    budgetClock: TestingBudgetClock
   ) {
     self.backend = backend
     self.processIDs = processIDs
     self.teardown = teardown
+    self.budgetClock = budgetClock
   }
 
   static func make() throws -> BackendOwnedLifecycleFixture {
     let processIDs = TestingProcessObjectIDs()
     let teardown = TestingTeardownSwitch()
+    let budgetClock = TestingBudgetClock()
     let app = AudioApp(
       id: "lifecycle.app",
       logicalID: "lifecycle.app",
@@ -201,22 +205,27 @@ private final class BackendOwnedLifecycleFixture: @unchecked Sendable {
           targetProcessObjectIDs: processObjectIDs,
           teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
             makeOriginalAudioAudible: { noErr },
-            stopIOProc: { teardown.shouldFailStop ? -1 : noErr },
-            restoreTapMuting: { noErr }
+            stopIOProc: { teardown.shouldFailStop ? -1 : noErr }
           )
         )
       },
       processObjectIDResolver: { _ in processIDs.value },
-      processObjectLivenessProvider: { _ in true }
+      processObjectLivenessProvider: { _ in true },
+      // Each cycle asks for one automatic geometry rebuild. Space them a
+      // minute apart on the rebuild-budget clock so this test exercises
+      // ownership, not the rebuild ceiling.
+      routeBudgetClock: { budgetClock.now }
     )
     return BackendOwnedLifecycleFixture(
       backend: backend,
       processIDs: processIDs,
-      teardown: teardown
+      teardown: teardown,
+      budgetClock: budgetClock
     )
   }
 
   func runCycle(number: Int) async throws {
+    budgetClock.now = .seconds(number * 60)
     let baseID = AudioObjectID(number + 1)
     processIDs.value = [baseID]
     let reuse = await backend.applyAppIntent(testingIntent(volume: 0.2, generation: UInt64(number * 2 + 1)))
@@ -275,4 +284,8 @@ private final class TestingProcessObjectIDs: @unchecked Sendable {
 
 private final class TestingTeardownSwitch: @unchecked Sendable {
   var shouldFailStop = false
+}
+
+private final class TestingBudgetClock: @unchecked Sendable {
+  var now: Duration = .zero
 }

@@ -35,6 +35,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   var lifecycleEpoch: UInt64 = 0
   private var shutdownTask: Task<BackendShutdownResult, Never>?
   private var shutdownResult: BackendShutdownResult?
+  /// What `handBackEveryApp` did, once it has run: the controllers it handed
+  /// back, for teardown, and what failed.
+  private var shutdownHandBack: (handedBack: [PerAppTapController], degradations: [CleanupDegradation])?
   private var didFinishDeviceChangeContinuation = false
   var retainedCleanupDegradations: [CleanupDegradation] = []
   /// How many rows were discarded once the buffer filled, so a bounded report
@@ -51,6 +54,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   }
   var levelUpdateTask: Task<Void, Never>?
   var routeMaintenanceTick = 0
+  var routeRebuildBudget = RouteRebuildBudget()
+  /// The output device and format each live route was built for.
+  var routeOutputBindingByRuntimeID: [String: RouteOutputBinding] = [:]
+  var devicesSeenNotAlive: Set<String> = []
+  let deviceFormatListeners: DeviceFormatListenerLifecycle
+  var wakeObserver: WakeObserverToken?
+  let routeBudgetClock: @Sendable () -> Duration
   var geometryRecoveryByRuntimeID: [String: GeometryRecoveryCoordinator] = [:]
   var routerConflictObservationByRuntimeID: [String: RouterConflictObservationDebouncer] = [:]
   var routerObservationListenerFailureDetail: String?
@@ -64,10 +74,30 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   var leakedProbeTapIDs: [AudioObjectID] = []
   var probeTapDestroyAttempts: [AudioObjectID: Int] = [:]
   let maxProbeTapDestroyRetries = 5
-  /// Controllers whose native teardown failed, awaiting another attempt.
+  /// Parked controllers: silent for good, their native teardown not yet
+  /// finished. See `retryParkedControllers`.
   var orphanedControllers: [PerAppTapController] = []
-  var orphanDisposeAttempts: [ObjectIdentifier: Int] = [:]
-  static let maxOrphanDisposeRetries = 5
+  /// Runtime IDs of apps a parked tap holds silent: they have no live route,
+  /// and the tap's mute would not release on the last pass.
+  var appsHeldSilentByParkedTaps: Set<String> = []
+  /// Routes released fail open after an automatic repair failed or was
+  /// refused, by logical ID. See `FailOpenRelease`.
+  var failOpenReleases: [String: FailOpenRelease] = [:]
+  /// Installed routes a managed release could not hand back, by runtime ID.
+  /// Each still plays its app at the user's level; see `UnreleasedRoute`.
+  var unreleasedRoutes: [String: UnreleasedRoute] = [:]
+  /// Why a live route still needs rebuilding, by runtime ID, kept until a
+  /// rebuild for it succeeds or the route changes hands. See
+  /// `PendingRouteRepair`.
+  var pendingRouteRepairs: [String: PendingRouteRepair] = [:]
+  /// Logical IDs the user excluded, by their newest intent. Waves's capture
+  /// authority, kept apart from a row's routing state, error and notes,
+  /// which repairs and holds rewrite: no route is built for an app in it
+  /// until an intent that does not exclude it (`applyRoute`).
+  var excludedLogicalIDs: Set<String> = []
+  /// Controllers whose release failed at quit, kept playing their apps
+  /// until Waves exits; macOS removes their taps and aggregates with it.
+  var controllersPlayingUntilExit: [PerAppTapController] = []
   let routeMaintenanceTickInterval = 20
   let staleRouteThresholdTicks = 24
   var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
@@ -104,6 +134,19 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   typealias RuntimeIdentityProvider = @Sendable (pid_t) -> AppRuntimeIdentity?
   typealias ProcessObjectTranslator = @Sendable (pid_t) throws -> AudioObjectID?
   typealias CaptureAuthorizationProbe = @Sendable () -> CaptureAuthorizationResult
+  /// Waits between controller-creation retries. Tests replace it with a gate so
+  /// newer work can be interleaved deterministically while a repair is paused.
+  typealias ControllerRetryPause = @Sendable (_ nanoseconds: UInt64) async throws -> Void
+  /// One poll interval while a handoff waits for the outgoing renderer's mute
+  /// fade. Tests replace it with one simulated render callback.
+  typealias HandoffSilencePause = @Sendable () -> Void
+  /// About 40 ms at the default 1 ms pause: one or two IO cycles at any
+  /// common buffer size. See `PerAppTapController.silenceForHandoff`.
+  static let handoffSilenceMaxPolls = 40
+  /// The one deadline shutdown gives every controller's callback queue
+  /// while it hands the apps back, well inside the app's 250 ms
+  /// termination timeout. See `performCheckedShutdown`.
+  static let shutdownHandBackWaitLimit: DispatchTimeInterval = .milliseconds(60)
   private let intentRouteApplyOverride: IntentRouteApplyOverride?
   private let shutdownCleanupOverride: ShutdownCleanupOverride?
   let routeMaintenanceOverride: RouteMaintenanceOverride?
@@ -132,6 +175,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   let captureAuthorizationProbe: CaptureAuthorizationProbe?
   let applicationCaptureProvider: (@Sendable () async -> AppRuntimeDiscovery.Capture)?
   let processLifetimeLiveness: @Sendable (AppProcessLifetimeIdentity) -> Bool
+  let controllerRetryPause: ControllerRetryPause
+  let handoffSilencePause: HandoffSilencePause
+  let outputDeviceUIDProvider: (@Sendable (AudioApp) -> String?)?
+  /// Output devices by object ID, replacing the Core Audio device list in tests.
+  let deviceInventoryProvider: (@Sendable () -> [AudioObjectID: String])?
+  let deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)?
+  /// Which processes are producing output, replacing the Core Audio scan in
+  /// tests of the discovery merge.
+  let audibleProcessIndexProvider: (@Sendable () -> AudibleProcessIndex)?
 
   nonisolated let deviceChangeEvents: AsyncStream<Void>
   nonisolated let deviceChangeContinuation: AsyncStream<Void>.Continuation
@@ -163,6 +215,16 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.captureAuthorizationProbe = nil
     self.applicationCaptureProvider = nil
     self.processLifetimeLiveness = RuntimeProcessIdentity.mayStillBeRunning
+    self.routeBudgetClock = Self.monotonicRouteTime
+    self.controllerRetryPause = { try await Task.sleep(nanoseconds: $0) }
+    self.handoffSilencePause = { usleep(1_000) }
+    self.outputDeviceUIDProvider = nil
+    self.deviceInventoryProvider = nil
+    self.deviceFormatObservationProvider = nil
+    self.audibleProcessIndexProvider = nil
+    self.deviceFormatListeners = DeviceFormatListenerLifecycle(
+      nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.device-format"))
+    )
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
     )
@@ -190,7 +252,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     processObjectTranslator: ProcessObjectTranslator? = nil,
     captureAuthorizationProbe: CaptureAuthorizationProbe? = nil,
     applicationCaptureProvider: (@Sendable () async -> AppRuntimeDiscovery.Capture)? = nil,
-    processLifetimeLiveness: @escaping @Sendable (AppProcessLifetimeIdentity) -> Bool = RuntimeProcessIdentity.mayStillBeRunning
+    processLifetimeLiveness: @escaping @Sendable (AppProcessLifetimeIdentity) -> Bool = RuntimeProcessIdentity.mayStillBeRunning,
+    routeBudgetClock: (@Sendable () -> Duration)? = nil,
+    controllerRetryPause: ControllerRetryPause? = nil,
+    handoffSilencePause: HandoffSilencePause? = nil,
+    outputDeviceUIDProvider: (@Sendable (AudioApp) -> String?)? = nil,
+    deviceInventoryProvider: (@Sendable () -> [AudioObjectID: String])? = nil,
+    deviceFormatObservationProvider: (@Sendable (String) -> DeviceFormatObservation)? = nil,
+    audibleProcessIndexProvider: (@Sendable () -> AudibleProcessIndex)? = nil,
+    deviceFormatListenerNativeCalls: DeviceFormatListenerNativeCalls? = nil
   ) {
     let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     self.deviceChangeEvents = stream
@@ -215,6 +285,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     self.captureAuthorizationProbe = captureAuthorizationProbe
     self.applicationCaptureProvider = applicationCaptureProvider
     self.processLifetimeLiveness = processLifetimeLiveness
+    self.routeBudgetClock = routeBudgetClock ?? Self.monotonicRouteTime
+    self.controllerRetryPause = controllerRetryPause ?? { try await Task.sleep(nanoseconds: $0) }
+    self.handoffSilencePause = handoffSilencePause ?? { usleep(1_000) }
+    self.outputDeviceUIDProvider = outputDeviceUIDProvider
+    self.deviceInventoryProvider = deviceInventoryProvider
+    self.deviceFormatObservationProvider = deviceFormatObservationProvider
+    self.audibleProcessIndexProvider = audibleProcessIndexProvider
+    self.deviceFormatListeners = DeviceFormatListenerLifecycle(
+      nativeCalls: deviceFormatListenerNativeCalls
+        ?? .live(on: DispatchQueue(label: "com.waves.backend.device-format"))
+    )
     self.routerObservationListeners = RouterObservationListenerLifecycle(
       nativeCalls: routerObservationNativeCalls
         ?? .live(on: DispatchQueue(label: "com.waves.backend.router-observation"))
@@ -233,7 +314,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   func start() async throws {
     try ensureAcceptingOperations()
     guard !isStarted else { return }
-    snapshot = await buildSnapshot(merging: snapshot)
+    snapshot = await buildSnapshot()
     try ensureAcceptingOperations()
     defaultOutputDeviceChange.recordInitialUID(try? currentDefaultOutputDeviceUID())
     isStarted = true
@@ -257,8 +338,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     retainCleanupDegradations(addRouterObservationListeners())
   }
 
-  func reattachRoutesForTesting(_ logicalIDs: Set<String>) async {
-    await reattachRoutes(forLogicalIDs: logicalIDs)
+  func reattachRoutesForTesting(
+    _ logicalIDs: Set<String>,
+    origin: RouteWorkOrigin = .userInitiated
+  ) async {
+    await reattachRoutes(forLogicalIDs: logicalIDs, origin: origin)
   }
 
   func flagGeometryMismatchForTesting(runtimeID: String) {
@@ -275,10 +359,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     // Publish the terminal lifecycle state before creating or awaiting any task so
     // actor reentrancy cannot admit a fresh route/device/recovery operation.
-    isShuttingDown = true
-    isStarted = false
-    lifecycleEpoch = lifecycleEpoch == .max ? 0 : lifecycleEpoch + 1
-    stagedIntentByLogicalID.removeAll()
+    enterShutdownState()
 
     let task = Task { [weak self] in
       guard let self else {
@@ -297,9 +378,78 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     return await task.value
   }
 
+  func handBackAppsForShutdown() async {
+    enterShutdownState()
+    _ = handBackEveryApp()
+  }
+
+  private func enterShutdownState() {
+    guard !isShuttingDown else { return }
+    isShuttingDown = true
+    isStarted = false
+    lifecycleEpoch = lifecycleEpoch == .max ? 0 : lifecycleEpoch + 1
+    stagedIntentByLogicalID.removeAll()
+  }
+
+  /// First, before anything that can be slow: hand every app back to its
+  /// own output. Each installed route is a managed release (silence, then
+  /// release the tap's mute); each parked one, already silent for good,
+  /// only releases its mute. All of it shares one deadline for waits on
+  /// the controllers' callback queues, so a blocked queue cannot use up
+  /// the app's termination timeout. If Waves is killed after this, each
+  /// tap left is removed by macOS with the process. Runs once.
+  private func handBackEveryApp() -> (handedBack: [PerAppTapController], degradations: [CleanupDegradation]) {
+    if let shutdownHandBack { return shutdownHandBack }
+    var degradations: [CleanupDegradation] = []
+    let handBackDeadline = DispatchTime.now() + Self.shutdownHandBackWaitLimit
+    let installedControllers = controllers.sorted { $0.key < $1.key }.map(\.value)
+    controllers.removeAll()
+    unreleasedRoutes.removeAll()
+    pendingRouteRepairs.removeAll()
+    var handedBack: [PerAppTapController] = []
+    for controller in installedControllers {
+      let hold = controller.releaseHold(.managedRelease, until: handBackDeadline)
+      degradations += hold.degradations
+      guard hold.outcome == .released else {
+        // Still muting the app, and still playing it at the user's level,
+        // until Waves exits.
+        controllersPlayingUntilExit.append(controller)
+        degradations.append(
+          CleanupDegradation(
+            appID: controller.appID,
+            stage: .controllerDisposal,
+            detail:
+              "Waves couldn't hand \(controller.appName) back before quitting, so it played through Waves until Waves exited. macOS removes the tap with Waves."
+          ))
+        continue
+      }
+      handedBack.append(controller)
+    }
+    for controller in orphanedControllers {
+      degradations += controller.releaseTapMuteIfHeld(until: handBackDeadline)
+    }
+    shutdownHandBack = (handedBack, degradations)
+    return (handedBack, degradations)
+  }
+
   private func performCheckedShutdown() async -> BackendShutdownResult {
     var degradations = retainedCleanupDegradations
     retainedCleanupDegradations.removeAll()
+
+    // Everything below goes through `record` rather than appending directly, so
+    // the failures that happen *during shutdown* are logged like every in-session
+    // failure is. They previously bypassed the only logging site, which is why a
+    // degraded quit left nothing behind explaining which stage had failed.
+    func record(_ new: [CleanupDegradation]) {
+      guard !new.isEmpty else { return }
+      logCleanupDegradations(new)
+      degradations.append(contentsOf: new)
+    }
+
+    // Usually already done by `handBackAppsForShutdown`.
+    let handBack = handBackEveryApp()
+    record(handBack.degradations)
+    let handedBack = handBack.handedBack
 
     // Close ingress before awaiting any work. Late native callbacks retain
     // their mailbox safely but cannot queue more work after shutdown begins.
@@ -319,31 +469,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       await levelTask.value
     }
 
-    // Everything below goes through `record` rather than appending directly, so
-    // the failures that happen *during shutdown* are logged like every in-session
-    // failure is. They previously bypassed the only logging site, which is why a
-    // degraded quit left nothing behind explaining which stage had failed.
-    func record(_ new: [CleanupDegradation]) {
-      guard !new.isEmpty else { return }
-      logCleanupDegradations(new)
-      degradations.append(contentsOf: new)
-    }
-
     record(removeDeviceChangeListener())
     record(removeRouterObservationListeners())
     if let deviceTask { await deviceTask.value }
     if let routerTask { await routerTask.value }
     defaultOutputDeviceChange.recordInitialUID(nil)
 
-    let installedControllers = controllers.sorted { $0.key < $1.key }
-    controllers.removeAll()
-    for (_, controller) in installedControllers {
-      let controllerDegradations = controller.dispose()
+    // The slow part: stop and destroy what was handed back.
+    for controller in handedBack {
+      let controllerDegradations = controller.finishTeardown()
       record(controllerDegradations)
-      if !controllerDegradations.isEmpty {
+      if !controller.isTornDown {
         // A failed stop or IO-proc destroy can still be followed by a native
         // callback. Keep its Swift callback state alive until process exit.
         orphanedControllers.append(controller)
+      }
+      if !controllerDegradations.isEmpty {
         record([
           CleanupDegradation(
             appID: controller.appID,
@@ -358,20 +499,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       record(shutdownCleanupOverride())
     }
 
-    // One last attempt at anything a previous teardown could not release, so a
-    // stranded tap does not outlive the process if it can be avoided.
-    let parked = orphanedControllers
-    orphanedControllers.removeAll(keepingCapacity: true)
-    for controller in parked {
-      let controllerDegradations = controller.retryDispose()
-      record(controllerDegradations)
-      if !controllerDegradations.isEmpty,
-        !orphanedControllers.contains(where: { $0 === controller })
-      {
-        orphanedControllers.append(controller)
-      }
+    // One last attempt at anything a previous teardown could not finish, so
+    // a stranded tap does not outlive the process if it can be avoided.
+    for controller in orphanedControllers {
+      record(controller.retryDispose())
     }
-    orphanDisposeAttempts.removeAll()
+    orphanedControllers.removeAll(where: \.isTornDown)
+    appsHeldSilentByParkedTaps.removeAll()
+    failOpenReleases.removeAll()
 
     // Never let the buffer's cap hide the fact that it capped: a truncated
     // report that looks complete is worse than one that admits the gap.
@@ -393,6 +528,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     staleRouteTicks.removeAll()
     lastRenderTickByAppID.removeAll()
     geometryRecoveryByRuntimeID.removeAll()
+    routeOutputBindingByRuntimeID.removeAll()
+    devicesSeenNotAlive.removeAll()
     routerConflictObservationByRuntimeID.removeAll()
     routeMaintenanceTick = 0
     routerObservationListenerFailureDetail = nil
@@ -426,7 +563,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   func refresh() async throws -> AudioSessionSnapshot {
     try ensureAcceptingOperations()
-    let rebuilt = await buildSnapshot(merging: snapshot)
+    let rebuilt = await buildSnapshot()
     try ensureAcceptingOperations()
     snapshot = rebuilt
     return snapshot
@@ -451,6 +588,17 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }
     guard let initialIndex = snapshot.apps.firstIndex(preferringLogicalID: intent.appID) else {
+      if intent.isExcluded, intent.generation >= latestAcceptedGenerationByLogicalID[intent.appID] ?? 0 {
+        // No row, but older intent work for the app may still be in flight,
+        // and a route may still be installed for it. The opt-out supersedes
+        // the one, and reaches the other by what it was built for.
+        latestAcceptedGenerationByLogicalID[intent.appID] = intent.generation
+        stagedIntentByLogicalID.removeValue(forKey: intent.appID)
+        excludedLogicalIDs.insert(intent.appID)
+        for runtimeID in controllers.filter({ $0.value.targetProcessFamily.logicalID == intent.appID }).map(\.key) {
+          releaseRoute(runtimeID: runtimeID, kind: .forcedRelease)
+        }
+      }
       return AppIntentApplyResult(
         appID: intent.appID,
         generation: intent.generation,
@@ -481,6 +629,14 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
     latestAcceptedGenerationByLogicalID[logicalID] = intent.generation
     stagedIntentByLogicalID[logicalID] = intent
+    if intent.isExcluded {
+      excludedLogicalIDs.insert(logicalID)
+    } else {
+      excludedLogicalIDs.remove(logicalID)
+    }
+    // The user's newest intent replaces whatever an automatic repair left.
+    failOpenReleases.removeValue(forKey: logicalID)
+    resetReleasePacing(runtimeID: currentApp.id)
     legacyGeneration = max(legacyGeneration, intent.generation)
 
     guard let acceptedIndex = snapshot.apps.firstIndex(where: { $0.logicalID == logicalID }) else {
@@ -620,6 +776,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
           forceRebuild: forceRebuild,
           equalizerSettings: intent.equalizerSettings,
           generationContext: generationContext,
+          origin: .userInitiated,
           routerActivity: routerActivity
         )
       }
@@ -945,6 +1102,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     // An explicit repair is the one place a fresh authorization verdict is
     // worth a system-wide probe tap; the periodic refresh trusts the cache.
     refreshCaptureAuthorization(force: true)
+    resetReleasePacing()
     let managedLogicalIDs = Set(
       snapshot.apps
         .filter {
@@ -952,21 +1110,37 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
             $0,
             hasActiveController: controllers[$0.id]?.isActive == true,
             reclaimMixedOutput: !waveLinkCompatibilityEnabled
-          )
+          ) || failOpenReleases[$0.logicalID] != nil
         }
         .map(\.logicalID)
     )
 
-    retainCleanupDegradations(disposeControllers(keeping: []))
+    disposeControllers(keeping: [])
+    // A route still installed now could not be handed back, and may carry
+    // a pending repair or a spent recovery: it is replaced, never reused.
+    let retainedRuntimeIDs = Set(controllers.keys)
+    // Each route's authorization is captured now, before the snapshot rebuild
+    // suspends: an exclusion or a yield that lands meanwhile must stop that
+    // route's reattachment.
+    let targets = repairContexts(forLogicalIDs: managedLogicalIDs)
+    // An explicit repair is the user's say-so to try again: it must not
+    // inherit a cooldown that automatic work ran into, nor an automatic
+    // retry allowance that is spent.
+    routeRebuildBudget.resetForUserRecovery()
+    for logicalID in failOpenReleases.keys {
+      failOpenReleases[logicalID]?.attemptsRemaining = FailOpenRelease.maximumAttempts
+    }
     // buildSnapshot (and the subsequent reattachRoutes) is the single source of
     // route-health truth here: it recomputes backendStatus from scratch, so any
     // isRouteRecoveryHealthy/lastError assignment made before it would be
     // immediately overwritten and has no observable effect.
-    snapshot = await buildSnapshot(merging: snapshot)
+    snapshot = await buildSnapshot()
     try ensureAcceptingOperations()
 
-    if !managedLogicalIDs.isEmpty {
-      await reattachRoutes(forLogicalIDs: managedLogicalIDs)
+    if !targets.isEmpty {
+      await reattachRoutes(targets, origin: .userInitiated, forceRebuildRuntimeIDs: retainedRuntimeIDs)
+      // A retained route that could not be replaced keeps saying why.
+      publishRouteHolds()
     }
 
     return snapshot
@@ -989,30 +1163,42 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
   }
 
+  /// Moves every route that follows the system default onto the new default.
+  ///
+  /// Make before break: no controller is disposed up front. Disposing first
+  /// released each app's tap before its replacement existed, so every managed
+  /// app played at its own full level until the new route took over, then
+  /// dropped back. Each route is now rebuilt in place by `applyRoute`, which
+  /// silences the outgoing renderer, builds and starts the replacement, and
+  /// only then disposes the old controller. See `reattachRoutes(_:mode:)` for
+  /// what happens when the replacement cannot be built.
+  ///
+  /// Only routes that follow the system default were built on the device
+  /// that just changed. A route pinned to its own output device keeps its
+  /// live tap: rebuilding it would interrupt audio on a device that did not
+  /// move, and a pinned device that disappeared is handled by the inventory
+  /// reconciliation instead.
+  ///
+  /// Each route's authorization is captured before the snapshot rebuild,
+  /// the pass's first suspension. An exclusion, a call mute, an output choice
+  /// or a yield that lands while discovery runs then stops that route's move;
+  /// capturing it afterwards would have authorized the move from the newer
+  /// state.
   func autoRestoreDevice() async throws -> AudioSessionSnapshot {
     try ensureAcceptingOperations()
-    // Only routes that follow the system default were built on the device
-    // that just changed. A route pinned to its own output device keeps its
-    // live tap: rebuilding it would interrupt audio on a device that did not
-    // move, and a pinned device that disappeared is handled by the inventory
-    // reconciliation instead.
-    let managedLogicalIDs = Set(
-      snapshot.apps
-        .filter {
-          $0.targetDeviceUID == nil
-            && ($0.routingState == .managed || controllers[$0.id]?.isActive == true)
-        }
-        .map(\.logicalID)
-    )
-    let pinnedRuntimeIDs = Set(snapshot.apps.filter { $0.targetDeviceUID != nil }.map(\.id))
+    let targets = snapshot.apps
+      .filter {
+        $0.targetDeviceUID == nil
+          && ($0.routingState == .managed || controllers[$0.id]?.isActive == true)
+      }
+      .map(makeRepairContext)
 
-    retainCleanupDegradations(disposeControllers(keeping: pinnedRuntimeIDs))
-    snapshot = await buildSnapshot(merging: snapshot)
+    snapshot = await buildSnapshot()
     try ensureAcceptingOperations()
     snapshot.updatedAt = .now
 
-    if !managedLogicalIDs.isEmpty {
-      await reattachRoutes(forLogicalIDs: managedLogicalIDs)
+    if !targets.isEmpty {
+      await reattachRoutes(targets, origin: .automatic, mode: .rehome)
     }
 
     return snapshot
@@ -1027,6 +1213,38 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let logicalID: String
     let generation: UInt64
     let lifecycleEpoch: UInt64
+  }
+
+  /// Everything that can make background route work (maintenance, device
+  /// changes, reattachment) stale while it is suspended. Background work has
+  /// no intent generation of its own, so it records the newest accepted one,
+  /// the controller it set out to replace, the output it was aimed at, and
+  /// and whether another router holds the app. Any change to these means
+  /// newer intent (an edit, an exclusion, an output choice), a yield to
+  /// another router, or newer route work landed first, and the repair must
+  /// not start or install. A batch captures every route's context when it
+  /// selects the route, before its first suspension, not when the route's
+  /// turn comes.
+  ///
+  /// The app's process lifetime is part of it. Discovery gives a relaunched
+  /// app the same runtime and logical IDs, so without it a repair recorded
+  /// for the old process would pass for the new one and capture it.
+  ///
+  /// The row's routing state itself is not compared: a snapshot rebuild
+  /// recomputes it from controller and audibility state (a released row
+  /// becomes monitor-only, an audible one live), so it changes without any
+  /// newer intent. What a yield or an identity collision changes is
+  /// recorded instead.
+  struct RouteRepairContext: Sendable {
+    let logicalID: String
+    let runtimeID: String
+    let acceptedGeneration: UInt64?
+    let lifecycleEpoch: UInt64
+    let incumbent: ObjectIdentifier?
+    let targetDeviceUID: String?
+    let routerHold: RouteHealthContext?
+    let hasAmbiguousIdentity: Bool
+    let processLifetime: AppProcessLifetimeIdentity?
   }
 
   struct IntentSupersededError: Error {}
@@ -1048,6 +1266,63 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     guard isGenerationCurrent(context) else { throw IntentSupersededError() }
   }
 
+  func makeRepairContext(for app: AudioApp) -> RouteRepairContext {
+    RouteRepairContext(
+      logicalID: app.logicalID,
+      runtimeID: app.id,
+      acceptedGeneration: latestAcceptedGenerationByLogicalID[app.logicalID],
+      lifecycleEpoch: lifecycleEpoch,
+      incumbent: controllers[app.id].map(ObjectIdentifier.init),
+      targetDeviceUID: app.targetDeviceUID,
+      routerHold: Self.routerHold(of: app),
+      hasAmbiguousIdentity: app.hasAmbiguousIdentity,
+      processLifetime: app.runtimeIdentity?.lifetime
+    )
+  }
+
+  func repairContexts(forLogicalIDs logicalIDs: Set<String>) -> [RouteRepairContext] {
+    snapshot.apps.filter { logicalIDs.contains($0.logicalID) }.map(makeRepairContext)
+  }
+
+  /// The router that holds `app`, if any: the part of its health context a
+  /// yield (or a router's release) changes.
+  static func routerHold(of app: AudioApp) -> RouteHealthContext? {
+    switch app.routeHealthContext {
+    case .verifiedRouterOwnership, .unattributableRouterFallback, .routerMixedOutput, .waveLinkBridge:
+      app.routeHealthContext
+    case nil, .geometryRecoveryInProgress, .geometryRecoveryExhausted:
+      nil
+    }
+  }
+
+  func isRepairCurrent(_ context: RouteRepairContext) -> Bool {
+    guard context.lifecycleEpoch == lifecycleEpoch,
+      latestAcceptedGenerationByLogicalID[context.logicalID] == context.acceptedGeneration,
+      controllers[context.runtimeID].map(ObjectIdentifier.init) == context.incumbent,
+      let app = snapshot.apps.first(where: { $0.logicalID == context.logicalID }),
+      app.id == context.runtimeID,
+      app.targetDeviceUID == context.targetDeviceUID,
+      Self.routerHold(of: app) == context.routerHold,
+      app.hasAmbiguousIdentity == context.hasAmbiguousIdentity,
+      app.runtimeIdentity?.lifetime == context.processLifetime
+    else { return false }
+    return true
+  }
+
+  /// One check for whichever context the route work carries.
+  func ensureRouteWorkCurrent(
+    _ generationContext: IntentGenerationContext?,
+    _ repairContext: RouteRepairContext?
+  ) throws {
+    if let generationContext {
+      try ensureGenerationCurrent(generationContext)
+    }
+    if let repairContext {
+      guard isStarted, !isShuttingDown else { throw IntentBackendStoppedError() }
+      guard isRepairCurrent(repairContext) else { throw IntentSupersededError() }
+    }
+  }
+
   func supersededResult(
     for intent: AppRouteIntent,
     logicalID: String
@@ -1064,9 +1339,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
   private func excludeApp(at index: Int) {
     let runtimeID = snapshot.apps[index].id
-    if let controller = controllers.removeValue(forKey: runtimeID) {
-      retainCleanupDegradations(disposeController(controller))
-    }
+    // Exclusion is the user's capture opt-out: Waves must not render the
+    // app by any controller, so this is a forced release.
+    releaseInstalledController(runtimeID: runtimeID, kind: .forcedRelease)
     controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
     staleRouteTicks.removeValue(forKey: runtimeID)
     lastRenderTickByAppID.removeValue(forKey: runtimeID)
@@ -1077,6 +1352,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].hasNoAudioCapability = false
     snapshot.apps[index].notes = nil
     snapshot.apps[index].routeHealthContext = nil
+    // A tap that would not let go holds the app silent: the row says so now,
+    // not on the next maintenance pass.
+    publishRouteHolds()
   }
 
   private func disposeControllerInstalledByGeneration(
@@ -1084,10 +1362,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     generation: UInt64
   ) {
     guard controllerGenerationByRuntimeID[runtimeID] == generation else { return }
+    guard releaseInstalledController(runtimeID: runtimeID, kind: .managedRelease) == .released else { return }
     controllerGenerationByRuntimeID.removeValue(forKey: runtimeID)
-    if let controller = controllers.removeValue(forKey: runtimeID) {
-      retainCleanupDegradations(disposeController(controller))
-    }
     staleRouteTicks.removeValue(forKey: runtimeID)
     lastRenderTickByAppID.removeValue(forKey: runtimeID)
   }
@@ -1173,6 +1449,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     forceRebuild: Bool = false,
     equalizerSettings: EqualizerSettings? = nil,
     generationContext: IntentGenerationContext? = nil,
+    repairContext: RouteRepairContext? = nil,
+    preservesGeometryRecovery: Bool = false,
+    origin: RouteWorkOrigin,
     routerActivity: VerifiedRouterActivitySnapshot? = nil
   ) async throws {
     try ensureAcceptingOperations()
@@ -1182,10 +1461,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
       throw BackendError.unsupportedOperation(conflict.detail)
     }
+    // The user's exclusion outranks every automatic path that reaches here.
+    guard !excludedLogicalIDs.contains(app.logicalID) else { throw IntentSupersededError() }
 
-    if let generationContext {
-      try ensureGenerationCurrent(generationContext)
-    }
+    try ensureRouteWorkCurrent(generationContext, repairContext)
     let processTarget = try resolveProcessTarget(for: app)
     let processObjectIDs = processTarget.processObjectIDs
     let targetProcessFamily = TargetProcessFamily(
@@ -1199,67 +1478,163 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       ?? EqualizerSettings()
 
     // Reuse the live tap for parameter-only changes as long as it already covers
-    // every process we'd tap now. A target-device change explicitly forces a new
-    // controller, while volume/mute/boost/EQ changes stay on the current route.
+    // every process we'd tap now and renders where the route should play. A
+    // target-device change explicitly forces a new controller, while
+    // volume/mute/boost/EQ changes stay on the current route. A route left on
+    // an old default (its move was overtaken by this very edit) is moved now.
     if !forceRebuild,
       let controller = controllers[app.id],
       controller.isActive,
-      controller.covers(targetProcessFamily)
+      controller.covers(targetProcessFamily),
+      isRouteOnItsExpectedDevice(app)
     {
-      if let generationContext {
-        try ensureGenerationCurrent(generationContext)
-      }
+      try ensureRouteWorkCurrent(generationContext, repairContext)
       controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
       controller.setEqualizer(stagedEqualizer)
       controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
       controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
+      // Route work that succeeded on it commits it as the app's route again.
+      unreleasedRoutes.removeValue(forKey: app.id)
       return
     }
 
-    if let generationContext {
-      try ensureGenerationCurrent(generationContext)
-    }
-    let controller = try await createControllerWithRetry(
+    try ensureRouteWorkCurrent(generationContext, repairContext)
+    // Make before break. The replacement is built and started silent while
+    // the incumbent keeps playing; both taps keep the app's own output muted,
+    // so the user hears the incumbent alone. Nothing touches the incumbent
+    // until the replacement is authorized to take over, so work that fails,
+    // or is overtaken while suspended in creation, leaves it exactly as it was.
+    let (controller, outputBinding) = try await createControllerWithRetry(
       for: app,
       processTarget: processTarget,
       equalizerSettings: stagedEqualizer,
-      generationContext: generationContext
+      generationContext: generationContext,
+      repairContext: repairContext,
+      origin: origin
     )
 
     do {
       try ensureAcceptingOperations()
-      if let generationContext {
-        try ensureGenerationCurrent(generationContext)
-        if let installedGeneration = controllerGenerationByRuntimeID[app.id],
-          installedGeneration > generationContext.generation
-        {
-          throw IntentSupersededError()
-        }
-        // Keep this check immediately adjacent to installation. If newer work ran
-        // while controller creation was suspended, the new controller is disposed
-        // below and the currently-installed controller remains untouched.
-        try ensureGenerationCurrent(generationContext)
+      // Background work was suspended in creation retries; newer intent or
+      // newer route work for this app wins and this controller is discarded.
+      try ensureRouteWorkCurrent(generationContext, repairContext)
+      guard !excludedLogicalIDs.contains(app.logicalID) else { throw IntentSupersededError() }
+      if let generationContext,
+        let installedGeneration = controllerGenerationByRuntimeID[app.id],
+        installedGeneration > generationContext.generation
+      {
+        throw IntentSupersededError()
       }
-
-      let replacedController = controllers.updateValue(controller, forKey: app.id)
-      if let generationContext {
-        controllerGenerationByRuntimeID[app.id] = generationContext.generation
-      } else {
-        controllerGenerationByRuntimeID.removeValue(forKey: app.id)
-      }
-      controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
-      controller.setEqualizer(stagedEqualizer)
-      controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
-      controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
-      if let replacedController {
-        retainCleanupDegradations(disposeController(replacedController))
-      }
-
-      // A freshly-created process tap proves capture is currently authorized.
-      captureAuthorization = .authorized
     } catch {
-      retainCleanupDegradations(disposeController(controller))
+      discardUnusedReplacement(controller, runtimeID: app.id)
       throw error
+    }
+
+    // The handoff. Nothing below suspends, so no other route work can run
+    // between silencing the incumbent and un-muting its replacement. The
+    // replacement is un-muted only once every other renderer of the app is
+    // confirmed silent; otherwise it is discarded and the incumbent stays.
+    let incumbent = controllers[app.id]
+    var silence = PerAppTapController.HandoffSilence.faded
+    if confirmParkedRenderersSilent(forRuntimeID: app.id) {
+      if let incumbent, incumbent.isActive {
+        silence = incumbent.silenceForHandoff(maxPolls: Self.handoffSilenceMaxPolls, pause: handoffSilencePause)
+      }
+    } else {
+      silence = .unconfirmed
+    }
+    guard silence != .unconfirmed else {
+      discardUnusedReplacement(controller, runtimeID: app.id)
+      // Only background work is retried; a user's change is not.
+      throw HandoffSilenceUnconfirmedError(appName: app.displayName, retriesAutomatically: generationContext == nil)
+    }
+    controllers[app.id] = controller
+    // A fresh controller starts with a fresh geometry-recovery budget. Only
+    // the rebuild the coordinator itself asked for carries it over, so that
+    // rebuild's verification window and attempt count still apply.
+    if !preservesGeometryRecovery {
+      geometryRecoveryByRuntimeID.removeValue(forKey: app.id)
+    }
+    routeOutputBindingByRuntimeID[app.id] = outputBinding
+    if let generationContext {
+      controllerGenerationByRuntimeID[app.id] = generationContext.generation
+    } else {
+      controllerGenerationByRuntimeID.removeValue(forKey: app.id)
+    }
+    if let incumbent {
+      retireController(incumbent)
+    }
+    unreleasedRoutes.removeValue(forKey: app.id)
+    // The rebuild a pending repair asked for has happened.
+    pendingRouteRepairs.removeValue(forKey: app.id)
+    failOpenReleases.removeValue(forKey: app.logicalID)
+    // Only now, with every other renderer of the app cut to silence, does the
+    // replacement fade in to the app's level.
+    controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
+    controller.setEqualizer(stagedEqualizer)
+    controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
+    controller.setAdaptiveGainDB(adaptiveGainDBByAppID[app.logicalID] ?? 0)
+
+    // A freshly-created process tap proves capture is currently authorized.
+    captureAuthorization = .authorized
+  }
+
+  /// False only when the live route is known to render to a device other than
+  /// the one it should play on now: its pinned target, or the current default.
+  /// Unknown either way (no recorded binding, or no readable default) counts
+  /// as true, so nothing is rebuilt on a guess. Every installed route records
+  /// its device, so "no binding" means a controller this backend did not
+  /// build. Cheap enough for every volume edit: a pinned route reads nothing,
+  /// a default-following one reads the default device's UID.
+  func isRouteOnItsExpectedDevice(_ app: AudioApp) -> Bool {
+    guard let bound = routeOutputBindingByRuntimeID[app.id]?.deviceUID,
+      let expected = expectedOutputDeviceUID(for: app)
+    else { return true }
+    return bound == expected
+  }
+
+  func startNewControllerForTesting(
+    _ controller: PerAppTapController,
+    runtimeID: String,
+    start: @Sendable () throws -> Void
+  ) throws {
+    try startNewController(controller, runtimeID: runtimeID, start: start)
+  }
+
+  func routeOutputBindingForTesting(runtimeID: String) -> RouteOutputBinding? {
+    routeOutputBindingByRuntimeID[runtimeID]
+  }
+
+  /// Starts a controller that was just built. One that will not start is a
+  /// replacement that was never installed, and is discarded like any other:
+  /// while the app's live route plays, its tap is not told to un-mute.
+  func startNewController(
+    _ controller: PerAppTapController,
+    runtimeID: String,
+    start: () throws -> Void
+  ) throws {
+    do {
+      try start()
+    } catch {
+      logger.error(
+        "Controller start failed for \(controller.appName, privacy: .public): \(error.localizedDescription, privacy: .public)"
+      )
+      discardUnusedReplacement(controller, runtimeID: runtimeID)
+      throw error
+    }
+  }
+
+  /// Disposes a replacement that was built but not installed. It never left
+  /// silence. While an incumbent's tap still keeps the app's own output muted
+  /// it is retired without releasing its own tap mute; with no incumbent it
+  /// is force-released, so the app is audible. It never carried the app and
+  /// was never committed, so there is no level a managed release could put
+  /// it back to.
+  private func discardUnusedReplacement(_ replacement: PerAppTapController, runtimeID: String) {
+    if controllers[runtimeID]?.isActive == true {
+      retireController(replacement)
+    } else {
+      forceReleaseUninstalledController(replacement)
     }
   }
 
@@ -1267,8 +1642,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     for app: AudioApp,
     processTarget: ResolvedProcessTarget,
     equalizerSettings: EqualizerSettings,
-    generationContext: IntentGenerationContext?
-  ) async throws -> PerAppTapController {
+    generationContext: IntentGenerationContext?,
+    repairContext: RouteRepairContext?,
+    origin: RouteWorkOrigin
+  ) async throws -> (PerAppTapController, RouteOutputBinding?) {
     let maxRetries = 3
     var lastError: Error?
     var currentProcessTarget = processTarget
@@ -1276,10 +1653,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     for attempt in 1...maxRetries {
       try ensureAcceptingOperations()
       do {
-        if let generationContext {
-          try ensureGenerationCurrent(generationContext)
-        }
-        let controller = try createController(
+        try ensureRouteWorkCurrent(generationContext, repairContext)
+        // Every attempt after the first follows a suspension.
+        guard !excludedLogicalIDs.contains(app.logicalID) else { throw IntentSupersededError() }
+        try spendRouteRebuildBudget(origin)
+        let created = try createController(
           for: app,
           processTarget: currentProcessTarget,
           equalizerSettings: equalizerSettings
@@ -1287,23 +1665,22 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         if attempt > 1 {
           logger.info("Successfully created controller for \(app.displayName) on attempt \(attempt)")
         }
-        return controller
+        return created
       } catch let superseded as IntentSupersededError {
         throw superseded
+      } catch let refused as RouteRebuildCeilingError {
+        logger.warning("Automatic route rebuild for \(app.displayName, privacy: .public) refused: rebuild ceiling active")
+        throw refused
       } catch {
         lastError = error
         logger.warning("Failed to create controller for \(app.displayName) on attempt \(attempt): \(error.localizedDescription)")
 
         if attempt < maxRetries {
           let backoffMs = UInt64(100 * Int(pow(4.0, Double(attempt - 1))))
-          if let generationContext {
-            try ensureGenerationCurrent(generationContext)
-          }
-          try await Task.sleep(nanoseconds: backoffMs * 1_000_000)
+          try ensureRouteWorkCurrent(generationContext, repairContext)
+          try await controllerRetryPause(backoffMs * 1_000_000)
           try ensureAcceptingOperations()
-          if let generationContext {
-            try ensureGenerationCurrent(generationContext)
-          }
+          try ensureRouteWorkCurrent(generationContext, repairContext)
 
           // Re-resolve process object IDs after suspension. A transient resolution
           // failure is left for the next retry to report with the friendly error.
@@ -1317,31 +1694,42 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
     }
 
-    if let generationContext {
-      try ensureGenerationCurrent(generationContext)
-    }
+    try ensureRouteWorkCurrent(generationContext, repairContext)
     logger.error("Giving up on managed route for \(app.displayName) after \(maxRetries) attempts: \(lastError?.localizedDescription ?? "unknown error")")
     throw BackendError.managedRouteUnavailable(
       "Waves couldn't take over audio for \(app.displayName). If this keeps happening, check that audio capture is allowed in System Settings › Privacy & Security."
     )
   }
 
+  /// Builds and starts one controller. Also returns the output device it
+  /// renders to and that device's format, read for this attempt before the
+  /// tap exists: each attempt resolves the default itself, so a binding read
+  /// once before the retries could describe a device an earlier, failed
+  /// attempt used. A format change that lands during creation is then seen
+  /// as a change afterwards rather than absorbed.
   private func createController(
     for app: AudioApp,
     processTarget: ResolvedProcessTarget,
     equalizerSettings: EqualizerSettings
-  ) throws -> PerAppTapController {
+  ) throws -> (PerAppTapController, RouteOutputBinding?) {
     try ensureAcceptingOperations()
 
+    // Every new renderer starts silent. `applyRoute` un-mutes it only once it
+    // is installed and the incumbent it replaces is silent.
+    var silentApp = app
+    silentApp.isMuted = true
     if let controllerFactory {
       try revalidateProcessTarget(processTarget, for: app)
-      return try controllerFactory(
-        app,
+      let outputBinding = currentOutputBinding(for: app)
+      let controller = try controllerFactory(
+        silentApp,
         processTarget.processObjectIDs,
         equalizerSettings,
         managedAudioEqualizerSettings,
         adaptiveGainDBByAppID[app.logicalID] ?? 0
       )
+      controller.ownerProcessLifetime = app.runtimeIdentity?.lifetime
+      return (controller, outputBinding)
     }
 
     if #available(macOS 14.2, *) {
@@ -1359,6 +1747,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       } else {
         outputDeviceUID = try currentDefaultOutputDeviceUID()
       }
+      let binding = outputBinding(forDeviceUID: outputDeviceUID)
 
       let tapDescription = CATapDescription(
         stereoMixdownOfProcesses: processTarget.processObjectIDs
@@ -1447,44 +1836,42 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         tapDescription: tapDescription,
         tapID: tapID,
         aggregateDeviceID: aggregateID,
-        volume: app.desiredVolume,
-        volumeBoost: app.volumeBoost,
-        muted: app.isMuted,
+        volume: silentApp.desiredVolume,
+        volumeBoost: silentApp.volumeBoost,
+        muted: silentApp.isMuted,
         equalizerSettings: equalizerSettings,
         managedAudioEqualizerSettings: managedAudioEqualizerSettings,
         adaptiveGainDB: adaptiveGainDBByAppID[app.logicalID] ?? 0,
         audioFormatPlan: audioFormatPlan,
         subDeviceInputStreamCount: subDeviceInputStreamCount
       )
+      controller.ownerProcessLifetime = app.runtimeIdentity?.lifetime
 
       controllerOwnsResources = true
-      do {
-        try controller.start()
-      } catch {
-        let cleanupDegradations = disposeController(controller)
-        retainCleanupDegradations(cleanupDegradations)
-        if !cleanupDegradations.isEmpty {
-          logger.error(
-            "Controller creation failed for \(app.displayName, privacy: .public): \(error.localizedDescription, privacy: .public). Cleanup also reported \(cleanupDegradations.count, privacy: .public) degradation(s)."
-          )
-        }
-        throw error
-      }
+      try startNewController(controller, runtimeID: app.id) { try controller.start() }
 
-      return controller
+      return (controller, binding)
     }
 
     throw BackendError.unsupportedOperation("Per-app routing requires macOS 14.2 or newer.")
   }
 
-  private func buildSnapshot(merging previousSnapshot: AudioSessionSnapshot?) async -> AudioSessionSnapshot {
+  /// Rediscovers running apps and merges the backend's control state into
+  /// them. Discovery suspends (application capture, then detached work), and
+  /// intents, exclusions, yields and route work all run meanwhile. The
+  /// control state merged in is therefore read after the last suspension, from
+  /// the snapshot as it is then: merging the copy taken before discovery
+  /// started would overwrite whatever landed in between (an exclusion, a call
+  /// mute, an output choice) with older values.
+  private func buildSnapshot() async -> AudioSessionSnapshot {
     // Re-check real capture authorization so a snapshot honestly reflects whether
     // Waves can actually take over audio, not merely whether the OS supports it.
     refreshCaptureAuthorization()
-    let audible = getAudibleProcesses()
+    let audible = audibleProcessIndexProvider?() ?? getAudibleProcesses()
+    let discoveryInputs = snapshot
     // Reuse encoded icons across discovery passes only while the captured
     // process identity still matches. Relaunches must capture fresh bytes.
-    let knownIcons = (previousSnapshot?.apps ?? []).reduce(
+    let knownIcons = discoveryInputs.apps.reduce(
       into: [String: AppRuntimeDiscovery.KnownIcon]()
     ) { result, app in
       guard let data = app.iconTIFFData, let runtimeIdentity = app.runtimeIdentity else { return }
@@ -1502,7 +1889,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         knownIcons: knownIcons
       )
     }
-    let incumbentIdentities = (previousSnapshot?.apps ?? []).reduce(into: [String: AppRuntimeIdentity]()) { result, app in
+    let incumbentIdentities = discoveryInputs.apps.reduce(into: [String: AppRuntimeIdentity]()) { result, app in
       result[app.logicalID] = app.runtimeIdentity
     }
     let runningApps = await Task.detached { [currentBundleID, audible, discoveryCapture, incumbentIdentities] in
@@ -1515,7 +1902,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       )
     }.value
     guard !isShuttingDown else { return snapshot }
-    let previousByLogicalID = dictionaryByLogicalID(previousSnapshot?.apps ?? [])
+    // No suspension from here to the caller's assignment.
+    let previousSnapshot = snapshot
+    let previousByLogicalID = dictionaryByLogicalID(previousSnapshot.apps)
     let now = Date()
 
     var mergedApps = runningApps.map { candidate -> AudioApp in
@@ -1568,6 +1957,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // rather than pinning the row/global health to error indefinitely.
       if previous.routingState == .error && !previous.hasAmbiguousIdentity
         && !candidate.hasAmbiguousIdentity && candidate.routingState != .live
+        && previous.runtimeIdentity?.lifetime == candidate.runtimeIdentity?.lifetime
       {
         app.routingState = .error
         app.notes = previous.notes
@@ -1577,7 +1967,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     }
 
     var mergedLogicalIDs = Set(mergedApps.map(\.logicalID))
-    for previous in previousSnapshot?.apps ?? [] {
+    for previous in previousSnapshot.apps {
       guard !mergedLogicalIDs.contains(previous.logicalID) else { continue }
       guard AppRuntimeDiscovery.isStillRunning(previous, in: discoveryCapture, currentBundleID: currentBundleID) else { continue }
 
@@ -1631,8 +2021,15 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       }
     }
 
-    let runningIDs: Set<String> = Set(mergedApps.map(\.id))
-    retainCleanupDegradations(disposeControllers(keeping: runningIDs))
+    releaseRoutesMissing(from: &mergedApps, previous: previousSnapshot.apps)
+    // A repair recorded for a process that is gone, or that relaunched under
+    // the same IDs, ends here.
+    let lifetimeByID = Dictionary(mergedApps.map { ($0.id, $0.runtimeIdentity?.lifetime) }, uniquingKeysWith: { first, _ in first })
+    failOpenReleases = failOpenReleases.filter { _, release in
+      guard let lifetime = lifetimeByID[release.context.runtimeID] else { return false }
+      return lifetime == release.context.processLifetime
+    }
+    applyStickyRouteNotes(to: &mergedApps)
 
     let hasRouteErrors = hasBlockingRouteErrors(in: mergedApps)
     let routeError =
@@ -1645,12 +2042,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     do {
       deviceReadiness = OutputDeviceReadiness(
         currentDevice: try currentOutputDevice(),
-        previousRecentDeviceIDs: previousSnapshot?.recentDeviceIDs ?? []
+        previousRecentDeviceIDs: previousSnapshot.recentDeviceIDs
       )
     } catch {
       deviceReadiness = OutputDeviceReadiness(
         currentDevice: nil,
-        previousRecentDeviceIDs: previousSnapshot?.recentDeviceIDs ?? [],
+        previousRecentDeviceIDs: previousSnapshot.recentDeviceIDs,
         failureDetail: "Waves could not identify the current output device: \(error.localizedDescription)"
       )
     }
