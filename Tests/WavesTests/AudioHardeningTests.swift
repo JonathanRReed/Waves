@@ -5,78 +5,146 @@ import WavesAudioCore
 
 @testable import Waves
 
-@Test func mutingTapTeardownRestoresOriginalAudioBeforeStoppingTheRenderer() {
-  var events: [String] = []
-
-  let result = MutingTapTeardownPreparation.perform(
-    makeOriginalAudioAudible: {
-      events.append("unmute-tap")
-      return noErr
-    },
-    stopIOProc: {
-      events.append("stop-io")
-      return noErr
-    },
-    restoreTapMuting: {
-      events.append("restore-tap-mute")
-      return noErr
-    },
-    deactivateRenderer: {
-      events.append("deactivate-renderer")
+/// Plays one buffer of a steady signal through `controller` and returns its
+/// output peak.
+func renderedPeak(of controller: PerAppTapController, frames: Int = 512) -> Float {
+  var input = [Float](repeating: 0.5, count: frames * 2)
+  var output = [Float](repeating: 0, count: input.count)
+  input.withUnsafeMutableBytes { inputBytes in
+    output.withUnsafeMutableBytes { outputBytes in
+      var inputList = AudioBufferList(
+        mNumberBuffers: 1,
+        mBuffers: AudioBuffer(mNumberChannels: 2, mDataByteSize: UInt32(inputBytes.count), mData: inputBytes.baseAddress)
+      )
+      var outputList = AudioBufferList(
+        mNumberBuffers: 1,
+        mBuffers: AudioBuffer(mNumberChannels: 2, mDataByteSize: UInt32(outputBytes.count), mData: outputBytes.baseAddress)
+      )
+      controller.renderForTesting(input: &inputList, output: &outputList)
     }
-  )
-
-  #expect(events == ["unmute-tap", "stop-io", "deactivate-renderer"])
-  #expect(result.canDestroyNativeResources)
-  #expect(result.originalAudioIsFailOpen)
+  }
+  return output.map(abs).max() ?? 0
 }
 
-@Test func failedMutingTapStopKeepsTheRendererLiveEvenAfterAnUnmuteRequest() {
-  var bothFailedEvents: [String] = []
-  let bothFailed = MutingTapTeardownPreparation.perform(
-    makeOriginalAudioAudible: {
-      bothFailedEvents.append("unmute-tap")
-      return -1
-    },
-    stopIOProc: {
-      bothFailedEvents.append("stop-io")
-      return -2
-    },
-    restoreTapMuting: {
-      bothFailedEvents.append("restore-tap-mute")
-      return noErr
-    },
-    deactivateRenderer: {
-      bothFailedEvents.append("deactivate-renderer")
-    }
+private final class TeardownLog: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recorded: [String] = []
+  var values: [String] { lock.withLock { recorded } }
+  func record(_ value: String) { lock.withLock { recorded.append(value) } }
+}
+
+private func teardownController(
+  _ log: TeardownLog,
+  release: OSStatus = noErr,
+  stop: OSStatus = noErr
+) throws -> PerAppTapController {
+  try PerAppTapController.testingController(
+    appID: "app.teardown",
+    teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
+      makeOriginalAudioAudible: {
+        log.record("unmute-tap")
+        return release
+      },
+      stopIOProc: {
+        log.record("stop-io")
+        return stop
+      },
+      destroyProcessTap: { _ in
+        log.record("destroy-tap")
+        return noErr
+      }
+    )
   )
+}
 
-  #expect(bothFailedEvents == ["unmute-tap"])
-  #expect(!bothFailed.canDestroyNativeResources)
-  #expect(!bothFailed.originalAudioIsFailOpen)
+@Test func teardownCutsTheRendererBeforeReleasingTheTapThenStopsAndDestroys() throws {
+  let log = TeardownLog()
+  let controller = try teardownController(log)
+  #expect(renderedPeak(of: controller) > 0)
 
-  var unmutedEvents: [String] = []
-  let unmutedBeforeStopFailure = MutingTapTeardownPreparation.perform(
-    makeOriginalAudioAudible: {
-      unmutedEvents.append("unmute-tap")
-      return noErr
-    },
-    stopIOProc: {
-      unmutedEvents.append("stop-io")
-      return -2
-    },
-    restoreTapMuting: {
-      unmutedEvents.append("restore-tap-mute")
-      return noErr
-    },
-    deactivateRenderer: {
-      unmutedEvents.append("deactivate-renderer")
-    }
-  )
+  #expect(controller.dispose().isEmpty)
 
-  #expect(unmutedEvents == ["unmute-tap", "stop-io", "restore-tap-mute"])
-  #expect(!unmutedBeforeStopFailure.canDestroyNativeResources)
-  #expect(unmutedBeforeStopFailure.audiblePath == .wavesRenderer)
+  #expect(log.values == ["unmute-tap", "stop-io", "destroy-tap"])
+  #expect(controller.isRenderSilent)
+  #expect(controller.isTornDown)
+  #expect(!controller.tapMutesApp)
+}
+
+@Test func aTeardownWhoseStopFailsLeavesTheRendererSilentAndTheTapReleased() throws {
+  // The app plays at its own level; the renderer that could not be stopped
+  // must not play beside it, and its tap must not be muted again.
+  let log = TeardownLog()
+  let controller = try teardownController(log, stop: -2)
+
+  #expect(!controller.dispose().isEmpty)
+
+  #expect(log.values == ["unmute-tap", "stop-io"])
+  #expect(!controller.tapMutesApp)
+  #expect(!controller.isTornDown)
+  #expect(renderedPeak(of: controller) == 0)
+  // Nothing can bring it back.
+  controller.apply(volume: 1, volumeBoost: 1, muted: false)
+  #expect(renderedPeak(of: controller) == 0)
+  #expect(controller.isRenderSilent)
+}
+
+@Test func aTeardownWhoseTapReleaseFailsStillStopsAndDestroysTheTap() throws {
+  // A tap that will not un-mute stops muting once it is destroyed, and its
+  // renderer is silent throughout: it never carries the app instead.
+  let log = TeardownLog()
+  let controller = try teardownController(log, release: -1)
+
+  #expect(!controller.dispose().isEmpty)
+
+  #expect(log.values == ["unmute-tap", "stop-io", "destroy-tap"])
+  #expect(controller.isTornDown)
+  #expect(!controller.tapMutesApp)
+  #expect(renderedPeak(of: controller) == 0)
+}
+
+@Test func aQueuedMuteWithNoRenderSinceIsNotSilence() throws {
+  let controller = try PerAppTapController.testingController(appID: "app.silence")
+  #expect(renderedPeak(of: controller) > 0)
+
+  // Muted, but the render path has not run since: its next buffer would
+  // still start at full gain.
+  controller.apply(volume: 1, volumeBoost: 1, muted: true)
+  #expect(!controller.isRenderSilent)
+
+  // A handoff whose renderer never renders again cuts it.
+  #expect(controller.silenceForHandoff(maxPolls: 3, pause: {}) == .cut)
+  #expect(controller.isRenderSilent)
+  #expect(renderedPeak(of: controller) == 0)
+}
+
+@Test func aFadeAcrossSeveralSmallBuffersIsSilentOnlyOnceItReachesZero() throws {
+  // 48 kHz: the mute fades over 240 frames, so 64-frame buffers take four.
+  let controller = try PerAppTapController.testingController(appID: "app.fade")
+  #expect(renderedPeak(of: controller, frames: 64) > 0)
+  controller.apply(volume: 1, volumeBoost: 1, muted: true)
+  var silentAfter: [Bool] = []
+  for _ in 0..<4 {
+    _ = renderedPeak(of: controller, frames: 64)
+    silentAfter.append(controller.isRenderSilent)
+  }
+  #expect(silentAfter == [false, false, false, true])
+  #expect(renderedPeak(of: controller, frames: 64) == 0)
+}
+
+@Test func aHandoffWaitsForTheFadeAndThenCutsForGood() throws {
+  let controller = try PerAppTapController.testingController(appID: "app.handoff")
+  #expect(renderedPeak(of: controller, frames: 64) > 0)
+  var renders = 0
+  let result = controller.silenceForHandoff(maxPolls: 40) {
+    _ = renderedPeak(of: controller, frames: 64)
+    renders += 1
+  }
+  #expect(result == .faded)
+  #expect(renders == 4)
+  // Retired: nothing un-mutes it again.
+  controller.apply(volume: 1, volumeBoost: 1, muted: false)
+  controller.setVolumeBoost(2)
+  #expect(renderedPeak(of: controller) == 0)
 }
 
 @Test func processTapAggregateStartsImmediatelyWithoutWaitingForSourceAudio() {

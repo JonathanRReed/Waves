@@ -81,6 +81,9 @@ extension WorkspaceAudioControlBackend {
         status: isRouteRebuildCeilingActive ? .warning : .informational,
         detail: routeRebuildBudgetSummary
       ))
+    if !orphanedControllers.isEmpty {
+      checks.append(parkedControllersCheck)
+    }
     checks.append(
       DiagnosticsCheck(
         title: "Support matrix",
@@ -88,6 +91,23 @@ extension WorkspaceAudioControlBackend {
         detail: snapshot.supportMatrix.coverageSummary
       ))
     return DiagnosticsReport(summary: recoverabilitySummary, checks: checks)
+  }
+
+  /// Audio routes whose teardown has not finished. Each is silent; the one
+  /// thing that matters to the user is an app one of them holds silent.
+  private var parkedControllersCheck: DiagnosticsCheck {
+    let held = snapshot.apps.filter { appsHeldSilentByParkedTaps.contains($0.id) }
+    let count = orphanedControllers.count
+    let summary =
+      "\(count) closed audio route\(count == 1 ? "" : "s") still \(count == 1 ? "holds" : "hold") Core Audio resources. Waves retries releasing them every few seconds; they never play."
+    guard !held.isEmpty else {
+      return DiagnosticsCheck(title: "Closing audio routes", status: .informational, detail: summary)
+    }
+    return DiagnosticsCheck(
+      title: "Closing audio routes",
+      status: .failed,
+      detail: ([summary] + held.map(Self.heldSilentNote(for:))).joined(separator: " ")
+    )
   }
 
   static func diagnosticsStatus(for bridge: WaveLinkBridgeStatus) -> DiagnosticsStatus {

@@ -225,6 +225,26 @@ extension WorkspaceAudioControlBackend {
     }
   }
 
+  /// Puts back what a refresh would otherwise lose: why an app has no route.
+  /// A row a parked tap holds silent says so. A live route explains itself,
+  /// so its row is left alone.
+  func applyStickyRouteNotes(to apps: inout [AudioApp]) {
+    for index in apps.indices
+    where controllers[apps[index].id]?.isActive != true && appsHeldSilentByParkedTaps.contains(apps[index].id) {
+      let app = apps[index]
+      apps[index].notes = Self.heldSilentNote(for: app)
+      apps[index].appliedVolume = nil
+      apps[index].peakLevel = 0
+      apps[index].rmsLevel = 0
+      // A row another router holds keeps its own state, so the router's
+      // release can still hand it back; only the note changes.
+      if app.routeHealthContext == nil {
+        apps[index].routingState = .error
+        apps[index].hasNoAudioCapability = false
+      }
+    }
+  }
+
   /// Disposes an app's controller and forgets its per-route bookkeeping.
   func releaseRoute(runtimeID: String) {
     if let controller = controllers.removeValue(forKey: runtimeID) {
@@ -296,7 +316,7 @@ extension WorkspaceAudioControlBackend {
       routeMaintenanceTick += 1
       if routeMaintenanceTick >= routeMaintenanceTickInterval || !routerReleasedRouteIDs.isEmpty {
         routeMaintenanceTick = 0
-        retryOrphanedControllerDisposals()
+        retryParkedControllers()
         await performRouteMaintenance(
           forceRebuildIDs: routerReleasedRouteIDs,
           routerActivity: routerActivity(),
@@ -426,9 +446,7 @@ extension WorkspaceAudioControlBackend {
     routeIDsNeedingRebuild.formUnion(routerReleasedRouteIDs)
     if routeMaintenanceTick >= routeMaintenanceTickInterval || !routeIDsNeedingRebuild.isEmpty {
       routeMaintenanceTick = 0
-      // A tap left behind by a failed teardown keeps its app muted, so keep
-      // trying to release it rather than leaving the app silent for the session.
-      retryOrphanedControllerDisposals()
+      retryParkedControllers()
       await performRouteMaintenance(
         forceRebuildIDs: routeIDsNeedingRebuild,
         geometryRecoveryIDs: geometryRecoveryRouteIDs,

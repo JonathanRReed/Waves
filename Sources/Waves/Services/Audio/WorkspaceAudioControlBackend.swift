@@ -71,14 +71,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   var leakedProbeTapIDs: [AudioObjectID] = []
   var probeTapDestroyAttempts: [AudioObjectID: Int] = [:]
   let maxProbeTapDestroyRetries = 5
-  /// Controllers whose native teardown failed, awaiting another attempt.
+  /// Parked controllers: silent for good, their native teardown not yet
+  /// finished. See `retryParkedControllers`.
   var orphanedControllers: [PerAppTapController] = []
-  var orphanDisposeAttempts: [ObjectIdentifier: Int] = [:]
-  static let maxOrphanDisposeRetries = 5
-  /// Parked controllers one app may accumulate before Waves stops building
-  /// new routes for it: each failed handoff parks one, and each holds a tap,
-  /// an aggregate device and an IO proc that cannot be freed.
-  static let maxParkedControllersPerApp = 2
+  /// Runtime IDs of apps a parked tap holds silent: they have no live route,
+  /// and the tap's mute would not release on the last pass.
+  var appsHeldSilentByParkedTaps: Set<String> = []
   let routeMaintenanceTickInterval = 20
   let staleRouteThresholdTicks = 24
   var deviceChangeListenerSelectors: [AudioObjectPropertySelector] = []
@@ -395,10 +393,12 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     for (_, controller) in installedControllers {
       let controllerDegradations = controller.dispose()
       record(controllerDegradations)
-      if !controllerDegradations.isEmpty {
+      if !controller.isTornDown {
         // A failed stop or IO-proc destroy can still be followed by a native
         // callback. Keep its Swift callback state alive until process exit.
         orphanedControllers.append(controller)
+      }
+      if !controllerDegradations.isEmpty {
         record([
           CleanupDegradation(
             appID: controller.appID,
@@ -415,18 +415,11 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     // One last attempt at anything a previous teardown could not release, so a
     // stranded tap does not outlive the process if it can be avoided.
-    let parked = orphanedControllers
-    orphanedControllers.removeAll(keepingCapacity: true)
-    for controller in parked {
-      let controllerDegradations = controller.retryDispose()
-      record(controllerDegradations)
-      if !controllerDegradations.isEmpty,
-        !orphanedControllers.contains(where: { $0 === controller })
-      {
-        orphanedControllers.append(controller)
-      }
+    for controller in orphanedControllers {
+      record(controller.retryDispose())
     }
-    orphanDisposeAttempts.removeAll()
+    orphanedControllers.removeAll(where: \.isTornDown)
+    appsHeldSilentByParkedTaps.removeAll()
 
     // Never let the buffer's cap hide the fact that it capped: a truncated
     // report that looks complete is worse than one that admits the gap.
@@ -1436,9 +1429,9 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     if let incumbent {
       retireController(incumbent)
     }
-    silenceParkedControllers(forRuntimeID: app.id)
-    // Only now, with the incumbent silent and stopped, does the replacement
-    // fade in to the app's level.
+    cutParkedRenderers(forRuntimeID: app.id)
+    // Only now, with every other renderer of the app cut to silence, does the
+    // replacement fade in to the app's level.
     controller.apply(volume: volume, volumeBoost: app.volumeBoost, muted: muted)
     controller.setEqualizer(stagedEqualizer)
     controller.setManagedAudioEqualizer(managedAudioEqualizerSettings)
@@ -1516,13 +1509,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let maxRetries = 3
     var lastError: Error?
     var currentProcessTarget = processTarget
-    // Bounds what failed teardowns can accumulate: no new route for an app
-    // whose earlier routes have not closed.
-    guard parkedControllerCount(forRuntimeID: app.id) < Self.maxParkedControllersPerApp else {
-      throw BackendError.managedRouteUnavailable(
-        "Waves couldn't close earlier audio routes for \(app.displayName), so it won't start another for now. Restarting Waves clears them."
-      )
-    }
 
     for attempt in 1...maxRetries {
       try ensureAcceptingOperations()
@@ -1892,6 +1878,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     let runningIDs: Set<String> = Set(mergedApps.map(\.id))
     retainCleanupDegradations(disposeControllers(keeping: runningIDs))
+    applyStickyRouteNotes(to: &mergedApps)
 
     let hasRouteErrors = hasBlockingRouteErrors(in: mergedApps)
     let routeError =

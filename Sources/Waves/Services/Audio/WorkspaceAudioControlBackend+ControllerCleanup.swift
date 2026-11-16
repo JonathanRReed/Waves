@@ -5,8 +5,9 @@ import WavesAudioCore
 
 // MARK: - Controller disposal and cleanup accounting
 //
-// Disposal is idempotent and fail-open for the target app's audio; anything
-// that could not be torn down is retained and retried in bounded rounds.
+// Disposal is idempotent and fail-open for the target app's audio. A
+// controller whose native teardown fails is parked: silent for good, and
+// retried on every maintenance pass until it is gone.
 
 extension WorkspaceAudioControlBackend {
   func releaseControllers(
@@ -111,126 +112,92 @@ extension WorkspaceAudioControlBackend {
     logCleanupDegradations(degradations)
   }
 
-  /// Disposes a controller and, if the native teardown failed, keeps it for
-  /// another attempt.
+  /// Disposes a controller fail open and parks it if its native teardown did
+  /// not finish.
   ///
   /// A failed teardown is not cosmetic: the process tap is created with
-  /// `.mutedWhenTapped`, so while it exists but nothing renders it, the target
-  /// app is *silent*. Before this, the controller was dropped on the floor
-  /// regardless of outcome and `IdempotentCleanupResult` memoized the failure,
-  /// so nothing would ever try again — the app stayed muted for the rest of the
-  /// session with no signal to the user.
+  /// `.mutedWhenTapped`, so while it exists the app's own output can stay
+  /// muted. Dropping it would also free callback state Core Audio may still
+  /// use. Parking keeps it until a retry finishes the job.
   func disposeController(_ controller: PerAppTapController) -> [CleanupDegradation] {
     let degradations = controller.dispose()
-    guard !degradations.isEmpty else { return degradations }
-    orphanedControllers.append(controller)
+    park(controller)
     return degradations
   }
 
   /// Retires a controller that a successor has replaced, without releasing its
-  /// tap mute (see `PerAppTapController.dispose(releasingTapMute:)`). A failed
-  /// teardown parks it like any other; it stays silent meanwhile.
+  /// tap mute (see `PerAppTapController.dispose(releasingTapMute:)`).
   func retireController(_ controller: PerAppTapController) {
     let degradations = controller.dispose(releasingTapMute: false)
-    guard !degradations.isEmpty else { return }
-    orphanedControllers.append(controller)
+    park(controller)
     retainCleanupDegradations(degradations)
   }
 
-  /// Retries parked teardowns and keeps every parked controller's app audible.
-  /// Driven from the existing route-maintenance tick, so it costs nothing when
-  /// there is nothing parked.
+  private func park(_ controller: PerAppTapController) {
+    guard !controller.isTornDown, !orphanedControllers.contains(where: { $0 === controller }) else { return }
+    orphanedControllers.append(controller)
+  }
+
+  /// A parked controller has one job: get out of the way. Its renderer was
+  /// cut to silence for good when it was disposed, so it never plays again.
+  /// What it may still hold is retried here, on every pass, for as long as it
+  /// exists:
+  /// - While its app has a live Waves route, its tap stays muted: the live
+  ///   route's tap mutes the app's own output anyway, and the app is heard
+  ///   through that route. Only the native teardown is retried.
+  /// - Once the app has no live route, for whatever reason, its tap's mute is
+  ///   released too, so the app plays at its own level.
   ///
-  /// Two separate policies:
-  /// - Teardown is retried a bounded number of times. A controller whose IO
-  ///   proc never relinquished its callback stays alive for the backend's
-  ///   lifetime, because dropping it would free callback state Core Audio may
-  ///   still use.
-  /// - Release is not bounded. While the app has a live route, that route's
-  ///   tap keeps the app's own output muted, and releasing a parked tap's
-  ///   mute could only add a second, full-level copy. Once the app has no live
-  ///   route, every pass releases a parked tap that still mutes it (fail
-  ///   open), however many teardowns failed. If even that fails, a parked
-  ///   renderer that can still play is restored to the app's committed level,
-  ///   so the app is not left silent.
-  func retryOrphanedControllerDisposals() {
+  /// Each attempt is a few Core Audio calls on handles that already exist.
+  /// Nothing is created, so it spends no rebuild budget; a destroy that
+  /// fails changes no device list, and one that succeeds forgets its handle,
+  /// so it raises its one notification once. A controller that is fully torn
+  /// down is forgotten.
+  ///
+  /// A tap whose mute will not release leaves its app silent while it has no
+  /// live route. Waves cannot fix that from inside the process and does not
+  /// paper over it: the app's row and Diagnostics say so
+  /// (`appsHeldSilentByParkedTaps`).
+  func retryParkedControllers() {
     guard !orphanedControllers.isEmpty else { return }
-    var stillOrphaned: [PerAppTapController] = []
     for controller in orphanedControllers {
-      let controllerID = ObjectIdentifier(controller)
       let hasLiveRoute = controllers[controller.appID]?.isActive == true
-      let attempts = orphanDisposeAttempts[controllerID] ?? 0
-      var exhaustedNow = false
-      if attempts < Self.maxOrphanDisposeRetries {
-        let degradations = controller.retryDispose(releasingTapMute: !hasLiveRoute)
-        if degradations.isEmpty {
-          // Released at last — drop its attempt count too, so a later controller
-          // that happens to reuse this appID starts from a full retry budget.
-          orphanDisposeAttempts.removeValue(forKey: controllerID)
-          continue
-        }
-        orphanDisposeAttempts[controllerID] = attempts + 1
-        exhaustedNow = attempts + 1 >= Self.maxOrphanDisposeRetries
-      }
-      if !hasLiveRoute {
-        keepAppAudible(withParked: controller)
-      }
-      if exhaustedNow {
-        retainCleanupDegradations([
-          CleanupDegradation(
-            appID: controller.appID,
-            stage: .controllerDisposal,
-            detail:
-              "Native audio resources still had not released after \(Self.maxOrphanDisposeRetries) attempts. Waves keeps the controller so its callbacks stay safe. \(parkedAudibilityDetail(controller, hasLiveRoute: hasLiveRoute))"
-          )
-        ])
-      }
-      stillOrphaned.append(controller)
+      _ = controller.retryDispose(releasingTapMute: !hasLiveRoute)
     }
-    orphanedControllers = stillOrphaned
+    orphanedControllers.removeAll(where: \.isTornDown)
+    let held = Set(
+      orphanedControllers
+        .filter { $0.tapMutesApp && controllers[$0.appID]?.isActive != true }
+        .map(\.appID)
+    )
+    guard held != appsHeldSilentByParkedTaps else { return }
+    let releasedIDs = appsHeldSilentByParkedTaps.subtracting(held)
+    appsHeldSilentByParkedTaps = held
+    // An app no longer held plays at its own level again.
+    for index in snapshot.apps.indices where releasedIDs.contains(snapshot.apps[index].id) {
+      let app = snapshot.apps[index]
+      guard controllers[app.id]?.isActive != true, app.notes == Self.heldSilentNote(for: app) else { continue }
+      snapshot.apps[index].notes = nil
+      if app.routeHealthContext == nil { snapshot.apps[index].routingState = .monitorOnly }
+    }
+    applyStickyRouteNotes(to: &snapshot.apps)
+    refreshGlobalRouteHealth()
+    snapshot.updatedAt = .now
   }
 
-  /// The release policy for one parked controller whose app has no live route.
-  private func keepAppAudible(withParked controller: PerAppTapController) {
-    retainCleanupDegradations(controller.releaseTapMuteForFailOpen())
-    guard controller.tapMutesApp, controller.rendererIsSilent, controller.isActive,
-      !orphanedControllers.contains(where: {
-        $0 !== controller && $0.appID == controller.appID && !$0.rendererIsSilent
-      }),
-      let app = snapshot.apps.first(where: { $0.id == controller.appID })
-    else { return }
-    // The tap will not release, its renderer still runs, and no other parked
-    // renderer already carries the app: let this one carry it again, at the
-    // level the user set, never above it.
-    controller.apply(volume: app.desiredVolume, volumeBoost: app.volumeBoost, muted: app.isMuted)
+  /// Cuts every parked renderer of `runtimeID` to silence before a new route
+  /// for the app is un-muted. Each was cut when it was disposed and cannot be
+  /// un-muted, so this changes nothing; it makes the handoff's guarantee (no
+  /// other renderer of the app can be heard) independent of how a controller
+  /// came to be parked.
+  func cutParkedRenderers(forRuntimeID runtimeID: String) {
+    for controller in orphanedControllers where controller.appID == runtimeID {
+      controller.cutToSilence()
+    }
   }
 
-  /// What a parked controller does to its app's sound right now.
-  private func parkedAudibilityDetail(_ controller: PerAppTapController, hasLiveRoute: Bool) -> String {
-    if !controller.tapMutesApp {
-      return "Its tap no longer mutes the app, so the app plays at its own volume."
-    }
-    if hasLiveRoute {
-      return "It is silent and its tap stays muted while the app's current route plays; Waves releases it if that route goes away."
-    }
-    if !controller.rendererIsSilent {
-      return "Its tap could not be released, so its renderer plays the app at the level set in Waves."
-    }
-    return "Its tap could not be released, so the app may stay silent until Waves quits."
-  }
-
-  /// Controllers parked for `runtimeID` after a failed teardown.
-  func parkedControllerCount(forRuntimeID runtimeID: String) -> Int {
-    orphanedControllers.count { $0.appID == runtimeID }
-  }
-
-  /// Silences every parked controller of `runtimeID` that still plays, before
-  /// a new route for the app is heard. A parked renderer carries the app only
-  /// while nothing else does; beside a new route it would be a second copy.
-  func silenceParkedControllers(forRuntimeID runtimeID: String) {
-    for controller in orphanedControllers where controller.appID == runtimeID && !controller.rendererIsSilent {
-      _ = controller.silenceForHandoff(maxPolls: 0, pause: {})
-    }
+  static func heldSilentNote(for app: AudioApp) -> String {
+    "Waves could not release its hold on \(app.displayName)'s sound, so it stays silent. Quit and reopen Waves to restore it."
   }
 
   /// Logs the first occurrence of each (stage, app) pair, then stays quiet:

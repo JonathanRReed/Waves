@@ -1381,8 +1381,7 @@ private let waveLinkRecoveryControllerFactory: WorkspaceAudioControlBackend.Cont
     targetProcessObjectIDs: processObjectIDs,
     teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
       makeOriginalAudioAudible: { 0 },
-      stopIOProc: { 0 },
-      restoreTapMuting: { 0 }
+      stopIOProc: { 0 }
     )
   )
 }

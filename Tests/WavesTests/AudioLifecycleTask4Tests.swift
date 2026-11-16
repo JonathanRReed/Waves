@@ -205,8 +205,7 @@ private final class BackendOwnedLifecycleFixture: @unchecked Sendable {
           targetProcessObjectIDs: processObjectIDs,
           teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
             makeOriginalAudioAudible: { noErr },
-            stopIOProc: { teardown.shouldFailStop ? -1 : noErr },
-            restoreTapMuting: { noErr }
+            stopIOProc: { teardown.shouldFailStop ? -1 : noErr }
           )
         )
       },

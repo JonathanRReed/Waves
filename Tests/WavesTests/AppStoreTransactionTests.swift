@@ -2702,7 +2702,6 @@ func appTerminationImmediatelyClearsWaveLinkOutputActivity(isActive: Bool) async
     teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
       makeOriginalAudioAudible: { noErr },
       stopIOProc: { noErr },
-      restoreTapMuting: { noErr },
       destroyIOProc: { _, _ in noErr },
       destroyAggregateDevice: { _ in noErr },
       destroyProcessTap: { _ in noErr }
