@@ -1349,9 +1349,6 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     snapshot.apps[index].hasNoAudioCapability = false
     snapshot.apps[index].notes = nil
     snapshot.apps[index].routeHealthContext = nil
-    // As the store presents it. Re-including restores the pin from the
-    // store's persisted intent, which the store sends with that intent.
-    snapshot.apps[index].targetDeviceUID = nil
     // A tap that would not let go holds the app silent: the row says so now,
     // not on the next maintenance pass.
     publishRouteHolds()

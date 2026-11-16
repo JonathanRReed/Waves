@@ -623,7 +623,8 @@ private func maintenancePass(_ fixture: RouteFixture, from start: Int, ticks: In
   let held = try #require(await backend.currentSnapshot().apps.first)
   #expect(held.routingState == .error)
   #expect(held.isHeldSilentByWaves)
-  #expect(held.targetDeviceUID == nil)
+  // The backend keeps the excluded app's controls, pin included.
+  #expect(held.targetDeviceUID == "usb-dac")
 
   // The pinned output appears again, a fresh event for the pinned route.
   // The exclusion still stands: nothing is built for the app.
