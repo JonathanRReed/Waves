@@ -24,26 +24,6 @@ struct AppIntentCoordinatorLifecycleSnapshot: Equatable, Sendable {
 struct AppIntentCoordinatorSettlingTasks {
   let appTransactions: [Task<AppIntentApplyResult, Never>]
   let mutations: [Task<Void, Never>]
-  /// The user's changes still in flight when shutdown began.
-  let unsavedUserIntents: [UnsavedUserIntent]
-}
-
-/// A user's change, from a direct control or a profile row, whose result
-/// has not arrived yet: what to save as the user's setting if Waves quits
-/// first. A nil field keeps the saved value.
-struct UnsavedUserIntent: Equatable, Sendable {
-  let appID: String
-  let generation: UInt64
-  var desiredVolume: Float?
-  var isMuted: Bool?
-  var volumeBoost: Float?
-  var equalizerSettings: EqualizerSettings?
-  var replacesTargetDevice = false
-  var targetDeviceUID: String?
-  /// A profile row's mute is the user's choice even during a call; a
-  /// direct change that did not touch mute is not.
-  var isMuteExplicit = false
-  var updatesDevicePreset = true
 }
 
 struct AppIntentTransactionStart: Sendable {
@@ -102,7 +82,6 @@ final class AppIntentCoordinator {
   private var durableMutationGenerations: [String: UInt64] = [:]
   private var devicePresetMutationGenerations: [String: UInt64] = [:]
   private var automaticMuteOwners: Set<String> = []
-  private var unsavedUserIntents: [String: UnsavedUserIntent] = [:]
   private var isShutDown = false
 
   var lifecycleSnapshot: AppIntentCoordinatorLifecycleSnapshot {
@@ -190,7 +169,6 @@ final class AppIntentCoordinator {
     cancelCurrentAppTask(for: appID)
     currentGenerations[appID] = generation
     optimisticProjections[appID] = projection
-    unsavedUserIntents.removeValue(forKey: appID)
     let token = UUID()
     currentAppTaskTokens[appID] = token
     return AppIntentTransactionStart(
@@ -280,26 +258,6 @@ final class AppIntentCoordinator {
     )
   }
 
-  /// Records a user's change that becomes their setting once accepted.
-  func recordUnsavedUserIntent(_ intent: AppRouteIntent, updatesDevicePreset: Bool) {
-    unsavedUserIntents[intent.appID] = UnsavedUserIntent(
-      appID: intent.appID,
-      generation: intent.generation,
-      desiredVolume: intent.desiredVolume,
-      isMuted: intent.isMuted,
-      volumeBoost: intent.volumeBoost,
-      equalizerSettings: intent.equalizerSettings,
-      replacesTargetDevice: true,
-      targetDeviceUID: intent.targetDeviceUID,
-      updatesDevicePreset: updatesDevicePreset
-    )
-  }
-
-  private func forgetUnsavedUserIntent(for appID: String, generation: UInt64) {
-    guard unsavedUserIntents[appID]?.generation == generation else { return }
-    unsavedUserIntents.removeValue(forKey: appID)
-  }
-
   func settleAppTask(token: UUID) {
     guard let record = appTasks.removeValue(forKey: token) else { return }
     if currentAppTaskTokens[record.appID] == token {
@@ -311,8 +269,6 @@ final class AppIntentCoordinator {
     for start: AppIntentTransactionStart,
     backendGeneration: UInt64
   ) -> AppIntentCompletionDisposition {
-    // Its result is in: persistence, or the lack of it, is decided from it.
-    forgetUnsavedUserIntent(for: start.intent.appID, generation: start.intent.generation)
     guard isCurrent(start.intent.generation, for: start.intent.appID) else {
       return .stale
     }
@@ -486,14 +442,10 @@ final class AppIntentCoordinator {
     equalizerDebounceTasks[token]?.task.cancel()
   }
 
-  /// `userEntries` are the rows that become the user's settings once
-  /// applied; outputs are left out, since a row's output can still be
-  /// withheld once the batch checks which devices are connected.
-  func beginProfile(affectedAppIDs: Set<String>, userEntries: [ProfileEntry] = []) -> UInt64 {
+  func beginProfile(affectedAppIDs: Set<String>) -> UInt64 {
     let generation = allocateGeneration()
     currentProfileGeneration = generation
     for appID in affectedAppIDs {
-      unsavedUserIntents.removeValue(forKey: appID)
       cancelCurrentAppTask(for: appID)
       clearPendingVolume(for: appID)
       cancelVolumeDebounce(for: appID)
@@ -501,17 +453,6 @@ final class AppIntentCoordinator {
       cancelEqualizerDebounce(for: appID)
       optimisticProjections.removeValue(forKey: appID)
       currentGenerations[appID] = generation
-    }
-    for entry in userEntries where affectedAppIDs.contains(entry.appID) {
-      unsavedUserIntents[entry.appID] = UnsavedUserIntent(
-        appID: entry.appID,
-        generation: generation,
-        desiredVolume: entry.desiredVolume,
-        isMuted: entry.isMuted,
-        volumeBoost: entry.volumeBoost,
-        equalizerSettings: entry.equalizer,
-        isMuteExplicit: true
-      )
     }
     return generation
   }
@@ -526,7 +467,6 @@ final class AppIntentCoordinator {
 
   func settleProfileTask(generation: UInt64) {
     profileTasks.removeValue(forKey: generation)
-    unsavedUserIntents = unsavedUserIntents.filter { $0.value.generation != generation }
   }
 
   func isCurrentProfile(_ generation: UInt64) -> Bool {
@@ -543,7 +483,6 @@ final class AppIntentCoordinator {
   }
 
   func claimDurableMutation(for appID: String, generation: UInt64) {
-    forgetUnsavedUserIntent(for: appID, generation: generation)
     durableMutationGenerations[appID] = generation
   }
 
@@ -654,14 +593,6 @@ final class AppIntentCoordinator {
   @discardableResult
   func shutdown() -> AppIntentCoordinatorSettlingTasks {
     isShutDown = true
-    // An automatic call mute is session-only: a change that did not touch
-    // mute keeps the mute the user saved.
-    let unsaved = unsavedUserIntents.values.sorted { $0.appID < $1.appID }.map { intent in
-      var intent = intent
-      if !intent.isMuteExplicit, automaticMuteOwners.contains(intent.appID) { intent.isMuted = nil }
-      return intent
-    }
-    unsavedUserIntents.removeAll()
     let appTransactions = appTasks.values.map(\.task)
     let mutations =
       volumeDebounceTasks.values.map(\.task)
@@ -682,8 +613,7 @@ final class AppIntentCoordinator {
     automaticMuteOwners.removeAll()
     return AppIntentCoordinatorSettlingTasks(
       appTransactions: appTransactions,
-      mutations: mutations,
-      unsavedUserIntents: unsaved
+      mutations: mutations
     )
   }
 

@@ -231,7 +231,6 @@ extension AppStore {
     let mutationTasks: [Task<Void, Never>]
     let appIntentTasks: [Task<AppIntentApplyResult, Never>]
     let persistenceTasks: [Task<Void, Never>]
-    let unsavedUserIntents: [UnsavedUserIntent]
   }
 
   func shutdown() async -> AppShutdownResult {
@@ -312,8 +311,7 @@ extension AppStore {
     return ShutdownSettlingTasks(
       mutationTasks: mutationTasks,
       appIntentTasks: appTransactions,
-      persistenceTasks: persistenceTasks,
-      unsavedUserIntents: intentTasks.unsavedUserIntents
+      persistenceTasks: persistenceTasks
     )
   }
 
@@ -349,7 +347,6 @@ extension AppStore {
       syncOnboarding(using: session)
     }
 
-    saveUserIntentsCutShortByShutdown(settlingTasks.unsavedUserIntents)
     let failureMarker = persistenceCoordinator.failureHistory.count
     persistenceCoordinator.beginFinalization()
     enqueuePreferencesPersistence(preferences)

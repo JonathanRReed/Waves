@@ -155,11 +155,6 @@ extension AppStore {
       reason: reason,
       optimistic: optimistic
     )
-    if case .acceptedUserIntent(let updatesDevicePreset) = persistencePolicy, reason != .automation,
-      !start.intent.isExcluded
-    {
-      appIntentCoordinator.recordUnsavedUserIntent(start.intent, updatesDevicePreset: updatesDevicePreset)
-    }
     let isEligibleLaunchControl =
       reason == .userEdit
       && (overrides.desiredVolume != nil || overrides.isMuted != nil)
@@ -549,38 +544,6 @@ extension AppStore {
       )
     }
     return .saved
-  }
-
-  /// Saves, as the user's settings, the changes still in flight when Waves
-  /// began to quit. Quitting hands every app back before it waits for
-  /// anything, which cuts their audio short, so their results arrive stale
-  /// and never reach `persistAcceptedAppIntent`; the user's change stands.
-  func saveUserIntentsCutShortByShutdown(_ intents: [UnsavedUserIntent]) {
-    for item in intents where !preferences.excludedAppIDs.contains(item.appID) {
-      let saved = preferences.appAudioIntents[item.appID]
-      let app = session.apps.first(matchingAppKey: item.appID)
-      let durable = PersistedAppAudioIntent(
-        appID: item.appID,
-        desiredVolume: item.desiredVolume ?? saved?.desiredVolume ?? app?.desiredVolume ?? 1,
-        isMuted: item.isMuted ?? saved?.isMuted ?? app.map(userMute(for:)) ?? false,
-        volumeBoost: item.volumeBoost ?? saved?.volumeBoost ?? app?.volumeBoost ?? 1,
-        equalizerSettings: item.equalizerSettings ?? saved?.equalizerSettings
-          ?? preferences.appEqualizerSettings[item.appID] ?? EqualizerSettings(),
-        targetDeviceUID: item.replacesTargetDevice ? item.targetDeviceUID : saved?.targetDeviceUID ?? app?.targetDeviceUID
-      )
-      preferences.appAudioIntents[item.appID] = durable
-      preferences.appEqualizerSettings[item.appID] = durable.equalizerSettings
-      guard item.updatesDevicePreset, preferences.enablePerDeviceVolumePresets, let deviceID = currentDeviceID else {
-        continue
-      }
-      var preset =
-        deviceVolumePresets.getVolumeSettings(for: item.appID, deviceID: deviceID)
-        ?? AppVolumeSettings(desiredVolume: durable.desiredVolume, isMuted: durable.isMuted, volumeBoost: durable.volumeBoost)
-      if item.desiredVolume != nil { preset.desiredVolume = durable.desiredVolume }
-      if item.isMuted != nil { preset.isMuted = durable.isMuted }
-      if item.volumeBoost != nil { preset.volumeBoost = durable.volumeBoost }
-      deviceVolumePresets.saveVolumeSettings(for: item.appID, deviceID: deviceID, settings: preset)
-    }
   }
 
   private func presentAppIntentFeedback(

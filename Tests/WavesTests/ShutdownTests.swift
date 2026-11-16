@@ -100,68 +100,6 @@ import WavesAudioCore
   }
 }
 
-/// Quitting right after a change hands every app back first, which cuts the
-/// change's audio short. The change is still the user's setting next launch.
-@MainActor
-@Test(arguments: ["slider", "mute", "profile", "slider during a call mute"])
-func quittingRightAfterAChangeKeepsItAsTheUsersSetting(_ change: String) async {
-  let fixture = await makeShutdownFixture(initialStartupState: .running)
-  let appID = fixture.app.logicalID
-  let deviceID = "device.shutdown"
-  fixture.store.preferences.appAudioIntents[appID] = PersistedAppAudioIntent(appID: appID, desiredVolume: 0.8)
-  switch change {
-  case "slider":
-    fixture.store.commitDesiredVolume(0.3, for: fixture.app)
-  case "mute":
-    fixture.store.setMuted(true, for: fixture.app)
-  case "profile":
-    fixture.store.applyProfile(
-      Profile(name: "Quiet", entries: [ProfileEntry(appID: appID, desiredVolume: 0.3, isMuted: true)])
-    )
-  default:
-    // A call muted the app automatically; the user then moves its slider.
-    var callMuted = fixture.app
-    callMuted.isMuted = true
-    callMuted.muteSource = .autoConferencing
-    fixture.store.session.apps[0] = callMuted
-    fixture.store.appIntentCoordinator.recordConfirmedApp(callMuted)
-    fixture.store.appIntentCoordinator.setCurrentGeneration(1, for: appID)
-    #expect(fixture.store.appIntentCoordinator.claimAutomaticMute(for: appID, generation: 1))
-    fixture.store.commitDesiredVolume(0.3, for: callMuted)
-  }
-
-  if change == "profile" {
-    // Quit before the profile's batch has even started.
-    _ = await fixture.store.shutdown()
-  } else {
-    await fixture.backend.waitUntilIntentIsSuspended()
-    let shutdown = Task { @MainActor in await fixture.store.shutdown() }
-    await waitUntil { fixture.recorder.events().contains("backend.handBack") }
-    fixture.backend.resumeIntent()
-    _ = await shutdown.value
-  }
-
-  // What the next launch reads.
-  let saved = fixture.preferencesStore.load().appAudioIntents[appID]
-  let preset = fixture.presetsStore.load().getVolumeSettings(for: appID, deviceID: deviceID)
-  switch change {
-  case "mute":
-    #expect(saved?.desiredVolume == 0.8)
-    #expect(saved?.isMuted == true)
-    #expect(preset?.isMuted == true)
-  case "profile":
-    #expect(saved?.desiredVolume == 0.3)
-    #expect(saved?.isMuted == true)
-    #expect(preset?.desiredVolume == 0.3)
-  default:
-    // A call's automatic mute is never saved.
-    #expect(saved?.desiredVolume == 0.3)
-    #expect(saved?.isMuted == false)
-    #expect(preset?.desiredVolume == 0.3)
-    #expect(preset?.isMuted == false)
-  }
-}
-
 @MainActor
 @Test func appStoreShutdownSkipsBackendWhenPrivacyGatedAndIsIdempotent() async {
   let fixture = await makeShutdownFixture(initialStartupState: .awaitingPrivacy)
@@ -605,7 +543,6 @@ private func makeShutdownFixture(
     store: store,
     backend: backend,
     preferencesStore: preferencesStore,
-    presetsStore: presetsStore,
     recorder: recorder,
     app: app
   )
@@ -615,7 +552,6 @@ private struct ShutdownFixture {
   let store: AppStore
   let backend: ShutdownBackend
   let preferencesStore: ShutdownPreferencesStore
-  let presetsStore: ShutdownDevicePresetsStore
   let recorder: ShutdownRecorder
   let app: AudioApp
 }
@@ -894,14 +830,9 @@ private final class ShutdownSessionStore: SessionPersisting, @unchecked Sendable
 
 private final class ShutdownDevicePresetsStore: DeviceVolumePresetsPersisting, @unchecked Sendable {
   private let recorder: ShutdownRecorder
-  private let lock = NSLock()
-  private var stored = DeviceVolumePresets()
   init(recorder: ShutdownRecorder) { self.recorder = recorder }
-  func load() -> DeviceVolumePresets { lock.withLock { stored } }
-  func save(_ presets: DeviceVolumePresets) async throws {
-    lock.withLock { stored = presets }
-    recorder.append("presets.save")
-  }
+  func load() -> DeviceVolumePresets { DeviceVolumePresets() }
+  func save(_ presets: DeviceVolumePresets) async throws { recorder.append("presets.save") }
   func flush() async throws { recorder.append("presets.flush") }
   func consumeDidRecoverFromCorruptFile() -> Bool { false }
 }

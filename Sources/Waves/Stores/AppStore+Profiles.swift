@@ -60,15 +60,7 @@ extension AppStore {
       submittedProfile.entries.compactMap { entry in
         entry.hasLevels && liveAppIDs.contains(entry.appID) ? entry.appID : nil
       })
-    // A profile the user chose becomes their settings; automation's and the
-    // default applied at launch do not need saving if Waves quits first.
-    let userEntries =
-      purpose == .userProfile || purpose == .mixReset
-      ? submittedProfile.entries.filter { !excludedAppIDsAtSubmission.contains($0.appID) } : []
-    let generation = appIntentCoordinator.beginProfile(
-      affectedAppIDs: affectedLiveAppIDs,
-      userEntries: userEntries
-    )
+    let generation = appIntentCoordinator.beginProfile(affectedAppIDs: affectedLiveAppIDs)
 
     // Preserve the immediate group-selection behavior for pure membership
     // profiles while still sending every source row through the ordered result API.
