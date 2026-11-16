@@ -477,7 +477,9 @@ extension AppStore {
         }
       case .applied, .noChange, .excluded, .unsupported, .failed:
         guard var resultingApp = row.resultingApp else { continue }
-        if entry.isMuted != nil {
+        // Only a mute the row actually set replaces an automatic one.
+        let setsMute = entry.isMuted != nil && (row.outcome == .applied || row.outcome == .noChange)
+        if setsMute {
           appIntentCoordinator.releaseAutomaticMute(for: entry.appID)
         }
         let cachedMuteSource = session.apps
@@ -495,7 +497,7 @@ extension AppStore {
           makeExcludedPresentation(&resultingApp)
         } else if resultingApp.isMuted {
           resultingApp.muteSource =
-            entry.isMuted != nil
+            setsMute
             ? .user
             : (cachedMuteSource == .autoConferencing ? .autoConferencing : resultingApp.muteSource)
         } else {

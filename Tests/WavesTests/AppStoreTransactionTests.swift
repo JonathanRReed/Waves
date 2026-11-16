@@ -1048,6 +1048,37 @@ func silentMaintenancePublishesDiagnosticSemanticChanges(field: String) async th
 }
 
 @MainActor
+@Test func aProfileUnmuteThatFailsLeavesACallMuteForTheCallsEndToRelease() async {
+  let app = transactionTestApp(id: "profile.failed-unmute")
+  let fixture = makeTransactionFixture(
+    apps: [app],
+    device: transactionTestDevice(),
+    intent: PersistedAppAudioIntent(
+      appID: app.logicalID,
+      desiredVolume: app.desiredVolume,
+      isMuted: false,
+      volumeBoost: app.volumeBoost
+    ),
+    profileOutcomes: [.failed]
+  )
+
+  // A call mutes the app; a profile asks to unmute it, and its row fails.
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: true)
+  fixture.store.applyProfile(
+    Profile(name: "Unmute", entries: [ProfileEntry(appID: app.logicalID, isMuted: false)])
+  )
+  await fixture.store.drainAppIntentTransactions()
+  #expect(fixture.store.lastProfileApplyResult?.rows.map(\.outcome) == [.failed])
+  #expect(fixture.store.session.apps.first?.isMuted == true)
+  #expect(fixture.store.session.apps.first?.muteSource == .autoConferencing)
+  #expect(fixture.store.appIntentCoordinator.ownsAutomaticMute(for: app.logicalID))
+
+  // The call ends: the mute the call made is released.
+  await fixture.store.applyAutomaticConferencingTransition(isConferencingActive: false)
+  #expect(fixture.store.session.apps.first?.isMuted == false)
+}
+
+@MainActor
 @Test func olderDirectTransactionCannotOverwriteLaterProfile() async {
   let app = transactionTestApp(id: "race.old-direct")
   let device = transactionTestDevice()
