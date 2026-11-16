@@ -18,6 +18,9 @@ struct RouterConflictObservationDebouncer: Sendable {
     self.debounce = debounce
   }
 
+  /// Whether the last state this debouncer applied is an active conflict.
+  var hasAppliedConflict: Bool { appliedState == true }
+
   mutating func observe(conflictIsActive: Bool, at now: Duration) -> RouterConflictObservationAction {
     if pendingState != conflictIsActive {
       pendingState = conflictIsActive

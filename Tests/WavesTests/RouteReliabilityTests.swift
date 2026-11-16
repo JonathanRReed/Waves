@@ -364,9 +364,11 @@ private func spendRebuildBudget(_ fixture: RouteFixture) async {
   #expect(fixture.events.hearing("app.a") == "waves #\(incumbent)")
 
   // By the time the budget allows the rebuild, another router owns the
-  // app, and the incumbent's tap will not let go, so a managed release
-  // would keep it playing. Waves yields: it must not render the app itself.
+  // app (observed, so its activation is applied), and the incumbent's tap
+  // will not let go, so a managed release would keep it playing. Waves
+  // yields: it must not render the app itself.
   fixture.routerRunning.value = true
+  await backend.markRouterObservationDirty()
   fixture.events.failNextMuteReleases(1_000)
   fixture.budgetClock.value = .seconds(600)
   await maintenancePass(fixture, from: 100)
@@ -422,22 +424,34 @@ func aRouterThatStartsWhileARouteIsBeingBuiltIsNeverCapturedByIt() async throws 
   let fixture = RouteFixture(apps: [routeTestApp()])
   try await fixture.installInitialRoutes()
   let backend = fixture.backend
-  for tick in 1..<20 {
+  for tick in 1..<4 {
     fixture.events.pumpRenders()
     await backend.updateAudioLevels(at: .seconds(tick))
   }
-
-  // Wave Link starts just before a maintenance pass, inside the observation
-  // debounce. The route must move (it was left on an old default), its
-  // process cannot be resolved right now, and its tap would not let go in a
-  // managed release, so a fallback would keep Waves playing the app.
+  // Wave Link starts, its activation is applied, and the route yields.
   fixture.routerRunning.value = true
+  await backend.markRouterObservationDirty()
+  await backend.updateAudioLevels(at: .seconds(4))
+  await backend.updateAudioLevels(at: .seconds(5))
+  #expect(await backend.currentSnapshot().apps.first?.routingState == .monitorOnly)
+  // It drops out for a moment no tick observes, and the user's change in
+  // that moment builds a route. The conflict is still applied, so no new
+  // activation will suspend the route.
+  fixture.routerRunning.value = false
+  let change = await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.6, generation: 5))
+  try #require(change.outcome == .applied)
+  fixture.routerRunning.value = true
+  await backend.markRouterObservationDirty()
+  fixture.events.reset()
+
+  // The route must move (it was left on an old default), its process cannot
+  // be resolved right now, and its tap would not let go in a managed
+  // release, so a fallback would keep Waves playing the app.
   fixture.devices.defaultUID = "headphones"
   fixture.resolutionFails.value = true
   fixture.events.failNextMuteReleases(1_000)
-  await backend.markRouterObservationDirty()
   fixture.events.pumpRenders()
-  await backend.updateAudioLevels(at: .seconds(20))
+  await backend.performRouteMaintenance(now: .seconds(6))
 
   #expect(fixture.events.creations == 0)
   #expect(fixture.events.hearing("app.a") == "own output")
@@ -445,6 +459,119 @@ func aRouterThatStartsWhileARouteIsBeingBuiltIsNeverCapturedByIt() async throws 
   let row = try #require(await backend.currentSnapshot().apps.first)
   #expect(row.routingState == .monitorOnly)
   #expect(row.routeHealthContext == .unattributableRouterFallback)
+}
+
+@Test func aRouterSeenOnlyInsideItsActivationWindowNeverStrandsAHealthyRoute() async throws {
+  let fixture = RouteFixture(apps: [routeTestApp()])
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  // The debouncer settles on "no conflict".
+  for tick in 1..<20 {
+    fixture.events.pumpRenders()
+    await backend.updateAudioLevels(at: .seconds(tick))
+  }
+
+  // A router is seen on the tick that runs the periodic maintenance pass,
+  // inside its activation window, and is gone before the activation lands.
+  fixture.routerRunning.value = true
+  await backend.markRouterObservationDirty()
+  fixture.events.pumpRenders()
+  await backend.updateAudioLevels(at: .seconds(20))
+  fixture.routerRunning.value = false
+  await backend.markRouterObservationDirty()
+  for tick in 21..<45 {
+    fixture.events.pumpRenders()
+    await backend.updateAudioLevels(at: .seconds(tick))
+  }
+
+  // The healthy route was kept: still managed, and still playing the app.
+  #expect(fixture.events.creations == 0)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routingState == .managed)
+  #expect(row.routeHealthContext == nil)
+}
+
+@Test(.timeLimit(.minutes(1)), arguments: ["router leaves", "router stays"])
+func aRouterSeenInsideItsActivationWindowDuringACreationRetryNeitherCapturesNorStrands(_ router: String) async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(apps: [routeTestApp()], retryPause: { _ in await gate.pause() })
+  let backend = fixture.backend
+  // The debouncer settles on "no conflict". The row is managed, with no
+  // controller yet; a maintenance pass builds it, and its first creation
+  // fails and waits to retry.
+  await backend.updateAudioLevels(at: .seconds(1))
+  await backend.updateAudioLevels(at: .seconds(2))
+  fixture.events.failNextCreations(1)
+  let pass = Task { await backend.performRouteMaintenance(now: .seconds(2)) }
+  await gate.waitUntilPaused()
+
+  // A router is seen, inside its activation window, and the retry resumes.
+  fixture.routerRunning.value = true
+  await backend.markRouterObservationDirty()
+  await backend.updateAudioLevels(at: .seconds(3))
+  await gate.release()
+  await pass.value
+
+  // Nothing was created or installed, and nothing yielded either.
+  #expect(fixture.events.creations == 0)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  #expect(fixture.events.hearing("app.a") == "own output")
+  var row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routingState == .managed)
+  #expect(row.routeHealthContext == nil)
+
+  if router == "router stays" {
+    // The activation is applied: the row yields to the router.
+    await backend.updateAudioLevels(at: .seconds(4))
+    row = try #require(await backend.currentSnapshot().apps.first)
+    #expect(row.routingState == .monitorOnly)
+    #expect(row.routeHealthContext == .unattributableRouterFallback)
+    #expect(fixture.events.creations == 0)
+  }
+
+  // The router goes away: the route is built on a later pass (reclaimed,
+  // when the router had owned the app).
+  fixture.routerRunning.value = false
+  await backend.markRouterObservationDirty()
+  for tick in 5..<25 {
+    fixture.events.pumpRenders()
+    await backend.updateAudioLevels(at: .seconds(tick))
+  }
+  #expect(fixture.events.creations == 1)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 1)
+  #expect(fixture.events.hearing("app.a") == "waves #1")
+  row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routingState == .managed)
+  #expect(row.routeHealthContext == nil)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func aUsersChangeDuringARoutersActivationWindowFailsAndLeavesTheRowAsItWas() async throws {
+  let gate = RetryGate()
+  let fixture = RouteFixture(apps: [routeTestApp()], retryPause: { _ in await gate.pause() })
+  let backend = fixture.backend
+  fixture.events.failNextCreations(1)
+  let change = Task { await backend.applyAppIntent(routeIntent(appID: "app.a", volume: 0.8, generation: 1)) }
+  await gate.waitUntilPaused()
+
+  // A router is seen, inside its activation window, while the change waits.
+  fixture.routerRunning.value = true
+  await backend.markRouterObservationDirty()
+  await backend.updateAudioLevels(at: .seconds(1))
+  await gate.release()
+  let result = await change.value
+
+  #expect(result.outcome == .failed)
+  #expect(result.detail?.contains("may be handled by another router") == true)
+  #expect(fixture.events.creations == 0)
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.routingState == .managed)
+  #expect(row.desiredVolume == 0.5)
+  #expect(row.routeHealthContext == nil)
+  #expect(row.notes == nil)
 }
 
 @Test func aRouteWhoseAggregateSilentlyStoppedIsRebuilt() async throws {

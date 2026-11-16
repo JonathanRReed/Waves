@@ -170,9 +170,10 @@ extension WorkspaceAudioControlBackend {
           snapshot.apps[index].notes = nil
           snapshot.apps[index].routeHealthContext = nil
         }
-      } catch is IntentSupersededError {
+      } catch is IntentSupersededError, is RouterConflictUnsettledError {
         // Newer intent or route work for this app landed while the reattach
-        // was suspended; that work owns the route now.
+        // was suspended; that work owns the route now. Or another router was
+        // seen but not yet applied: the row is left as it was.
         continue
       } catch is IntentBackendStoppedError {
         return
@@ -766,12 +767,18 @@ extension WorkspaceAudioControlBackend {
       do {
         // Overtaken while an earlier route in this pass was suspended.
         guard isRepairCurrent(repairContext) else { throw IntentSupersededError() }
-        // Another router owns the app now: yield to it. First, before the
-        // reuse shortcut and anything that can fail: ownership is not a
-        // failed repair, so it never takes the managed fallback below, and a
-        // healthy route is not kept beside the router.
+        // Another router, checked before anything that can fail: ownership
+        // is not a failed repair, so it never takes the managed fallback
+        // below. Yield only to one the debouncer has applied, whose release
+        // reclaims the row. One only seen so far may be transient: the route
+        // is left as it is, and the next pass looks again.
         routerActivity = currentRouterActivity(replacing: routerActivity)
-        if let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) {
+        switch routerAuthority(for: app, routerActivity: routerActivity) {
+        case .clear:
+          break
+        case .unsettled:
+          throw RouterConflictUnsettledError(appName: app.displayName)
+        case .owned(let conflict):
           suspendManagedRouteForConflict(at: index, conflict: conflict)
           changed = true
           continue
@@ -820,10 +827,11 @@ extension WorkspaceAudioControlBackend {
           geometryRecoveryByRuntimeID[app.id] = recovery
         }
         changed = true
-      } catch is IntentSupersededError {
+      } catch is IntentSupersededError, is RouterConflictUnsettledError {
         // A user edit, an exclusion, or an output change overtook this repair
-        // while it was suspended. It proved nothing about the route, so a
-        // geometry attempt is handed back rather than counted.
+        // while it was suspended, or another router was seen but not yet
+        // applied. It proved nothing about the route, so a geometry attempt
+        // is handed back rather than counted.
         if geometryRecoveryIDs.contains(appID) || geometryRecoveryIDs.contains(app.id),
           var recovery = geometryRecoveryByRuntimeID[app.id]
         {

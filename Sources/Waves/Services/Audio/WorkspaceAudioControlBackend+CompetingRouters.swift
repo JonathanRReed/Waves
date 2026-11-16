@@ -385,21 +385,43 @@ extension WorkspaceAudioControlBackend {
     return currentRouterActivity()
   }
 
+  /// Another router's claim on `app` in `routerActivity`. Route work yields
+  /// only to a conflict the observation debouncer has applied, so that its
+  /// release always reclaims the row. One seen but not yet applied may be a
+  /// transient observation: route work then neither builds nor yields.
+  enum RouterAuthority {
+    case clear
+    case unsettled
+    case owned(VerifiedRouterConflict)
+  }
+
+  func routerAuthority(for app: AudioApp, routerActivity: VerifiedRouterActivitySnapshot?) -> RouterAuthority {
+    guard let conflict = competingAudioRouterConflict(for: app, routerActivity: routerActivity) else { return .clear }
+    return routerConflictObservationByRuntimeID[app.id]?.hasAppliedConflict == true ? .owned(conflict) : .unsettled
+  }
+
   /// Router authority for route work that may have suspended since it last
   /// checked, at observation generation `generation`. A router that started
   /// meanwhile is seen even when its activation changed no row (the app had
   /// no route yet), so cached views and repair contexts cannot vouch for it:
-  /// if the generation moved, the verdict is taken again, and a router that
-  /// owns the app now wins. The row yields and the work is superseded.
+  /// if the generation moved, the verdict is taken again. A router that owns
+  /// the app wins: the row yields and the work is superseded. One not yet
+  /// applied stops the work and leaves the row as it was.
   func ensureRouterAuthorityCurrent(for app: AudioApp, since generation: inout UInt64) throws {
     guard routerObservationGeneration != generation else { return }
     generation = routerObservationGeneration
-    guard let conflict = competingAudioRouterConflict(for: app, routerActivity: currentRouterActivity()) else { return }
-    if let index = snapshot.apps.firstIndex(where: { $0.id == app.id && $0.logicalID == app.logicalID }) {
-      suspendManagedRouteForConflict(at: index, conflict: conflict)
-      snapshot.updatedAt = .now
+    switch routerAuthority(for: app, routerActivity: currentRouterActivity()) {
+    case .clear:
+      return
+    case .unsettled:
+      throw RouterConflictUnsettledError(appName: app.displayName)
+    case .owned(let conflict):
+      if let index = snapshot.apps.firstIndex(where: { $0.id == app.id && $0.logicalID == app.logicalID }) {
+        suspendManagedRouteForConflict(at: index, conflict: conflict)
+        snapshot.updatedAt = .now
+      }
+      throw IntentSupersededError()
     }
-    throw IntentSupersededError()
   }
 
   func yieldRouteToRouterForTesting(logicalID: String) {
