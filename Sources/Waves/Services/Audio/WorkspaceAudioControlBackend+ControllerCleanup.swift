@@ -24,7 +24,11 @@ extension WorkspaceAudioControlBackend {
     guard !targetIDs.isEmpty else { return }
 
     for id in targetIDs {
-      // The process is gone: nothing may carry it, and nothing can.
+      // The process is gone: nothing may carry it, and nothing can. A repair
+      // recorded for it ends with it.
+      if let logicalID = snapshot.apps.first(where: { $0.id == id })?.logicalID {
+        failOpenReleases.removeValue(forKey: logicalID)
+      }
       releaseInstalledController(runtimeID: id, kind: .forcedRelease)
       controllerGenerationByRuntimeID.removeValue(forKey: id)
       staleRouteTicks.removeValue(forKey: id)
@@ -232,12 +236,23 @@ extension WorkspaceAudioControlBackend {
   }
 
   /// Apps a parked tap holds silent: the tap still mutes the app's own
-  /// output and no live route of Waves plays it.
+  /// output, no live route of Waves plays it, and the tap was built for the
+  /// process the row describes now. A tap built for an earlier process that
+  /// reused the app's IDs cannot mute a relaunched one; a row whose identity
+  /// is ambiguous shows that error instead.
   func heldSilentRuntimeIDs(in apps: [AudioApp]) -> Set<String> {
-    let rowIDs = Set(apps.map(\.id))
+    let lifetimeByID = Dictionary(
+      apps.filter { !$0.hasAmbiguousIdentity }.map { ($0.id, $0.runtimeIdentity?.lifetime) },
+      uniquingKeysWith: { first, _ in first }
+    )
     return Set(
       orphanedControllers
-        .filter { $0.tapMutesApp && controllers[$0.appID]?.isActive != true && rowIDs.contains($0.appID) }
+        .filter { controller in
+          guard controller.tapMutesApp, controllers[controller.appID]?.isActive != true,
+            let lifetime = lifetimeByID[controller.appID]
+          else { return false }
+          return lifetime == controller.ownerProcessLifetime
+        }
         .map(\.appID)
     )
   }

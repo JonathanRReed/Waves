@@ -1166,6 +1166,10 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
   /// selects the route, before its first suspension, not when the route's
   /// turn comes.
   ///
+  /// The app's process lifetime is part of it. Discovery gives a relaunched
+  /// app the same runtime and logical IDs, so without it a repair recorded
+  /// for the old process would pass for the new one and capture it.
+  ///
   /// The row's routing state itself is not compared: a snapshot rebuild
   /// recomputes it from controller and audibility state (a released row
   /// becomes monitor-only, an audible one live), so it changes without any
@@ -1180,6 +1184,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
     let targetDeviceUID: String?
     let routerHold: RouteHealthContext?
     let hasAmbiguousIdentity: Bool
+    let processLifetime: AppProcessLifetimeIdentity?
   }
 
   struct IntentSupersededError: Error {}
@@ -1210,7 +1215,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       incumbent: controllers[app.id].map(ObjectIdentifier.init),
       targetDeviceUID: app.targetDeviceUID,
       routerHold: Self.routerHold(of: app),
-      hasAmbiguousIdentity: app.hasAmbiguousIdentity
+      hasAmbiguousIdentity: app.hasAmbiguousIdentity,
+      processLifetime: app.runtimeIdentity?.lifetime
     )
   }
 
@@ -1237,7 +1243,8 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       app.id == context.runtimeID,
       app.targetDeviceUID == context.targetDeviceUID,
       Self.routerHold(of: app) == context.routerHold,
-      app.hasAmbiguousIdentity == context.hasAmbiguousIdentity
+      app.hasAmbiguousIdentity == context.hasAmbiguousIdentity,
+      app.runtimeIdentity?.lifetime == context.processLifetime
     else { return false }
     return true
   }
@@ -1649,6 +1656,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         managedAudioEqualizerSettings,
         adaptiveGainDBByAppID[app.logicalID] ?? 0
       )
+      controller.ownerProcessLifetime = app.runtimeIdentity?.lifetime
       return (controller, outputBinding)
     }
 
@@ -1765,6 +1773,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
         audioFormatPlan: audioFormatPlan,
         subDeviceInputStreamCount: subDeviceInputStreamCount
       )
+      controller.ownerProcessLifetime = app.runtimeIdentity?.lifetime
 
       controllerOwnsResources = true
       try startNewController(controller, runtimeID: app.id) { try controller.start() }
@@ -1876,6 +1885,7 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
       // rather than pinning the row/global health to error indefinitely.
       if previous.routingState == .error && !previous.hasAmbiguousIdentity
         && !candidate.hasAmbiguousIdentity && candidate.routingState != .live
+        && previous.runtimeIdentity?.lifetime == candidate.runtimeIdentity?.lifetime
       {
         app.routingState = .error
         app.notes = previous.notes
@@ -1941,7 +1951,13 @@ actor WorkspaceAudioControlBackend: AudioControlBackend {
 
     let runningIDs: Set<String> = Set(mergedApps.map(\.id))
     disposeControllers(keeping: runningIDs)
-    failOpenReleases = failOpenReleases.filter { runningIDs.contains($0.value.context.runtimeID) }
+    // A repair recorded for a process that is gone, or that relaunched under
+    // the same IDs, ends here.
+    let lifetimeByID = Dictionary(mergedApps.map { ($0.id, $0.runtimeIdentity?.lifetime) }, uniquingKeysWith: { first, _ in first })
+    failOpenReleases = failOpenReleases.filter { _, release in
+      guard let lifetime = lifetimeByID[release.context.runtimeID] else { return false }
+      return lifetime == release.context.processLifetime
+    }
     applyStickyRouteNotes(to: &mergedApps)
 
     let hasRouteErrors = hasBlockingRouteErrors(in: mergedApps)

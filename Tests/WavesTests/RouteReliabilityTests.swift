@@ -873,6 +873,73 @@ func aReleasedRouteIsNeverRebuiltAfterNewerOwnership(_ change: String) async thr
   try await expectReleasedRow()
 }
 
+// MARK: - Recovery state belongs to one process lifetime
+
+private let playerID = "com.example.player"
+
+private func foregroundPlayerFixture() -> RouteFixture {
+  RouteFixture(apps: [routeTestApp(id: playerID, volume: 0.3, bundleID: playerID)], foreground: true)
+}
+
+@Test func aRepairRecordedForAnAppNeverCapturesItsRelaunchedProcess() async throws {
+  let fixture = foregroundPlayerFixture()
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.stopRendering(serial: 1)
+  fixture.devices.set("builtin", .alive(rate96))
+  fixture.events.failNextCreations(3)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+  #expect(await backend.lifecycleDebugSnapshot().liveControllers == 0)
+
+  // The app quits and opens again between two snapshots, with no snapshot
+  // in which it was absent. Same IDs, generation, output and router state.
+  fixture.relaunch(bundleID: playerID)
+  _ = try await backend.refresh()
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.runtimeIdentity?.lifetime.pid == 901)
+  #expect(row.notes?.contains("plays at its own volume") != true)
+  #expect(row.routingState != .error)
+
+  // The old process's repair authorizes nothing for the new one.
+  for pass in 0..<3 {
+    await maintenancePass(fixture, from: 20 + pass * 20)
+  }
+  #expect(fixture.events.creations == 0)
+}
+
+@Test func aTapHeldForAnEarlierProcessDoesNotClaimTheRelaunchedApp() async throws {
+  let fixture = foregroundPlayerFixture()
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.failNextMuteReleases(1_000)
+  fixture.events.failNextStops(1_000)
+  _ = await backend.applyAppIntent(routeIntent(appID: playerID, volume: 0.3, generation: 10, isExcluded: true))
+  #expect(await backend.currentSnapshot().apps.first?.isHeldSilentByWaves == true)
+
+  // The tap targets the process that quit; the relaunched one plays freely.
+  fixture.relaunch(bundleID: playerID)
+  _ = try await backend.refresh()
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.isHeldSilentByWaves == false)
+  #expect(row.notes?.contains("could not release its hold") != true)
+}
+
+@Test func anIdentityCollisionExplainsTheRowRatherThanAStaleRepairNote() async throws {
+  let fixture = foregroundPlayerFixture()
+  try await fixture.installInitialRoutes()
+  let backend = fixture.backend
+  fixture.events.stopRendering(serial: 1)
+  fixture.devices.set("builtin", .alive(rate96))
+  fixture.events.failNextCreations(3)
+  await backend.revalidateRouteFormatsForTesting(at: .seconds(10))
+
+  fixture.addImpostor(bundleID: playerID)
+  _ = try await backend.refresh()
+  let row = try #require(await backend.currentSnapshot().apps.first)
+  #expect(row.hasAmbiguousIdentity)
+  #expect(row.notes == AppRuntimeDiscovery.identityCollisionNote)
+}
+
 // MARK: - A replacement that will not start
 
 @Test func aReplacementThatWillNotStartNeverUnmutesItsTapBesideTheLiveRoute() async throws {
@@ -2238,6 +2305,50 @@ final class RouteFixture: @unchecked Sendable {
   let audiblePIDs = TestBox<Set<pid_t>>([])
   /// Whether a verified audio router is mixing every app's output.
   let routerRunning = TestBox(false)
+  /// The running applications discovery captures.
+  let captured = TestBox<[AppRuntimeDiscovery.CapturedApplication]>([])
+
+  /// The app quits and opens again: a new process, under the same bundle,
+  /// name and therefore the same runtime and logical IDs.
+  func relaunch(bundleID: String) {
+    captured.value = captured.value.map { application in
+      guard application.bundleID == bundleID, let identity = application.runtimeIdentity else { return application }
+      return AppRuntimeDiscovery.CapturedApplication(
+        pid: 901,
+        bundleID: application.bundleID,
+        localizedName: application.localizedName,
+        bundlePath: application.bundlePath,
+        activationPolicy: application.activationPolicy,
+        isActive: application.isActive,
+        iconTIFFData: nil,
+        runtimeIdentity: AppRuntimeIdentity(
+          lifetime: AppProcessLifetimeIdentity(pid: 901, startTimeSeconds: 200, startTimeMicroseconds: 0),
+          executablePath: identity.executablePath,
+          outerBundlePath: identity.outerBundlePath,
+          signingIdentity: identity.signingIdentity
+        )
+      )
+    }
+  }
+
+  /// A second, unrelated app claims the same bundle ID and name, so
+  /// discovery cannot tell which one the row means.
+  func addImpostor(bundleID: String) {
+    guard let original = captured.value.first(where: { $0.bundleID == bundleID }) else { return }
+    let impostor = routeTestIdentity("impostor")
+    captured.value.append(
+      AppRuntimeDiscovery.CapturedApplication(
+        pid: 902,
+        bundleID: bundleID,
+        localizedName: original.localizedName,
+        bundlePath: impostor.outerBundlePath,
+        activationPolicy: original.activationPolicy,
+        isActive: false,
+        iconTIFFData: nil,
+        runtimeIdentity: impostor
+      )
+    )
+  }
 
   /// - Parameter rendersDuringHandoff: whether outgoing renderers keep
   ///   rendering while a handoff waits for them to fade out. False models a
@@ -2265,20 +2376,19 @@ final class RouteFixture: @unchecked Sendable {
     let routerRunning = self.routerRunning
     // Every test app is still running. Captured as background-only processes
     // so discovery keeps the backend's own rows rather than inventing new ones.
-    let capture = AppRuntimeDiscovery.Capture(
-      applications: apps.map {
-        AppRuntimeDiscovery.CapturedApplication(
-          pid: $0.pid ?? 900,
-          bundleID: $0.bundleID,
-          localizedName: $0.displayName,
-          bundlePath: $0.runtimeIdentity?.outerBundlePath,
-          activationPolicy: foreground ? .regular : .prohibited,
-          isActive: foreground,
-          iconTIFFData: nil,
-          runtimeIdentity: $0.runtimeIdentity
-        )
-      }
-    )
+    let captured = self.captured
+    captured.value = apps.map {
+      AppRuntimeDiscovery.CapturedApplication(
+        pid: $0.pid ?? 900,
+        bundleID: $0.bundleID,
+        localizedName: $0.displayName,
+        bundlePath: $0.runtimeIdentity?.outerBundlePath,
+        activationPolicy: foreground ? .regular : .prohibited,
+        isActive: foreground,
+        iconTIFFData: nil,
+        runtimeIdentity: $0.runtimeIdentity
+      )
+    }
     backend = WorkspaceAudioControlBackend(
       testingSnapshot: AudioSessionSnapshot(
         apps: apps,
@@ -2361,7 +2471,7 @@ final class RouteFixture: @unchecked Sendable {
       captureAuthorizationProbe: { .authorized },
       applicationCaptureProvider: {
         await discoveryPause?()
-        return capture
+        return AppRuntimeDiscovery.Capture(applications: captured.value)
       },
       routeBudgetClock: { budgetClock.value },
       controllerRetryPause: retryPause ?? { _ in },

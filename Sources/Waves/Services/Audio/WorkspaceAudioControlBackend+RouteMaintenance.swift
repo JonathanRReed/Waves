@@ -266,6 +266,9 @@ extension WorkspaceAudioControlBackend {
         }
       }
       let app = apps[index]
+      // An identity collision explains the row; nothing recorded for an
+      // earlier process may replace that.
+      if app.hasAmbiguousIdentity { continue }
       if let controller = controllers[app.id], controller.isActive {
         if let unreleased = unreleasedRoutes[app.id], unreleased.controller == ObjectIdentifier(controller) {
           apps[index].routingState = .error
@@ -286,7 +289,9 @@ extension WorkspaceAudioControlBackend {
           apps[index].routingState = .error
           apps[index].hasNoAudioCapability = false
         }
-      } else if let release = failOpenReleases[app.logicalID], release.context.runtimeID == app.id {
+      } else if let release = failOpenReleases[app.logicalID], release.context.runtimeID == app.id,
+        release.context.processLifetime == app.runtimeIdentity?.lifetime
+      {
         apps[index].routingState = release.routingState
         apps[index].notes = release.notes
         apps[index].hasNoAudioCapability = release.hasNoAudioCapability
