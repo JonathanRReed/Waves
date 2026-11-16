@@ -36,6 +36,12 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
   /// while `routingState == .error`; ignored otherwise. Not persisted: it is
   /// re-derived from the live error the next time a route is attempted.
   public var hasNoAudioCapability: Bool
+  /// True while a tap Waves could not take down still mutes this app's own
+  /// output and Waves has no route playing it: the app is silent and only
+  /// quitting Waves restores it. Live state, never persisted. Kept apart
+  /// from `notes` so presentation that rewrites a row (exclusion) can keep
+  /// showing it.
+  public var isHeldSilentByWaves: Bool
   public var compatibility: CompatibilityState
   public var notes: String?
   /// Typed live routing context for truthful presentation. This is additive and
@@ -68,6 +74,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     isPinned: Bool = false,
     routingState: RoutingState = .recent,
     hasNoAudioCapability: Bool = false,
+    isHeldSilentByWaves: Bool = false,
     compatibility: CompatibilityState = .planned,
     notes: String? = nil,
     volumeBoost: Float = 1.0,
@@ -114,6 +121,7 @@ public struct AudioApp: Identifiable, Codable, Hashable, Sendable {
     self.isPinned = isPinned
     self.routingState = routingState
     self.hasNoAudioCapability = hasNoAudioCapability
+    self.isHeldSilentByWaves = isHeldSilentByWaves
     self.compatibility = compatibility
 
     // Validate notes length

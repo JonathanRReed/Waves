@@ -97,8 +97,7 @@ import WavesAudioCore
     targetProcessObjectIDs: [1],
     teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
       makeOriginalAudioAudible: { noErr },
-      stopIOProc: { noErr },
-      restoreTapMuting: { noErr }
+      stopIOProc: { noErr }
     )
   )
   let conflict = VerifiedRouterConflict(
@@ -543,8 +542,7 @@ import WavesAudioCore
         targetProcessObjectIDs: processObjectIDs,
         teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
           makeOriginalAudioAudible: { noErr },
-          stopIOProc: { noErr },
-          restoreTapMuting: { noErr }
+          stopIOProc: { noErr }
         )
       )
     },
@@ -588,8 +586,7 @@ import WavesAudioCore
         targetProcessObjectIDs: processObjectIDs,
         teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
           makeOriginalAudioAudible: { noErr },
-          stopIOProc: { noErr },
-          restoreTapMuting: { noErr }
+          stopIOProc: { noErr }
         )
       )
     },
@@ -804,8 +801,7 @@ private func routerActivityBackend(
         targetProcessObjectIDs: processObjectIDs,
         teardownNativeCalls: PerAppTapControllerTeardownNativeCalls(
           makeOriginalAudioAudible: { noErr },
-          stopIOProc: { noErr },
-          restoreTapMuting: { noErr }
+          stopIOProc: { noErr }
         )
       )
     },

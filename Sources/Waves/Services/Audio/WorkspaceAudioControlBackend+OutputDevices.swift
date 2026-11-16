@@ -172,7 +172,7 @@ extension WorkspaceAudioControlBackend {
     return OutputDeviceInventory.inputStreamCount(deviceID)
   }
 
-  private func allDeviceIDs() -> [AudioObjectID] {
+  func allDeviceIDs() -> [AudioObjectID] {
     OutputDeviceInventory.allDeviceIDs { message in
       logger.warning("\(message, privacy: .public)")
     }
@@ -220,20 +220,32 @@ extension WorkspaceAudioControlBackend {
     return rawValue as String
   }
 
-  func addDeviceChangeListener() {
+  /// `registersSystemListeners` is false only in tests, which must not
+  /// listen to this Mac's real device list.
+  func addDeviceChangeListener(registersSystemListeners: Bool = true) {
     guard !isShuttingDown else { return }
     // Avoid registering a second listener (and leaking the previous block) if
     // start() runs more than once.
     guard deviceChangeListenerBlock == nil else { return }
+    // What the first pass compares with: without it, every device already
+    // present would count as newly appeared and reset retry allowances.
+    if lastKnownExternalDeviceUIDs == nil { lastKnownExternalDeviceUIDs = currentExternalDeviceUIDs() }
 
     let mailbox = deviceChangeMailbox
     if deviceChangeTask == nil {
       deviceChangeTask = Task { [weak self, mailbox] in
         for await _ in mailbox.wakeups {
           guard !Task.isCancelled else { break }
-          let changes = mailbox.takePending()
+          var changes = mailbox.takePending()
           guard !changes.isEmpty else { continue }
-          await self?.performDeviceChangePass(selectors: changes.outputSelectors)
+          if changes.isDisjoint(with: [.defaultOutput, .deviceInventory]) {
+            // A Bluetooth profile switch or a wake raises a burst of rate,
+            // stream, and alive events. Let it settle, then revalidate once.
+            try? await Task.sleep(for: WorkspaceAudioControlBackend.formatEventDebounce)
+            guard !Task.isCancelled else { break }
+            changes.formUnion(mailbox.takePending())
+          }
+          await self?.performDeviceChangePass(changes: changes)
           await Task.yield()
         }
       }
@@ -247,7 +259,7 @@ extension WorkspaceAudioControlBackend {
       kAudioHardwarePropertyDevices,
     ]
 
-    for selector in selectors {
+    for selector in selectors where registersSystemListeners {
       var address = AudioObjectPropertyAddress(
         mSelector: selector,
         mScope: kAudioObjectPropertyScopeGlobal,
@@ -271,12 +283,16 @@ extension WorkspaceAudioControlBackend {
     if !deviceChangeListenerSelectors.isEmpty {
       deviceChangeListenerBlock = listenerBlock
     }
+    syncDeviceFormatListeners()
+    addWakeObserver()
   }
 
   func removeDeviceChangeListener() -> [CleanupDegradation] {
+    removeWakeObserver()
+    let formatDegradations = deviceFormatListeners.remove()
     guard let listenerBlock = deviceChangeListenerBlock else {
       deviceChangeListenerSelectors.removeAll()
-      return []
+      return formatDegradations
     }
 
     var observations: [CleanupStatusObservation] = []
@@ -302,24 +318,75 @@ extension WorkspaceAudioControlBackend {
 
     deviceChangeListenerSelectors.removeAll()
     deviceChangeListenerBlock = nil
-    return checkedCleanupDegradations(from: observations)
+    return formatDegradations + checkedCleanupDegradations(from: observations)
   }
 
-  private func performDeviceChangePass(selectors: [AudioObjectPropertySelector]) async {
+  private func performDeviceChangePass(changes: AudioPropertyChanges) async {
     guard !isShuttingDown, !Task.isCancelled else { return }
     let currentDefaultUID = try? currentDefaultOutputDeviceUID()
     let defaultOutputChanged = defaultOutputDeviceChange.didChange(
-      selectors: selectors,
+      selectors: changes.outputSelectors,
       currentUID: currentDefaultUID
     )
     let externalDeviceUIDs = currentExternalDeviceUIDs()
     let inventoryChanged = externalDeviceUIDs != lastKnownExternalDeviceUIDs
+    // Devices that were not in the last device list: a pinned route whose
+    // output is among them gets a fresh allowance of automatic attempts.
+    let appearedDeviceUIDs = lastKnownExternalDeviceUIDs.map { externalDeviceUIDs.subtracting($0) } ?? externalDeviceUIDs
     lastKnownExternalDeviceUIDs = externalDeviceUIDs
+    // On every raw device-list notification, not only when the set of UIDs
+    // changed: a device that leaves and returns under the same UID before
+    // this pass runs comes back as a new object, which needs its own
+    // listeners, and its routes need checking (the sync records it as seen
+    // not alive). Waves's own aggregate churn lands here too; the sync then
+    // finds nothing to change and revalidation nothing to rebuild.
+    if inventoryChanged || changes.contains(.deviceInventory) {
+      syncDeviceFormatListeners()
+    }
 
-    if defaultOutputChanged {
-      // Re-tap managed routes only when the effective default output changed.
-      // Plain device inventory churn, such as plugging in an unused interface,
-      // should not tear down audible routes.
+    await applyDeviceChangePlan(
+      DeviceChangePassPlan(defaultOutputChanged: defaultOutputChanged, inventoryChanged: inventoryChanged),
+      availableDeviceUIDs: { self.availableDeviceUIDs() },
+      appearedDeviceUIDs: appearedDeviceUIDs
+    )
+    guard !isShuttingDown else { return }
+    if !changes.isDisjoint(with: [.deviceFormat, .wake, .deviceInventory]) {
+      await revalidateRouteFormats(now: Self.monotonicRouteTime())
+    }
+  }
+
+  func startObservingDeviceChangesForTesting() {
+    addDeviceChangeListener(registersSystemListeners: false)
+  }
+
+  func performDeviceChangePassForTesting(changes: AudioPropertyChanges) async {
+    await performDeviceChangePass(changes: changes)
+  }
+
+  private func availableDeviceUIDs() -> Set<String> {
+    if let deviceInventoryProvider { return Set(deviceInventoryProvider().values) }
+    return Set(allDeviceIDs().compactMap(OutputDeviceInventory.deviceUID))
+  }
+
+  func applyDeviceChangePlan(
+    _ plan: DeviceChangePassPlan,
+    availableDeviceUIDs: () -> Set<String>,
+    appearedDeviceUIDs: Set<String> = []
+  ) async {
+    guard plan.reconcilesPinnedRoutes || plan.rehomesDefaultFollowingRoutes else { return }
+    resetReleasePacing()
+    // Pinned routes first. Unplugging a device that was both the default and
+    // a pinned destination raises both changes at once, and the inventory
+    // change is consumed by this pass; skipping it here left routes to the
+    // vanished device marked managed until something else rebuilt them.
+    if plan.reconcilesPinnedRoutes {
+      await reconcilePinnedRoutesAfterDeviceInventoryChange(
+        availableUIDs: availableDeviceUIDs(),
+        appearedUIDs: appearedDeviceUIDs
+      )
+      guard !isShuttingDown else { return }
+    }
+    if plan.rehomesDefaultFollowingRoutes {
       do {
         _ = try await autoRestoreDevice()
         guard !isShuttingDown else { return }
@@ -329,15 +396,6 @@ extension WorkspaceAudioControlBackend {
         refreshGlobalRouteHealth(latestError: error.localizedDescription)
         logger.error("Output device change recovery failed: \(error.localizedDescription)")
       }
-    } else {
-      // Every Waves route rebuild creates and destroys a private aggregate,
-      // and each of those raises this same inventory event. When nothing
-      // outside Waves changed there is nothing to reconcile and nothing for
-      // the store to refresh; reacting anyway fed the rebuild back into
-      // itself (a pinned route whose device accepts an aggregate but fails to
-      // start could loop without end).
-      guard inventoryChanged else { return }
-      await reconcilePinnedRoutesAfterDeviceInventoryChange()
     }
     guard !isShuttingDown else { return }
     // Notify observers (the store) so they can refresh UI state and restore
@@ -345,17 +403,36 @@ extension WorkspaceAudioControlBackend {
     deviceChangeContinuation.yield()
   }
 
+  func applyDeviceChangePlanForTesting(
+    _ plan: DeviceChangePassPlan,
+    availableDeviceUIDs: Set<String>,
+    appearedDeviceUIDs: Set<String> = []
+  ) async {
+    await applyDeviceChangePlan(
+      plan,
+      availableDeviceUIDs: { availableDeviceUIDs },
+      appearedDeviceUIDs: appearedDeviceUIDs
+    )
+  }
+
   /// UIDs of every device that is not one of Waves's own private aggregates.
   private func currentExternalDeviceUIDs() -> Set<String> {
-    Set(
+    if let deviceInventoryProvider { return Set(deviceInventoryProvider().values) }
+    return Set(
       allDeviceIDs()
         .compactMap(OutputDeviceInventory.deviceUID)
         .filter { !$0.hasPrefix("com.waves.aggregate.") }
     )
   }
 
-  private func reconcilePinnedRoutesAfterDeviceInventoryChange() async {
-    let availableUIDs = Set(allDeviceIDs().compactMap(OutputDeviceInventory.deviceUID))
+  /// Releases pinned routes whose output went away, and reattaches released
+  /// pinned routes whose output is available, within the allowance they
+  /// share with every other automatic attach (`consumeAutomaticAttachAttempt`).
+  /// A pinned output among `appearedUIDs` is a fresh event for its routes.
+  private func reconcilePinnedRoutesAfterDeviceInventoryChange(
+    availableUIDs: Set<String>,
+    appearedUIDs: Set<String>
+  ) async {
     guard !availableUIDs.isEmpty else { return }
 
     var lastError: String?
@@ -367,29 +444,29 @@ extension WorkspaceAudioControlBackend {
       let targetIsAvailable = availableUIDs.contains(targetDeviceUID)
 
       if isActivelyManaged, !targetIsAvailable {
-        if let controller = controllers.removeValue(forKey: app.id) {
-          retainCleanupDegradations(disposeController(controller))
-        }
-        controllerGenerationByRuntimeID.removeValue(forKey: app.id)
-        staleRouteTicks.removeValue(forKey: app.logicalID)
-        lastRenderTickByAppID.removeValue(forKey: app.logicalID)
         let error = BackendError.managedRouteUnavailable(
           "The chosen output device for \(app.displayName) is unavailable. Pick another in the app's Output Device menu."
         )
+        lastError = error.localizedDescription
+        guard releaseRoute(runtimeID: app.id, reason: error.localizedDescription) == .released else { continue }
         if let index = snapshot.apps.firstIndex(where: { $0.id == app.id || $0.logicalID == app.logicalID }) {
           markRouteError(at: index, error: error)
-          snapshot.apps[index].appliedVolume = snapshot.apps[index].isMuted ? 0 : snapshot.apps[index].desiredVolume
+          // Handed back: it plays at its own level, which Waves did not set.
+          snapshot.apps[index].appliedVolume = nil
           snapshot.apps[index].peakLevel = 0
           snapshot.apps[index].rmsLevel = 0
         }
-        lastError = error.localizedDescription
-      } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability {
+        publishRouteHolds()
+      } else if app.routingState == .error, targetIsAvailable, !app.hasNoAudioCapability,
+        controllers[app.id]?.isActive != true, !excludedLogicalIDs.contains(app.logicalID),
+        consumeAutomaticAttachAttempt(for: app, isFreshEvent: appearedUIDs.contains(targetDeviceUID))
+      {
         routesNeedingReattach.insert(app.logicalID)
       }
     }
 
     if !routesNeedingReattach.isEmpty {
-      await reattachRoutes(forLogicalIDs: routesNeedingReattach)
+      await reattachRoutes(forLogicalIDs: routesNeedingReattach, origin: .automatic)
       if lastError != nil {
         refreshGlobalRouteHealth(latestError: lastError)
         snapshot.updatedAt = .now
@@ -398,5 +475,23 @@ extension WorkspaceAudioControlBackend {
       refreshGlobalRouteHealth(latestError: lastError)
       snapshot.updatedAt = .now
     }
+  }
+}
+
+/// What one coalesced device-change pass has to do.
+struct DeviceChangePassPlan: Equatable, Sendable {
+  /// Re-tap routes that follow the system default, only when the effective
+  /// default changed. Plain inventory churn, such as plugging in an unused
+  /// interface, must not tear down audible routes.
+  let rehomesDefaultFollowingRoutes: Bool
+  /// Reconcile pinned routes whenever a device outside Waves appeared or
+  /// disappeared, including in the same pass as a default change. Waves's
+  /// own aggregate create/destroy is filtered out before this point; reacting
+  /// to it fed rebuilds back into themselves.
+  let reconcilesPinnedRoutes: Bool
+
+  init(defaultOutputChanged: Bool, inventoryChanged: Bool) {
+    rehomesDefaultFollowingRoutes = defaultOutputChanged
+    reconcilesPinnedRoutes = inventoryChanged
   }
 }
