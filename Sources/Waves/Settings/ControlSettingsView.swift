@@ -27,8 +27,8 @@ struct ControlSettingsView: View {
       } header: {
         Text("Global Shortcuts")
       } footer: {
-        Text(
-          "The first three act on whichever app is in front; Show Waves brings the mixer forward, which is the only way in from a full-screen app. Click a shortcut to change it, or press Delete while recording to remove it. Waves registers only the combinations listed here; it never watches your other keystrokes."
+        SettingsFooter(
+          "The first three act on whichever app is in front. Click a shortcut to change it, or press Delete while recording to remove it. Waves registers only these combinations and never watches your other keystrokes."
         )
       }
 
@@ -49,8 +49,8 @@ struct ControlSettingsView: View {
       } header: {
         Text("App Shortcuts")
       } footer: {
-        Text(
-          "Mute or adjust one specific app from anywhere, whatever is in front. The app you most want a shortcut for is rarely the one you are looking at. Nothing is assigned by default, so nothing collides with your launcher or key remapper. You can also assign one from an app's row in the mixer."
+        SettingsFooter(
+          "Mute or adjust one specific app from anywhere, whatever is in front. Nothing is assigned by default. You can also assign one from an app's row in the mixer."
         )
       }
 
@@ -90,8 +90,8 @@ struct ControlSettingsView: View {
       } header: {
         Text("Automation")
       } footer: {
-        Text(
-          "Both are off by default. Turn them on only for automation you trust. External control listens on a private socket that only your user account can reach, never the network, and no other Mac can see it. In the main window, keyboard control also works without either: arrow keys select an app, Space mutes, = and - adjust volume."
+        SettingsFooter(
+          "Both are off by default. Turn them on only for automation you trust. External control listens on a private socket that only your user account can reach, never the network."
         )
       }
     }

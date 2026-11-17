@@ -93,7 +93,7 @@ struct SettingsUpdatesSection: View {
     } header: {
       Text("Updates")
     } footer: {
-      Text(
+      SettingsFooter(
         "A check downloads the signed update feed from waves.jonathanrreed.com and nothing else. Waves makes no network requests until you check or turn on automatic checks."
       )
     }

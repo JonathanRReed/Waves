@@ -42,11 +42,13 @@ struct MixerSettingsView: View {
       } header: {
         Text("Wave Link")
       } footer: {
-        Text(
-          store.preferences.waveLinkCompatibilityEnabled
-            ? "Only one app renders each audio path. With Waves selected, volume and mute use a dedicated Wave Link software channel."
-            : "Compatibility is off. Use this only after your custom Wave Link routing prevents a second monitored copy."
-        )
+        // With compatibility on, the description in the card already says how the
+        // audio path is shared; a second paragraph below it only repeated that.
+        if !store.preferences.waveLinkCompatibilityEnabled {
+          SettingsFooter(
+            "Compatibility is off. Use this only after your custom Wave Link routing prevents a second monitored copy."
+          )
+        }
       }
 
       Section {
@@ -78,7 +80,7 @@ struct MixerSettingsView: View {
       } header: {
         Text("App List")
       } footer: {
-        Text(
+        SettingsFooter(
           "If apps disappear during short pauses or track changes, set Keep quiet apps in Live to Relaxed. If the Live list feels sticky, set it to Brief."
         )
       }
@@ -126,7 +128,7 @@ struct MixerSettingsView: View {
       } header: {
         Text("Volume Memory")
       } footer: {
-        Text(
+        SettingsFooter(
           "Example: headphones at 40% for Spotify, speakers at 80%. Waves switches between them with the device."
         )
       }
@@ -165,7 +167,7 @@ struct MixerSettingsView: View {
       } header: {
         Text("Calls")
       } footer: {
-        Text(
+        SettingsFooter(
           "In front: works with Zoom, Teams, Webex, and FaceTime, but media comes back when you switch to another app, and browser calls aren't detected. Microphone: works with the apps you choose, such as Discord, Slack, or Chrome, but any microphone use by them counts as a call. Waves only asks macOS which apps are using the microphone and never listens to it."
         )
       }
