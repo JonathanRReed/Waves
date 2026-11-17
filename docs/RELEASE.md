@@ -8,8 +8,8 @@ tags, sign, notarize, or publish releases.
 
 ## Current release boundary
 
-The latest published release is Waves 1.7.4 build 22, published on 2026-11-14
-from signed tag `v1.7.4` at revision `88196a37fef2ffd4def1f42c0f1e40473d5d11a3`.
+The latest published release is Waves 1.8.0 build 25, published on 2026-11-16
+from signed tag `v1.8.0` at revision `3c24023be3c9ee59b53edd0d492b2d17039d73d4`.
 `release/metadata.json` on this revision still describes it. Whether a version
 is published is decided by its signed `vX.Y.Z` tag, the GitHub release, and the
 Sparkle appcast, never by this document; `script/verify-publication.rb` checks
@@ -100,7 +100,7 @@ artifact validation must be recorded against the exact candidate.
 
 ## Publish sequence
 
-This is the order 1.7.4 was published in. Each step is detailed below.
+This is the order 1.7.4 and 1.8.0 were published in. Each step is detailed below.
 
 1. Prepare metadata, `CHANGELOG.md`, the cask template version, and the
    `VERSION` and `BUILD` constants and tracked-deferral assertions in
