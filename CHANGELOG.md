@@ -12,8 +12,8 @@ All notable changes to Waves are documented here. The format follows
 - Profiles can save each app's EQ and output device as well as its levels. You
   choose both when saving. Applying a profile skips a saved output that is not
   connected and tells you which.
-- Save Current Mix, in the menu bar's profile menu and the sidebar (Shift-
-  Command-S), saves what is playing now as a profile in one step.
+- Save Current Mix, in the menu bar's profile menu and the sidebar
+  (Shift-Command-S), saves what is playing now as a profile in one step.
 - "Mute media during calls" can detect a call when an app you choose is using
   the microphone, whichever app is in front, so calls in apps such as Discord,
   Slack or Chrome can count. It is off until you pick it in Settings > Mixer. Waves only asks macOS which
